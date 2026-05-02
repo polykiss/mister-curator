@@ -21,6 +21,7 @@ config.json
 .idea/
 *.swp
 .DS_Store
+.claude/
 
 # Logs
 *.log
