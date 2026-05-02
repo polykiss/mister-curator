@@ -1,10 +1,35 @@
 import { NodeSSH } from 'node-ssh';
 
 import { shellQuote } from '@app/main/clients/shell';
-import { MISTER_GAMES_DIR } from '@shared/constants';
+import {
+  HIDEABLE_CATEGORIES,
+  MISTER_CATEGORY_DIRS,
+  MISTER_GAMES_DIR,
+  MISTER_LEDGER_DIR,
+  MISTER_LEDGER_PATH,
+} from '@shared/constants';
+import {
+  computeCoreRenames,
+  matchRbfsToGamesDirs,
+  type CoreRename,
+  type RawGamesDirInput,
+  type RawRbfInput,
+} from '@shared/core-matching';
+import {
+  LEDGER_HEREDOC_DELIMITER,
+  parseLedger,
+  serializeLedger,
+} from '@shared/ledger';
 import { MisterConnectionError } from '@shared/types';
-import type { Core, MisterProfile, Rom } from '@shared/types';
 import type {
+  CoreCategory,
+  CoreEntry,
+  HideLedger,
+  MisterProfile,
+  Rom,
+} from '@shared/types';
+import type {
+  CoreVisibilityChange,
   IMisterClient,
   MisterSecret,
   RomVisibilityChange,
@@ -83,24 +108,14 @@ export class RealMisterClient implements IMisterClient {
     return this.ssh.isConnected();
   }
 
-  async listCores(): Promise<Core[]> {
+  async listAllCoresWithFiles(): Promise<CoreEntry[]> {
     this.assertConnected();
 
-    // Single batched shell loop: emit one TAB-separated line per core with
-    // total file count and hidden file count. Avoids one SSH call per core.
-    const script = [
-      'set -e',
-      `cd ${shellQuote(MISTER_GAMES_DIR)}`,
-      'for d in */; do',
-      '  [ -d "$d" ] || continue',
-      '  d="${d%/}"',
-      `  visible=$(find "$d" -maxdepth 1 -type f ! -name '.*' 2>/dev/null | wc -l)`,
-      `  hidden=$(find "$d" -maxdepth 1 -type f -name '.*' 2>/dev/null | wc -l)`,
-      '  total=$((visible + hidden))',
-      `  printf '%s\\t%s\\t%s\\n' "$d" "$total" "$hidden"`,
-      'done',
-    ].join('\n');
-
+    // One batched shell script that emits two kinds of TAB-separated lines:
+    //   R\t<category>\t<file|dir>\t<filename>      one per rbf or folder-core
+    //   G\t<rawname>\t<total>\t<hidden>            one per games dir
+    // The JS side joins them via matchRbfsToGamesDirs.
+    const script = buildListAllCoresScript();
     const result = await this.ssh.execCommand(script);
     if (result.code !== 0) {
       throw new Error(
@@ -108,19 +123,35 @@ export class RealMisterClient implements IMisterClient {
       );
     }
 
-    const cores: Core[] = [];
+    const rbfs: RawRbfInput[] = [];
+    const gamesDirs: RawGamesDirInput[] = [];
     for (const line of result.stdout.split('\n')) {
-      if (line.trim() === '') continue;
-      const match = /^([^\t]+)\t(\d+)\t(\d+)$/.exec(line);
-      if (!match) continue;
-      const id = match[1] ?? '';
-      const total = Number.parseInt(match[2] ?? '0', 10);
-      const hidden = Number.parseInt(match[3] ?? '0', 10);
-      cores.push({ id, name: id, romCount: total, hiddenCount: hidden });
+      if (line === '') continue;
+      const parts = line.split('\t');
+      const tag = parts[0];
+      if (tag === 'R' && parts.length >= 4) {
+        const categoryName = parts[1] ?? '';
+        const kind = parts[2] ?? '';
+        const filename = parts.slice(3).join('\t');
+        const category = parseCategory(categoryName);
+        if (!category) continue;
+        const dirForCategory = MISTER_CATEGORY_DIRS.find((c) => c.category === category)?.dir;
+        if (dirForCategory === undefined) continue;
+        rbfs.push({
+          category,
+          filename,
+          fullPath: `${dirForCategory}/${filename}`,
+          isFolder: kind === 'dir',
+        });
+      } else if (tag === 'G' && parts.length >= 4) {
+        const rawName = parts[1] ?? '';
+        const total = Number.parseInt(parts[2] ?? '0', 10);
+        const hidden = Number.parseInt(parts[3] ?? '0', 10);
+        gamesDirs.push({ rawName, romCount: total, hiddenCount: hidden });
+      }
     }
 
-    cores.sort((a, b) => a.id.localeCompare(b.id));
-    return cores;
+    return matchRbfsToGamesDirs({ rbfs, gamesDirs });
   }
 
   async listRoms(coreId: string): Promise<Rom[]> {
@@ -129,8 +160,6 @@ export class RealMisterClient implements IMisterClient {
 
     const coreDir = `${MISTER_GAMES_DIR}/${coreId}`;
 
-    // Single batched shell loop: list visible and dot-prefixed files with
-    // their byte sizes, TAB-separated. One SSH call regardless of file count.
     const script = [
       'set -e',
       `cd ${shellQuote(coreDir)}`,
@@ -235,6 +264,88 @@ export class RealMisterClient implements IMisterClient {
     }
   }
 
+  async hideCore(core: CoreEntry): Promise<void> {
+    this.assertConnected();
+    if (!HIDEABLE_CATEGORIES.has(core.category)) {
+      throw new Error(`Refusing to hide a core in category '${core.category}'.`);
+    }
+    const renames = computeCoreRenames(core, true);
+    if (renames.length === 0) return;
+    await this.runRenameScript(renames, `hide core ${core.id}`);
+  }
+
+  async showCore(core: CoreEntry): Promise<void> {
+    this.assertConnected();
+    if (!HIDEABLE_CATEGORIES.has(core.category)) {
+      throw new Error(`Refusing to show a core in category '${core.category}'.`);
+    }
+    const renames = computeCoreRenames(core, false);
+    if (renames.length === 0) return;
+    await this.runRenameScript(renames, `show core ${core.id}`);
+  }
+
+  async setBulkCoreVisibility(changes: readonly CoreVisibilityChange[]): Promise<void> {
+    this.assertConnected();
+    const allRenames: CoreRename[] = [];
+    for (const change of changes) {
+      if (!HIDEABLE_CATEGORIES.has(change.core.category)) {
+        throw new Error(
+          `Refusing to toggle a core in category '${change.core.category}'.`,
+        );
+      }
+      allRenames.push(...computeCoreRenames(change.core, change.hidden));
+    }
+    if (allRenames.length === 0) return;
+    await this.runRenameScript(allRenames, 'bulk core visibility');
+  }
+
+  async readHideLedger(): Promise<HideLedger> {
+    this.assertConnected();
+    // `cat` returns non-zero when the file is missing; we want that to be a
+    // soft "empty ledger" outcome, so we tolerate it inline and rely on the
+    // parser to handle the empty string.
+    const result = await this.ssh.execCommand(
+      `cat ${shellQuote(MISTER_LEDGER_PATH)} 2>/dev/null || true`,
+    );
+    return parseLedger(result.stdout);
+  }
+
+  async writeHideLedger(ledger: HideLedger): Promise<void> {
+    this.assertConnected();
+    // serializeLedger refuses to produce a payload containing the heredoc
+    // delimiter — defense-in-depth so a hostile coreId / rbfPath value can
+    // never close the heredoc early and turn the tail of the JSON into
+    // shell commands.
+    const json = serializeLedger(ledger);
+    const tmpPath = `${MISTER_LEDGER_PATH}.tmp`;
+    const script =
+      `mkdir -p ${shellQuote(MISTER_LEDGER_DIR)}\n` +
+      `cat > ${shellQuote(tmpPath)} <<'${LEDGER_HEREDOC_DELIMITER}'\n` +
+      json +
+      `${LEDGER_HEREDOC_DELIMITER}\n` +
+      `mv ${shellQuote(tmpPath)} ${shellQuote(MISTER_LEDGER_PATH)}\n`;
+
+    const result = await this.ssh.execCommand(script);
+    if (result.code !== 0) {
+      throw new Error(
+        `Failed to write hide ledger: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+      );
+    }
+  }
+
+  private async runRenameScript(renames: readonly CoreRename[], label: string): Promise<void> {
+    const lines = ['set -e'];
+    for (const r of renames) {
+      lines.push(`mv ${shellQuote(r.from)} ${shellQuote(r.to)}`);
+    }
+    const result = await this.ssh.execCommand(lines.join('\n'));
+    if (result.code !== 0) {
+      throw new Error(
+        `Failed to ${label}: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+      );
+    }
+  }
+
   private assertConnected(): void {
     if (!this.ssh.isConnected()) {
       throw new Error('RealMisterClient is not connected. Call connect() first.');
@@ -248,6 +359,52 @@ export class RealMisterClient implements IMisterClient {
       // Ignore — dispose is best-effort cleanup.
     }
   }
+}
+
+function buildListAllCoresScript(): string {
+  const dirsScript = MISTER_CATEGORY_DIRS.map(({ category, dir }) => {
+    return [
+      `if [ -d ${shellQuote(dir)} ]; then`,
+      `  cd ${shellQuote(dir)}`,
+      '  for entry in * .[!.]*; do',
+      '    [ -e "$entry" ] || continue',
+      '    if [ -d "$entry" ]; then',
+      `      printf 'R\\t${category}\\tdir\\t%s\\n' "$entry"`,
+      '    elif [ -f "$entry" ]; then',
+      '      case "$entry" in',
+      `        *.rbf|*.RBF) printf 'R\\t${category}\\tfile\\t%s\\n' "$entry" ;;`,
+      '      esac',
+      '    fi',
+      '  done',
+      'fi',
+    ].join('\n');
+  }).join('\n');
+
+  const gamesScript = [
+    `if [ -d ${shellQuote(MISTER_GAMES_DIR)} ]; then`,
+    `  cd ${shellQuote(MISTER_GAMES_DIR)}`,
+    '  for d in * .[!.]*; do',
+    '    [ -d "$d" ] || continue',
+    `    visible=$(find "$d" -maxdepth 1 -type f ! -name '.*' 2>/dev/null | wc -l)`,
+    `    hidden=$(find "$d" -maxdepth 1 -type f -name '.*' 2>/dev/null | wc -l)`,
+    '    total=$((visible + hidden))',
+    `    printf 'G\\t%s\\t%s\\t%s\\n' "$d" "$total" "$hidden"`,
+    '  done',
+    'fi',
+  ].join('\n');
+
+  return `set -e\n${dirsScript}\n${gamesScript}\n`;
+}
+
+function parseCategory(name: string): CoreCategory | null {
+  const valid: ReadonlySet<CoreCategory> = new Set([
+    'Console',
+    'Computer',
+    'Other',
+    'Utility',
+    'Arcade',
+  ]);
+  return valid.has(name as CoreCategory) ? (name as CoreCategory) : null;
 }
 
 function assertSafeSegment(label: string, value: string): void {

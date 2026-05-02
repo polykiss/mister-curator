@@ -9,7 +9,7 @@ import {
 } from 'react';
 import type { JSX, ReactNode } from 'react';
 
-import type { Core, Rom } from '@shared/types';
+import type { CoreEntry, Rom } from '@shared/types';
 
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import {
@@ -23,11 +23,11 @@ type RomsByCore = Readonly<Record<string, readonly Rom[]>>;
 type LoadingByCore = Readonly<Record<string, boolean>>;
 
 interface CoresContextValue {
-  readonly cores: readonly Core[] | null;
+  readonly cores: readonly CoreEntry[] | null;
   readonly coresLoading: boolean;
   readonly coresError: string | null;
   readonly selectedCoreId: string | null;
-  readonly selectedCore: Core | null;
+  readonly selectedCore: CoreEntry | null;
   readonly romsByCore: RomsByCore;
   readonly romsLoading: LoadingByCore;
   readonly selectCore: (coreId: string | null) => void;
@@ -42,13 +42,18 @@ interface CoresContextValue {
     coreId: string,
     changes: readonly VisibilityChange[],
   ) => Promise<void>;
+  readonly hideCore: (coreId: string) => Promise<void>;
+  readonly showCore: (coreId: string) => Promise<void>;
+  readonly setBulkCoreVisibility: (
+    changes: readonly { readonly coreId: string; readonly hidden: boolean }[],
+  ) => Promise<void>;
 }
 
 const CoresContext = createContext<CoresContextValue | null>(null);
 
 export function CoresProvider({ children }: { children: ReactNode }): JSX.Element {
   const { status } = useConnection();
-  const [cores, setCores] = useState<readonly Core[] | null>(null);
+  const [cores, setCores] = useState<readonly CoreEntry[] | null>(null);
   const [coresLoading, setCoresLoading] = useState(false);
   const [coresError, setCoresError] = useState<string | null>(null);
   const [selectedCoreId, setSelectedCoreId] = useState<string | null>(null);
@@ -65,7 +70,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     setCoresLoading(true);
     setCoresError(null);
     try {
-      const next = await window.mister.listCores();
+      const next = await window.mister.listAllCoresWithFiles();
       setCores(next);
       setRomsByCore({});
       setRomsLoading({});
@@ -144,6 +149,45 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     [updateCoreCounts],
   );
 
+  const hideCore = useCallback(async (coreId: string) => {
+    await window.mister.hideCore(coreId);
+    // Invalidate the cores cache so the rebuilt list reflects the new state.
+    const next = await window.mister.listAllCoresWithFiles();
+    setCores(next);
+    // Clear cached ROMs for this core — its games dir may have moved.
+    setRomsByCore((prev) => {
+      if (!(coreId in prev)) return prev;
+      const copy = { ...prev };
+      delete copy[coreId];
+      return copy;
+    });
+  }, []);
+
+  const showCore = useCallback(async (coreId: string) => {
+    await window.mister.showCore(coreId);
+    const next = await window.mister.listAllCoresWithFiles();
+    setCores(next);
+    setRomsByCore((prev) => {
+      if (!(coreId in prev)) return prev;
+      const copy = { ...prev };
+      delete copy[coreId];
+      return copy;
+    });
+  }, []);
+
+  const setBulkCoreVisibility = useCallback(
+    async (
+      changes: readonly { readonly coreId: string; readonly hidden: boolean }[],
+    ) => {
+      if (changes.length === 0) return;
+      await window.mister.setBulkCoreVisibility(changes);
+      const next = await window.mister.listAllCoresWithFiles();
+      setCores(next);
+      setRomsByCore({});
+    },
+    [],
+  );
+
   // Reset whenever we leave the connected state.
   useEffect(() => {
     if (status !== 'connected') {
@@ -186,6 +230,9 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       ensureRoms,
       setRomVisibility,
       setBulkRomVisibility,
+      hideCore,
+      showCore,
+      setBulkCoreVisibility,
     }),
     [
       cores,
@@ -200,6 +247,9 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       ensureRoms,
       setRomVisibility,
       setBulkRomVisibility,
+      hideCore,
+      showCore,
+      setBulkCoreVisibility,
     ],
   );
 

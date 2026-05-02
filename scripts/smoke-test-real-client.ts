@@ -91,7 +91,7 @@ async function main(): Promise<void> {
   try {
     await timed('connect()', () => client.connect(profile, secret));
 
-    const cores = await timed('listCores()', () => client.listCores());
+    const cores = await timed('listAllCoresWithFiles()', () => client.listAllCoresWithFiles());
     console.log(`\n  Found ${String(cores.length)} core(s).`);
     if (cores.length > 0) {
       console.log('  First 10:');

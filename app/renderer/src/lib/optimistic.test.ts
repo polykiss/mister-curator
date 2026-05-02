@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { Core, Rom } from '@shared/types';
+import type { CoreEntry, Rom } from '@shared/types';
 
 import {
   applyBulkVisibilityChange,
@@ -93,7 +93,16 @@ describe('applyBulkVisibilityChange', () => {
 
 describe('recountCore', () => {
   it('recomputes romCount and hiddenCount from the current rom list', () => {
-    const core: Core = { id: 'NES', name: 'NES', romCount: 99, hiddenCount: 99 };
+    const core: CoreEntry = {
+      id: 'NES',
+      name: 'NES',
+      romCount: 99,
+      hiddenCount: 99,
+      category: 'Console',
+      rbfPaths: [],
+      gamesDirExists: true,
+      gamesDirHidden: false,
+    };
     const roms = [
       makeRom('a.nes', false),
       makeRom('.b.nes', true),
@@ -108,7 +117,16 @@ describe('recountCore', () => {
   });
 
   it('returns a new core object even when counts are unchanged', () => {
-    const core: Core = { id: 'NES', name: 'NES', romCount: 1, hiddenCount: 0 };
+    const core: CoreEntry = {
+      id: 'NES',
+      name: 'NES',
+      romCount: 1,
+      hiddenCount: 0,
+      category: 'Console',
+      rbfPaths: [],
+      gamesDirExists: true,
+      gamesDirHidden: false,
+    };
     const roms = [makeRom('a.nes', false)];
     const next = recountCore(core, roms);
     expect(next).not.toBe(core);

@@ -1,5 +1,5 @@
 import { MISTER_GAMES_DIR } from '@shared/constants';
-import type { Core, Rom } from '@shared/types';
+import type { CoreEntry, Rom } from '@shared/types';
 
 export interface VisibilityChange {
   readonly filename: string;
@@ -54,7 +54,7 @@ export function applyBulkVisibilityChange(
  * list. Used to keep the left-pane counts in sync after a visibility change
  * without a full server refetch.
  */
-export function recountCore(core: Core, roms: readonly Rom[]): Core {
+export function recountCore(core: CoreEntry, roms: readonly Rom[]): CoreEntry {
   let hiddenCount = 0;
   for (const rom of roms) {
     if (rom.hidden) hiddenCount += 1;

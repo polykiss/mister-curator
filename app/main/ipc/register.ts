@@ -4,7 +4,12 @@ import { BrowserWindow, dialog, ipcMain } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
 
 import { IPC_CHANNELS } from '@shared/preload-api';
-import type { PickedKeyFile, RomVisibilityChangeWire } from '@shared/preload-api';
+import type {
+  ConnectResult,
+  CoreVisibilityChangeWire,
+  PickedKeyFile,
+  RomVisibilityChangeWire,
+} from '@shared/preload-api';
 import type { MisterSecret } from '@shared/mister-client';
 import type { MisterProfile } from '@shared/types';
 
@@ -39,7 +44,7 @@ export function registerIpcHandlers(
     store.delete(profileId),
   );
 
-  handle<[string], void>(IPC_CHANNELS.connect, (profileId) =>
+  handle<[string], ConnectResult>(IPC_CHANNELS.connect, (profileId) =>
     manager.connect(profileId),
   );
 
@@ -47,7 +52,7 @@ export function registerIpcHandlers(
 
   handle(IPC_CHANNELS.getConnectionStatus, () => manager.getStatus());
 
-  handle(IPC_CHANNELS.listCores, () => manager.listCores());
+  handle(IPC_CHANNELS.listAllCoresWithFiles, () => manager.listAllCoresWithFiles());
 
   handle<[string], unknown>(IPC_CHANNELS.listRoms, (coreId) =>
     manager.listRoms(coreId),
@@ -62,6 +67,19 @@ export function registerIpcHandlers(
   handle<[string, readonly RomVisibilityChangeWire[]], void>(
     IPC_CHANNELS.setBulkRomVisibility,
     (coreId, changes) => manager.setBulkRomVisibility(coreId, changes),
+  );
+
+  handle<[string], void>(IPC_CHANNELS.hideCore, (coreId) =>
+    manager.hideCore(coreId),
+  );
+
+  handle<[string], void>(IPC_CHANNELS.showCore, (coreId) =>
+    manager.showCore(coreId),
+  );
+
+  handle<[readonly CoreVisibilityChangeWire[]], void>(
+    IPC_CHANNELS.setBulkCoreVisibility,
+    (changes) => manager.setBulkCoreVisibility(changes),
   );
 
   ipcMain.handle(

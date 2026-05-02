@@ -17,7 +17,7 @@ interface ConnectionContextValue {
   readonly currentProfile: MisterProfile | null;
   readonly profilesLoading: boolean;
   readonly refreshProfiles: () => Promise<void>;
-  readonly connect: (profileId: string) => Promise<void>;
+  readonly connect: (profileId: string) => Promise<{ reappliedCount: number }>;
   readonly disconnect: () => Promise<void>;
   readonly saveProfile: (profile: MisterProfile, secret: MisterSecret) => Promise<void>;
   readonly deleteProfile: (profileId: string) => Promise<void>;
@@ -62,7 +62,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
   const connect = useCallback(async (profileId: string) => {
     setCurrentProfileId(profileId);
     try {
-      await window.mister.connect(profileId);
+      return await window.mister.connect(profileId);
     } catch (err) {
       setCurrentProfileId(null);
       throw err;

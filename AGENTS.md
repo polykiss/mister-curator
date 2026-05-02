@@ -10,8 +10,9 @@ MiSTer FPGA over SSH and lets users curate their ROM collection: audit
 their library, toggle visibility of individual ROMs and whole cores,
 manage saves, and more — without touching the MiSTer directly.
 
-The user's MiSTer is treated as a remote filesystem. Nothing is ever
-permanently installed on the device.
+The user's MiSTer is treated as a remote filesystem. The only persistent
+state the app writes is a small JSON ledger under
+`/media/fat/.mistercurator/`. No code is permanently installed.
 
 ## Core architectural principle: remote-only
 
@@ -19,6 +20,11 @@ The MiSTer is accessed exclusively via SSH and SFTP. No code is permanently
 installed on the device. Helper scripts in `agent/` are copied to
 `/tmp/mistercurator/` on demand, executed, and may be left there for the
 session but must never be assumed to persist.
+
+The hide-core feature persists a small JSON ledger at
+`/media/fat/.mistercurator/state.json` so we can re-apply the user's
+hides after a MiSTer update. That directory is reserved for this app and
+is the only persistent thing the app writes outside of file renames.
 
 The app must work correctly against a freshly-flashed MiSTer with default
 settings. If you're tempted to add a "first run setup on the MiSTer"
@@ -79,7 +85,7 @@ Update it before changing consumers.
 ## Never do
 
 - Never install anything persistent on the MiSTer (no apt, no pip, no
-  files outside `/tmp/mistercurator/`).
+  files outside `/tmp/mistercurator/` and `/media/fat/.mistercurator/`).
 - Never delete a user's ROM, save, config, or BIOS file. Hide via rename;
   that's it.
 - Never make assumptions about the MiSTer's filesystem layout beyond

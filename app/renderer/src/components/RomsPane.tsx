@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
-import type { Core, Rom } from '@shared/types';
+import type { CoreEntry, Rom } from '@shared/types';
 
 import { Button } from '@app/renderer/src/components/ui/button';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
@@ -21,7 +21,7 @@ import { formatBytes } from '@app/renderer/src/lib/format';
 import type { VisibilityChange } from '@app/renderer/src/lib/optimistic';
 
 interface RomsPaneProps {
-  readonly core: Core;
+  readonly core: CoreEntry;
 }
 
 export function RomsPane({ core }: RomsPaneProps): JSX.Element {
