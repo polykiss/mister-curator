@@ -134,4 +134,10 @@ async function main(): Promise<void> {
   }
 }
 
-await main();
+main().catch((err: unknown) => {
+  // Last-resort safety net — main() already prints and exits 1 for its own
+  // failures, so reaching here means something rejected outside the inner
+  // try/catch. Surface it the same way before exiting non-zero.
+  printError(err);
+  process.exit(1);
+});
