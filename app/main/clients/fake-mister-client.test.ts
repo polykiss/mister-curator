@@ -374,7 +374,17 @@ describe('FakeMisterClient', () => {
       ).rejects.toThrow(/not a real core/i);
     });
 
-    it('hideCore refuses the synthetic Arcade placeholder', async () => {
+    it('emits exactly one Arcade placeholder whenever _Arcade/ exists (regression)', async () => {
+    // The cores list in `fixtures/sample-mister/_Arcade/` carries .rbf
+    // entries. Real MiSTers carry hundreds of .mra files instead, but
+    // either way the placeholder must appear exactly once.
+    const cores = await client.listAllCoresWithFiles();
+    const arcades = cores.filter((c) => c.category === 'Arcade');
+    expect(arcades).toHaveLength(1);
+    expect(arcades[0]?.name).toBe('Arcade');
+  });
+
+  it('hideCore refuses the synthetic Arcade placeholder', async () => {
       const cores = await client.listAllCoresWithFiles();
       const arcade = cores.find((c) => c.category === 'Arcade');
       expect(arcade).toBeDefined();

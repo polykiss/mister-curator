@@ -11,6 +11,8 @@ import type { JSX, ReactNode } from 'react';
 import type { MisterSecret } from '@shared/mister-client';
 import type { ConnectionStatus, MisterProfile } from '@shared/types';
 
+import { useOperationStatus } from '@app/renderer/src/contexts/OperationStatusContext';
+
 interface ConnectionContextValue {
   readonly status: ConnectionStatus;
   readonly profiles: readonly MisterProfile[];
@@ -26,6 +28,7 @@ interface ConnectionContextValue {
 const ConnectionContext = createContext<ConnectionContextValue | null>(null);
 
 export function ConnectionProvider({ children }: { children: ReactNode }): JSX.Element {
+  const { run: runWithStatus } = useOperationStatus();
   const [status, setStatus] = useState<ConnectionStatus>('disconnected');
   const [profiles, setProfiles] = useState<readonly MisterProfile[]>([]);
   const [currentProfileId, setCurrentProfileId] = useState<string | null>(null);
@@ -59,23 +62,30 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
     setProfiles(await window.mister.listProfiles());
   }, []);
 
-  const connect = useCallback(async (profileId: string) => {
-    setCurrentProfileId(profileId);
-    try {
-      return await window.mister.connect(profileId);
-    } catch (err) {
-      setCurrentProfileId(null);
-      throw err;
-    }
-  }, []);
+  const connect = useCallback(
+    async (profileId: string) => {
+      setCurrentProfileId(profileId);
+      const profile = profiles.find((p) => p.id === profileId);
+      const message = profile
+        ? `Connecting to ${profile.host}…`
+        : 'Connecting…';
+      try {
+        return await runWithStatus(message, () => window.mister.connect(profileId));
+      } catch (err) {
+        setCurrentProfileId(null);
+        throw err;
+      }
+    },
+    [profiles, runWithStatus],
+  );
 
   const disconnect = useCallback(async () => {
     try {
-      await window.mister.disconnect();
+      await runWithStatus('Disconnecting…', () => window.mister.disconnect());
     } finally {
       setCurrentProfileId(null);
     }
-  }, []);
+  }, [runWithStatus]);
 
   const saveProfile = useCallback(
     async (profile: MisterProfile, secret: MisterSecret) => {

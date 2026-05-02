@@ -35,16 +35,22 @@ export function CoresPane(): JSX.Element {
   // Cores list excludes externally-hidden entries. They're cores whose
   // hidden state pre-dates our ledger (MiSTer's stock layout, other
   // tools). The user can still see they exist via the header count.
+  // Arcade placeholder is always shown — it's a synthetic UI row that
+  // would otherwise get dropped because it has no rbfs and no games dir,
+  // which `isCoreHidden` treats as "hidden".
   const presentableCores = useMemo(() => {
     if (!cores) return null;
-    return cores.filter((c) => !isCoreHidden(c) || c.managedByApp === true);
+    return cores.filter(
+      (c) =>
+        c.category === 'Arcade' || !isCoreHidden(c) || c.managedByApp === true,
+    );
   }, [cores]);
 
   const visibleCores = useMemo(() => {
     if (!presentableCores) return null;
     return showHidden
       ? presentableCores
-      : presentableCores.filter((c) => !isCoreHidden(c));
+      : presentableCores.filter((c) => c.category === 'Arcade' || !isCoreHidden(c));
   }, [presentableCores, showHidden]);
 
   const emptyHideableCores = useMemo(
@@ -324,6 +330,16 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                 {isPlaceholder ? (
                   <span className="shrink-0 text-xs text-muted-foreground">
                     coming later
+                  </span>
+                ) : !core.gamesDirExists && core.rbfPaths.length > 0 ? (
+                  // Cores with an .rbf or .mgl but no games/ dir get a
+                  // small badge instead of "0 ROMs" so users don't think
+                  // their content vanished.
+                  <span
+                    className="shrink-0 text-xs italic text-muted-foreground"
+                    title={`No games directory at /media/fat/games/${core.id}/`}
+                  >
+                    no games dir
                   </span>
                 ) : (
                   <span className="shrink-0 text-xs text-muted-foreground">

@@ -13,6 +13,7 @@ import type { BulkCoreResult, BulkRomResult } from '@shared/mister-client';
 import type { CoreEntry, Rom } from '@shared/types';
 
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
+import { useOperationStatus } from '@app/renderer/src/contexts/OperationStatusContext';
 import {
   applyBulkVisibilityChange,
   applyVisibilityChange,
@@ -54,6 +55,7 @@ const CoresContext = createContext<CoresContextValue | null>(null);
 
 export function CoresProvider({ children }: { children: ReactNode }): JSX.Element {
   const { status } = useConnection();
+  const { run: runWithStatus } = useOperationStatus();
   const [cores, setCores] = useState<readonly CoreEntry[] | null>(null);
   const [coresLoading, setCoresLoading] = useState(false);
   const [coresError, setCoresError] = useState<string | null>(null);
@@ -64,14 +66,41 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   // Refs for stale-closure-safe reads inside async callbacks.
   const coresRef = useRef(cores);
   const romsByCoreRef = useRef(romsByCore);
+  const selectedCoreIdRef = useRef(selectedCoreId);
   coresRef.current = cores;
   romsByCoreRef.current = romsByCore;
+  selectedCoreIdRef.current = selectedCoreId;
+
+  /**
+   * After a bulk op invalidates the rom cache, the RomsPane's `useEffect`
+   * doesn't re-fire (its dep array is stable), so the right pane goes
+   * blank until the user clicks away and back. Force a re-fetch for the
+   * currently-selected core so the user sees the post-op state.
+   */
+  const refetchSelectedRoms = useCallback(async (): Promise<void> => {
+    const sel = selectedCoreIdRef.current;
+    if (!sel) return;
+    setRomsLoading((prev) => ({ ...prev, [sel]: true }));
+    try {
+      const fresh = await runWithStatus(`Loading ROMs in ${sel}…`, () =>
+        window.mister.listRoms(sel),
+      );
+      setRomsByCore((prev) => ({ ...prev, [sel]: fresh }));
+    } catch {
+      // Best-effort — leave the cache empty and let the next render
+      // trigger ensureRoms via the normal effect path.
+    } finally {
+      setRomsLoading((prev) => ({ ...prev, [sel]: false }));
+    }
+  }, [runWithStatus]);
 
   const refresh = useCallback(async () => {
     setCoresLoading(true);
     setCoresError(null);
     try {
-      const next = await window.mister.listAllCoresWithFiles();
+      const next = await runWithStatus('Scanning cores…', () =>
+        window.mister.listAllCoresWithFiles(),
+      );
       setCores(next);
       setRomsByCore({});
       setRomsLoading({});
@@ -81,18 +110,23 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     } finally {
       setCoresLoading(false);
     }
-  }, []);
+  }, [runWithStatus]);
 
-  const ensureRoms = useCallback(async (coreId: string) => {
-    if (romsByCoreRef.current[coreId]) return;
-    setRomsLoading((prev) => ({ ...prev, [coreId]: true }));
-    try {
-      const roms = await window.mister.listRoms(coreId);
-      setRomsByCore((prev) => ({ ...prev, [coreId]: roms }));
-    } finally {
-      setRomsLoading((prev) => ({ ...prev, [coreId]: false }));
-    }
-  }, []);
+  const ensureRoms = useCallback(
+    async (coreId: string) => {
+      if (romsByCoreRef.current[coreId]) return;
+      setRomsLoading((prev) => ({ ...prev, [coreId]: true }));
+      try {
+        const roms = await runWithStatus(`Loading ROMs in ${coreId}…`, () =>
+          window.mister.listRoms(coreId),
+        );
+        setRomsByCore((prev) => ({ ...prev, [coreId]: roms }));
+      } finally {
+        setRomsLoading((prev) => ({ ...prev, [coreId]: false }));
+      }
+    },
+    [runWithStatus],
+  );
 
   const updateCoreCounts = useCallback((coreId: string, nextRoms: readonly Rom[]) => {
     setCores((prev) => {
@@ -144,8 +178,13 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       }
 
       let result: BulkRomResult;
+      const hidingCount = changes.filter((c) => c.hidden).length;
+      const verb = hidingCount > 0 ? 'Hiding' : 'Restoring';
+      const statusMessage = `${verb} ${String(changes.length)} ROMs in ${coreId}…`;
       try {
-        result = await window.mister.setBulkRomVisibility(coreId, [...changes]);
+        result = await runWithStatus(statusMessage, () =>
+          window.mister.setBulkRomVisibility(coreId, [...changes]),
+        );
       } catch (err) {
         if (previousRoms) {
           setRomsByCore((prev) => ({ ...prev, [coreId]: previousRoms }));
@@ -168,49 +207,76 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
 
       return result;
     },
-    [updateCoreCounts],
+    [updateCoreCounts, runWithStatus],
   );
 
-  const hideCore = useCallback(async (coreId: string) => {
-    await window.mister.hideCore(coreId);
-    // Invalidate the cores cache so the rebuilt list reflects the new state.
-    const next = await window.mister.listAllCoresWithFiles();
-    setCores(next);
-    // Clear cached ROMs for this core — its games dir may have moved.
-    setRomsByCore((prev) => {
-      if (!(coreId in prev)) return prev;
-      const copy = { ...prev };
-      delete copy[coreId];
-      return copy;
-    });
-  }, []);
+  const hideCore = useCallback(
+    async (coreId: string) => {
+      await runWithStatus(`Hiding ${coreId}…`, () =>
+        window.mister.hideCore(coreId),
+      );
+      // Invalidate the cores cache so the rebuilt list reflects the new state.
+      const next = await window.mister.listAllCoresWithFiles();
+      setCores(next);
+      // Clear cached ROMs for this core — its games dir may have moved.
+      setRomsByCore((prev) => {
+        if (!(coreId in prev)) return prev;
+        const copy = { ...prev };
+        delete copy[coreId];
+        return copy;
+      });
+      // If the user is currently looking at this core, refetch so the
+      // right pane doesn't go blank.
+      if (selectedCoreIdRef.current === coreId) {
+        await refetchSelectedRoms();
+      }
+    },
+    [refetchSelectedRoms, runWithStatus],
+  );
 
-  const showCore = useCallback(async (coreId: string) => {
-    await window.mister.showCore(coreId);
-    const next = await window.mister.listAllCoresWithFiles();
-    setCores(next);
-    setRomsByCore((prev) => {
-      if (!(coreId in prev)) return prev;
-      const copy = { ...prev };
-      delete copy[coreId];
-      return copy;
-    });
-  }, []);
+  const showCore = useCallback(
+    async (coreId: string) => {
+      await runWithStatus(`Restoring ${coreId}…`, () =>
+        window.mister.showCore(coreId),
+      );
+      const next = await window.mister.listAllCoresWithFiles();
+      setCores(next);
+      setRomsByCore((prev) => {
+        if (!(coreId in prev)) return prev;
+        const copy = { ...prev };
+        delete copy[coreId];
+        return copy;
+      });
+      if (selectedCoreIdRef.current === coreId) {
+        await refetchSelectedRoms();
+      }
+    },
+    [refetchSelectedRoms, runWithStatus],
+  );
 
   const setBulkCoreVisibility = useCallback(
     async (
       changes: readonly { readonly coreId: string; readonly hidden: boolean }[],
     ): Promise<BulkCoreResult> => {
       if (changes.length === 0) return { succeeded: [], failed: [] };
-      const result = await window.mister.setBulkCoreVisibility(changes);
+      const hidingCount = changes.filter((c) => c.hidden).length;
+      const verb = hidingCount > 0 ? 'Hiding' : 'Restoring';
+      const message = `${verb} ${String(changes.length)} cores…`;
+      const result = await runWithStatus(message, () =>
+        window.mister.setBulkCoreVisibility(changes),
+      );
       // Always refetch after a bulk core op — partial failures mean the
       // optimistic mental model isn't reliable.
       const next = await window.mister.listAllCoresWithFiles();
       setCores(next);
       setRomsByCore({});
+      // The bulk op may have renamed the games dir for the currently-
+      // selected core (or one of its case-duplicate siblings). Refetch
+      // its ROMs so the right pane doesn't go blank.
+      await refetchSelectedRoms();
       return result;
     },
-    [],
+    [refetchSelectedRoms, runWithStatus],
   );
 
   // Reset whenever we leave the connected state.
