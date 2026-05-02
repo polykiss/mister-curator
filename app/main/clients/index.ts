@@ -3,15 +3,17 @@ import path from 'node:path';
 
 import type { IMisterClient } from '@shared/mister-client';
 import { FakeMisterClient } from '@app/main/clients/fake-mister-client';
+import { RealMisterClient } from '@app/main/clients/real-mister-client';
 
 export type { IMisterClient } from '@shared/mister-client';
 export { FakeMisterClient } from '@app/main/clients/fake-mister-client';
+export { RealMisterClient } from '@app/main/clients/real-mister-client';
 
 export type MisterClientMode = 'real' | 'fake';
 
 export function createMisterClient(mode: MisterClientMode): IMisterClient {
   if (mode === 'real') {
-    throw new Error('Real MiSTer client not implemented yet.');
+    return new RealMisterClient();
   }
 
   // The fake operates on a stable temp location so dev sessions can mutate
