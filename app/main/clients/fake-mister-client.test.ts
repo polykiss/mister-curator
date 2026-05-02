@@ -65,7 +65,8 @@ describe('FakeMisterClient', () => {
   it('lists the expected cores from fixtures', async () => {
     const cores = await client.listAllCoresWithFiles();
     const ids = cores.map((c) => c.id);
-    // Now joins games/ with _Console / _Computer / _Other / _Utility / _Arcade.
+    // Joins games/ with _Console / _Computer / _Other / _Utility, plus a
+    // single placeholder for _Arcade (individual arcade cores collapse).
     expect(ids).toContain('NES');
     expect(ids).toContain('SNES');
     expect(ids).toContain('Genesis');
@@ -73,9 +74,31 @@ describe('FakeMisterClient', () => {
     expect(ids).toContain('Atari800');
     expect(ids).toContain('CrazyMatch');
     expect(ids).toContain('Memtest');
-    expect(ids).toContain('Galaga'); // arcade — listed but not hideable
     expect(ids).toContain('SMS'); // rbf-only, no games dir
     expect(ids).toContain('Orphan'); // games dir without a matching rbf
+
+    // Individual arcade cores never appear; one synthetic placeholder does.
+    expect(ids).not.toContain('Galaga');
+    expect(ids).not.toContain('Pacman');
+    const arcadeRow = cores.find((c) => c.category === 'Arcade');
+    expect(arcadeRow).toBeDefined();
+    expect(arcadeRow?.name).toBe('Arcade');
+
+    // .mgl cores must be discovered alongside .rbf cores.
+    expect(ids).toContain('Game Gear');
+    expect(ids).toContain('Atari 2600');
+    expect(ids).toContain('GameboyColor');
+    expect(ids).toContain('Mega Duck');
+    expect(ids).toContain('Pocket Challenge V2');
+    const gameGear = cores.find((c) => c.id === 'Game Gear');
+    expect(gameGear?.rbfPaths).toEqual(['/media/fat/_Console/Game Gear.mgl']);
+    expect(gameGear?.category).toBe('Console');
+
+    // User-created organizational folders without a .rbf or .mgl inside
+    // are NOT cores and must be filtered out.
+    expect(ids).not.toContain('_alternatives');
+    expect(ids).not.toContain('_hidden');
+    expect(ids).not.toContain('_Organized');
 
     const nes = cores.find((c) => c.id === 'NES');
     expect(nes).toBeDefined();
@@ -98,9 +121,6 @@ describe('FakeMisterClient', () => {
     const ao486 = cores.find((c) => c.id === 'AO486');
     expect(ao486?.category).toBe('Computer');
     expect(ao486?.rbfPaths).toContain('/media/fat/_Computer/AO486');
-
-    const galaga = cores.find((c) => c.id === 'Galaga');
-    expect(galaga?.category).toBe('Arcade');
   });
 
   it('lists ROMs including dot-prefixed hidden files', async () => {
@@ -272,11 +292,12 @@ describe('FakeMisterClient', () => {
     expect(nesShown?.rbfPaths.some((p) => p.includes('/.'))).toBe(false);
   });
 
-  it('hideCore refuses arcade cores', async () => {
+  it('hideCore refuses the arcade placeholder', async () => {
     const before = await client.listAllCoresWithFiles();
-    const galaga = before.find((c) => c.id === 'Galaga');
-    expect(galaga?.category).toBe('Arcade');
-    await expect(client.hideCore(galaga!)).rejects.toThrow(/Arcade/);
+    const arcade = before.find((c) => c.category === 'Arcade');
+    expect(arcade).toBeDefined();
+    expect(arcade?.name).toBe('Arcade');
+    await expect(client.hideCore(arcade!)).rejects.toThrow(/Arcade/);
   });
 
   it('setBulkCoreVisibility applies many changes', async () => {

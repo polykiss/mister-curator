@@ -180,9 +180,13 @@ describe('RealMisterClient', () => {
         'R\tConsole\tfile\tNES_20231215.rbf',
         'R\tConsole\tfile\tSNES_20240115.rbf',
         'R\tConsole\tfile\tSMS_20240115.rbf',
+        'R\tConsole\tfile\tGame Gear.mgl',
+        'R\tConsole\tfile\tAtari 2600.mgl',
+        'R\tConsole\tfile\tMega Duck.mgl',
         'R\tComputer\tdir\tAO486',
         'R\tComputer\tfile\tAtari800_20240220.rbf',
         'R\tArcade\tfile\tGalaga_20240115.rbf',
+        'R\tArcade\tfile\tPacman_20240310.rbf',
         'G\tNES\t9\t2',
         'G\tSNES\t9\t2',
         'G\tAO486\t1\t0',
@@ -200,8 +204,20 @@ describe('RealMisterClient', () => {
       expect(ids).toContain('NES');
       expect(ids).toContain('SMS');
       expect(ids).toContain('AO486');
-      expect(ids).toContain('Galaga');
       expect(ids).toContain('Orphan');
+
+      // .mgl cores are first-class — Game Gear / Atari 2600 / Mega Duck.
+      expect(ids).toContain('Game Gear');
+      expect(ids).toContain('Atari 2600');
+      expect(ids).toContain('Mega Duck');
+      const gameGear = cores.find((c) => c.id === 'Game Gear');
+      expect(gameGear?.rbfPaths).toEqual(['/media/fat/_Console/Game Gear.mgl']);
+
+      // Both arcade entries collapse into one synthetic placeholder.
+      expect(ids).not.toContain('Galaga');
+      expect(ids).not.toContain('Pacman');
+      const arcade = cores.find((c) => c.category === 'Arcade');
+      expect(arcade?.name).toBe('Arcade');
 
       const nes = cores.find((c) => c.id === 'NES');
       expect(nes?.category).toBe('Console');
@@ -217,9 +233,6 @@ describe('RealMisterClient', () => {
       expect(ao486?.category).toBe('Computer');
       expect(ao486?.rbfPaths).toEqual(['/media/fat/_Computer/AO486']);
 
-      const galaga = cores.find((c) => c.id === 'Galaga');
-      expect(galaga?.category).toBe('Arcade');
-
       const orphan = cores.find((c) => c.id === 'Orphan');
       expect(orphan?.category).toBe('Unknown');
       expect(orphan?.rbfPaths).toEqual([]);
@@ -234,6 +247,35 @@ describe('RealMisterClient', () => {
       const client = new RealMisterClient();
 
       await expect(client.listAllCoresWithFiles()).rejects.toThrow(/not connected/);
+    });
+
+    it('emits a shell script that recognises .mgl files alongside .rbf', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.listAllCoresWithFiles();
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      // The case branch for files matches both extensions, both cases.
+      expect(script).toContain('*.rbf|*.RBF|*.mgl|*.MGL');
+    });
+
+    it('emits a shell script that gates folder-shaped cores on rbf/mgl content', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.listAllCoresWithFiles();
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      // The folder branch uses find -iname for both extensions before
+      // emitting an R-line, so user-created folders without a .rbf or
+      // .mgl inside (e.g. _alternatives, _Organized) are skipped.
+      expect(script).toMatch(/find ".*?".*-iname '\*\.rbf'/);
+      expect(script).toMatch(/-iname '\*\.mgl'/);
     });
   });
 

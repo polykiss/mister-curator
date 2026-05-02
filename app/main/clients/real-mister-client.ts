@@ -362,6 +362,11 @@ export class RealMisterClient implements IMisterClient {
 }
 
 function buildListAllCoresScript(): string {
+  // Both `.rbf` (compiled FPGA cores) and `.mgl` (XML pointer cores)
+  // count as cores. A subdirectory under a category dir is only treated
+  // as a folder-shaped core when it contains at least one such file
+  // directly inside — otherwise it's a user-created organizational
+  // folder (e.g. `_alternatives`) and we ignore it.
   const dirsScript = MISTER_CATEGORY_DIRS.map(({ category, dir }) => {
     return [
       `if [ -d ${shellQuote(dir)} ]; then`,
@@ -369,10 +374,12 @@ function buildListAllCoresScript(): string {
       '  for entry in * .[!.]*; do',
       '    [ -e "$entry" ] || continue',
       '    if [ -d "$entry" ]; then',
-      `      printf 'R\\t${category}\\tdir\\t%s\\n' "$entry"`,
+      `      if find "$entry" -maxdepth 1 -type f \\( -iname '*.rbf' -o -iname '*.mgl' \\) 2>/dev/null | grep -q .; then`,
+      `        printf 'R\\t${category}\\tdir\\t%s\\n' "$entry"`,
+      '      fi',
       '    elif [ -f "$entry" ]; then',
       '      case "$entry" in',
-      `        *.rbf|*.RBF) printf 'R\\t${category}\\tfile\\t%s\\n' "$entry" ;;`,
+      `        *.rbf|*.RBF|*.mgl|*.MGL) printf 'R\\t${category}\\tfile\\t%s\\n' "$entry" ;;`,
       '      esac',
       '    fi',
       '  done',

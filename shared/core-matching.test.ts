@@ -3,9 +3,12 @@ import { describe, expect, it } from 'vitest';
 import type { CoreEntry, HideLedger } from '@shared/types';
 
 import {
+  ARCADE_PLACEHOLDER_ID,
   computeAutoReapplyChanges,
   dottedPath,
   extractCorePrefix,
+  isArcadePlaceholder,
+  isCoreFile,
   isCoreHidden,
   matchRbfsToGamesDirs,
   pathBasename,
@@ -44,6 +47,41 @@ describe('extractCorePrefix', () => {
 
   it('is case-insensitive for the .rbf suffix only', () => {
     expect(extractCorePrefix('NES_20240115.RBF')).toBe('NES');
+  });
+
+  it('strips the .mgl extension just like .rbf', () => {
+    expect(extractCorePrefix('GameboyColor.mgl')).toBe('GameboyColor');
+    expect(extractCorePrefix('GameboyColor.MGL')).toBe('GameboyColor');
+  });
+
+  it('preserves spaces in core names with no date suffix (real .mgl shape)', () => {
+    expect(extractCorePrefix('Game Gear.mgl')).toBe('Game Gear');
+    expect(extractCorePrefix('Atari 2600.mgl')).toBe('Atari 2600');
+    expect(extractCorePrefix('Mega Duck.mgl')).toBe('Mega Duck');
+    expect(extractCorePrefix('Pocket Challenge V2.mgl')).toBe('Pocket Challenge V2');
+  });
+
+  it('handles a hidden .mgl filename', () => {
+    expect(extractCorePrefix('.Game Gear.mgl')).toBe('Game Gear');
+  });
+});
+
+describe('isCoreFile', () => {
+  it('accepts .rbf files (any case)', () => {
+    expect(isCoreFile('NES_20240115.rbf')).toBe(true);
+    expect(isCoreFile('NES_20240115.RBF')).toBe(true);
+  });
+
+  it('accepts .mgl files (any case)', () => {
+    expect(isCoreFile('Game Gear.mgl')).toBe(true);
+    expect(isCoreFile('Game Gear.MGL')).toBe(true);
+  });
+
+  it('rejects everything else', () => {
+    expect(isCoreFile('README.txt')).toBe(false);
+    expect(isCoreFile('AO486')).toBe(false); // folder name, not a file
+    expect(isCoreFile('something.mra')).toBe(false); // arcade metadata, not in scope
+    expect(isCoreFile('')).toBe(false);
   });
 });
 
@@ -189,7 +227,7 @@ describe('matchRbfsToGamesDirs', () => {
     expect(result[0]?.gamesDirExists).toBe(true);
   });
 
-  it('preserves Arcade category so the UI can disable hide on it', () => {
+  it('collapses every arcade rbf into one synthetic placeholder row', () => {
     const result = matchRbfsToGamesDirs({
       rbfs: [
         {
@@ -198,10 +236,49 @@ describe('matchRbfsToGamesDirs', () => {
           fullPath: '/media/fat/_Arcade/Galaga_20240115.rbf',
           isFolder: false,
         },
+        {
+          category: 'Arcade',
+          filename: 'Pacman_20240310.rbf',
+          fullPath: '/media/fat/_Arcade/Pacman_20240310.rbf',
+          isFolder: false,
+        },
+        {
+          category: 'Console',
+          filename: 'NES_20240115.rbf',
+          fullPath: '/media/fat/_Console/NES_20240115.rbf',
+          isFolder: false,
+        },
       ],
       gamesDirs: [],
     });
-    expect(result[0]?.category).toBe('Arcade');
+
+    const arcadeEntries = result.filter((c) => c.category === 'Arcade');
+    expect(arcadeEntries).toHaveLength(1);
+    expect(arcadeEntries[0]?.id).toBe(ARCADE_PLACEHOLDER_ID);
+    expect(arcadeEntries[0]?.name).toBe('Arcade');
+    expect(arcadeEntries[0]?.rbfPaths).toEqual([]);
+    expect(isArcadePlaceholder(arcadeEntries[0]!)).toBe(true);
+
+    // Non-arcade cores are unaffected by the collapse.
+    expect(result.find((c) => c.id === 'NES')?.category).toBe('Console');
+    // Individual arcade core ids are NOT in the output.
+    expect(result.map((c) => c.id)).not.toContain('Galaga');
+    expect(result.map((c) => c.id)).not.toContain('Pacman');
+  });
+
+  it('emits no arcade placeholder when no arcade cores were enumerated', () => {
+    const result = matchRbfsToGamesDirs({
+      rbfs: [
+        {
+          category: 'Console',
+          filename: 'NES_20240115.rbf',
+          fullPath: '/media/fat/_Console/NES_20240115.rbf',
+          isFolder: false,
+        },
+      ],
+      gamesDirs: [],
+    });
+    expect(result.find((c) => c.category === 'Arcade')).toBeUndefined();
   });
 
   it('sorts the result by core id, case-insensitive', () => {

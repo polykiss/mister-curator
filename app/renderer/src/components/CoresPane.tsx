@@ -1,9 +1,9 @@
-import { Eye, EyeOff, Sparkles } from 'lucide-react';
+import { Check, Eye, EyeOff, Sparkles, Undo2, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
-import { isCoreHidden } from '@shared/core-matching';
+import { isArcadePlaceholder, isCoreHidden } from '@shared/core-matching';
 import type { CoreEntry } from '@shared/types';
 
 import { Button } from '@app/renderer/src/components/ui/button';
@@ -11,6 +11,8 @@ import { HideEmptyCoresDialog } from '@app/renderer/src/components/HideEmptyCore
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
 import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
+
+const ARCADE_TOOLTIP = "Arcade cores aren't supported yet — coming in a later release.";
 
 export function CoresPane(): JSX.Element {
   const {
@@ -21,6 +23,7 @@ export function CoresPane(): JSX.Element {
     selectCore,
     hideCore,
     showCore,
+    setBulkCoreVisibility,
   } = useCores();
 
   const [showHidden, setShowHidden] = useState(false);
@@ -38,6 +41,11 @@ export function CoresPane(): JSX.Element {
       (cores ?? []).filter(
         (c) => c.romCount === 0 && c.category !== 'Arcade' && !isCoreHidden(c),
       ),
+    [cores],
+  );
+
+  const allHiddenCores = useMemo(
+    () => (cores ?? []).filter((c) => isCoreHidden(c) && c.category !== 'Arcade'),
     [cores],
   );
 
@@ -101,18 +109,59 @@ export function CoresPane(): JSX.Element {
     }
   };
 
+  const onShowAllHidden = async (): Promise<void> => {
+    if (allHiddenCores.length === 0) return;
+    const changes = allHiddenCores.map((c) => ({ coreId: c.id, hidden: false }));
+    try {
+      await setBulkCoreVisibility(changes);
+      toast.success(`Restored ${String(allHiddenCores.length)} hidden cores`, {
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            void (async () => {
+              try {
+                await setBulkCoreVisibility(
+                  changes.map((c) => ({ ...c, hidden: true })),
+                );
+              } catch {
+                /* swallow */
+              }
+            })();
+          },
+        },
+        duration: 10000,
+      });
+    } catch (err) {
+      toast.error('Could not show all hidden cores', {
+        description: err instanceof Error ? err.message : 'Unexpected error.',
+      });
+    }
+  };
+
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center justify-between gap-2 border-b p-3 text-xs">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setBulkOpen(true)}
-          disabled={emptyHideableCores.length === 0}
-        >
-          <Sparkles />
-          Hide empty ({emptyHideableCores.length})
-        </Button>
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b p-3 text-xs">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setBulkOpen(true)}
+            disabled={emptyHideableCores.length === 0}
+          >
+            <Sparkles />
+            Hide empty ({emptyHideableCores.length})
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void onShowAllHidden()}
+            disabled={allHiddenCores.length === 0}
+            title="Restore visibility for every hidden core in one batch"
+          >
+            <Undo2 />
+            Show all hidden ({allHiddenCores.length})
+          </Button>
+        </div>
         <label className="flex items-center gap-1.5">
           <input
             type="checkbox"
@@ -187,15 +236,19 @@ function renderCoreList(args: RenderArgs): JSX.Element {
         const isSelected = core.id === args.selectedCoreId;
         const isHiddenCore = isCoreHidden(core);
         const isArcade = core.category === 'Arcade';
-        const askingDelete = args.confirmHideId === core.id;
+        const isPlaceholder = isArcadePlaceholder(core);
+        const askingHide = args.confirmHideId === core.id;
+        const isPending = args.pendingId === core.id;
 
         return (
-          <li key={core.id} className="group">
+          <li key={core.id}>
             <div
               className={cn(
-                'flex w-full items-center gap-2 px-3 py-2 text-sm transition-colors',
+                'flex w-full items-center gap-1 px-3 py-2 text-sm transition-colors',
                 isSelected && 'bg-accent',
                 !isSelected && 'hover:bg-accent/50',
+                // Hidden cores get a strong, unambiguous visual treatment.
+                isHiddenCore && 'bg-muted/60 text-muted-foreground italic',
               )}
             >
               <button
@@ -203,65 +256,88 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                 role="option"
                 aria-selected={isSelected}
                 onClick={() => args.onSelect(core.id)}
-                className={cn(
-                  'flex flex-1 items-center justify-between gap-2 text-left',
-                  isHiddenCore && 'italic text-muted-foreground',
-                )}
+                className="flex flex-1 min-w-0 items-center justify-between gap-2 text-left"
               >
-                <span className="truncate font-medium">{core.name}</span>
-                <span className="shrink-0 text-xs text-muted-foreground">
-                  {core.romCount}
-                  {core.hiddenCount > 0 ? (
-                    <span className="ml-1 italic">({core.hiddenCount} hidden)</span>
-                  ) : null}
+                <span
+                  className={cn(
+                    'truncate font-medium',
+                    isHiddenCore && 'line-through',
+                  )}
+                >
+                  {core.name}
                 </span>
+                {isPlaceholder ? (
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    coming later
+                  </span>
+                ) : (
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {core.romCount}
+                    {core.hiddenCount > 0 ? (
+                      <span className="ml-1 italic">({core.hiddenCount} hidden)</span>
+                    ) : null}
+                  </span>
+                )}
               </button>
 
-              {askingDelete ? (
-                <div className="flex shrink-0 items-center gap-1">
+              {askingHide ? (
+                // Two icon-sized buttons replace the eye button — same width
+                // budget, fits inside any reasonable cores-pane width.
+                <div className="flex shrink-0 items-center gap-0.5">
                   <Button
                     variant="destructive"
-                    size="sm"
+                    size="icon"
                     onClick={() => void args.onConfirmHide(core)}
-                    disabled={args.pendingId === core.id}
+                    disabled={isPending}
+                    title={`Confirm: hide ${core.name}`}
+                    aria-label={`Confirm hide ${core.name}`}
                   >
-                    Hide {core.name}
+                    <Check />
                   </Button>
                   <Button
                     variant="ghost"
-                    size="sm"
+                    size="icon"
                     onClick={args.onCancelHide}
-                    disabled={args.pendingId === core.id}
+                    disabled={isPending}
+                    title="Cancel"
+                    aria-label="Cancel hide"
                   >
-                    Cancel
+                    <X />
                   </Button>
                 </div>
-              ) : isHiddenCore ? (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label={`Show ${core.name}`}
-                  onClick={() => void args.onShow(core)}
-                  disabled={args.pendingId === core.id}
-                >
-                  <Eye />
-                </Button>
               ) : isArcade ? (
-                <span
-                  className="text-xs text-muted-foreground"
-                  title="Arcade cores aren't supported yet — coming in a later release."
-                >
-                  Arcade
-                </span>
-              ) : (
                 <Button
                   variant="ghost"
                   size="icon"
-                  aria-label={`Hide ${core.name}`}
-                  onClick={() => args.onAskHide(core.id)}
-                  disabled={args.pendingId === core.id}
+                  disabled
+                  title={ARCADE_TOOLTIP}
+                  aria-label={ARCADE_TOOLTIP}
                 >
                   <EyeOff />
+                </Button>
+              ) : isHiddenCore ? (
+                // State icon: crossed-out eye = currently hidden. Click to show.
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => void args.onShow(core)}
+                  disabled={isPending}
+                  title={`Show ${core.name}`}
+                  aria-label={`Show ${core.name}`}
+                >
+                  <EyeOff />
+                </Button>
+              ) : (
+                // State icon: open eye = currently visible. Click to hide.
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => args.onAskHide(core.id)}
+                  disabled={isPending}
+                  title={`Hide ${core.name}`}
+                  aria-label={`Hide ${core.name}`}
+                >
+                  <Eye />
                 </Button>
               )}
             </div>

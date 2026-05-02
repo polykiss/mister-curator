@@ -11,6 +11,7 @@ import {
 } from '@shared/constants';
 import {
   computeCoreRenames,
+  isCoreFile,
   matchRbfsToGamesDirs,
   type RawGamesDirInput,
   type RawRbfInput,
@@ -92,13 +93,23 @@ export class FakeMisterClient implements IMisterClient {
       for (const entry of entries) {
         const filename = entry.name;
         if (entry.isDirectory()) {
+          // A directory under a category dir is only a core if it contains
+          // at least one .rbf or .mgl file directly inside. Otherwise it's
+          // a user-created organizational folder (e.g. `_alternatives`).
+          const inner = await fs.readdir(path.join(localDir, filename), {
+            withFileTypes: true,
+          });
+          const looksLikeCore = inner.some(
+            (innerEntry) => innerEntry.isFile() && isCoreFile(innerEntry.name),
+          );
+          if (!looksLikeCore) continue;
           rbfs.push({
             category,
             filename,
             fullPath: `${logicalDir}/${filename}`,
             isFolder: true,
           });
-        } else if (entry.isFile() && filename.toLowerCase().endsWith('.rbf')) {
+        } else if (entry.isFile() && isCoreFile(filename)) {
           rbfs.push({
             category,
             filename,

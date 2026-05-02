@@ -2,6 +2,8 @@ import { LogOut, RefreshCw } from 'lucide-react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
+import { isArcadePlaceholder } from '@shared/core-matching';
+
 import { Button } from '@app/renderer/src/components/ui/button';
 import { CoresPane } from '@app/renderer/src/components/CoresPane';
 import { RomsPane } from '@app/renderer/src/components/RomsPane';
@@ -68,7 +70,17 @@ export function BrowserScreen(): JSX.Element {
         </aside>
         <main className="min-w-0">
           {selectedCore ? (
-            <RomsPane core={selectedCore} />
+            isArcadePlaceholder(selectedCore) ? (
+              <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
+                <h2 className="text-lg font-semibold">Arcade</h2>
+                <p className="max-w-md text-sm text-muted-foreground">
+                  Arcade core management is coming in a later release. For now, your
+                  .mra files are visible to MiSTer as normal.
+                </p>
+              </div>
+            ) : (
+              <RomsPane core={selectedCore} />
+            )
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
               Select a core on the left to browse its ROMs.

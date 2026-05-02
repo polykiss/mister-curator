@@ -199,7 +199,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                     <TableCell
                       className={cn(
                         'truncate font-medium',
-                        rom.hidden && 'italic text-muted-foreground',
+                        rom.hidden && 'italic text-muted-foreground line-through',
                       )}
                     >
                       {rom.displayName}
@@ -212,15 +212,17 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         variant="ghost"
                         size="sm"
                         onClick={() => void onSingleToggle(rom)}
+                        title={rom.hidden ? `Show ${rom.displayName}` : `Hide ${rom.displayName}`}
                       >
+                        {/* State icon: crossed-out eye = currently hidden, open eye = currently visible. */}
                         {rom.hidden ? (
                           <>
-                            <Eye />
+                            <EyeOff />
                             Show
                           </>
                         ) : (
                           <>
-                            <EyeOff />
+                            <Eye />
                             Hide
                           </>
                         )}

@@ -2,26 +2,55 @@ import { MISTER_GAMES_DIR } from '@shared/constants';
 import type { CoreCategory, CoreEntry, HideLedger } from '@shared/types';
 
 /**
- * Strip the leading dot (if present) and the `.rbf` extension (if present),
- * then drop a trailing `_<8+ digits>` date version suffix. This is how we
- * collapse `NES_20240115.rbf` and `NES_20231215.rbf` to the same coreId.
+ * Strip the leading dot (if present), the `.rbf` or `.mgl` extension (if
+ * present), then drop a trailing `_<8+ digits>` date version suffix. This
+ * is how we collapse `NES_20240115.rbf` and `NES_20231215.rbf` to the same
+ * coreId.
+ *
+ * Real MiSTers ship many cores as `.mgl` (XML pointer) files instead of
+ * `.rbf` — `.mgl` cores are treated identically to `.rbf` for matching,
+ * hiding, and showing. The XML is never parsed; we just rename the file.
  *
  * Examples:
- *   NES_20240115.rbf       → NES
- *   Atari2600_20240220.rbf → Atari2600
- *   .NES_20240115.rbf      → NES         (currently hidden)
- *   Tatung_Einstein.rbf    → Tatung_Einstein  (no date suffix; underscore preserved)
- *   MyCore.rbf             → MyCore
- *   AO486                  → AO486        (folder-shaped core)
- *   .AO486                 → AO486        (currently hidden folder)
+ *   NES_20251013.rbf            → NES
+ *   Atari2600_20240220.rbf      → Atari2600
+ *   .NES_20240115.rbf           → NES                     (currently hidden)
+ *   Tatung_Einstein.rbf         → Tatung_Einstein         (no date; underscore preserved)
+ *   MyCore.rbf                  → MyCore
+ *   AO486                       → AO486                   (folder-shaped core)
+ *   .AO486                      → AO486                   (hidden folder)
+ *   Game Gear.mgl               → Game Gear               (.mgl, with space)
+ *   Atari 2600.mgl              → Atari 2600
+ *   Mega Duck.mgl               → Mega Duck
+ *   Pocket Challenge V2.mgl     → Pocket Challenge V2
+ *   GameboyColor.mgl            → GameboyColor
  */
 export function extractCorePrefix(filename: string): string {
   const undotted = filename.startsWith('.') ? filename.slice(1) : filename;
-  const base = undotted.toLowerCase().endsWith('.rbf')
-    ? undotted.slice(0, -4)
-    : undotted;
+  const lower = undotted.toLowerCase();
+  const base =
+    lower.endsWith('.rbf') || lower.endsWith('.mgl')
+      ? undotted.slice(0, -4)
+      : undotted;
   return base.replace(/_\d{8,}$/, '');
 }
+
+/**
+ * True when the on-disk filename is something this app treats as a core
+ * file — either an `.rbf` (synthesized core) or an `.mgl` (XML pointer
+ * core). Case-insensitive.
+ */
+export function isCoreFile(filename: string): boolean {
+  const lower = filename.toLowerCase();
+  return lower.endsWith('.rbf') || lower.endsWith('.mgl');
+}
+
+/**
+ * Synthetic id used for the single placeholder row that represents the
+ * Arcade category in the cores list. Real arcade core ids never use this
+ * prefix (real ids come from filename parsing).
+ */
+export const ARCADE_PLACEHOLDER_ID = '__mister:arcade_placeholder__';
 
 export interface RawRbfInput {
   readonly category: CoreCategory;
@@ -125,7 +154,7 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     }
   }
 
-  const out: CoreEntry[] = Array.from(byId.values()).map((e) => ({
+  const all: CoreEntry[] = Array.from(byId.values()).map((e) => ({
     id: e.id,
     name: e.name,
     romCount: e.romCount,
@@ -135,8 +164,33 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     gamesDirExists: e.gamesDirExists,
     gamesDirHidden: e.gamesDirHidden,
   }));
-  out.sort((a, b) => a.id.localeCompare(b.id, 'en-US', { sensitivity: 'base' }));
-  return out;
+
+  // Collapse all arcade entries into a single placeholder row. Arcade is
+  // out of scope for the hide feature (per AGENTS.md), but users still
+  // expect to see "Arcade" in the cores list — listing every individual
+  // arcade core would be both noisy and misleading because none of them
+  // are hideable.
+  const arcadeEntries = all.filter((c) => c.category === 'Arcade');
+  const nonArcade = all.filter((c) => c.category !== 'Arcade');
+  if (arcadeEntries.length > 0) {
+    nonArcade.push({
+      id: ARCADE_PLACEHOLDER_ID,
+      name: 'Arcade',
+      romCount: 0,
+      hiddenCount: 0,
+      category: 'Arcade',
+      rbfPaths: [],
+      gamesDirExists: false,
+      gamesDirHidden: false,
+    });
+  }
+
+  nonArcade.sort((a, b) => a.id.localeCompare(b.id, 'en-US', { sensitivity: 'base' }));
+  return nonArcade;
+}
+
+export function isArcadePlaceholder(core: CoreEntry): boolean {
+  return core.id === ARCADE_PLACEHOLDER_ID;
 }
 
 /**
