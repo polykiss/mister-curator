@@ -30,6 +30,7 @@
     "app/**/*",
     "shared/**/*",
     "agent/types/**/*",
+    "scripts/**/*",
     "electron.vite.config.ts",
     "vitest.config.ts"
   ]
