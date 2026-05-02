@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
 
+import { MISTER_GAMES_DIR } from '@shared/constants';
 import { MisterConnectionError } from '@shared/types';
 import type { Core, MisterProfile, Rom } from '@shared/types';
 import type {
@@ -9,8 +10,6 @@ import type {
   MisterSecret,
   RomVisibilityChange,
 } from '@shared/mister-client';
-
-const MISTER_GAMES_DIR = '/media/fat/games';
 
 export interface FakeMisterClientOptions {
   readonly rootPath: string;
