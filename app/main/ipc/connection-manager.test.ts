@@ -122,7 +122,7 @@ describe('ConnectionManager — permission slip', () => {
       path.join(workDir, 'games', '.Orphan'),
     );
 
-    // The user clicks "Show all hidden" — but the manager only un-hides
+    // The user clicks "Unhide all" — but the manager only un-hides
     // ledger-managed cores. We simulate this by passing every hidden
     // core's coreId.
     const cores = await manager.listAllCoresWithFiles();

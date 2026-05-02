@@ -1015,4 +1015,125 @@ describe('RealMisterClient', () => {
       expect(mocks.execCommand).not.toHaveBeenCalled();
     });
   });
+
+  describe('readSystemFilesMarks / addSystemFileMark / removeSystemFileMark', () => {
+    it('readSystemFilesMarks tolerates a missing file', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      const marks = await client.readSystemFilesMarks();
+      expect(marks).toEqual({ schemaVersion: 1, marked: [] });
+
+      const command = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(command).toContain(`cat '/media/fat/.mistercurator/system-files.json'`);
+      expect(command).toContain('|| true');
+    });
+
+    it('readSystemFilesMarks parses a populated marks file', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      const json = JSON.stringify({
+        schemaVersion: 1,
+        marked: [
+          {
+            coreId: 'C64',
+            filename: 'DolphinDOS_2.0.rom',
+            markedAt: '2026-05-02T12:00:00Z',
+          },
+        ],
+      });
+      mocks.execCommand.mockResolvedValueOnce(execOk(json));
+
+      const marks = await client.readSystemFilesMarks();
+      expect(marks.marked).toHaveLength(1);
+      expect(marks.marked[0]?.coreId).toBe('C64');
+    });
+
+    it('addSystemFileMark reads, mutates, and writes via heredoc', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      // First call: read existing marks (empty).
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+      // Second call: write the mutated marks.
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.addSystemFileMark('C64', 'DolphinDOS_2.0.rom');
+
+      expect(mocks.execCommand).toHaveBeenCalledTimes(2);
+      const writeScript = mocks.execCommand.mock.calls[1]?.[0] as string;
+      expect(writeScript).toContain(`mkdir -p '/media/fat/.mistercurator'`);
+      expect(writeScript).toContain(`<<'MISTERCURATOR_SYSTEM_FILES_EOF'`);
+      expect(writeScript).toContain('"coreId": "C64"');
+      expect(writeScript).toContain('"filename": "DolphinDOS_2.0.rom"');
+      expect(writeScript).toContain(
+        `mv '/media/fat/.mistercurator/system-files.json.tmp' '/media/fat/.mistercurator/system-files.json'`,
+      );
+    });
+
+    it('addSystemFileMark issues only one read when the mark already exists', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      const existing = JSON.stringify({
+        schemaVersion: 1,
+        marked: [
+          {
+            coreId: 'C64',
+            filename: 'DolphinDOS_2.0.rom',
+            markedAt: '2026-05-02T12:00:00Z',
+          },
+        ],
+      });
+      mocks.execCommand.mockResolvedValueOnce(execOk(existing));
+
+      await client.addSystemFileMark('C64', 'DolphinDOS_2.0.rom');
+
+      // Only the read; no write because withMark is idempotent.
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+    });
+
+    it('removeSystemFileMark drops the entry and rewrites the file', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      const existing = JSON.stringify({
+        schemaVersion: 1,
+        marked: [
+          {
+            coreId: 'C64',
+            filename: 'DolphinDOS_2.0.rom',
+            markedAt: '2026-05-02T12:00:00Z',
+          },
+        ],
+      });
+      mocks.execCommand.mockResolvedValueOnce(execOk(existing));
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.removeSystemFileMark('C64', 'DolphinDOS_2.0.rom');
+
+      expect(mocks.execCommand).toHaveBeenCalledTimes(2);
+      const writeScript = mocks.execCommand.mock.calls[1]?.[0] as string;
+      // The rewrite no longer contains the entry.
+      expect(writeScript).not.toContain('DolphinDOS_2.0.rom');
+    });
+
+    it('removeSystemFileMark issues only one read when the entry is absent', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+      await client.removeSystemFileMark('C64', 'never_marked.rom');
+
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+    });
+  });
 });

@@ -486,6 +486,74 @@ describe('FakeMisterClient', () => {
     });
   });
 
+  describe('system-files marks', () => {
+    it('returns an empty marks list when no file exists', async () => {
+      const marks = await client.readSystemFilesMarks();
+      expect(marks).toEqual({ schemaVersion: 1, marked: [] });
+    });
+
+    it('round-trips a single mark via add → read', async () => {
+      await client.addSystemFileMark('C64', 'DolphinDOS_2.0.rom');
+      const marks = await client.readSystemFilesMarks();
+      expect(marks.marked).toHaveLength(1);
+      expect(marks.marked[0]?.coreId).toBe('C64');
+      expect(marks.marked[0]?.filename).toBe('DolphinDOS_2.0.rom');
+      expect(marks.marked[0]?.markedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it('addSystemFileMark is idempotent (re-marking is a no-op)', async () => {
+      await client.addSystemFileMark('NES', 'header.txt');
+      await client.addSystemFileMark('NES', 'header.txt');
+      const marks = await client.readSystemFilesMarks();
+      expect(marks.marked).toHaveLength(1);
+    });
+
+    it('removeSystemFileMark drops the entry', async () => {
+      await client.addSystemFileMark('NES', 'header.txt');
+      await client.removeSystemFileMark('NES', 'header.txt');
+      const marks = await client.readSystemFilesMarks();
+      expect(marks.marked).toHaveLength(0);
+    });
+
+    it('removeSystemFileMark for a non-existent entry is a no-op', async () => {
+      await client.removeSystemFileMark('NES', 'never_marked.bin');
+      const marks = await client.readSystemFilesMarks();
+      expect(marks.marked).toHaveLength(0);
+    });
+
+    it('listAllCoresWithFiles applies the marks to per-core counts', async () => {
+      // NEOGEO has 9 game dirs + 12 BIOS files in the fixture-equivalent
+      // shape. We don't have NEOGEO in the fake fixture, so use NES
+      // instead — it has 9 ROMs (7 visible + 2 hidden). Mark one
+      // visible ROM and expect the count to drop by 1.
+      const before = await client.listAllCoresWithFiles();
+      const nesBefore = before.find((c) => c.id === 'NES');
+      const romCountBefore = nesBefore?.romCount ?? 0;
+      expect(romCountBefore).toBeGreaterThan(0);
+
+      await client.addSystemFileMark('NES', 'Castlevania (USA, Europe).nes');
+
+      const after = await client.listAllCoresWithFiles(
+        await client.readSystemFilesMarks(),
+      );
+      const nesAfter = after.find((c) => c.id === 'NES');
+      expect(nesAfter?.romCount).toBe(romCountBefore - 1);
+    });
+
+    it('persists across reset only when the marks file survives', async () => {
+      // The marks file lives under .mistercurator/, a directory the
+      // fixture doesn't ship. After reset() the working tree is the
+      // pristine fixture, so the marks file is gone — this is the
+      // expected behavior. Verifies that we don't accidentally cache
+      // marks across a reconnect.
+      await client.addSystemFileMark('NES', 'persisted_test.nes');
+      await client.reset();
+      await client.connect(profile, secret);
+      const marks = await client.readSystemFilesMarks();
+      expect(marks.marked).toHaveLength(0);
+    });
+  });
+
   describe('ledger self-heal', () => {
     it('drops a stale entry that names a non-existent core', async () => {
       // Pre-seed the ledger with a `_hidden` entry that no real core

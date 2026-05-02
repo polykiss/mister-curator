@@ -8,6 +8,7 @@ import {
   MISTER_GAMES_DIR,
   MISTER_LEDGER_DIR,
   MISTER_LEDGER_PATH,
+  MISTER_SYSTEM_FILES_PATH,
 } from '@shared/constants';
 import {
   computeCoreRenames,
@@ -17,18 +18,26 @@ import {
   type RawGamesDirInput,
   type RawRbfInput,
 } from '@shared/core-matching';
+import { displayRomName } from '@shared/display';
 import {
   healLedger,
   ledgerEqual,
   parseLedger,
   serializeLedger,
 } from '@shared/ledger';
+import {
+  parseSystemFilesMarks,
+  serializeSystemFilesMarks,
+  withMark,
+  withoutMark,
+} from '@shared/system-files-marks';
 import { MisterConnectionError } from '@shared/types';
 import type {
   CoreEntry,
   HideLedger,
   MisterProfile,
   Rom,
+  SystemFilesMarks,
 } from '@shared/types';
 import type {
   BulkCoreResult,
@@ -84,7 +93,9 @@ export class FakeMisterClient implements IMisterClient {
     return this.connected;
   }
 
-  async listAllCoresWithFiles(): Promise<CoreEntry[]> {
+  async listAllCoresWithFiles(
+    systemFilesMarks?: SystemFilesMarks,
+  ): Promise<CoreEntry[]> {
     this.assertConnected();
     await this.delay();
 
@@ -165,7 +176,12 @@ export class FakeMisterClient implements IMisterClient {
       // _Arcade/ doesn't exist on this fixture — leave the flag false.
     }
 
-    return matchRbfsToGamesDirs({ rbfs, gamesDirs, arcadeDirExists });
+    return matchRbfsToGamesDirs({
+      rbfs,
+      gamesDirs,
+      arcadeDirExists,
+      systemFilesMarks,
+    });
   }
 
   async listRoms(coreId: string): Promise<Rom[]> {
@@ -189,7 +205,7 @@ export class FakeMisterClient implements IMisterClient {
     for (const entry of entries) {
       const filename = entry.name;
       const hidden = filename.startsWith('.');
-      const displayName = hidden ? filename.slice(1) : filename;
+      const displayName = displayRomName(hidden ? filename.slice(1) : filename);
       const fullPath = path.join(localDir, filename);
 
       if (entry.isFile()) {
@@ -371,6 +387,56 @@ export class FakeMisterClient implements IMisterClient {
     const localPath = this.toLocal(MISTER_LEDGER_PATH);
     await fs.mkdir(localDir, { recursive: true });
     const json = serializeLedger(ledger);
+    const tmp = `${localPath}.tmp`;
+    await fs.writeFile(tmp, json, 'utf-8');
+    await fs.rename(tmp, localPath);
+  }
+
+  async readSystemFilesMarks(): Promise<SystemFilesMarks> {
+    this.assertConnected();
+    await this.delay();
+    const localPath = this.toLocal(MISTER_SYSTEM_FILES_PATH);
+    try {
+      const text = await fs.readFile(localPath, 'utf-8');
+      return parseSystemFilesMarks(text);
+    } catch (err) {
+      if (isNodeError(err) && err.code === 'ENOENT') {
+        return parseSystemFilesMarks('');
+      }
+      throw err;
+    }
+  }
+
+  async addSystemFileMark(coreId: string, filename: string): Promise<void> {
+    this.assertConnected();
+    this.assertSafeCoreId(coreId);
+    this.assertSafeFilename(filename);
+    const current = await this.readSystemFilesMarks();
+    const next = withMark(current, {
+      coreId,
+      filename,
+      markedAt: new Date().toISOString(),
+    });
+    if (next === current) return;
+    await this.writeSystemFilesMarks(next);
+  }
+
+  async removeSystemFileMark(coreId: string, filename: string): Promise<void> {
+    this.assertConnected();
+    this.assertSafeCoreId(coreId);
+    this.assertSafeFilename(filename);
+    const current = await this.readSystemFilesMarks();
+    const next = withoutMark(current, coreId, filename);
+    if (next === current) return;
+    await this.writeSystemFilesMarks(next);
+  }
+
+  private async writeSystemFilesMarks(marks: SystemFilesMarks): Promise<void> {
+    await this.delay();
+    const localDir = this.toLocal(MISTER_LEDGER_DIR);
+    const localPath = this.toLocal(MISTER_SYSTEM_FILES_PATH);
+    await fs.mkdir(localDir, { recursive: true });
+    const json = serializeSystemFilesMarks(marks);
     const tmp = `${localPath}.tmp`;
     await fs.writeFile(tmp, json, 'utf-8');
     await fs.rename(tmp, localPath);

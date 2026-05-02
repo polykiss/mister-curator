@@ -7,6 +7,7 @@ import {
   MISTER_GAMES_DIR,
   MISTER_LEDGER_DIR,
   MISTER_LEDGER_PATH,
+  MISTER_SYSTEM_FILES_PATH,
 } from '@shared/constants';
 import {
   computeCoreRenames,
@@ -16,6 +17,7 @@ import {
   type RawGamesDirInput,
   type RawRbfInput,
 } from '@shared/core-matching';
+import { displayRomName } from '@shared/display';
 import {
   healLedger,
   ledgerEqual,
@@ -23,6 +25,13 @@ import {
   parseLedger,
   serializeLedger,
 } from '@shared/ledger';
+import {
+  parseSystemFilesMarks,
+  serializeSystemFilesMarks,
+  SYSTEM_FILES_HEREDOC_DELIMITER,
+  withMark,
+  withoutMark,
+} from '@shared/system-files-marks';
 import { MisterConnectionError } from '@shared/types';
 import type {
   CoreCategory,
@@ -30,6 +39,7 @@ import type {
   HideLedger,
   MisterProfile,
   Rom,
+  SystemFilesMarks,
 } from '@shared/types';
 import type {
   BulkCoreResult,
@@ -113,7 +123,9 @@ export class RealMisterClient implements IMisterClient {
     return this.ssh.isConnected();
   }
 
-  async listAllCoresWithFiles(): Promise<CoreEntry[]> {
+  async listAllCoresWithFiles(
+    systemFilesMarks?: SystemFilesMarks,
+  ): Promise<CoreEntry[]> {
     this.assertConnected();
 
     // One batched shell script that emits TAB-separated lines:
@@ -197,7 +209,12 @@ export class RealMisterClient implements IMisterClient {
       dirs: b.dirs,
     }));
 
-    return matchRbfsToGamesDirs({ rbfs, gamesDirs, arcadeDirExists });
+    return matchRbfsToGamesDirs({
+      rbfs,
+      gamesDirs,
+      arcadeDirExists,
+      systemFilesMarks,
+    });
   }
 
   async listRoms(coreId: string): Promise<Rom[]> {
@@ -240,7 +257,7 @@ export class RealMisterClient implements IMisterClient {
       if (filename === '' || Number.isNaN(sizeBytes)) continue;
 
       const hidden = filename.startsWith('.');
-      const displayName = hidden ? filename.slice(1) : filename;
+      const displayName = displayRomName(hidden ? filename.slice(1) : filename);
 
       roms.push({
         coreId,
@@ -460,6 +477,60 @@ export class RealMisterClient implements IMisterClient {
     if (result.code !== 0) {
       throw new Error(
         `Failed to write hide ledger: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+      );
+    }
+  }
+
+  async readSystemFilesMarks(): Promise<SystemFilesMarks> {
+    this.assertConnected();
+    const result = await this.ssh.execCommand(
+      `cat ${shellQuote(MISTER_SYSTEM_FILES_PATH)} 2>/dev/null || true`,
+    );
+    return parseSystemFilesMarks(result.stdout);
+  }
+
+  async addSystemFileMark(coreId: string, filename: string): Promise<void> {
+    this.assertConnected();
+    assertSafeSegment('coreId', coreId);
+    if (filename === '' || filename.includes('\0')) {
+      throw new Error(`Invalid filename: ${filename}`);
+    }
+    const current = await this.readSystemFilesMarks();
+    const next = withMark(current, {
+      coreId,
+      filename,
+      markedAt: new Date().toISOString(),
+    });
+    if (next === current) return;
+    await this.writeSystemFilesMarks(next);
+  }
+
+  async removeSystemFileMark(coreId: string, filename: string): Promise<void> {
+    this.assertConnected();
+    assertSafeSegment('coreId', coreId);
+    if (filename === '' || filename.includes('\0')) {
+      throw new Error(`Invalid filename: ${filename}`);
+    }
+    const current = await this.readSystemFilesMarks();
+    const next = withoutMark(current, coreId, filename);
+    if (next === current) return;
+    await this.writeSystemFilesMarks(next);
+  }
+
+  private async writeSystemFilesMarks(marks: SystemFilesMarks): Promise<void> {
+    const json = serializeSystemFilesMarks(marks);
+    const tmpPath = `${MISTER_SYSTEM_FILES_PATH}.tmp`;
+    const script =
+      `mkdir -p ${shellQuote(MISTER_LEDGER_DIR)}\n` +
+      `cat > ${shellQuote(tmpPath)} <<'${SYSTEM_FILES_HEREDOC_DELIMITER}'\n` +
+      json +
+      `${SYSTEM_FILES_HEREDOC_DELIMITER}\n` +
+      `mv ${shellQuote(tmpPath)} ${shellQuote(MISTER_SYSTEM_FILES_PATH)}\n`;
+
+    const result = await this.ssh.execCommand(script);
+    if (result.code !== 0) {
+      throw new Error(
+        `Failed to write system-files marks: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
       );
     }
   }

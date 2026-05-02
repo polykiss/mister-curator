@@ -9,6 +9,7 @@ import type {
   CoreEntry,
   MisterProfile,
   Rom,
+  SystemFilesMarks,
 } from '@shared/types';
 
 export const IPC_CHANNELS = {
@@ -27,6 +28,9 @@ export const IPC_CHANNELS = {
   setBulkCoreVisibility: 'mister:setBulkCoreVisibility',
   pickKeyFile: 'mister:pickKeyFile',
   connectionStatusChanged: 'mister:connectionStatusChanged',
+  listSystemFileMarks: 'mister:listSystemFileMarks',
+  addSystemFileMark: 'mister:addSystemFileMark',
+  removeSystemFileMark: 'mister:removeSystemFileMark',
 } as const;
 
 export interface RomVisibilityChangeWire {
@@ -97,6 +101,27 @@ export interface MisterApi {
   ): Promise<BulkCoreResult>;
   pickKeyFile(): Promise<PickedKeyFile | null>;
   onConnectionStatusChanged(handler: (status: ConnectionStatus) => void): () => void;
+  /**
+   * Returns the cached user-marks list. Cache is primed on connect and
+   * refreshed after every add/remove, so the renderer can call this
+   * eagerly without triggering an SSH round-trip.
+   */
+  listSystemFileMarks(): Promise<SystemFilesMarks>;
+  /**
+   * Adds a user-defined system-file mark for `(coreId, filename)`.
+   * Idempotent at the persistence layer. Returns the refreshed marks
+   * list so the renderer doesn't need a follow-up call to repaint.
+   */
+  addSystemFileMark(coreId: string, filename: string): Promise<SystemFilesMarks>;
+  /**
+   * Removes a user-defined mark. Idempotent. Returns the refreshed
+   * marks list. Auto-detected files are unaffected (they're heuristic,
+   * never stored — the UI disables the unmark action for them).
+   */
+  removeSystemFileMark(
+    coreId: string,
+    filename: string,
+  ): Promise<SystemFilesMarks>;
 }
 
 const VALID_CONNECTION_ERROR_CODES: ReadonlySet<ConnectionErrorCode> = new Set([

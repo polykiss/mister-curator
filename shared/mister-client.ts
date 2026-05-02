@@ -1,4 +1,10 @@
-import type { CoreEntry, HideLedger, MisterProfile, Rom } from '@shared/types';
+import type {
+  CoreEntry,
+  HideLedger,
+  MisterProfile,
+  Rom,
+  SystemFilesMarks,
+} from '@shared/types';
 
 export type MisterSecret =
   | { readonly type: 'key'; readonly privateKey: string }
@@ -51,8 +57,17 @@ export interface IMisterClient {
    * Lists every core the device knows about — joined across `_Console`,
    * `_Computer`, `_Other`, `_Utility`, `_Arcade` and `games/`. Replaces
    * the older `listCores()` which only saw `games/` subdirectories.
+   *
+   * `systemFilesMarks` is an optional layer over the auto-detector
+   * heuristic. When supplied, files and folders the user has marked as
+   * system for a given core are excluded from each `CoreEntry`'s
+   * `romCount` / `hiddenCount` exactly like auto-detected BIOSes. The
+   * caller (ConnectionManager) typically caches the marks once per
+   * connection and passes them on every list call.
    */
-  listAllCoresWithFiles(): Promise<CoreEntry[]>;
+  listAllCoresWithFiles(
+    systemFilesMarks?: SystemFilesMarks,
+  ): Promise<CoreEntry[]>;
 
   listRoms(coreId: string): Promise<Rom[]>;
 
@@ -103,4 +118,29 @@ export interface IMisterClient {
    * Atomically (re)write the ledger via a temp file + rename.
    */
   writeHideLedger(ledger: HideLedger): Promise<void>;
+
+  /**
+   * Read and parse the on-MiSTer user-marked system-files list
+   * (`/media/fat/.mistercurator/system-files.json`). Returns the empty
+   * marks object if the file is missing or empty. The marks file
+   * extends the auto-detector heuristic — files appearing here are
+   * treated as system content for that specific core.
+   */
+  readSystemFilesMarks(): Promise<SystemFilesMarks>;
+
+  /**
+   * Mark a single `(coreId, filename)` pair as a user-defined system
+   * file. Idempotent at the persistence layer — re-marking is a
+   * silent no-op. The implementation reads-modifies-writes the marks
+   * file in one logical operation; concurrent writers are not expected
+   * (the renderer is single-threaded against one MiSTer).
+   */
+  addSystemFileMark(coreId: string, filename: string): Promise<void>;
+
+  /**
+   * Remove a user-defined system-file mark. Idempotent — removing a
+   * non-existent mark is a silent no-op. Auto-detected system files
+   * are not affected (they're heuristic, not stored).
+   */
+  removeSystemFileMark(coreId: string, filename: string): Promise<void>;
 }

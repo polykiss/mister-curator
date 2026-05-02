@@ -1,11 +1,15 @@
-import { Cog, Eye, EyeOff, Folder } from 'lucide-react';
+import { Cog, Eye, EyeOff, Folder, MoreHorizontal } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
-import { isSystemFile } from '@shared/system-files';
+import { isAutoDetectedSystemFile, isSystemFile } from '@shared/system-files';
 import type { CoreEntry, Rom } from '@shared/types';
 
+import {
+  RomRowMenu,
+  type RomRowMenuItem,
+} from '@app/renderer/src/components/RomRowMenu';
 import { Button } from '@app/renderer/src/components/ui/button';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
 import {
@@ -26,13 +30,27 @@ interface RomsPaneProps {
 }
 
 export function RomsPane({ core }: RomsPaneProps): JSX.Element {
-  const { romsByCore, romsLoading, ensureRoms, setRomVisibility, setBulkRomVisibility } =
-    useCores();
+  const {
+    romsByCore,
+    romsLoading,
+    ensureRoms,
+    setRomVisibility,
+    setBulkRomVisibility,
+    systemFilesMarks,
+    isUserMarked,
+    addSystemFileMark,
+    removeSystemFileMark,
+  } = useCores();
   const roms = romsByCore[core.id];
   const loading = romsLoading[core.id] ?? false;
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
   const [showHidden, setShowHidden] = useState(false);
   const [showSystem, setShowSystem] = useState(false);
+  const [menuFor, setMenuFor] = useState<{
+    readonly rom: Rom;
+    readonly x: number;
+    readonly y: number;
+  } | null>(null);
 
   // Reset selection when the visible core changes.
   useEffect(() => {
@@ -46,14 +64,20 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
 
   // System-file classification is keyed on (filename, kind). Cache for
   // the current rom list so the renderer doesn't re-classify on every
-  // re-render.
+  // re-render. Uses the combined check — auto-detector OR user-marks.
   const systemFlags = useMemo(() => {
     const map = new Map<string, boolean>();
     for (const r of roms ?? []) {
-      map.set(r.filename, isSystemFile({ filename: r.filename, kind: r.kind }));
+      map.set(
+        r.filename,
+        isSystemFile(
+          { filename: r.filename, kind: r.kind },
+          { marks: systemFilesMarks, coreId: core.id },
+        ),
+      );
     }
     return map;
-  }, [roms]);
+  }, [roms, systemFilesMarks, core.id]);
 
   // The list the user actually sees — hidden + system filters apply
   // independently. Counts in the header reflect this filtered view so
@@ -192,6 +216,91 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     setSelected(new Set());
   };
 
+  const onMarkAsSystem = async (rom: Rom): Promise<void> => {
+    try {
+      await addSystemFileMark(core.id, rom.filename);
+      toast.success(`Marked ${rom.displayName} as system file`, {
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            void (async () => {
+              try {
+                await removeSystemFileMark(core.id, rom.filename);
+              } catch {
+                /* swallow */
+              }
+            })();
+          },
+        },
+      });
+    } catch (err) {
+      toast.error(`Could not mark ${rom.displayName}`, {
+        description: err instanceof Error ? err.message : 'Unexpected error.',
+      });
+    }
+  };
+
+  const onUnmarkSystem = async (rom: Rom): Promise<void> => {
+    try {
+      await removeSystemFileMark(core.id, rom.filename);
+      toast.success(`Unmarked ${rom.displayName}`, {
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            void (async () => {
+              try {
+                await addSystemFileMark(core.id, rom.filename);
+              } catch {
+                /* swallow */
+              }
+            })();
+          },
+        },
+      });
+    } catch (err) {
+      toast.error(`Could not unmark ${rom.displayName}`, {
+        description: err instanceof Error ? err.message : 'Unexpected error.',
+      });
+    }
+  };
+
+  function buildMenuItems(rom: Rom): readonly RomRowMenuItem[] {
+    // Auto-detected files cannot be unmarked — the heuristic decides
+    // every connection. The disabled state surfaces this without
+    // hiding the option (user can still see it, learn the rule).
+    const auto = isAutoDetectedSystemFile({ filename: rom.filename, kind: rom.kind });
+    const marked = isUserMarked(core.id, rom.filename);
+    if (auto) {
+      return [
+        {
+          label: 'Auto-detected — cannot unmark',
+          onSelect: () => undefined,
+          disabled: true,
+          title:
+            'This file matches a built-in system-file pattern (BIOS, config, palette).',
+        },
+      ];
+    }
+    if (marked) {
+      return [
+        {
+          label: 'Unmark as system file',
+          onSelect: () => void onUnmarkSystem(rom),
+          title:
+            'Treat this file as a regular ROM again. Removes it from the system-files list.',
+        },
+      ];
+    }
+    return [
+      {
+        label: 'Mark as system file',
+        onSelect: () => void onMarkAsSystem(rom),
+        title:
+          'Hide this file from the ROM list and exclude it from bulk operations.',
+      },
+    ];
+  }
+
   return (
     <div className="flex h-full flex-col">
       <header className="border-b p-4">
@@ -289,6 +398,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                 <TableHead>Name</TableHead>
                 <TableHead className="w-24 text-right">Size</TableHead>
                 <TableHead className="w-24 text-right">Visibility</TableHead>
+                <TableHead className="w-10" aria-label="Actions" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -299,13 +409,16 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                   <TableRow
                     key={rom.filename}
                     data-state={isSelected ? 'selected' : undefined}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setMenuFor({ rom, x: e.clientX, y: e.clientY });
+                    }}
                     className={cn(
-                      // Hidden ROMs get an unmistakable visual treatment —
-                      // halved opacity, solid muted bg, low-contrast text,
-                      // italics + line-through on the name, plus a
-                      // destructive HIDDEN badge. Same as the cores list
-                      // so the user sees consistency between panes.
-                      rom.hidden && 'bg-muted text-muted-foreground opacity-50',
+                      // Hidden ROMs: half-opacity row + solid muted bg +
+                      // italic + a destructive HIDDEN badge left of the
+                      // name. No strikethrough — same treatment as the
+                      // cores list so panes feel consistent.
+                      rom.hidden && 'bg-muted italic text-muted-foreground opacity-50',
                     )}
                   >
                     <TableCell>
@@ -317,13 +430,16 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         disabled={isSystem}
                       />
                     </TableCell>
-                    <TableCell
-                      className={cn(
-                        'truncate font-medium',
-                        rom.hidden && 'italic line-through',
-                      )}
-                    >
+                    <TableCell className="truncate font-medium">
                       <span className="inline-flex items-center gap-1.5">
+                        {rom.hidden ? (
+                          <span
+                            className="shrink-0 rounded bg-destructive px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide not-italic text-destructive-foreground"
+                            title="This ROM is hidden from the MiSTer menu."
+                          >
+                            Hidden
+                          </span>
+                        ) : null}
                         {isSystem ? (
                           <Cog
                             className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
@@ -336,14 +452,6 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                           />
                         ) : null}
                         <span className="truncate">{rom.displayName}</span>
-                        {rom.hidden ? (
-                          <span
-                            className="shrink-0 rounded bg-destructive px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide not-italic text-destructive-foreground"
-                            title="This ROM is hidden from the MiSTer menu."
-                          >
-                            Hidden
-                          </span>
-                        ) : null}
                         {isSystem ? (
                           <span
                             className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
@@ -387,6 +495,20 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         </Button>
                       )}
                     </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        title="More actions"
+                        aria-label={`More actions for ${rom.displayName}`}
+                        onClick={(e) => {
+                          const r = e.currentTarget.getBoundingClientRect();
+                          setMenuFor({ rom, x: r.left, y: r.bottom });
+                        }}
+                      >
+                        <MoreHorizontal />
+                      </Button>
+                    </TableCell>
                   </TableRow>
                 );
               })}
@@ -394,6 +516,14 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
           </Table>
         )}
       </div>
+      {menuFor ? (
+        <RomRowMenu
+          x={menuFor.x}
+          y={menuFor.y}
+          items={buildMenuItems(menuFor.rom)}
+          onClose={() => setMenuFor(null)}
+        />
+      ) : null}
     </div>
   );
 }

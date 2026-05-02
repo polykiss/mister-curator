@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { isSystemFile } from '@shared/system-files';
+import { isAutoDetectedSystemFile, isSystemFile } from '@shared/system-files';
+import type { SystemFilesMarks } from '@shared/types';
 
 const f = (filename: string): { filename: string; kind: 'file' } => ({
   filename,
@@ -146,5 +147,97 @@ describe('isSystemFile — edge cases', () => {
     // BIOS like "boot." should not get caught.
     expect(isSystemFile(f('booty island.zip'))).toBe(false);
     expect(isSystemFile(f('biosphere.rbf'))).toBe(false);
+  });
+});
+
+describe('isSystemFile — user-marked layer', () => {
+  // The long-tail file types that the heuristic deliberately doesn't
+  // chase — palette tables, BIOS variants, mod tools. Auto-detection
+  // returns false; a user mark layered on top must flip the result.
+  const longTail: readonly string[] = [
+    'pal.act',
+    'custom.flt',
+    'Empty.d64',
+    'DolphinDOS_2.0.rom',
+    'SpeedDOS_plus_2.7.rom',
+    'SID curve designer.html',
+    'boot1_opensource.rom',
+    'CP-ClockF83_1.3.D64',
+  ];
+
+  it('does not auto-detect any of the long-tail names', () => {
+    for (const name of longTail) {
+      expect(isAutoDetectedSystemFile(f(name))).toBe(false);
+    }
+  });
+
+  it('returns true when the (coreId, filename) pair is in the marks list', () => {
+    const marks: SystemFilesMarks = {
+      schemaVersion: 1,
+      marked: [
+        { coreId: 'C64', filename: 'DolphinDOS_2.0.rom', markedAt: '2026-05-02' },
+      ],
+    };
+    expect(
+      isSystemFile(f('DolphinDOS_2.0.rom'), { marks, coreId: 'C64' }),
+    ).toBe(true);
+  });
+
+  it('returns false when the marks list lacks the file (unmarked long-tail)', () => {
+    const marks: SystemFilesMarks = { schemaVersion: 1, marked: [] };
+    expect(isSystemFile(f('Empty.d64'), { marks, coreId: 'C64' })).toBe(false);
+  });
+
+  it('returns false when no options are supplied (auto-detector only)', () => {
+    expect(isSystemFile(f('Empty.d64'))).toBe(false);
+    expect(isSystemFile(f('pal.act'))).toBe(false);
+  });
+
+  it('does not bleed marks across cores — same filename, different core', () => {
+    const marks: SystemFilesMarks = {
+      schemaVersion: 1,
+      marked: [
+        { coreId: 'C64', filename: 'shared_name.rom', markedAt: '2026-05-02' },
+      ],
+    };
+    expect(isSystemFile(f('shared_name.rom'), { marks, coreId: 'C64' })).toBe(true);
+    expect(isSystemFile(f('shared_name.rom'), { marks, coreId: 'NES' })).toBe(false);
+  });
+
+  it('still returns true for an auto-detected file even with no marks', () => {
+    expect(isSystemFile(f('boot.rom'), { marks: undefined, coreId: undefined })).toBe(
+      true,
+    );
+  });
+
+  it('marks layer also applies to folders (Palettes / Overlays variants)', () => {
+    // The user might mark a custom folder name like "_resources" that
+    // isn't in the auto-detect list. The mark wins.
+    const marks: SystemFilesMarks = {
+      schemaVersion: 1,
+      marked: [
+        { coreId: 'Atari800', filename: '_resources', markedAt: '2026-05-02' },
+      ],
+    };
+    expect(
+      isSystemFile(d('_resources'), { marks, coreId: 'Atari800' }),
+    ).toBe(true);
+    // Without the mark, the folder is not auto-detected.
+    expect(isSystemFile(d('_resources'))).toBe(false);
+  });
+});
+
+describe('isAutoDetectedSystemFile (auto layer in isolation)', () => {
+  it('returns true for the auto-detector hits', () => {
+    expect(isAutoDetectedSystemFile(f('boot.rom'))).toBe(true);
+    expect(isAutoDetectedSystemFile(f('lynxboot.img'))).toBe(true);
+    expect(isAutoDetectedSystemFile(f('romsets.xml'))).toBe(true);
+    expect(isAutoDetectedSystemFile(d('Palettes'))).toBe(true);
+  });
+
+  it('returns false for everything outside the auto-detector', () => {
+    expect(isAutoDetectedSystemFile(f('mslug.zip'))).toBe(false);
+    expect(isAutoDetectedSystemFile(f('pal.act'))).toBe(false);
+    expect(isAutoDetectedSystemFile(d('Panzer Dragoon (USA) (1S)'))).toBe(false);
   });
 });

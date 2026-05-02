@@ -119,3 +119,22 @@ export interface HideLedger {
   readonly schemaVersion: 1;
   readonly hiddenCores: readonly HiddenCoreEntry[];
 }
+
+/**
+ * One entry in the user-marked system files list. Mirrors the shape of
+ * `HiddenCoreEntry`: identified by `(coreId, filename)`, timestamped at
+ * mark time. The auto-detector heuristic (`isSystemFile`) is the floor;
+ * this list lets the user *expand* what's treated as system-content to
+ * cover the long tail (`pal.act`, `Empty.d64`, `DolphinDOS_2.0.rom`,
+ * etc) that the heuristic refuses to chase.
+ */
+export interface SystemFileMark {
+  readonly coreId: string;
+  readonly filename: string;
+  readonly markedAt: string;
+}
+
+export interface SystemFilesMarks {
+  readonly schemaVersion: 1;
+  readonly marked: readonly SystemFileMark[];
+}

@@ -19,6 +19,7 @@ import type {
   CoreEntry,
   MisterProfile,
   Rom,
+  SystemFilesMarks,
 } from '@shared/types';
 
 async function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
@@ -65,6 +66,16 @@ const api: MisterApi = {
       ipcRenderer.removeListener(IPC_CHANNELS.connectionStatusChanged, listener);
     };
   },
+  listSystemFileMarks: () =>
+    invoke<SystemFilesMarks>(IPC_CHANNELS.listSystemFileMarks),
+  addSystemFileMark: (coreId: string, filename: string) =>
+    invoke<SystemFilesMarks>(IPC_CHANNELS.addSystemFileMark, coreId, filename),
+  removeSystemFileMark: (coreId: string, filename: string) =>
+    invoke<SystemFilesMarks>(
+      IPC_CHANNELS.removeSystemFileMark,
+      coreId,
+      filename,
+    ),
 };
 
 contextBridge.exposeInMainWorld('mister', api);

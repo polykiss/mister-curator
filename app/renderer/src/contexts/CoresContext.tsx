@@ -10,7 +10,8 @@ import {
 import type { JSX, ReactNode } from 'react';
 
 import type { BulkCoreResult, BulkRomResult } from '@shared/mister-client';
-import type { CoreEntry, Rom } from '@shared/types';
+import { EMPTY_SYSTEM_FILES_MARKS, isMarked } from '@shared/system-files-marks';
+import type { CoreEntry, Rom, SystemFilesMarks } from '@shared/types';
 
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import { useOperationStatus } from '@app/renderer/src/contexts/OperationStatusContext';
@@ -49,6 +50,23 @@ interface CoresContextValue {
   readonly setBulkCoreVisibility: (
     changes: readonly { readonly coreId: string; readonly hidden: boolean }[],
   ) => Promise<BulkCoreResult>;
+  /** User-marked system-files list for the current connection. */
+  readonly systemFilesMarks: SystemFilesMarks;
+  /**
+   * True iff the user has explicitly marked `(coreId, filename)` as a
+   * system file. Distinct from the auto-detector — RomsPane uses this
+   * to gate the right-click "Unmark" action (auto-detected files
+   * cannot be unmarked).
+   */
+  readonly isUserMarked: (coreId: string, filename: string) => boolean;
+  /**
+   * Adds a user mark and refetches the affected slice (ROM list and
+   * cores list — the latter so per-core counts pick up the change).
+   * Optimistic: the marks cache flips immediately; on IPC failure the
+   * cache rolls back and the error propagates.
+   */
+  readonly addSystemFileMark: (coreId: string, filename: string) => Promise<void>;
+  readonly removeSystemFileMark: (coreId: string, filename: string) => Promise<void>;
 }
 
 const CoresContext = createContext<CoresContextValue | null>(null);
@@ -62,6 +80,9 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   const [selectedCoreId, setSelectedCoreId] = useState<string | null>(null);
   const [romsByCore, setRomsByCore] = useState<RomsByCore>({});
   const [romsLoading, setRomsLoading] = useState<LoadingByCore>({});
+  const [systemFilesMarks, setSystemFilesMarks] = useState<SystemFilesMarks>(
+    EMPTY_SYSTEM_FILES_MARKS,
+  );
 
   // Refs for stale-closure-safe reads inside async callbacks.
   const coresRef = useRef(cores);
@@ -98,6 +119,9 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     setCoresLoading(true);
     setCoresError(null);
     try {
+      // Marks first — counts in the cores list depend on them.
+      const marks = await window.mister.listSystemFileMarks();
+      setSystemFilesMarks(marks);
       const next = await runWithStatus('Scanning cores…', () =>
         window.mister.listAllCoresWithFiles(),
       );
@@ -279,6 +303,82 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     [refetchSelectedRoms, runWithStatus],
   );
 
+  const isUserMarked = useCallback(
+    (coreId: string, filename: string): boolean =>
+      isMarked(systemFilesMarks, coreId, filename),
+    [systemFilesMarks],
+  );
+
+  const addSystemFileMark = useCallback(
+    async (coreId: string, filename: string): Promise<void> => {
+      const previous = systemFilesMarks;
+      // Optimistic: assume the call succeeds and reflect it immediately.
+      // The marks cache only sees the truth-from-server on the next call,
+      // so we synthesise a placeholder entry until then.
+      if (!isMarked(previous, coreId, filename)) {
+        setSystemFilesMarks({
+          ...previous,
+          marked: [
+            ...previous.marked,
+            { coreId, filename, markedAt: new Date().toISOString() },
+          ],
+        });
+      }
+      try {
+        const refreshed = await window.mister.addSystemFileMark(coreId, filename);
+        setSystemFilesMarks(refreshed);
+      } catch (err) {
+        setSystemFilesMarks(previous);
+        throw err;
+      }
+      // Re-fetch the affected ROMs (filter changed) and cores list (counts).
+      try {
+        const [freshRoms, freshCores] = await Promise.all([
+          window.mister.listRoms(coreId),
+          window.mister.listAllCoresWithFiles(),
+        ]);
+        setRomsByCore((prev) => ({ ...prev, [coreId]: freshRoms }));
+        setCores(freshCores);
+      } catch {
+        // Best-effort reconciliation — the next normal refresh fixes it.
+      }
+    },
+    [systemFilesMarks],
+  );
+
+  const removeSystemFileMark = useCallback(
+    async (coreId: string, filename: string): Promise<void> => {
+      const previous = systemFilesMarks;
+      const next: SystemFilesMarks = {
+        ...previous,
+        marked: previous.marked.filter(
+          (m) =>
+            !(m.coreId.toLowerCase() === coreId.toLowerCase() &&
+              m.filename === filename),
+        ),
+      };
+      setSystemFilesMarks(next);
+      try {
+        const refreshed = await window.mister.removeSystemFileMark(coreId, filename);
+        setSystemFilesMarks(refreshed);
+      } catch (err) {
+        setSystemFilesMarks(previous);
+        throw err;
+      }
+      try {
+        const [freshRoms, freshCores] = await Promise.all([
+          window.mister.listRoms(coreId),
+          window.mister.listAllCoresWithFiles(),
+        ]);
+        setRomsByCore((prev) => ({ ...prev, [coreId]: freshRoms }));
+        setCores(freshCores);
+      } catch {
+        // Best-effort reconciliation — the next normal refresh fixes it.
+      }
+    },
+    [systemFilesMarks],
+  );
+
   // Reset whenever we leave the connected state.
   useEffect(() => {
     if (status !== 'connected') {
@@ -288,6 +388,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       setRomsLoading({});
       setCoresError(null);
       setCoresLoading(false);
+      setSystemFilesMarks(EMPTY_SYSTEM_FILES_MARKS);
     }
   }, [status]);
 
@@ -324,6 +425,10 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       hideCore,
       showCore,
       setBulkCoreVisibility,
+      systemFilesMarks,
+      isUserMarked,
+      addSystemFileMark,
+      removeSystemFileMark,
     }),
     [
       cores,
@@ -341,6 +446,10 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       hideCore,
       showCore,
       setBulkCoreVisibility,
+      systemFilesMarks,
+      isUserMarked,
+      addSystemFileMark,
+      removeSystemFileMark,
     ],
   );
 

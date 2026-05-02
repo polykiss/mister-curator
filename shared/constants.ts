@@ -5,6 +5,8 @@ export const MISTER_GAMES_DIR = '/media/fat/games';
 export const MISTER_AGENT_DIR = '/tmp/mistercurator';
 export const MISTER_LEDGER_DIR = '/media/fat/.mistercurator';
 export const MISTER_LEDGER_PATH = '/media/fat/.mistercurator/state.json';
+export const MISTER_SYSTEM_FILES_PATH =
+  '/media/fat/.mistercurator/system-files.json';
 
 /**
  * Core category dirs under `/media/fat/`. The hide-core feature only

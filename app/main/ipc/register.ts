@@ -15,7 +15,7 @@ import type {
   BulkRomResult,
   MisterSecret,
 } from '@shared/mister-client';
-import type { MisterProfile } from '@shared/types';
+import type { MisterProfile, SystemFilesMarks } from '@shared/types';
 
 import type { ConnectionManager } from '@app/main/ipc/connection-manager';
 import type { ProfileStore } from '@app/main/storage/profile-store';
@@ -84,6 +84,20 @@ export function registerIpcHandlers(
   handle<[readonly CoreVisibilityChangeWire[]], BulkCoreResult>(
     IPC_CHANNELS.setBulkCoreVisibility,
     (changes) => manager.setBulkCoreVisibility(changes),
+  );
+
+  handle<[], SystemFilesMarks>(IPC_CHANNELS.listSystemFileMarks, () =>
+    manager.listSystemFileMarks(),
+  );
+
+  handle<[string, string], SystemFilesMarks>(
+    IPC_CHANNELS.addSystemFileMark,
+    (coreId, filename) => manager.addSystemFileMark(coreId, filename),
+  );
+
+  handle<[string, string], SystemFilesMarks>(
+    IPC_CHANNELS.removeSystemFileMark,
+    (coreId, filename) => manager.removeSystemFileMark(coreId, filename),
   );
 
   ipcMain.handle(

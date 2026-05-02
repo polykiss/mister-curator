@@ -1,6 +1,12 @@
 import { MISTER_GAMES_DIR } from '@shared/constants';
 import { isSystemFile } from '@shared/system-files';
-import type { CoreCategory, CoreEntry, HideLedger } from '@shared/types';
+import { isMarked } from '@shared/system-files-marks';
+import type {
+  CoreCategory,
+  CoreEntry,
+  HideLedger,
+  SystemFilesMarks,
+} from '@shared/types';
 
 /**
  * Strip the leading dot (if present), the `.rbf` or `.mgl` extension (if
@@ -84,6 +90,15 @@ export interface MatchInput {
    * pass an explicit value.
    */
   readonly arcadeDirExists?: boolean;
+  /**
+   * Optional user-marked system-files list. When supplied, files and
+   * folders that the user has marked as system for a given core are
+   * excluded from `romCount` / `hiddenCount` exactly like auto-detected
+   * BIOSes. Auto-detection of folders is unchanged (Saturn-shape disc
+   * folders are never auto-filtered); marks layer over both files and
+   * folders.
+   */
+  readonly systemFilesMarks?: SystemFilesMarks;
 }
 
 interface MutableCoreEntry {
@@ -147,18 +162,25 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     const visibleName = isHidden ? gd.rawName.slice(1) : gd.rawName;
     if (visibleName === '') continue;
 
-    // System files (BIOSes, .xml/.ini configs, BIOS-suffix images)
-    // are excluded from the count so a core with only a BIOS still
-    // qualifies as "empty" for the "Hide empty cores" sweep. Folders
-    // are NEVER excluded — the folder is the unit, regardless of
-    // what's inside it (Saturn-style disc cores).
+    // System files (BIOSes, .xml/.ini configs, BIOS-suffix images) are
+    // excluded from the count so a core with only a BIOS still qualifies
+    // as "empty" for the "Hide empty cores" sweep. Folders are never
+    // *auto*-filtered — the folder is the unit, regardless of contents
+    // (Saturn-style disc cores) — but the user-marks layer DOES apply
+    // to folders, so a user who explicitly marks `Palettes/` as system
+    // gets it out of their counts.
+    const marks = input.systemFilesMarks;
+    const isMarkedHere = (filename: string): boolean =>
+      marks ? isMarked(marks, visibleName, filename) : false;
     const nonSystemFiles = gd.files.filter(
-      (f) => !isSystemFile({ filename: f, kind: 'file' }),
+      (f) =>
+        !isSystemFile({ filename: f, kind: 'file' }, { marks, coreId: visibleName }),
     );
-    const romCount = nonSystemFiles.length + gd.dirs.length;
+    const nonSystemDirs = gd.dirs.filter((d) => !isMarkedHere(d));
+    const romCount = nonSystemFiles.length + nonSystemDirs.length;
     const hiddenCount =
       nonSystemFiles.filter((f) => f.startsWith('.')).length +
-      gd.dirs.filter((d) => d.startsWith('.')).length;
+      nonSystemDirs.filter((d) => d.startsWith('.')).length;
 
     const existing = byId.get(visibleName);
     if (existing) {
@@ -339,7 +361,7 @@ function mergeAliases(winner: CoreEntry, losers: readonly CoreEntry[]): CoreEntr
  * Single source of truth for "is this a core the app may operate on?".
  *
  * Used by every code path that mutates state — single hide/show, bulk
- * hide/show, "Hide empty cores", "Show all hidden", auto-reapply on
+ * hide/show, "Hide empty cores", "Unhide all", auto-reapply on
  * connect — so a user-created organisational folder under a category
  * dir (e.g. `_Console/_hidden`, `_Arcade/_Organized`) can never slip
  * through to an `mv` command. Defense-in-depth on top of the matcher's

@@ -61,7 +61,7 @@ export function CoresPane(): JSX.Element {
     [cores],
   );
 
-  // "Show all hidden (N)" only counts cores we hid ourselves. Pre-existing
+  // "Unhide all (N)" only counts cores we hid ourselves. Pre-existing
   // dot-prefixed dirs from MiSTer's stock state stay alone.
   const appHiddenCores = useMemo(
     () =>
@@ -180,7 +180,7 @@ export function CoresPane(): JSX.Element {
         duration: 10000,
       });
     } catch (err) {
-      toast.error('Could not show all hidden cores', {
+      toast.error('Could not unhide all cores', {
         description: err instanceof Error ? err.message : 'Unexpected error.',
       });
     }
@@ -207,7 +207,7 @@ export function CoresPane(): JSX.Element {
             title="Restore visibility for every core MiSTerCurator hid"
           >
             <Undo2 />
-            Show all hidden ({appHiddenCores.length})
+            Unhide all ({appHiddenCores.length})
           </Button>
         </div>
         <label className="flex items-center gap-1.5">
@@ -304,10 +304,10 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                 'flex w-full items-center gap-1 px-3 py-2 text-sm transition-colors',
                 isSelected && 'bg-accent',
                 !isSelected && 'hover:bg-accent/50',
-                // Hidden cores get a strong, unambiguous visual treatment:
-                // halved opacity + solid muted bg + italic + line-through
-                // on the name + a destructive HIDDEN badge below. Anyone
-                // glancing at the list can tell hidden from visible at speed.
+                // Hidden cores: half-opacity row + solid muted bg + italic
+                // + a destructive HIDDEN badge to the LEFT of the name.
+                // No strikethrough (it competed with the badge for the
+                // user's eye and reduced legibility on long names).
                 isHiddenCore && 'bg-muted text-muted-foreground italic opacity-50',
                 // Arcade placeholder is read-only; render in a subtle
                 // "coming soon" style so it doesn't compete visually
@@ -322,14 +322,7 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                 onClick={() => args.onSelect(core.id)}
                 className="flex flex-1 min-w-0 items-center justify-between gap-2 text-left"
               >
-                <span
-                  className={cn(
-                    'flex min-w-0 items-center gap-1.5 truncate font-medium',
-                  )}
-                >
-                  <span className={cn('truncate', isHiddenCore && 'line-through')}>
-                    {core.name}
-                  </span>
+                <span className="flex min-w-0 items-center gap-1.5 truncate font-medium">
                   {isHiddenCore ? (
                     <span
                       className="shrink-0 rounded bg-destructive px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide not-italic text-destructive-foreground"
@@ -338,6 +331,7 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                       Hidden
                     </span>
                   ) : null}
+                  <span className="truncate">{core.name}</span>
                 </span>
                 {isPlaceholder ? (
                   <span className="shrink-0 text-xs text-muted-foreground">

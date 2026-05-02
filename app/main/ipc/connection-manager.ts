@@ -17,12 +17,14 @@ import type {
   MisterSecret,
   RomVisibilityChange,
 } from '@shared/mister-client';
+import { EMPTY_SYSTEM_FILES_MARKS } from '@shared/system-files-marks';
 import type {
   ConnectionStatus,
   CoreEntry,
   HiddenCoreEntry,
   HideLedger,
   Rom,
+  SystemFilesMarks,
 } from '@shared/types';
 
 import type { ProfileStore } from '@app/main/storage/profile-store';
@@ -67,6 +69,13 @@ export class ConnectionManager {
    * renderer's cores list is enriched against this cache.
    */
   private ledgerCache: HideLedger = EMPTY_LEDGER;
+  /**
+   * In-memory copy of the user-marked system-files list. Populated on
+   * connect and kept in sync with add/remove ops. Passed through to
+   * `client.listAllCoresWithFiles` so the per-core counts respect any
+   * marks the user has placed.
+   */
+  private systemFilesMarksCache: SystemFilesMarks = EMPTY_SYSTEM_FILES_MARKS;
 
   constructor(
     private readonly client: IMisterClient,
@@ -100,6 +109,7 @@ export class ConnectionManager {
     this.setStatus('connecting');
     this.coresCache = [];
     this.ledgerCache = EMPTY_LEDGER;
+    this.systemFilesMarksCache = EMPTY_SYSTEM_FILES_MARKS;
 
     try {
       const profile = await this.store.get(profileId);
@@ -113,6 +123,9 @@ export class ConnectionManager {
       // Prime the ledger cache. readHideLedger self-heals as a side
       // effect — drops stale `_hidden` etc. entries and rewrites.
       this.ledgerCache = await this.client.readHideLedger();
+      // Prime the system-files marks cache. Cheap (small JSON file) and
+      // we want the cores list to reflect marks immediately.
+      this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
 
       let reappliedCount = 0;
       if (profile.autoReapplyHides === true) {
@@ -135,19 +148,47 @@ export class ConnectionManager {
       this.currentProfileId = null;
       this.coresCache = [];
       this.ledgerCache = EMPTY_LEDGER;
+      this.systemFilesMarksCache = EMPTY_SYSTEM_FILES_MARKS;
       this.setStatus('disconnected');
     }
   }
 
   async listAllCoresWithFiles(): Promise<CoreEntry[]> {
     this.assertConnected();
-    const raw = await this.client.listAllCoresWithFiles();
+    const raw = await this.client.listAllCoresWithFiles(
+      this.systemFilesMarksCache,
+    );
     const enriched = raw.map((c) => ({
       ...c,
       managedByApp: this.ledgerHasCore(c.id),
     }));
     this.coresCache = enriched;
     return enriched;
+  }
+
+  async listSystemFileMarks(): Promise<SystemFilesMarks> {
+    this.assertConnected();
+    return this.systemFilesMarksCache;
+  }
+
+  async addSystemFileMark(
+    coreId: string,
+    filename: string,
+  ): Promise<SystemFilesMarks> {
+    this.assertConnected();
+    await this.client.addSystemFileMark(coreId, filename);
+    this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
+    return this.systemFilesMarksCache;
+  }
+
+  async removeSystemFileMark(
+    coreId: string,
+    filename: string,
+  ): Promise<SystemFilesMarks> {
+    this.assertConnected();
+    await this.client.removeSystemFileMark(coreId, filename);
+    this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
+    return this.systemFilesMarksCache;
   }
 
   async listRoms(coreId: string): Promise<Rom[]> {
@@ -227,7 +268,7 @@ export class ConnectionManager {
         // Permission slip: the un-hide path refuses cores the app didn't
         // hide. This is what protects the ~40+ pre-existing dot-prefixed
         // directories on a real MiSTer from being un-hidden by the user
-        // accidentally clicking "Show all hidden".
+        // accidentally clicking "Unhide all".
         upfrontFailed.push({
           coreId: core.id,
           reason: 'not managed by MiSTerCurator (we will not modify it)',
@@ -264,7 +305,9 @@ export class ConnectionManager {
   private async runAutoReapply(): Promise<number> {
     if (this.ledgerCache.hiddenCores.length === 0) return 0;
 
-    const cores = await this.client.listAllCoresWithFiles();
+    const cores = await this.client.listAllCoresWithFiles(
+      this.systemFilesMarksCache,
+    );
     this.coresCache = cores;
 
     const changes = computeAutoReapplyChanges(this.ledgerCache, cores);
@@ -283,7 +326,9 @@ export class ConnectionManager {
     const result = await this.client.setBulkCoreVisibility(resolved);
 
     // Refresh the cache so subsequent hideCore lookups see the new state.
-    const refreshed = await this.client.listAllCoresWithFiles();
+    const refreshed = await this.client.listAllCoresWithFiles(
+      this.systemFilesMarksCache,
+    );
     this.coresCache = refreshed.map((c) => ({
       ...c,
       managedByApp: this.ledgerHasCore(c.id),

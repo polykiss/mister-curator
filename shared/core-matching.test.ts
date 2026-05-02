@@ -441,7 +441,7 @@ describe('matchRbfsToGamesDirs', () => {
 
     it('excludes a hidden BIOS from hiddenCount as well as romCount', () => {
       // A hidden BIOS is still a BIOS — it doesn't make the core
-      // hide-relevant for the "Show all hidden ROMs" UI.
+      // hide-relevant for the "Unhide all" UI flow.
       const result = matchRbfsToGamesDirs({
         rbfs: [],
         gamesDirs: [
@@ -496,6 +496,107 @@ describe('matchRbfsToGamesDirs', () => {
       const neogeo = result.find((c) => c.id === 'NEOGEO');
       expect(neogeo?.romCount).toBe(9);
       expect(neogeo?.hiddenCount).toBe(0);
+    });
+  });
+
+  describe('romCount honours user-marked system files', () => {
+    // Marks layer over the auto-detector — they take a (coreId, filename)
+    // pair and pull the file out of the count just like a BIOS would.
+
+    it('excludes a user-marked file from romCount', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          { rawName: 'C64', files: ['mygame.d64', 'DolphinDOS_2.0.rom'], dirs: [] },
+        ],
+        systemFilesMarks: {
+          schemaVersion: 1,
+          marked: [
+            { coreId: 'C64', filename: 'DolphinDOS_2.0.rom', markedAt: '2026-05-02' },
+          ],
+        },
+      });
+      const c64 = result.find((c) => c.id === 'C64');
+      expect(c64?.romCount).toBe(1);
+    });
+
+    it('excludes a user-marked folder from romCount', () => {
+      // Folders aren't auto-filtered, but marking should still pull them
+      // out of the count — covers Palettes / Overlays / custom folders.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          {
+            rawName: 'Atari800',
+            files: [],
+            dirs: ['_resources', 'Game 1', 'Game 2'],
+          },
+        ],
+        systemFilesMarks: {
+          schemaVersion: 1,
+          marked: [
+            { coreId: 'Atari800', filename: '_resources', markedAt: '2026-05-02' },
+          ],
+        },
+      });
+      const atari = result.find((c) => c.id === 'Atari800');
+      expect(atari?.romCount).toBe(2);
+    });
+
+    it('matches the marks coreId case-insensitively against the games dir name', () => {
+      // games dir is `.APOGEE` (visible name "APOGEE") but the user
+      // marked the file under coreId "Apogee" (canonical form). The
+      // case-insensitive lookup ensures the mark applies anyway.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          { rawName: '.APOGEE', files: ['random_data.bin'], dirs: [] },
+        ],
+        systemFilesMarks: {
+          schemaVersion: 1,
+          marked: [
+            { coreId: 'Apogee', filename: 'random_data.bin', markedAt: '2026-05-02' },
+          ],
+        },
+      });
+      const apogee = result.find((c) => c.id === 'APOGEE');
+      expect(apogee?.romCount).toBe(0);
+    });
+
+    it('a hidden user-marked file is excluded from hiddenCount as well', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          { rawName: 'C64', files: ['.DolphinDOS_2.0.rom', 'mygame.d64'], dirs: [] },
+        ],
+        systemFilesMarks: {
+          schemaVersion: 1,
+          marked: [
+            { coreId: 'C64', filename: '.DolphinDOS_2.0.rom', markedAt: '2026-05-02' },
+          ],
+        },
+      });
+      const c64 = result.find((c) => c.id === 'C64');
+      expect(c64?.romCount).toBe(1);
+      expect(c64?.hiddenCount).toBe(0);
+    });
+
+    it('does not bleed across cores when filenames overlap', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          { rawName: 'C64', files: ['shared.rom'], dirs: [] },
+          { rawName: 'NES', files: ['shared.rom'], dirs: [] },
+        ],
+        systemFilesMarks: {
+          schemaVersion: 1,
+          marked: [
+            { coreId: 'C64', filename: 'shared.rom', markedAt: '2026-05-02' },
+          ],
+        },
+      });
+      expect(result.find((c) => c.id === 'C64')?.romCount).toBe(0);
+      expect(result.find((c) => c.id === 'NES')?.romCount).toBe(1);
     });
   });
 

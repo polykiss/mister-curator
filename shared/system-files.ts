@@ -5,10 +5,16 @@
  * ROM folders.
  *
  * The rules are intentionally conservative — false positives (real ROMs
- * marked as system) are worse than false negatives. To extend: add to
+ * marked as system) are worse than false negatives. The auto-detector
+ * is intentionally narrow; the long tail of system-y files (palette
+ * tables, BIOS variants, mod tools) is handled by the user-marks layer
+ * that lives alongside it. To extend the heuristic: add to
  * `SYSTEM_FILE_PATTERNS` for files or `SYSTEM_FOLDER_NAMES` for folders.
  * See docs/architecture.md for the rationale and snapshot reference.
  */
+
+import { isMarked } from '@shared/system-files-marks';
+import type { SystemFilesMarks } from '@shared/types';
 
 /**
  * File-level rules. A name matches if it satisfies any pattern. Names
@@ -88,11 +94,50 @@ export interface SystemFileCandidate {
 }
 
 /**
- * True iff the candidate looks like a system file or folder rather than
- * a user-installed ROM. The leading-dot (hidden) form of the same name
- * is treated identically — a hidden BIOS is still a BIOS.
+ * Optional layer over the auto-detector heuristic: a user-maintained
+ * marks list combined with the relevant `coreId`. When supplied, a
+ * `(coreId, filename)` pair found in `marks` is treated as system
+ * regardless of whether the heuristic flags it.
  */
-export function isSystemFile(candidate: SystemFileCandidate): boolean {
+export interface SystemFileOptions {
+  readonly marks?: SystemFilesMarks;
+  readonly coreId?: string;
+}
+
+/**
+ * True iff the candidate looks like a system file or folder rather than
+ * a user-installed ROM. Two layers:
+ *
+ *   1. Auto-detector heuristic — the rules in this file (BIOS prefix /
+ *      suffix / extension / folder-name).
+ *   2. User-maintained marks — when `options.marks` and `options.coreId`
+ *      are provided, the function also returns true for any file the
+ *      user has explicitly marked as system for this core.
+ *
+ * The leading-dot (hidden) form of the same name is treated identically
+ * for the auto-detector — a hidden BIOS is still a BIOS. The marks list
+ * stores raw filenames as the user marked them (the renderer marks the
+ * visible name; both clients store/read it verbatim).
+ */
+export function isSystemFile(
+  candidate: SystemFileCandidate,
+  options: SystemFileOptions = {},
+): boolean {
+  if (isAutoDetectedSystemFile(candidate)) return true;
+  if (options.marks && options.coreId !== undefined) {
+    return isMarked(options.marks, options.coreId, candidate.filename);
+  }
+  return false;
+}
+
+/**
+ * Auto-detector layer in isolation. Used by the UI to decide whether a
+ * "Mark as system file" / "Unmark" action is available — auto-detected
+ * files cannot be unmarked because they're heuristic, not stored.
+ */
+export function isAutoDetectedSystemFile(
+  candidate: SystemFileCandidate,
+): boolean {
   const name = candidate.filename.startsWith('.')
     ? candidate.filename.slice(1)
     : candidate.filename;
