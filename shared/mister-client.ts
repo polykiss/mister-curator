@@ -18,5 +18,5 @@ export interface IMisterClient {
   listRoms(coreId: string): Promise<Rom[]>;
 
   setRomVisibility(coreId: string, filename: string, hidden: boolean): Promise<void>;
-  setBulkRomVisibility(coreId: string, changes: RomVisibilityChange[]): Promise<void>;
+  setBulkRomVisibility(coreId: string, changes: readonly RomVisibilityChange[]): Promise<void>;
 }
