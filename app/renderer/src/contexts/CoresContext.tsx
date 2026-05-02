@@ -9,6 +9,7 @@ import {
 } from 'react';
 import type { JSX, ReactNode } from 'react';
 
+import type { BulkCoreResult, BulkRomResult } from '@shared/mister-client';
 import type { CoreEntry, Rom } from '@shared/types';
 
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
@@ -41,12 +42,12 @@ interface CoresContextValue {
   readonly setBulkRomVisibility: (
     coreId: string,
     changes: readonly VisibilityChange[],
-  ) => Promise<void>;
+  ) => Promise<BulkRomResult>;
   readonly hideCore: (coreId: string) => Promise<void>;
   readonly showCore: (coreId: string) => Promise<void>;
   readonly setBulkCoreVisibility: (
     changes: readonly { readonly coreId: string; readonly hidden: boolean }[],
-  ) => Promise<void>;
+  ) => Promise<BulkCoreResult>;
 }
 
 const CoresContext = createContext<CoresContextValue | null>(null);
@@ -126,25 +127,46 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   );
 
   const setBulkRomVisibility = useCallback(
-    async (coreId: string, changes: readonly VisibilityChange[]) => {
+    async (
+      coreId: string,
+      changes: readonly VisibilityChange[],
+    ): Promise<BulkRomResult> => {
       const previousRoms = romsByCoreRef.current[coreId];
       const previousCores = coresRef.current;
-      if (!previousRoms) {
-        await window.mister.setBulkRomVisibility(coreId, [...changes]);
-        return;
+
+      // Optimistic apply when we have the rom list cached. On any error
+      // (network, throw), roll the cache back. On a partial success we
+      // re-fetch from the server to reconcile.
+      if (previousRoms) {
+        const optimistic = applyBulkVisibilityChange(previousRoms, changes);
+        setRomsByCore((prev) => ({ ...prev, [coreId]: optimistic }));
+        updateCoreCounts(coreId, optimistic);
       }
 
-      const optimistic = applyBulkVisibilityChange(previousRoms, changes);
-      setRomsByCore((prev) => ({ ...prev, [coreId]: optimistic }));
-      updateCoreCounts(coreId, optimistic);
-
+      let result: BulkRomResult;
       try {
-        await window.mister.setBulkRomVisibility(coreId, [...changes]);
+        result = await window.mister.setBulkRomVisibility(coreId, [...changes]);
       } catch (err) {
-        setRomsByCore((prev) => ({ ...prev, [coreId]: previousRoms }));
-        if (previousCores) setCores(previousCores);
+        if (previousRoms) {
+          setRomsByCore((prev) => ({ ...prev, [coreId]: previousRoms }));
+          if (previousCores) setCores(previousCores);
+        }
         throw err;
       }
+
+      if (result.failed.length > 0 && previousRoms) {
+        // Partial failure — refetch from the server so the UI reflects
+        // truth, not the optimistic application.
+        try {
+          const fresh = await window.mister.listRoms(coreId);
+          setRomsByCore((prev) => ({ ...prev, [coreId]: fresh }));
+          updateCoreCounts(coreId, fresh);
+        } catch {
+          // Best-effort reconciliation; leave optimistic state if refetch fails.
+        }
+      }
+
+      return result;
     },
     [updateCoreCounts],
   );
@@ -178,12 +200,15 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   const setBulkCoreVisibility = useCallback(
     async (
       changes: readonly { readonly coreId: string; readonly hidden: boolean }[],
-    ) => {
-      if (changes.length === 0) return;
-      await window.mister.setBulkCoreVisibility(changes);
+    ): Promise<BulkCoreResult> => {
+      if (changes.length === 0) return { succeeded: [], failed: [] };
+      const result = await window.mister.setBulkCoreVisibility(changes);
+      // Always refetch after a bulk core op — partial failures mean the
+      // optimistic mental model isn't reliable.
       const next = await window.mister.listAllCoresWithFiles();
       setCores(next);
       setRomsByCore({});
+      return result;
     },
     [],
   );

@@ -1,4 +1,8 @@
-import type { MisterSecret } from '@shared/mister-client';
+import type {
+  BulkCoreResult,
+  BulkRomResult,
+  MisterSecret,
+} from '@shared/mister-client';
 import type {
   ConnectionErrorCode,
   ConnectionStatus,
@@ -71,13 +75,26 @@ export interface MisterApi {
   listAllCoresWithFiles(): Promise<CoreEntry[]>;
   listRoms(coreId: string): Promise<Rom[]>;
   setRomVisibility(coreId: string, filename: string, hidden: boolean): Promise<void>;
+  /**
+   * Bulk ROM visibility — does NOT abort on first failure. Returns a
+   * structured per-rename result so the renderer can surface partial
+   * success ("Hid 45 ROMs. 2 failed: …").
+   */
   setBulkRomVisibility(
     coreId: string,
     changes: readonly RomVisibilityChangeWire[],
-  ): Promise<void>;
+  ): Promise<BulkRomResult>;
   hideCore(coreId: string): Promise<void>;
   showCore(coreId: string): Promise<void>;
-  setBulkCoreVisibility(changes: readonly CoreVisibilityChangeWire[]): Promise<void>;
+  /**
+   * Bulk core visibility — does NOT abort on first failure. Returns a
+   * structured per-core result. Each core's renames are atomic (set -e
+   * inside a subshell), but a failure in one core does not affect the
+   * others.
+   */
+  setBulkCoreVisibility(
+    changes: readonly CoreVisibilityChangeWire[],
+  ): Promise<BulkCoreResult>;
   pickKeyFile(): Promise<PickedKeyFile | null>;
   onConnectionStatusChanged(handler: (status: ConnectionStatus) => void): () => void;
 }

@@ -1,9 +1,12 @@
 import {
   computeAutoReapplyChanges,
   isCoreHidden,
+  isRealCore,
 } from '@shared/core-matching';
 import { withCoreHidden, withCoreShown } from '@shared/ledger';
 import type {
+  BulkCoreResult,
+  BulkRomResult,
   CoreVisibilityChange,
   IMisterClient,
   MisterSecret,
@@ -34,16 +37,16 @@ export interface ConnectResult {
  * The manager also owns the on-MiSTer hide ledger I/O — the IPC bridge
  * intentionally does not expose ledger reads/writes to the renderer, so
  * the ledger is only ever touched here.
+ *
+ * Bulk operations forward partial-success results from the client up to
+ * the IPC layer, but the manager filters non-real cores out of the input
+ * up front (defense-in-depth: the renderer's cores list also filters
+ * via isRealCore, but this layer enforces the same guarantee).
  */
 export class ConnectionManager {
   private status: ConnectionStatus = 'disconnected';
   private currentProfileId: string | null = null;
   private readonly listeners = new Set<StatusListener>();
-  /**
-   * Snapshot of the most recent listAllCoresWithFiles result. Lets
-   * `hideCore(coreId)` resolve the full CoreEntry without an extra SSH
-   * round-trip. Invalidated on disconnect; refreshed on every list call.
-   */
   private coresCache: CoreEntry[] = [];
 
   constructor(
@@ -135,14 +138,19 @@ export class ConnectionManager {
   async setBulkRomVisibility(
     coreId: string,
     changes: readonly RomVisibilityChange[],
-  ): Promise<void> {
+  ): Promise<BulkRomResult> {
     this.assertConnected();
-    await this.client.setBulkRomVisibility(coreId, changes);
+    return this.client.setBulkRomVisibility(coreId, changes);
   }
 
   async hideCore(coreId: string): Promise<void> {
     this.assertConnected();
     const core = await this.lookupCore(coreId);
+    if (!isRealCore(core)) {
+      throw new Error(
+        `Refusing to hide '${coreId}': not a real core.`,
+      );
+    }
     await this.client.hideCore(core);
     await this.recordHide(core);
   }
@@ -150,33 +158,69 @@ export class ConnectionManager {
   async showCore(coreId: string): Promise<void> {
     this.assertConnected();
     const core = await this.lookupCore(coreId);
+    if (!isRealCore(core)) {
+      throw new Error(
+        `Refusing to show '${coreId}': not a real core.`,
+      );
+    }
     await this.client.showCore(core);
     await this.recordShow(core);
   }
 
   async setBulkCoreVisibility(
     changes: readonly { readonly coreId: string; readonly hidden: boolean }[],
-  ): Promise<void> {
+  ): Promise<BulkCoreResult> {
     this.assertConnected();
-    if (changes.length === 0) return;
+    if (changes.length === 0) return { succeeded: [], failed: [] };
 
+    // Resolve coreIds to CoreEntries and filter out anything that isn't a
+    // real core. Non-real entries (user folders, arcade placeholder) are
+    // reported as failed in the result rather than aborting the batch.
     const resolved: CoreVisibilityChange[] = [];
+    const upfrontFailed: { coreId: string; reason: string }[] = [];
     for (const c of changes) {
-      const core = await this.lookupCore(c.coreId);
+      let core: CoreEntry;
+      try {
+        core = await this.lookupCore(c.coreId);
+      } catch (err) {
+        upfrontFailed.push({
+          coreId: c.coreId,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+        continue;
+      }
+      if (!isRealCore(core)) {
+        upfrontFailed.push({
+          coreId: c.coreId,
+          reason: 'not a real core (likely a user folder or the Arcade placeholder)',
+        });
+        continue;
+      }
       resolved.push({ core, hidden: c.hidden });
     }
 
-    await this.client.setBulkCoreVisibility(resolved);
+    if (resolved.length === 0) {
+      return { succeeded: [], failed: upfrontFailed };
+    }
 
-    // Ledger update: reflect every core's intended state. Only after the
-    // renames have committed — a half-success would have already thrown.
+    const result = await this.client.setBulkCoreVisibility(resolved);
+    const failed = [...upfrontFailed, ...result.failed];
+
+    // Ledger update: only for cores whose renames fully succeeded. A
+    // partial failure within a core is impossible because the client
+    // wraps each core's renames in `set -e`, so per-core success is
+    // all-or-nothing.
+    const succeededIds = new Set(result.succeeded);
     let ledger: HideLedger = await this.client.readHideLedger();
     for (const c of resolved) {
+      if (!succeededIds.has(c.core.id)) continue;
       ledger = c.hidden
         ? withCoreHidden(ledger, this.toHiddenEntry(c.core))
         : withCoreShown(ledger, c.core.id);
     }
     await this.client.writeHideLedger(ledger);
+
+    return { succeeded: result.succeeded, failed };
   }
 
   private async runAutoReapply(): Promise<number> {
@@ -194,19 +238,20 @@ export class ConnectionManager {
     for (const c of changes) {
       const core = coresById.get(c.coreId);
       if (!core) continue;
+      // computeAutoReapplyChanges already filters arcade and missing,
+      // but defense-in-depth: skip anything that isn't a real core.
+      if (!isRealCore(core)) continue;
       resolved.push({ core, hidden: c.hidden });
     }
     if (resolved.length === 0) return 0;
 
-    await this.client.setBulkCoreVisibility(resolved);
+    const result = await this.client.setBulkCoreVisibility(resolved);
 
-    // Ledger doesn't need updating — the cores were already in the ledger;
-    // we just made the device match. We do refresh the cache so subsequent
-    // hideCore lookups see the now-hidden state.
+    // Refresh the cache so subsequent hideCore lookups see the new state.
     const refreshed = await this.client.listAllCoresWithFiles();
     this.coresCache = [...refreshed];
 
-    return resolved.length;
+    return result.succeeded.length;
   }
 
   private async recordHide(core: CoreEntry): Promise<void> {
@@ -222,8 +267,6 @@ export class ConnectionManager {
   }
 
   private toHiddenEntry(core: CoreEntry): HiddenCoreEntry {
-    // Normalize rbf paths to the un-hidden (canonical) form, so a future
-    // re-hide knows the names to match against.
     const canonicalRbfs = core.rbfPaths.map((p) => {
       const slash = p.lastIndexOf('/');
       const dir = slash < 0 ? '' : p.slice(0, slash);

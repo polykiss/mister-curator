@@ -65,3 +65,57 @@ export function formatBytes(bytes: number): string {
 export function stripLeadingDot(filename: string): string {
   return filename.startsWith('.') ? filename.slice(1) : filename;
 }
+
+/**
+ * Summarize a bulk operation for a toast. Returns one of three shapes
+ * depending on whether the operation fully succeeded, fully failed, or
+ * partially succeeded — so the caller can pick the right toast variant
+ * (success / error / warning) without case analysis at every call site.
+ */
+export interface BulkOperationSummary {
+  readonly kind: 'success' | 'partial' | 'fail';
+  readonly title: string;
+  readonly description?: string;
+}
+
+const MAX_FAIL_NAMES = 5;
+
+export function summarizeBulkResult(args: {
+  readonly action: 'Hid' | 'Restored';
+  readonly itemNoun: 'core' | 'ROM';
+  readonly succeeded: readonly string[];
+  readonly failed: readonly { readonly reason: string }[];
+  readonly failedNames: readonly string[];
+}): BulkOperationSummary {
+  const { action, itemNoun, succeeded, failed, failedNames } = args;
+  const pluralize = (n: number, singular: string): string =>
+    n === 1 ? `1 ${singular}` : `${String(n)} ${singular}s`;
+
+  if (failed.length === 0 && succeeded.length === 0) {
+    return { kind: 'success', title: 'Nothing to do' };
+  }
+  if (failed.length === 0) {
+    return { kind: 'success', title: `${action} ${pluralize(succeeded.length, itemNoun)}` };
+  }
+
+  const namesPreview = failedNames.slice(0, MAX_FAIL_NAMES).join(', ');
+  const more =
+    failedNames.length > MAX_FAIL_NAMES
+      ? ` (+${String(failedNames.length - MAX_FAIL_NAMES)} more)`
+      : '';
+  const reasonPreview = failed[0]?.reason ?? '';
+
+  if (succeeded.length === 0) {
+    return {
+      kind: 'fail',
+      title: `Failed to ${action.toLowerCase()} ${pluralize(failed.length, itemNoun)}`,
+      description: `${namesPreview}${more}${reasonPreview === '' ? '' : ` — ${reasonPreview}`}`,
+    };
+  }
+
+  return {
+    kind: 'partial',
+    title: `${action} ${pluralize(succeeded.length, itemNoun)} · ${String(failed.length)} failed`,
+    description: `Failed: ${namesPreview}${more}${reasonPreview === '' ? '' : ` — ${reasonPreview}`}`,
+  };
+}

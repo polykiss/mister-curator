@@ -10,6 +10,7 @@ import {
 } from '@shared/constants';
 import {
   computeCoreRenames,
+  isRealCore,
   matchRbfsToGamesDirs,
   type CoreRename,
   type RawGamesDirInput,
@@ -29,6 +30,8 @@ import type {
   Rom,
 } from '@shared/types';
 import type {
+  BulkCoreResult,
+  BulkRomResult,
   CoreVisibilityChange,
   IMisterClient,
   MisterSecret,
@@ -125,11 +128,17 @@ export class RealMisterClient implements IMisterClient {
 
     const rbfs: RawRbfInput[] = [];
     const gamesDirs: RawGamesDirInput[] = [];
+    let arcadeDirExists = false;
     for (const line of result.stdout.split('\n')) {
       if (line === '') continue;
       const parts = line.split('\t');
       const tag = parts[0];
-      if (tag === 'R' && parts.length >= 4) {
+      if (tag === 'A') {
+        // Sentinel emitted by the script when /media/fat/_Arcade/ exists
+        // on the device. Triggers the synthetic Arcade placeholder row
+        // regardless of the directory's contents.
+        arcadeDirExists = true;
+      } else if (tag === 'R' && parts.length >= 4) {
         const categoryName = parts[1] ?? '';
         const kind = parts[2] ?? '';
         const filename = parts.slice(3).join('\t');
@@ -151,7 +160,7 @@ export class RealMisterClient implements IMisterClient {
       }
     }
 
-    return matchRbfsToGamesDirs({ rbfs, gamesDirs });
+    return matchRbfsToGamesDirs({ rbfs, gamesDirs, arcadeDirExists });
   }
 
   async listRoms(coreId: string): Promise<Rom[]> {
@@ -232,40 +241,58 @@ export class RealMisterClient implements IMisterClient {
   async setBulkRomVisibility(
     coreId: string,
     changes: readonly RomVisibilityChange[],
-  ): Promise<void> {
+  ): Promise<BulkRomResult> {
     this.assertConnected();
     assertSafeSegment('coreId', coreId);
     for (const change of changes) {
       assertSafeSegment('filename', change.filename);
     }
 
-    const renames: string[] = [];
+    interface PendingRename {
+      readonly filename: string;
+      readonly src: string;
+      readonly dst: string;
+    }
+
+    const pending: PendingRename[] = [];
     for (const change of changes) {
       const visible = change.filename.startsWith('.')
         ? change.filename.slice(1)
         : change.filename;
       const target = change.hidden ? `.${visible}` : visible;
       if (target === change.filename) continue;
-      renames.push(`mv ${shellQuote(change.filename)} ${shellQuote(target)}`);
+      pending.push({ filename: change.filename, src: change.filename, dst: target });
     }
 
-    if (renames.length === 0) {
-      return;
+    if (pending.length === 0) {
+      return { succeeded: [], failed: [] };
     }
 
     const coreDir = `${MISTER_GAMES_DIR}/${coreId}`;
-    const script = ['set -e', `cd ${shellQuote(coreDir)}`, ...renames].join('\n');
-
-    const result = await this.ssh.execCommand(script);
-    if (result.code !== 0) {
-      throw new Error(
-        `Bulk rename failed: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+    const lines: string[] = [`cd ${shellQuote(coreDir)}`];
+    for (const p of pending) {
+      const id = shellQuote(p.filename);
+      lines.push(
+        `if err=$(mv ${shellQuote(p.src)} ${shellQuote(p.dst)} 2>&1); then`,
+        `  printf 'OK\\t%s\\n' ${id}`,
+        `else`,
+        `  printf 'FAIL\\t%s\\t%s\\n' ${id} "$(printf '%s' "$err" | tr '\\n\\t' '  ' | head -c 200)"`,
+        `fi`,
       );
     }
+
+    const script = lines.join('\n');
+    const result = await this.ssh.execCommand(script);
+    return parseBulkResult<BulkRomResult>(result.stdout, 'filename');
   }
 
   async hideCore(core: CoreEntry): Promise<void> {
     this.assertConnected();
+    if (!isRealCore(core)) {
+      throw new Error(
+        `Refusing to hide '${core.id}': not a real core (likely a user folder or the Arcade placeholder).`,
+      );
+    }
     if (!HIDEABLE_CATEGORIES.has(core.category)) {
       throw new Error(`Refusing to hide a core in category '${core.category}'.`);
     }
@@ -276,6 +303,11 @@ export class RealMisterClient implements IMisterClient {
 
   async showCore(core: CoreEntry): Promise<void> {
     this.assertConnected();
+    if (!isRealCore(core)) {
+      throw new Error(
+        `Refusing to show '${core.id}': not a real core (likely a user folder or the Arcade placeholder).`,
+      );
+    }
     if (!HIDEABLE_CATEGORIES.has(core.category)) {
       throw new Error(`Refusing to show a core in category '${core.category}'.`);
     }
@@ -284,19 +316,57 @@ export class RealMisterClient implements IMisterClient {
     await this.runRenameScript(renames, `show core ${core.id}`);
   }
 
-  async setBulkCoreVisibility(changes: readonly CoreVisibilityChange[]): Promise<void> {
+  async setBulkCoreVisibility(
+    changes: readonly CoreVisibilityChange[],
+  ): Promise<BulkCoreResult> {
     this.assertConnected();
-    const allRenames: CoreRename[] = [];
+
+    interface PerCorePlan {
+      readonly coreId: string;
+      readonly renames: readonly CoreRename[];
+    }
+    const plans: PerCorePlan[] = [];
     for (const change of changes) {
+      if (!isRealCore(change.core)) {
+        throw new Error(
+          `Refusing to toggle '${change.core.id}': not a real core (likely a user folder or the Arcade placeholder).`,
+        );
+      }
       if (!HIDEABLE_CATEGORIES.has(change.core.category)) {
         throw new Error(
           `Refusing to toggle a core in category '${change.core.category}'.`,
         );
       }
-      allRenames.push(...computeCoreRenames(change.core, change.hidden));
+      const renames = computeCoreRenames(change.core, change.hidden);
+      if (renames.length === 0) continue;
+      plans.push({ coreId: change.core.id, renames });
     }
-    if (allRenames.length === 0) return;
-    await this.runRenameScript(allRenames, 'bulk core visibility');
+    if (plans.length === 0) {
+      return { succeeded: [], failed: [] };
+    }
+
+    const lines: string[] = [];
+    for (const plan of plans) {
+      // Each core's renames run in a `(set -e ...)` subshell so the
+      // core itself is atomic — partial state is impossible inside one
+      // core. But subshells are independent, so a failure in core A
+      // does NOT abort core B.
+      const moves = plan.renames
+        .map((r) => `mv ${shellQuote(r.from)} ${shellQuote(r.to)}`)
+        .join('\n  ');
+      const id = shellQuote(plan.coreId);
+      lines.push(
+        `if err=$( (set -e\n  ${moves}) 2>&1 ); then`,
+        `  printf 'OK\\t%s\\n' ${id}`,
+        `else`,
+        `  printf 'FAIL\\t%s\\t%s\\n' ${id} "$(printf '%s' "$err" | tr '\\n\\t' '  ' | head -c 200)"`,
+        `fi`,
+      );
+    }
+
+    const script = lines.join('\n');
+    const result = await this.ssh.execCommand(script);
+    return parseBulkResult<BulkCoreResult>(result.stdout, 'coreId');
   }
 
   async readHideLedger(): Promise<HideLedger> {
@@ -400,7 +470,50 @@ function buildListAllCoresScript(): string {
     'fi',
   ].join('\n');
 
-  return `set -e\n${dirsScript}\n${gamesScript}\n`;
+  // Emit an A-tagged line if the arcade directory exists on the device,
+  // regardless of contents. The renderer needs this signal because real
+  // MiSTers populate `_Arcade/` with `.mra` files (and subfolders), not
+  // `.rbf` / `.mgl` — so we cannot infer arcade presence from the rbfs
+  // stream alone.
+  const arcadeProbeScript = [
+    `if [ -d ${shellQuote('/media/fat/_Arcade')} ]; then`,
+    `  printf 'A\\n'`,
+    `fi`,
+  ].join('\n');
+
+  return `set -e\n${dirsScript}\n${gamesScript}\n${arcadeProbeScript}\n`;
+}
+
+/**
+ * Parses the OK / FAIL stream produced by a bulk-rename shell script.
+ * Each line is either:
+ *   OK\t<id>
+ *   FAIL\t<id>\t<single-line reason>
+ * The shape is identifier-agnostic — same parser for ROMs and cores.
+ */
+function parseBulkResult<T extends BulkRomResult | BulkCoreResult>(
+  stdout: string,
+  idKey: 'filename' | 'coreId',
+): T {
+  const succeeded: string[] = [];
+  const failed: { readonly filename?: string; readonly coreId?: string; readonly reason: string }[] = [];
+  for (const line of stdout.split('\n')) {
+    if (line === '') continue;
+    const parts = line.split('\t');
+    const tag = parts[0];
+    if (tag === 'OK' && parts.length >= 2) {
+      succeeded.push(parts[1] ?? '');
+    } else if (tag === 'FAIL' && parts.length >= 3) {
+      const id = parts[1] ?? '';
+      const reason = parts.slice(2).join('\t') || 'unknown error';
+      const entry =
+        idKey === 'filename'
+          ? { filename: id, reason }
+          : { coreId: id, reason };
+      failed.push(entry);
+    }
+  }
+  return { succeeded, failed } as unknown as T;
 }
 
 function parseCategory(name: string): CoreCategory | null {

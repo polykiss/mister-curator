@@ -8,7 +8,11 @@ import type {
   PickedKeyFile,
   RomVisibilityChangeWire,
 } from '@shared/preload-api';
-import type { MisterSecret } from '@shared/mister-client';
+import type {
+  BulkCoreResult,
+  BulkRomResult,
+  MisterSecret,
+} from '@shared/mister-client';
 import { MisterConnectionError } from '@shared/types';
 import type {
   ConnectionStatus,
@@ -45,11 +49,12 @@ const api: MisterApi = {
   setBulkRomVisibility: (
     coreId: string,
     changes: readonly RomVisibilityChangeWire[],
-  ) => invoke<void>(IPC_CHANNELS.setBulkRomVisibility, coreId, changes),
+  ) =>
+    invoke<BulkRomResult>(IPC_CHANNELS.setBulkRomVisibility, coreId, changes),
   hideCore: (coreId: string) => invoke<void>(IPC_CHANNELS.hideCore, coreId),
   showCore: (coreId: string) => invoke<void>(IPC_CHANNELS.showCore, coreId),
   setBulkCoreVisibility: (changes: readonly CoreVisibilityChangeWire[]) =>
-    invoke<void>(IPC_CHANNELS.setBulkCoreVisibility, changes),
+    invoke<BulkCoreResult>(IPC_CHANNELS.setBulkCoreVisibility, changes),
   pickKeyFile: () => invoke<PickedKeyFile | null>(IPC_CHANNELS.pickKeyFile),
   onConnectionStatusChanged: (handler: (status: ConnectionStatus) => void) => {
     const listener = (_event: unknown, status: ConnectionStatus): void => {

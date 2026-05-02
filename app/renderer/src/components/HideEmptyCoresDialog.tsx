@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from '@app/renderer/src/components/ui/dialog';
 import { useCores } from '@app/renderer/src/contexts/CoresContext';
+import { summarizeBulkResult } from '@app/renderer/src/lib/format';
 
 interface HideEmptyCoresDialogProps {
   readonly open: boolean;
@@ -34,26 +35,42 @@ export function HideEmptyCoresDialog({
     setSubmitting(true);
     const changes = candidates.map((c) => ({ coreId: c.id, hidden: true }));
     try {
-      await setBulkCoreVisibility(changes);
-      const noun = candidates.length === 1 ? 'empty core' : 'empty cores';
-      toast.success(`Hid ${String(candidates.length)} ${noun}`, {
-        action: {
-          label: 'Undo',
-          onClick: () => {
-            void (async () => {
-              try {
-                await setBulkCoreVisibility(
-                  changes.map((c) => ({ ...c, hidden: false })),
-                );
-                toast.success(`Restored ${String(candidates.length)} ${noun}`);
-              } catch (err) {
-                toast.error('Could not undo', {
-                  description: err instanceof Error ? err.message : 'Unexpected error.',
-                });
+      const result = await setBulkCoreVisibility(changes);
+      const summary = summarizeBulkResult({
+        action: 'Hid',
+        itemNoun: 'core',
+        succeeded: result.succeeded,
+        failed: result.failed,
+        failedNames: result.failed.map((f) => f.coreId),
+      });
+      const surface =
+        summary.kind === 'success'
+          ? toast.success
+          : summary.kind === 'partial'
+            ? toast.warning
+            : toast.error;
+      surface(summary.title, {
+        description: summary.description,
+        action:
+          summary.kind === 'success' && result.succeeded.length > 0
+            ? {
+                label: 'Undo',
+                onClick: () => {
+                  void (async () => {
+                    try {
+                      await setBulkCoreVisibility(
+                        result.succeeded.map((id) => ({ coreId: id, hidden: false })),
+                      );
+                    } catch (err) {
+                      toast.error('Could not undo', {
+                        description:
+                          err instanceof Error ? err.message : 'Unexpected error.',
+                      });
+                    }
+                  })();
+                },
               }
-            })();
-          },
-        },
+            : undefined,
         duration: 10000,
       });
       onOpenChange(false);

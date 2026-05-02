@@ -10,7 +10,11 @@ import type {
   PickedKeyFile,
   RomVisibilityChangeWire,
 } from '@shared/preload-api';
-import type { MisterSecret } from '@shared/mister-client';
+import type {
+  BulkCoreResult,
+  BulkRomResult,
+  MisterSecret,
+} from '@shared/mister-client';
 import type { MisterProfile } from '@shared/types';
 
 import type { ConnectionManager } from '@app/main/ipc/connection-manager';
@@ -64,7 +68,7 @@ export function registerIpcHandlers(
       manager.setRomVisibility(coreId, filename, hidden),
   );
 
-  handle<[string, readonly RomVisibilityChangeWire[]], void>(
+  handle<[string, readonly RomVisibilityChangeWire[]], BulkRomResult>(
     IPC_CHANNELS.setBulkRomVisibility,
     (coreId, changes) => manager.setBulkRomVisibility(coreId, changes),
   );
@@ -77,7 +81,7 @@ export function registerIpcHandlers(
     manager.showCore(coreId),
   );
 
-  handle<[readonly CoreVisibilityChangeWire[]], void>(
+  handle<[readonly CoreVisibilityChangeWire[]], BulkCoreResult>(
     IPC_CHANNELS.setBulkCoreVisibility,
     (changes) => manager.setBulkCoreVisibility(changes),
   );

@@ -72,6 +72,15 @@ export interface RawGamesDirInput {
 export interface MatchInput {
   readonly rbfs: readonly RawRbfInput[];
   readonly gamesDirs: readonly RawGamesDirInput[];
+  /**
+   * True when `/media/fat/_Arcade/` exists on the device, regardless of
+   * what's inside it. Real MiSTers populate `_Arcade/` with `.mra` files
+   * and subfolders rather than `.rbf` or `.mgl` cores, so we can't infer
+   * arcade presence from the rbfs list — the placeholder row needs an
+   * explicit signal. Defaults to false; the production clients always
+   * pass an explicit value.
+   */
+  readonly arcadeDirExists?: boolean;
 }
 
 interface MutableCoreEntry {
@@ -165,14 +174,15 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     gamesDirHidden: e.gamesDirHidden,
   }));
 
-  // Collapse all arcade entries into a single placeholder row. Arcade is
-  // out of scope for the hide feature (per AGENTS.md), but users still
-  // expect to see "Arcade" in the cores list — listing every individual
-  // arcade core would be both noisy and misleading because none of them
-  // are hideable.
-  const arcadeEntries = all.filter((c) => c.category === 'Arcade');
+  // Collapse arcade into a single placeholder row. Arcade is out of scope
+  // for the hide feature (per AGENTS.md), but users still expect to see
+  // "Arcade" in the cores list. The placeholder is emitted whenever the
+  // device has an `_Arcade/` directory at all — most real MiSTers populate
+  // it with `.mra` files, not `.rbf` / `.mgl`, so we can't infer presence
+  // from the rbfs list.
   const nonArcade = all.filter((c) => c.category !== 'Arcade');
-  if (arcadeEntries.length > 0) {
+  const arcadeFromRbfs = all.some((c) => c.category === 'Arcade');
+  if (input.arcadeDirExists === true || arcadeFromRbfs) {
     nonArcade.push({
       id: ARCADE_PLACEHOLDER_ID,
       name: 'Arcade',
@@ -191,6 +201,26 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
 
 export function isArcadePlaceholder(core: CoreEntry): boolean {
   return core.id === ARCADE_PLACEHOLDER_ID;
+}
+
+/**
+ * Single source of truth for "is this a core the app may operate on?".
+ *
+ * Used by every code path that mutates state — single hide/show, bulk
+ * hide/show, "Hide empty cores", "Show all hidden", auto-reapply on
+ * connect — so a user-created organisational folder under a category
+ * dir (e.g. `_Console/_hidden`, `_Arcade/_Organized`) can never slip
+ * through to an `mv` command. Defense-in-depth on top of the matcher's
+ * enumeration filter.
+ *
+ * A CoreEntry is a real core iff it has at least one `.rbf`/`.mgl`
+ * (file or folder-shaped) OR a games directory. The synthetic Arcade
+ * placeholder is never a real core; arcade is out of scope until a
+ * later release.
+ */
+export function isRealCore(entry: CoreEntry): boolean {
+  if (entry.category === 'Arcade') return false;
+  return entry.rbfPaths.length > 0 || entry.gamesDirExists;
 }
 
 /**

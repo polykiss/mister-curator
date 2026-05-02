@@ -19,6 +19,29 @@ export interface CoreVisibilityChange {
   readonly hidden: boolean;
 }
 
+/**
+ * Per-rom result of a batched ROM visibility operation. Bulk ROM
+ * operations do NOT abort on first failure: each rename runs
+ * independently, and a partial failure produces a partial result rather
+ * than throwing. The caller surfaces whichever toast variant matches.
+ */
+export interface BulkRomResult {
+  readonly succeeded: readonly string[];
+  readonly failed: readonly { readonly filename: string; readonly reason: string }[];
+}
+
+/**
+ * Per-core result of a batched core-visibility operation. A core is
+ * considered "succeeded" only if every rename it owned (games dir +
+ * each matching .rbf / .mgl) committed. Any rename failure within a
+ * core marks that core as failed (and leaves the ledger entry for it
+ * untouched in ConnectionManager).
+ */
+export interface BulkCoreResult {
+  readonly succeeded: readonly string[];
+  readonly failed: readonly { readonly coreId: string; readonly reason: string }[];
+}
+
 export interface IMisterClient {
   connect(profile: MisterProfile, secret: MisterSecret): Promise<void>;
   disconnect(): Promise<void>;
@@ -34,7 +57,17 @@ export interface IMisterClient {
   listRoms(coreId: string): Promise<Rom[]>;
 
   setRomVisibility(coreId: string, filename: string, hidden: boolean): Promise<void>;
-  setBulkRomVisibility(coreId: string, changes: readonly RomVisibilityChange[]): Promise<void>;
+
+  /**
+   * Apply many ROM visibility changes in a single batched SSH call.
+   * Per-rename results are aggregated and returned — a single failed
+   * `mv` does NOT abort the batch (defensive against races, perms,
+   * etc). The caller decides how to react.
+   */
+  setBulkRomVisibility(
+    coreId: string,
+    changes: readonly RomVisibilityChange[],
+  ): Promise<BulkRomResult>;
 
   /**
    * Hide a single core: rename its games dir AND every matching rbf
@@ -47,10 +80,17 @@ export interface IMisterClient {
 
   /**
    * Apply many core-visibility changes in a single batched SSH call.
+   * Each core's renames run inside a `set -e` subshell so the core
+   * itself is atomic, but a failure in one core does NOT abort the
+   * other cores in the batch. Per-core results are returned.
+   *
    * No-op changes (already in desired state) are skipped silently. If
-   * every change is a no-op, zero SSH calls are issued.
+   * every change is a no-op, zero SSH calls are issued and the result
+   * is `{ succeeded: [], failed: [] }`.
    */
-  setBulkCoreVisibility(changes: readonly CoreVisibilityChange[]): Promise<void>;
+  setBulkCoreVisibility(
+    changes: readonly CoreVisibilityChange[],
+  ): Promise<BulkCoreResult>;
 
   /**
    * Read and parse the on-MiSTer hide ledger

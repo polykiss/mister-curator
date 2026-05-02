@@ -10,6 +10,7 @@ import {
   isArcadePlaceholder,
   isCoreFile,
   isCoreHidden,
+  isRealCore,
   matchRbfsToGamesDirs,
   pathBasename,
   undottedPath,
@@ -266,7 +267,7 @@ describe('matchRbfsToGamesDirs', () => {
     expect(result.map((c) => c.id)).not.toContain('Pacman');
   });
 
-  it('emits no arcade placeholder when no arcade cores were enumerated', () => {
+  it('emits no arcade placeholder when no arcade signal at all', () => {
     const result = matchRbfsToGamesDirs({
       rbfs: [
         {
@@ -277,8 +278,42 @@ describe('matchRbfsToGamesDirs', () => {
         },
       ],
       gamesDirs: [],
+      arcadeDirExists: false,
     });
     expect(result.find((c) => c.category === 'Arcade')).toBeUndefined();
+  });
+
+  it('emits the arcade placeholder when arcadeDirExists, even with no arcade rbfs', () => {
+    // Real MiSTers populate /media/fat/_Arcade/ with .mra files, not
+    // .rbf or .mgl. The placeholder must still appear so users see
+    // "Arcade" in the cores list.
+    const result = matchRbfsToGamesDirs({
+      rbfs: [],
+      gamesDirs: [],
+      arcadeDirExists: true,
+    });
+    const arcade = result.find((c) => c.category === 'Arcade');
+    expect(arcade).toBeDefined();
+    expect(arcade?.id).toBe(ARCADE_PLACEHOLDER_ID);
+    expect(arcade?.name).toBe('Arcade');
+    expect(arcade?.rbfPaths).toEqual([]);
+  });
+
+  it('emits exactly one placeholder when both arcadeDirExists AND arcade rbfs are present', () => {
+    const result = matchRbfsToGamesDirs({
+      rbfs: [
+        {
+          category: 'Arcade',
+          filename: 'Galaga_20240115.rbf',
+          fullPath: '/media/fat/_Arcade/Galaga_20240115.rbf',
+          isFolder: false,
+        },
+      ],
+      gamesDirs: [],
+      arcadeDirExists: true,
+    });
+    const arcadeRows = result.filter((c) => c.category === 'Arcade');
+    expect(arcadeRows).toHaveLength(1);
   });
 
   it('sorts the result by core id, case-insensitive', () => {
@@ -306,6 +341,58 @@ describe('matchRbfsToGamesDirs', () => {
       gamesDirs: [],
     });
     expect(result.map((c) => c.id)).toEqual(['apollo', 'NES', 'Zebra']);
+  });
+});
+
+describe('isRealCore', () => {
+  function makeCore(overrides: Partial<CoreEntry> = {}): CoreEntry {
+    return {
+      id: 'X',
+      name: 'X',
+      romCount: 0,
+      hiddenCount: 0,
+      category: 'Console',
+      rbfPaths: [],
+      gamesDirExists: false,
+      gamesDirHidden: false,
+      ...overrides,
+    };
+  }
+
+  it('returns true for a core with at least one rbf', () => {
+    expect(
+      isRealCore(makeCore({ rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'] })),
+    ).toBe(true);
+  });
+
+  it('returns true for a core with a games dir but no rbf', () => {
+    expect(isRealCore(makeCore({ gamesDirExists: true, category: 'Unknown' }))).toBe(true);
+  });
+
+  it('returns false for a CoreEntry that has neither rbfs nor a games dir', () => {
+    // This is the user-folder shape — `_Console/_hidden`, `_Computer/_Organized`,
+    // `_Arcade/_alternatives` etc. The matcher should never produce one of
+    // these, but isRealCore is the defensive net at the operation layer.
+    expect(isRealCore(makeCore({ id: '_hidden' }))).toBe(false);
+    expect(isRealCore(makeCore({ id: '_Organized' }))).toBe(false);
+    expect(isRealCore(makeCore({ id: '_alternatives' }))).toBe(false);
+  });
+
+  it('returns false for the synthetic Arcade placeholder', () => {
+    expect(
+      isRealCore(makeCore({ id: ARCADE_PLACEHOLDER_ID, category: 'Arcade' })),
+    ).toBe(false);
+  });
+
+  it('returns false for any Arcade-category entry', () => {
+    expect(
+      isRealCore(
+        makeCore({
+          category: 'Arcade',
+          rbfPaths: ['/media/fat/_Arcade/Galaga_20240115.rbf'],
+        }),
+      ),
+    ).toBe(false);
   });
 });
 

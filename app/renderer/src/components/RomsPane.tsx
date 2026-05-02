@@ -17,7 +17,7 @@ import {
 } from '@app/renderer/src/components/ui/table';
 import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
-import { formatBytes } from '@app/renderer/src/lib/format';
+import { formatBytes, summarizeBulkResult } from '@app/renderer/src/lib/format';
 import type { VisibilityChange } from '@app/renderer/src/lib/optimistic';
 
 interface RomsPaneProps {
@@ -75,15 +75,34 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     }
   };
 
-  const runBulk = async (changes: readonly VisibilityChange[], label: string): Promise<void> => {
+  const runBulk = async (
+    changes: readonly VisibilityChange[],
+    action: 'Hid' | 'Restored',
+  ): Promise<void> => {
     if (changes.length === 0) return;
+    let result;
     try {
-      await setBulkRomVisibility(core.id, changes);
+      result = await setBulkRomVisibility(core.id, changes);
     } catch (err) {
-      toast.error(label, {
+      toast.error(`${action} failed`, {
         description: err instanceof Error ? err.message : 'Unexpected error.',
       });
+      return;
     }
+    const summary = summarizeBulkResult({
+      action,
+      itemNoun: 'ROM',
+      succeeded: result.succeeded,
+      failed: result.failed,
+      failedNames: result.failed.map((f) => f.filename),
+    });
+    const surface =
+      summary.kind === 'success'
+        ? toast.success
+        : summary.kind === 'partial'
+          ? toast.warning
+          : toast.error;
+    surface(summary.title, { description: summary.description });
   };
 
   const onHideAll = (): void => {
@@ -91,7 +110,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     const changes: VisibilityChange[] = roms
       .filter((r) => !r.hidden)
       .map((r) => ({ filename: r.filename, hidden: true }));
-    void runBulk(changes, 'Bulk hide failed');
+    void runBulk(changes, 'Hid');
   };
 
   const onShowAll = (): void => {
@@ -99,7 +118,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     const changes: VisibilityChange[] = roms
       .filter((r) => r.hidden)
       .map((r) => ({ filename: r.filename, hidden: false }));
-    void runBulk(changes, 'Bulk show failed');
+    void runBulk(changes, 'Restored');
   };
 
   const onHideSelected = (): void => {
@@ -107,7 +126,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     const changes: VisibilityChange[] = roms
       .filter((r) => selected.has(r.filename) && !r.hidden)
       .map((r) => ({ filename: r.filename, hidden: true }));
-    void runBulk(changes, 'Hide selected failed');
+    void runBulk(changes, 'Hid');
     setSelected(new Set());
   };
 
@@ -116,7 +135,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     const changes: VisibilityChange[] = roms
       .filter((r) => selected.has(r.filename) && r.hidden)
       .map((r) => ({ filename: r.filename, hidden: false }));
-    void runBulk(changes, 'Show selected failed');
+    void runBulk(changes, 'Restored');
     setSelected(new Set());
   };
 

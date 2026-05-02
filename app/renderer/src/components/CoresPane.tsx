@@ -11,6 +11,7 @@ import { HideEmptyCoresDialog } from '@app/renderer/src/components/HideEmptyCore
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
 import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
+import { summarizeBulkResult } from '@app/renderer/src/lib/format';
 
 const ARCADE_TOOLTIP = "Arcade cores aren't supported yet — coming in a later release.";
 
@@ -113,22 +114,39 @@ export function CoresPane(): JSX.Element {
     if (allHiddenCores.length === 0) return;
     const changes = allHiddenCores.map((c) => ({ coreId: c.id, hidden: false }));
     try {
-      await setBulkCoreVisibility(changes);
-      toast.success(`Restored ${String(allHiddenCores.length)} hidden cores`, {
-        action: {
-          label: 'Undo',
-          onClick: () => {
-            void (async () => {
-              try {
-                await setBulkCoreVisibility(
-                  changes.map((c) => ({ ...c, hidden: true })),
-                );
-              } catch {
-                /* swallow */
+      const result = await setBulkCoreVisibility(changes);
+      const summary = summarizeBulkResult({
+        action: 'Restored',
+        itemNoun: 'core',
+        succeeded: result.succeeded,
+        failed: result.failed,
+        failedNames: result.failed.map((f) => f.coreId),
+      });
+      const surface =
+        summary.kind === 'success'
+          ? toast.success
+          : summary.kind === 'partial'
+            ? toast.warning
+            : toast.error;
+      surface(summary.title, {
+        description: summary.description,
+        action:
+          summary.kind === 'success' && result.succeeded.length > 0
+            ? {
+                label: 'Undo',
+                onClick: () => {
+                  void (async () => {
+                    try {
+                      await setBulkCoreVisibility(
+                        result.succeeded.map((id) => ({ coreId: id, hidden: true })),
+                      );
+                    } catch {
+                      /* swallow */
+                    }
+                  })();
+                },
               }
-            })();
-          },
-        },
+            : undefined,
         duration: 10000,
       });
     } catch (err) {

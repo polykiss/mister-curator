@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { FakeMisterClient } from '@app/main/clients/fake-mister-client';
 import { MisterConnectionError } from '@shared/types';
-import type { MisterProfile } from '@shared/types';
+import type { CoreEntry, MisterProfile } from '@shared/types';
 import type { MisterSecret } from '@shared/mister-client';
 
 const fixturesDir = path.resolve(import.meta.dirname, '../../../fixtures/sample-mister');
@@ -338,5 +338,90 @@ describe('FakeMisterClient', () => {
     };
     await client.writeHideLedger(ledger);
     expect(await client.readHideLedger()).toEqual(ledger);
+  });
+
+  describe('isRealCore guard rails', () => {
+    function userFolderEntry(id: string): CoreEntry {
+      return {
+        id,
+        name: id,
+        romCount: 0,
+        hiddenCount: 0,
+        category: 'Console',
+        rbfPaths: [],
+        gamesDirExists: false,
+        gamesDirHidden: false,
+      };
+    }
+
+    it('hideCore refuses a user-folder CoreEntry (no rbfs, no games dir)', async () => {
+      await expect(client.hideCore(userFolderEntry('_hidden'))).rejects.toThrow(
+        /not a real core/i,
+      );
+    });
+
+    it('showCore refuses a user-folder CoreEntry', async () => {
+      await expect(client.showCore(userFolderEntry('_alternatives'))).rejects.toThrow(
+        /not a real core/i,
+      );
+    });
+
+    it('setBulkCoreVisibility refuses if any change targets a user folder', async () => {
+      await expect(
+        client.setBulkCoreVisibility([
+          { core: userFolderEntry('_Organized'), hidden: true },
+        ]),
+      ).rejects.toThrow(/not a real core/i);
+    });
+
+    it('hideCore refuses the synthetic Arcade placeholder', async () => {
+      const cores = await client.listAllCoresWithFiles();
+      const arcade = cores.find((c) => c.category === 'Arcade');
+      expect(arcade).toBeDefined();
+      await expect(client.hideCore(arcade!)).rejects.toThrow(/Arcade|not a real/i);
+    });
+  });
+
+  describe('bulk partial-success', () => {
+    it('returns succeeded + failed for a mixed batch (3 cores, 1 fails)', async () => {
+      // Simulate one of the cores having a stale path that mv cannot stat.
+      const cores = await client.listAllCoresWithFiles();
+      const nes = cores.find((c) => c.id === 'NES');
+      const snes = cores.find((c) => c.id === 'SNES');
+      const genesis = cores.find((c) => c.id === 'Genesis');
+      expect(nes && snes && genesis).toBeDefined();
+
+      // Synthesise a CoreEntry with a non-existent rbf path so its
+      // rename will fail. The other two should still succeed.
+      const broken: CoreEntry = {
+        ...snes!,
+        rbfPaths: ['/media/fat/_Console/IDoNotExist_20240115.rbf'],
+      };
+
+      const result = await client.setBulkCoreVisibility([
+        { core: nes!, hidden: true },
+        { core: broken, hidden: true },
+        { core: genesis!, hidden: true },
+      ]);
+
+      expect(result.succeeded).toContain('NES');
+      expect(result.succeeded).toContain('Genesis');
+      expect(result.succeeded).not.toContain('SNES');
+      expect(result.failed.map((f) => f.coreId)).toEqual(['SNES']);
+      expect(result.failed[0]?.reason).toMatch(/not found|ENOENT/i);
+    });
+
+    it('setBulkRomVisibility returns per-rom partial-success', async () => {
+      const result = await client.setBulkRomVisibility('NES', [
+        { filename: 'Castlevania (USA, Europe).nes', hidden: true }, // exists, ok
+        { filename: 'IDoNotExist.nes', hidden: true }, // mv will fail
+        { filename: 'Contra (USA).nes', hidden: true }, // exists, ok
+      ]);
+
+      expect(result.succeeded).toContain('Castlevania (USA, Europe).nes');
+      expect(result.succeeded).toContain('Contra (USA).nes');
+      expect(result.succeeded).not.toContain('IDoNotExist.nes');
+      expect(result.failed.map((f) => f.filename)).toEqual(['IDoNotExist.nes']);
+    });
   });
 });

@@ -12,6 +12,7 @@ import {
 import {
   computeCoreRenames,
   isCoreFile,
+  isRealCore,
   matchRbfsToGamesDirs,
   type RawGamesDirInput,
   type RawRbfInput,
@@ -25,6 +26,8 @@ import type {
   Rom,
 } from '@shared/types';
 import type {
+  BulkCoreResult,
+  BulkRomResult,
   CoreVisibilityChange,
   IMisterClient,
   MisterSecret,
@@ -147,7 +150,15 @@ export class FakeMisterClient implements IMisterClient {
       gamesDirs.push({ rawName: entry.name, romCount, hiddenCount });
     }
 
-    return matchRbfsToGamesDirs({ rbfs, gamesDirs });
+    let arcadeDirExists = false;
+    try {
+      await fs.access(this.toLocal('/media/fat/_Arcade'));
+      arcadeDirExists = true;
+    } catch {
+      // _Arcade/ doesn't exist on this fixture — leave the flag false.
+    }
+
+    return matchRbfsToGamesDirs({ rbfs, gamesDirs, arcadeDirExists });
   }
 
   async listRoms(coreId: string): Promise<Rom[]> {
@@ -199,20 +210,37 @@ export class FakeMisterClient implements IMisterClient {
   async setBulkRomVisibility(
     coreId: string,
     changes: readonly RomVisibilityChange[],
-  ): Promise<void> {
+  ): Promise<BulkRomResult> {
     this.assertConnected();
     this.assertSafeCoreId(coreId);
     for (const change of changes) {
       this.assertSafeFilename(change.filename);
     }
     await this.delay();
-    await Promise.all(
-      changes.map((change) => this.applyRomRename(coreId, change.filename, change.hidden)),
-    );
+
+    const succeeded: string[] = [];
+    const failed: { filename: string; reason: string }[] = [];
+    for (const change of changes) {
+      try {
+        await this.applyRomRename(coreId, change.filename, change.hidden);
+        succeeded.push(change.filename);
+      } catch (err) {
+        failed.push({
+          filename: change.filename,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return { succeeded, failed };
   }
 
   async hideCore(core: CoreEntry): Promise<void> {
     this.assertConnected();
+    if (!isRealCore(core)) {
+      throw new Error(
+        `Refusing to hide '${core.id}': not a real core (likely a user folder or the Arcade placeholder).`,
+      );
+    }
     if (!HIDEABLE_CATEGORIES.has(core.category)) {
       throw new Error(`Refusing to hide a core in category '${core.category}'.`);
     }
@@ -224,6 +252,11 @@ export class FakeMisterClient implements IMisterClient {
 
   async showCore(core: CoreEntry): Promise<void> {
     this.assertConnected();
+    if (!isRealCore(core)) {
+      throw new Error(
+        `Refusing to show '${core.id}': not a real core (likely a user folder or the Arcade placeholder).`,
+      );
+    }
     if (!HIDEABLE_CATEGORIES.has(core.category)) {
       throw new Error(`Refusing to show a core in category '${core.category}'.`);
     }
@@ -233,18 +266,48 @@ export class FakeMisterClient implements IMisterClient {
     for (const r of renames) await this.renamePath(r);
   }
 
-  async setBulkCoreVisibility(changes: readonly CoreVisibilityChange[]): Promise<void> {
+  async setBulkCoreVisibility(
+    changes: readonly CoreVisibilityChange[],
+  ): Promise<BulkCoreResult> {
     this.assertConnected();
-    const allRenames: { from: string; to: string }[] = [];
+
+    interface Plan {
+      readonly coreId: string;
+      readonly renames: readonly { from: string; to: string }[];
+    }
+    const plans: Plan[] = [];
     for (const c of changes) {
+      if (!isRealCore(c.core)) {
+        throw new Error(
+          `Refusing to toggle '${c.core.id}': not a real core (likely a user folder or the Arcade placeholder).`,
+        );
+      }
       if (!HIDEABLE_CATEGORIES.has(c.core.category)) {
         throw new Error(`Refusing to toggle a core in category '${c.core.category}'.`);
       }
-      allRenames.push(...computeCoreRenames(c.core, c.hidden));
+      const renames = computeCoreRenames(c.core, c.hidden);
+      if (renames.length === 0) continue;
+      plans.push({ coreId: c.core.id, renames });
     }
-    if (allRenames.length === 0) return;
+    if (plans.length === 0) return { succeeded: [], failed: [] };
+
     await this.delay();
-    for (const r of allRenames) await this.renamePath(r);
+    const succeeded: string[] = [];
+    const failed: { coreId: string; reason: string }[] = [];
+    for (const plan of plans) {
+      try {
+        // Per-core atomic: each rename runs sequentially; if any throws,
+        // we record the core as failed and move on to the next core.
+        for (const r of plan.renames) await this.renamePath(r);
+        succeeded.push(plan.coreId);
+      } catch (err) {
+        failed.push({
+          coreId: plan.coreId,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return { succeeded, failed };
   }
 
   async readHideLedger(): Promise<HideLedger> {

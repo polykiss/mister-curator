@@ -277,6 +277,42 @@ describe('RealMisterClient', () => {
       expect(script).toMatch(/find ".*?".*-iname '\*\.rbf'/);
       expect(script).toMatch(/-iname '\*\.mgl'/);
     });
+
+    it('emits an arcade-dir probe so the placeholder appears whenever _Arcade exists', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.listAllCoresWithFiles();
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain(`if [ -d '/media/fat/_Arcade' ]; then`);
+      expect(script).toContain(`printf 'A\\n'`);
+    });
+
+    it('parses the A sentinel into a synthetic Arcade placeholder row', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      // Real-MiSTer shape: _Arcade exists but contains only .mra files,
+      // so no R-Arcade lines are emitted — only the A sentinel.
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'R\tConsole\tfile\tNES_20240115.rbf',
+            'A',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const cores = await client.listAllCoresWithFiles();
+      const arcade = cores.find((c) => c.category === 'Arcade');
+      expect(arcade).toBeDefined();
+      expect(arcade?.name).toBe('Arcade');
+    });
   });
 
   describe('listRoms', () => {
@@ -371,8 +407,14 @@ describe('RealMisterClient', () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
+      // Mock the bulk script's stdout so the parser sees five OK lines.
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(['a.nes', 'b.nes', '.c.nes', 'd.nes', '.e.nes']
+          .map((id) => `OK\t${id}`)
+          .join('\n')),
+      );
 
-      await client.setBulkRomVisibility('NES', [
+      const result = await client.setBulkRomVisibility('NES', [
         { filename: 'a.nes', hidden: true },
         { filename: 'b.nes', hidden: true },
         { filename: '.c.nes', hidden: false },
@@ -381,20 +423,24 @@ describe('RealMisterClient', () => {
       ]);
 
       expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      expect(result.succeeded).toEqual(['a.nes', 'b.nes', '.c.nes', 'd.nes', '.e.nes']);
+      expect(result.failed).toEqual([]);
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
-      expect(script.startsWith('set -e\n')).toBe(true);
       expect(script).toContain(`cd '/media/fat/games/NES'`);
-      const mvLines = script.split('\n').filter((l) => l.startsWith('mv '));
-      expect(mvLines).toHaveLength(5);
-      expect(mvLines).toContain(`mv 'a.nes' '.a.nes'`);
-      expect(mvLines).toContain(`mv '.c.nes' 'c.nes'`);
+      // Each rename is wrapped in an `if err=$(mv ...)` block so the
+      // batch never aborts on the first failure.
+      const ifMvCount = (script.match(/if err=\$\(mv /g) ?? []).length;
+      expect(ifMvCount).toBe(5);
+      expect(script).toContain(`mv 'a.nes' '.a.nes'`);
+      expect(script).toContain(`mv '.c.nes' 'c.nes'`);
     });
 
     it('skips no-op changes but still issues exactly one call when at least one rename is needed', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk('OK\tbar.nes'));
 
       await client.setBulkRomVisibility('NES', [
         { filename: 'foo.nes', hidden: false }, // already visible — no-op
@@ -403,8 +449,10 @@ describe('RealMisterClient', () => {
 
       expect(mocks.execCommand).toHaveBeenCalledTimes(1);
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
-      const mvLines = script.split('\n').filter((l) => l.startsWith('mv '));
-      expect(mvLines).toEqual([`mv 'bar.nes' '.bar.nes'`]);
+      const ifMvCount = (script.match(/if err=\$\(mv /g) ?? []).length;
+      expect(ifMvCount).toBe(1);
+      expect(script).toContain(`mv 'bar.nes' '.bar.nes'`);
+      expect(script).not.toContain(`mv 'foo.nes'`);
     });
 
     it('makes zero SSH calls when every change is a no-op', async () => {
@@ -412,12 +460,42 @@ describe('RealMisterClient', () => {
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
 
-      await client.setBulkRomVisibility('NES', [
+      const result = await client.setBulkRomVisibility('NES', [
         { filename: 'foo.nes', hidden: false },
         { filename: '.bar.nes', hidden: true },
       ]);
 
       expect(mocks.execCommand).not.toHaveBeenCalled();
+      expect(result).toEqual({ succeeded: [], failed: [] });
+    });
+
+    it('returns a partial-success result when some renames fail', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      // One failure mid-batch — parser should still consume the surrounding OKs.
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'OK\ta.nes',
+            'FAIL\tb.nes\tmv: cannot stat b.nes',
+            'OK\tc.nes',
+          ].join('\n'),
+        ),
+      );
+
+      const result = await client.setBulkRomVisibility('NES', [
+        { filename: 'a.nes', hidden: true },
+        { filename: 'b.nes', hidden: true },
+        { filename: 'c.nes', hidden: true },
+      ]);
+
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      expect(result.succeeded).toEqual(['a.nes', 'c.nes']);
+      expect(result.failed).toEqual([
+        { filename: 'b.nes', reason: 'mv: cannot stat b.nes' },
+      ]);
     });
   });
 
@@ -543,6 +621,43 @@ describe('RealMisterClient', () => {
       );
     });
 
+    it('hideCore refuses a CoreEntry that is not a real core (user folder shape)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      // No rbfs, no games dir — looks like `_Console/_hidden`.
+      await expect(
+        client.hideCore(
+          makeCore({
+            id: '_hidden',
+            category: 'Console',
+            rbfPaths: [],
+            gamesDirExists: false,
+          }),
+        ),
+      ).rejects.toThrow(/not a real core/i);
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+
+    it('showCore refuses a CoreEntry that is not a real core', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      await expect(
+        client.showCore(
+          makeCore({
+            id: '_alternatives',
+            category: 'Console',
+            rbfPaths: [],
+            gamesDirExists: false,
+          }),
+        ),
+      ).rejects.toThrow(/not a real core/i);
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+
     it('hideCore refuses arcade cores', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
@@ -592,6 +707,13 @@ describe('RealMisterClient', () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          ['NES', 'SNES', 'Genesis', 'Atari800', 'SMS']
+            .map((id) => `OK\t${id}`)
+            .join('\n'),
+        ),
+      );
 
       const cores = ['NES', 'SNES', 'Genesis', 'Atari800', 'SMS'].map((id) =>
         makeCore({
@@ -601,15 +723,54 @@ describe('RealMisterClient', () => {
         }),
       );
 
-      await client.setBulkCoreVisibility(
+      const result = await client.setBulkCoreVisibility(
         cores.map((core) => ({ core, hidden: true })),
       );
 
       expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      expect(result.succeeded).toHaveLength(5);
+      expect(result.failed).toEqual([]);
+
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
-      const mvLines = script.split('\n').filter((l) => l.startsWith('mv '));
-      // 3 games dirs (NES, SNES, Genesis) + 5 rbfs = 8 renames.
-      expect(mvLines).toHaveLength(8);
+      // 3 games dirs (NES, SNES, Genesis) + 5 rbfs = 8 mv commands woven
+      // through five `(set -e ...)` per-core subshells.
+      const mvCount = (script.match(/mv '/g) ?? []).length;
+      expect(mvCount).toBe(8);
+      // Each core gets its own atomic subshell.
+      const subshellCount = (script.match(/\(set -e/g) ?? []).length;
+      expect(subshellCount).toBe(5);
+    });
+
+    it('returns a partial-success result when one core fails mid-batch', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'OK\tNES',
+            'FAIL\tSNES\tmv: cannot stat SNES',
+            'OK\tGenesis',
+          ].join('\n'),
+        ),
+      );
+
+      const result = await client.setBulkCoreVisibility(
+        ['NES', 'SNES', 'Genesis'].map((id) => ({
+          core: makeCore({
+            id,
+            rbfPaths: [`/media/fat/_Console/${id}_20240115.rbf`],
+            gamesDirExists: true,
+          }),
+          hidden: true,
+        })),
+      );
+
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      expect(result.succeeded).toEqual(['NES', 'Genesis']);
+      expect(result.failed).toEqual([
+        { coreId: 'SNES', reason: 'mv: cannot stat SNES' },
+      ]);
     });
 
     it('issues zero SSH calls when every change is a no-op', async () => {
