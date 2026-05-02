@@ -106,6 +106,35 @@ describe('isSystemFile — hidden (dot-prefixed) variants', () => {
   });
 });
 
+describe('isSystemFile — *boot.*/*bios.* suffix patterns', () => {
+  // The cases that motivated the suffix rule. AtariLynx's lynxboot.img
+  // doesn't match any prefix; before the suffix rule, the count
+  // wouldn't drop it and "Hide empty" missed AtariLynx with only its
+  // BIOS installed.
+  const SUFFIX_HITS: readonly string[] = [
+    'lynxboot.img',
+    'sega_bios.rom',
+    'gba_bios.bin',
+    'ngp_bios.bin',
+    'pcecd_bios.rom',
+    // The plain forms also match (also covered by the prefix rule).
+    'boot.img',
+    'bios.rom',
+  ];
+  for (const name of SUFFIX_HITS) {
+    it(`flags ${name} via the *boot/*bios suffix rule`, () => {
+      expect(isSystemFile(f(name))).toBe(true);
+    });
+  }
+
+  it('does not flag a real ROM whose name happens to start with letters that look BIOS-y', () => {
+    // Suffix rule requires `boot.` or `bios.` immediately before the
+    // ext. "Boot Camp Wars.zip" is not flagged.
+    expect(isSystemFile(f('Boot Camp Wars.zip'))).toBe(false);
+    expect(isSystemFile(f('Bootleg Bird (Hack).gba'))).toBe(false);
+  });
+});
+
 describe('isSystemFile — edge cases', () => {
   it('returns false for empty filenames', () => {
     expect(isSystemFile(f(''))).toBe(false);

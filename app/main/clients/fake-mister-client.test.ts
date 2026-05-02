@@ -474,12 +474,13 @@ describe('FakeMisterClient', () => {
       );
     });
 
-    it('counts a disc core (Saturn) as non-empty even with only one file', async () => {
+    it('counts a disc core (Saturn) by its disc folders, excluding the BIOS file', async () => {
       const cores = await client.listAllCoresWithFiles();
       const saturn = cores.find((c) => c.id === 'Saturn');
       expect(saturn).toBeDefined();
-      // 1 file + 3 dirs (2 visible + 1 hidden) = 4
-      expect(saturn!.romCount).toBe(4);
+      // Fixture: 1 BIOS file (sega_bios.rom — system, excluded) + 3 dirs
+      // (2 visible + 1 hidden). romCount counts only the dirs.
+      expect(saturn!.romCount).toBe(3);
       // The hidden folder counts toward hiddenCount.
       expect(saturn!.hiddenCount).toBe(1);
     });

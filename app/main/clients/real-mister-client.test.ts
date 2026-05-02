@@ -175,6 +175,17 @@ describe('RealMisterClient', () => {
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
 
+      // Per-entry GF/GD lines: NES has 9 ROMs (7 visible + 2 hidden),
+      // SNES the same, AO486 has 1 file, Orphan has 3 files. None of
+      // these names match the system-file heuristic so all of them
+      // count toward romCount.
+      const nesGames: string[] = [];
+      for (let i = 0; i < 7; i += 1) nesGames.push(`GF\tNES\tgame${String(i)}.nes`);
+      for (let i = 0; i < 2; i += 1) nesGames.push(`GF\tNES\t.hidden${String(i)}.nes`);
+      const snesGames: string[] = [];
+      for (let i = 0; i < 7; i += 1) snesGames.push(`GF\tSNES\tgame${String(i)}.sfc`);
+      for (let i = 0; i < 2; i += 1) snesGames.push(`GF\tSNES\t.hidden${String(i)}.sfc`);
+
       const stdout = [
         'R\tConsole\tfile\tNES_20240115.rbf',
         'R\tConsole\tfile\tNES_20231215.rbf',
@@ -187,10 +198,16 @@ describe('RealMisterClient', () => {
         'R\tComputer\tfile\tAtari800_20240220.rbf',
         'R\tArcade\tfile\tGalaga_20240115.rbf',
         'R\tArcade\tfile\tPacman_20240310.rbf',
-        'G\tNES\t9\t2',
-        'G\tSNES\t9\t2',
-        'G\tAO486\t1\t0',
-        'G\tOrphan\t3\t0',
+        'G\tNES',
+        ...nesGames,
+        'G\tSNES',
+        ...snesGames,
+        'G\tAO486',
+        'GF\tAO486\tDefault.img',
+        'G\tOrphan',
+        'GF\tOrphan\ta.bin',
+        'GF\tOrphan\tb.bin',
+        'GF\tOrphan\tc.bin',
         '',
       ].join('\n');
 
@@ -851,7 +868,21 @@ describe('RealMisterClient', () => {
       // listAllCoresWithFiles to verify each entry. Return a snapshot
       // that includes NES so the entry survives.
       mocks.execCommand.mockResolvedValueOnce(
-        execOk('R\tConsole\tfile\tNES_20240115.rbf\nG\tNES\t9\t2'),
+        execOk(
+          [
+            'R\tConsole\tfile\tNES_20240115.rbf',
+            'G\tNES',
+            'GF\tNES\tCastlevania.nes',
+            'GF\tNES\tContra.nes',
+            'GF\tNES\tFinal Fantasy.nes',
+            'GF\tNES\tMega Man 2.nes',
+            'GF\tNES\tMetroid.nes',
+            'GF\tNES\tSuper Mario Bros.nes',
+            'GF\tNES\tZelda.nes',
+            'GF\tNES\t.hidden1.nes',
+            'GF\tNES\t.hidden2.nes',
+          ].join('\n'),
+        ),
       );
 
       const ledger = await client.readHideLedger();
@@ -891,7 +922,21 @@ describe('RealMisterClient', () => {
       mocks.execCommand.mockResolvedValueOnce(execOk(ledgerJson));
       // listAllCoresWithFiles snapshot: only NES exists. _hidden doesn't.
       mocks.execCommand.mockResolvedValueOnce(
-        execOk('R\tConsole\tfile\tNES_20240115.rbf\nG\tNES\t9\t2'),
+        execOk(
+          [
+            'R\tConsole\tfile\tNES_20240115.rbf',
+            'G\tNES',
+            'GF\tNES\tCastlevania.nes',
+            'GF\tNES\tContra.nes',
+            'GF\tNES\tFinal Fantasy.nes',
+            'GF\tNES\tMega Man 2.nes',
+            'GF\tNES\tMetroid.nes',
+            'GF\tNES\tSuper Mario Bros.nes',
+            'GF\tNES\tZelda.nes',
+            'GF\tNES\t.hidden1.nes',
+            'GF\tNES\t.hidden2.nes',
+          ].join('\n'),
+        ),
       );
       // The heal triggers a writeHideLedger.
       mocks.execCommand.mockResolvedValueOnce(execOk(''));

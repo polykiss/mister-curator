@@ -127,7 +127,23 @@ describe('matchRbfsToGamesDirs', () => {
           isFolder: false,
         },
       ],
-      gamesDirs: [{ rawName: 'NES', romCount: 9, hiddenCount: 2 }],
+      gamesDirs: [
+        {
+          rawName: 'NES',
+          files: [
+            'Castlevania.nes',
+            'Contra.nes',
+            'Final Fantasy.nes',
+            'Mega Man 2.nes',
+            'Metroid.nes',
+            'Super Mario Bros.nes',
+            'Zelda.nes',
+            '.Action 52.nes',
+            '.Color a Dinosaur.nes',
+          ],
+          dirs: [],
+        },
+      ],
     });
 
     expect(result).toEqual([
@@ -161,7 +177,7 @@ describe('matchRbfsToGamesDirs', () => {
           isFolder: false,
         },
       ],
-      gamesDirs: [{ rawName: 'NES', romCount: 1, hiddenCount: 0 }],
+      gamesDirs: [{ rawName: 'NES', files: ['Castlevania.nes'], dirs: [] }],
     });
 
     expect(result).toHaveLength(1);
@@ -174,7 +190,9 @@ describe('matchRbfsToGamesDirs', () => {
   it('emits CoreEntry with category=Unknown for an orphan games dir', () => {
     const result = matchRbfsToGamesDirs({
       rbfs: [],
-      gamesDirs: [{ rawName: 'WeirdCore', romCount: 3, hiddenCount: 0 }],
+      gamesDirs: [
+        { rawName: 'WeirdCore', files: ['a.bin', 'b.bin', 'c.bin'], dirs: [] },
+      ],
     });
 
     expect(result[0]?.category).toBe('Unknown');
@@ -206,7 +224,13 @@ describe('matchRbfsToGamesDirs', () => {
   it('detects a hidden games dir from the leading dot', () => {
     const result = matchRbfsToGamesDirs({
       rbfs: [],
-      gamesDirs: [{ rawName: '.SNES', romCount: 5, hiddenCount: 0 }],
+      gamesDirs: [
+        {
+          rawName: '.SNES',
+          files: ['a.sfc', 'b.sfc', 'c.sfc', 'd.sfc', 'e.sfc'],
+          dirs: [],
+        },
+      ],
     });
     expect(result[0]?.id).toBe('SNES');
     expect(result[0]?.gamesDirHidden).toBe(true);
@@ -222,7 +246,7 @@ describe('matchRbfsToGamesDirs', () => {
           isFolder: true,
         },
       ],
-      gamesDirs: [{ rawName: 'AO486', romCount: 0, hiddenCount: 0 }],
+      gamesDirs: [{ rawName: 'AO486', files: [], dirs: [] }],
     });
 
     expect(result[0]?.category).toBe('Computer');
@@ -345,6 +369,136 @@ describe('matchRbfsToGamesDirs', () => {
     expect(result.map((c) => c.id)).toEqual(['apollo', 'NES', 'Zebra']);
   });
 
+  describe('romCount excludes system files', () => {
+    // F1: BIOSes, .xml/.ini configs, and *boot/*bios suffix files must
+    // not count toward romCount. A core that only contains a BIOS still
+    // qualifies as "empty" for the "Hide empty cores" sweep so cores like
+    // AtariLynx (only `lynxboot.img` installed) get caught.
+
+    it('treats a core with only a BIOS as empty (romCount=0)', () => {
+      // Real example: AtariLynx with only lynxboot.img. Before the
+      // system-file filter this counted as romCount=1 and slipped past
+      // "Hide empty cores".
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: 'AtariLynx_20240115.rbf',
+            fullPath: '/media/fat/_Console/AtariLynx_20240115.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [
+          { rawName: 'AtariLynx', files: ['lynxboot.img'], dirs: [] },
+        ],
+      });
+      const lynx = result.find((c) => c.id === 'AtariLynx');
+      expect(lynx?.romCount).toBe(0);
+      expect(lynx?.hiddenCount).toBe(0);
+    });
+
+    it('counts a real ROM alongside a BIOS (romCount=1)', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          { rawName: 'AtariLynx', files: ['boot.rom', 'mygame.lnx'], dirs: [] },
+        ],
+      });
+      const lynx = result.find((c) => c.id === 'AtariLynx');
+      expect(lynx?.romCount).toBe(1);
+    });
+
+    it('counts folder ROMs even if every file is a BIOS', () => {
+      // Saturn-shape: 1 BIOS file + 17 disc folders. romCount must
+      // reflect the folders so "Hide empty" never nukes a disc collection.
+      const dirs: string[] = [];
+      for (let i = 0; i < 17; i += 1) dirs.push(`Disc Game ${String(i)}`);
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          { rawName: 'Saturn', files: ['sega_bios.rom'], dirs },
+        ],
+      });
+      const saturn = result.find((c) => c.id === 'Saturn');
+      expect(saturn?.romCount).toBe(17);
+    });
+
+    it('mixes BIOS-filtered files with folder ROMs (romCount = folders)', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          {
+            rawName: 'NeoGeo',
+            files: ['boot.rom', 'romsets.xml', 'sfix.sfix'],
+            dirs: ['mslug', 'kof97', 'samsho', 'lastblade2', 'mslug2'],
+          },
+        ],
+      });
+      const neogeo = result.find((c) => c.id === 'NeoGeo');
+      expect(neogeo?.romCount).toBe(5);
+      expect(neogeo?.hiddenCount).toBe(0);
+    });
+
+    it('excludes a hidden BIOS from hiddenCount as well as romCount', () => {
+      // A hidden BIOS is still a BIOS — it doesn't make the core
+      // hide-relevant for the "Show all hidden ROMs" UI.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          {
+            rawName: 'NeoGeo',
+            files: ['.boot.rom', '.romsets.xml', 'mslug.zip'],
+            dirs: [],
+          },
+        ],
+      });
+      const neogeo = result.find((c) => c.id === 'NeoGeo');
+      expect(neogeo?.romCount).toBe(1);
+      expect(neogeo?.hiddenCount).toBe(0);
+    });
+
+    it('mirrors the NEOGEO snapshot (12 BIOS files + 9 game dirs → romCount=9)', () => {
+      // Real snapshot shape: NEOGEO ships with a dozen system files
+      // mixed in with the actual ROM folders (.zip / .neo).
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          {
+            rawName: 'NEOGEO',
+            files: [
+              '000-lo.lo',
+              'sfix.sfix',
+              'sp-s2.sp1',
+              'neo-epo.sp1',
+              'uni-bios.rom',
+              'uni-bioscd.rom',
+              'top-sp1.bin',
+              'neocd.bin',
+              'cd_bios.rom',
+              'romsets.xml',
+              'gog-romsets.xml',
+              'boot.rom',
+            ],
+            dirs: [
+              'mslug',
+              'kof97',
+              'mslug2',
+              'samsho',
+              'lastblade2',
+              'mslug3',
+              'kof98',
+              'samsho2',
+              'lastblade',
+            ],
+          },
+        ],
+      });
+      const neogeo = result.find((c) => c.id === 'NEOGEO');
+      expect(neogeo?.romCount).toBe(9);
+      expect(neogeo?.hiddenCount).toBe(0);
+    });
+  });
+
   describe('case-duplicate dedupe', () => {
     it('keeps the visible entry when one sibling is hidden (visible+hidden)', () => {
       // The exact shape from the real-MiSTer snapshot:
@@ -359,7 +513,7 @@ describe('matchRbfsToGamesDirs', () => {
             isFolder: false,
           },
         ],
-        gamesDirs: [{ rawName: '.VECTREX', romCount: 0, hiddenCount: 0 }],
+        gamesDirs: [{ rawName: '.VECTREX', files: [], dirs: [] }],
       });
 
       const matches = result.filter((c) => c.id.toLowerCase() === 'vectrex');
@@ -387,7 +541,7 @@ describe('matchRbfsToGamesDirs', () => {
             isFolder: false,
           },
         ],
-        gamesDirs: [{ rawName: '.APOGEE', romCount: 0, hiddenCount: 0 }],
+        gamesDirs: [{ rawName: '.APOGEE', files: [], dirs: [] }],
       });
       expect(result.find((c) => c.id.toLowerCase() === 'apogee')).toBeUndefined();
     });
@@ -421,7 +575,7 @@ describe('matchRbfsToGamesDirs', () => {
             isFolder: false,
           },
         ],
-        gamesDirs: [{ rawName: '.SAMCOUPE', romCount: 0, hiddenCount: 0 }],
+        gamesDirs: [{ rawName: '.SAMCOUPE', files: [], dirs: [] }],
       });
       const merged = result.find((c) => c.id.toLowerCase() === 'samcoupe');
       expect(merged?.id).toBe('SAMCoupe');

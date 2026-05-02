@@ -304,8 +304,11 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                 'flex w-full items-center gap-1 px-3 py-2 text-sm transition-colors',
                 isSelected && 'bg-accent',
                 !isSelected && 'hover:bg-accent/50',
-                // Hidden cores get a strong, unambiguous visual treatment.
-                isHiddenCore && 'bg-muted/60 text-muted-foreground italic',
+                // Hidden cores get a strong, unambiguous visual treatment:
+                // halved opacity + solid muted bg + italic + line-through
+                // on the name + a destructive HIDDEN badge below. Anyone
+                // glancing at the list can tell hidden from visible at speed.
+                isHiddenCore && 'bg-muted text-muted-foreground italic opacity-50',
                 // Arcade placeholder is read-only; render in a subtle
                 // "coming soon" style so it doesn't compete visually
                 // with active cores.
@@ -321,11 +324,20 @@ function renderCoreList(args: RenderArgs): JSX.Element {
               >
                 <span
                   className={cn(
-                    'truncate font-medium',
-                    isHiddenCore && 'line-through',
+                    'flex min-w-0 items-center gap-1.5 truncate font-medium',
                   )}
                 >
-                  {core.name}
+                  <span className={cn('truncate', isHiddenCore && 'line-through')}>
+                    {core.name}
+                  </span>
+                  {isHiddenCore ? (
+                    <span
+                      className="shrink-0 rounded bg-destructive px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide not-italic text-destructive-foreground"
+                      title="This core is hidden from the MiSTer menu."
+                    >
+                      Hidden
+                    </span>
+                  ) : null}
                 </span>
                 {isPlaceholder ? (
                   <span className="shrink-0 text-xs text-muted-foreground">

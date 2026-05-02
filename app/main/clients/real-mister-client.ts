@@ -116,10 +116,14 @@ export class RealMisterClient implements IMisterClient {
   async listAllCoresWithFiles(): Promise<CoreEntry[]> {
     this.assertConnected();
 
-    // One batched shell script that emits two kinds of TAB-separated lines:
+    // One batched shell script that emits TAB-separated lines:
     //   R\t<category>\t<file|dir>\t<filename>      one per rbf or folder-core
-    //   G\t<rawname>\t<total>\t<hidden>            one per games dir
-    // The JS side joins them via matchRbfsToGamesDirs.
+    //   G\t<rawname>                                one per games dir
+    //   GF\t<rawname>\t<filename>                  one per top-level file
+    //   GD\t<rawname>\t<dirname>                   one per top-level dir
+    //   A                                           if /media/fat/_Arcade exists
+    // The JS side joins them via matchRbfsToGamesDirs, which applies the
+    // `isSystemFile` heuristic to derive romCount/hiddenCount.
     const script = buildListAllCoresScript();
     const result = await this.ssh.execCommand(script);
     if (result.code !== 0) {
@@ -129,7 +133,12 @@ export class RealMisterClient implements IMisterClient {
     }
 
     const rbfs: RawRbfInput[] = [];
-    const gamesDirs: RawGamesDirInput[] = [];
+    // Aggregate per-games-dir entries from the GF / GD lines so the
+    // matcher can apply the system-file filter to derive romCount.
+    const gamesDirsBuilder = new Map<
+      string,
+      { files: string[]; dirs: string[] }
+    >();
     let arcadeDirExists = false;
     for (const line of result.stdout.split('\n')) {
       if (line === '') continue;
@@ -154,13 +163,39 @@ export class RealMisterClient implements IMisterClient {
           fullPath: `${dirForCategory}/${filename}`,
           isFolder: kind === 'dir',
         });
-      } else if (tag === 'G' && parts.length >= 4) {
+      } else if (tag === 'G' && parts.length >= 2) {
+        // Games-dir announcement. Initialises the bucket so empty
+        // dirs (no GF/GD lines following) still appear in the matcher
+        // input — without this they'd be lost.
         const rawName = parts[1] ?? '';
-        const total = Number.parseInt(parts[2] ?? '0', 10);
-        const hidden = Number.parseInt(parts[3] ?? '0', 10);
-        gamesDirs.push({ rawName, romCount: total, hiddenCount: hidden });
+        if (rawName !== '' && !gamesDirsBuilder.has(rawName)) {
+          gamesDirsBuilder.set(rawName, { files: [], dirs: [] });
+        }
+      } else if (tag === 'GF' && parts.length >= 3) {
+        const rawName = parts[1] ?? '';
+        const filename = parts.slice(2).join('\t');
+        let bucket = gamesDirsBuilder.get(rawName);
+        if (!bucket) {
+          bucket = { files: [], dirs: [] };
+          gamesDirsBuilder.set(rawName, bucket);
+        }
+        bucket.files.push(filename);
+      } else if (tag === 'GD' && parts.length >= 3) {
+        const rawName = parts[1] ?? '';
+        const dirname = parts.slice(2).join('\t');
+        let bucket = gamesDirsBuilder.get(rawName);
+        if (!bucket) {
+          bucket = { files: [], dirs: [] };
+          gamesDirsBuilder.set(rawName, bucket);
+        }
+        bucket.dirs.push(dirname);
       }
     }
+    const gamesDirs: RawGamesDirInput[] = Array.from(gamesDirsBuilder, ([rawName, b]) => ({
+      rawName,
+      files: b.files,
+      dirs: b.dirs,
+    }));
 
     return matchRbfsToGamesDirs({ rbfs, gamesDirs, arcadeDirExists });
   }
@@ -483,19 +518,27 @@ function buildListAllCoresScript(): string {
     ].join('\n');
   }).join('\n');
 
-  // Counts include BOTH files AND directories at depth 1, because
-  // folder-shaped ROMs (Saturn/MegaCD/X68000) live as subdirectories.
-  // Counting only files would mis-classify Saturn (1 file + 17 dirs) as
-  // empty and let "Hide empty cores" nuke a disc collection.
+  // Per-entry emission: one G line announcing the games dir, then one
+  // GF/GD line per top-level file/dir inside it. The matcher applies
+  // `isSystemFile` to derive romCount/hiddenCount — keeping the heuristic
+  // in JS means the shell stays dumb and we can extend the patterns
+  // without re-deploying. Folder-shaped ROMs (Saturn/MegaCD discs) come
+  // through as GD lines and are NEVER filtered out as system content.
   const gamesScript = [
     `if [ -d ${shellQuote(MISTER_GAMES_DIR)} ]; then`,
     `  cd ${shellQuote(MISTER_GAMES_DIR)}`,
     '  for d in * .[!.]*; do',
     '    [ -d "$d" ] || continue',
-    `    visible=$(find "$d" -maxdepth 1 -mindepth 1 \\( -type f -o -type d \\) ! -name '.*' 2>/dev/null | wc -l)`,
-    `    hidden=$(find "$d" -maxdepth 1 -mindepth 1 \\( -type f -o -type d \\) -name '.*' 2>/dev/null | wc -l)`,
-    '    total=$((visible + hidden))',
-    `    printf 'G\\t%s\\t%s\\t%s\\n' "$d" "$total" "$hidden"`,
+    `    printf 'G\\t%s\\n' "$d"`,
+    '    for entry in "$d"/* "$d"/.[!.]*; do',
+    '      [ -e "$entry" ] || continue',
+    '      name="${entry##*/}"',
+    '      if [ -f "$entry" ]; then',
+    `        printf 'GF\\t%s\\t%s\\n' "$d" "$name"`,
+    '      elif [ -d "$entry" ]; then',
+    `        printf 'GD\\t%s\\t%s\\n' "$d" "$name"`,
+    '      fi',
+    '    done',
     '  done',
     'fi',
   ].join('\n');

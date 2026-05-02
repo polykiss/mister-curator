@@ -49,6 +49,27 @@ const SYSTEM_FILE_EXTENSIONS: readonly string[] = [
 ];
 
 /**
+ * Suffix matches catch the very common BIOS naming convention used by
+ * many cores: `<core-prefix>boot.<ext>` and `<core-prefix>bios.<ext>`.
+ * Real-world examples that motivated this rule:
+ *   - lynxboot.img    (AtariLynx)
+ *   - sega_bios.rom   (Saturn)
+ *   - gba_bios.bin    (GBA)
+ *   - ngp_bios.ngp    (Neo Geo Pocket)
+ *
+ * False-positive risk is low: real ROM names rarely end with
+ * `boot.<ext>` or `bios.<ext>`. If we get bitten, we'll narrow.
+ */
+const SYSTEM_FILE_SUFFIXES: readonly string[] = [
+  'boot.img',
+  'boot.bin',
+  'boot.rom',
+  'bios.img',
+  'bios.bin',
+  'bios.rom',
+];
+
+/**
  * Folder-level rules. Top-level subfolders that match the case-
  * insensitive set are treated as system content (palettes, overlays,
  * filter packs, MiSTer's `old/` rotation dir).
@@ -88,6 +109,9 @@ export function isSystemFile(candidate: SystemFileCandidate): boolean {
   }
   for (const ext of SYSTEM_FILE_EXTENSIONS) {
     if (lower.endsWith(ext)) return true;
+  }
+  for (const suffix of SYSTEM_FILE_SUFFIXES) {
+    if (lower.endsWith(suffix)) return true;
   }
   return false;
 }

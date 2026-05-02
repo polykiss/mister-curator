@@ -301,9 +301,11 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                     data-state={isSelected ? 'selected' : undefined}
                     className={cn(
                       // Hidden ROMs get an unmistakable visual treatment —
-                      // muted background, low-contrast text, italics, line-
-                      // through. Same as cores so the user sees consistency.
-                      rom.hidden && 'bg-muted/50 text-muted-foreground',
+                      // halved opacity, solid muted bg, low-contrast text,
+                      // italics + line-through on the name, plus a
+                      // destructive HIDDEN badge. Same as the cores list
+                      // so the user sees consistency between panes.
+                      rom.hidden && 'bg-muted text-muted-foreground opacity-50',
                     )}
                   >
                     <TableCell>
@@ -334,6 +336,14 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                           />
                         ) : null}
                         <span className="truncate">{rom.displayName}</span>
+                        {rom.hidden ? (
+                          <span
+                            className="shrink-0 rounded bg-destructive px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide not-italic text-destructive-foreground"
+                            title="This ROM is hidden from the MiSTer menu."
+                          >
+                            Hidden
+                          </span>
+                        ) : null}
                         {isSystem ? (
                           <span
                             className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"

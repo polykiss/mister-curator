@@ -145,17 +145,16 @@ export class FakeMisterClient implements IMisterClient {
       if (!entry.isDirectory()) continue;
       const dirPath = path.join(localGamesRoot, entry.name);
       const inner = await fs.readdir(dirPath, { withFileTypes: true });
-      // ROM count = files + folder-shaped ROMs (subdirectories). Disc-
-      // based cores like Saturn ship as 1 file + 17 dirs and must NOT be
-      // treated as empty just because they have one .cue file.
-      let romCount = 0;
-      let hiddenCount = 0;
+      // The matcher applies the system-file filter to derive
+      // `romCount` and `hiddenCount` from this raw split, so the fake
+      // and real clients stay in sync on what counts as "empty".
+      const files: string[] = [];
+      const dirs: string[] = [];
       for (const f of inner) {
-        if (!f.isFile() && !f.isDirectory()) continue;
-        romCount += 1;
-        if (f.name.startsWith('.')) hiddenCount += 1;
+        if (f.isFile()) files.push(f.name);
+        else if (f.isDirectory()) dirs.push(f.name);
       }
-      gamesDirs.push({ rawName: entry.name, romCount, hiddenCount });
+      gamesDirs.push({ rawName: entry.name, files, dirs });
     }
 
     let arcadeDirExists = false;

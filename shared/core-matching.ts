@@ -1,4 +1,5 @@
 import { MISTER_GAMES_DIR } from '@shared/constants';
+import { isSystemFile } from '@shared/system-files';
 import type { CoreCategory, CoreEntry, HideLedger } from '@shared/types';
 
 /**
@@ -65,8 +66,10 @@ export interface RawRbfInput {
 export interface RawGamesDirInput {
   /** Raw on-disk directory name, including any leading `.`. */
   readonly rawName: string;
-  readonly romCount: number;
-  readonly hiddenCount: number;
+  /** Top-level files inside this games dir (basenames, may be dot-prefixed). */
+  readonly files: readonly string[];
+  /** Top-level subdirectories (basenames, may be dot-prefixed). */
+  readonly dirs: readonly string[];
 }
 
 export interface MatchInput {
@@ -144,19 +147,32 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     const visibleName = isHidden ? gd.rawName.slice(1) : gd.rawName;
     if (visibleName === '') continue;
 
+    // System files (BIOSes, .xml/.ini configs, BIOS-suffix images)
+    // are excluded from the count so a core with only a BIOS still
+    // qualifies as "empty" for the "Hide empty cores" sweep. Folders
+    // are NEVER excluded — the folder is the unit, regardless of
+    // what's inside it (Saturn-style disc cores).
+    const nonSystemFiles = gd.files.filter(
+      (f) => !isSystemFile({ filename: f, kind: 'file' }),
+    );
+    const romCount = nonSystemFiles.length + gd.dirs.length;
+    const hiddenCount =
+      nonSystemFiles.filter((f) => f.startsWith('.')).length +
+      gd.dirs.filter((d) => d.startsWith('.')).length;
+
     const existing = byId.get(visibleName);
     if (existing) {
       existing.gamesDirExists = true;
       existing.gamesDirHidden = isHidden;
       existing.gamesDirName = visibleName;
-      existing.romCount = gd.romCount;
-      existing.hiddenCount = gd.hiddenCount;
+      existing.romCount = romCount;
+      existing.hiddenCount = hiddenCount;
     } else {
       byId.set(visibleName, {
         id: visibleName,
         name: visibleName,
-        romCount: gd.romCount,
-        hiddenCount: gd.hiddenCount,
+        romCount,
+        hiddenCount,
         category: 'Unknown',
         rbfPaths: [],
         gamesDirExists: true,
