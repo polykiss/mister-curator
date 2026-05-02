@@ -1,4 +1,5 @@
-import type { HiddenCoreEntry, HideLedger } from '@shared/types';
+import { isRealCore } from '@shared/core-matching';
+import type { CoreEntry, HiddenCoreEntry, HideLedger } from '@shared/types';
 
 /**
  * The heredoc delimiter used by the real client when writing the ledger
@@ -69,10 +70,88 @@ export function withCoreHidden(ledger: HideLedger, entry: HiddenCoreEntry): Hide
 }
 
 export function withCoreShown(ledger: HideLedger, coreId: string): HideLedger {
+  // Case-insensitive comparison so an entry written under one canonical
+  // id (e.g. APOGEE pre-dedupe) is still removed when the new canonical
+  // is `Apogee`. Real ledgers should match exactly, but defensive.
+  const lower = coreId.toLowerCase();
   return {
     ...ledger,
-    hiddenCores: ledger.hiddenCores.filter((e) => e.coreId !== coreId),
+    hiddenCores: ledger.hiddenCores.filter((e) => e.coreId.toLowerCase() !== lower),
   };
+}
+
+/**
+ * Drops ledger entries that no longer correspond to a real core in the
+ * current device snapshot. Used by the IMisterClient layer on every
+ * read so that a ledger that has accumulated junk (a `_hidden` user
+ * folder we mis-recorded before the closeout fix, a case-duplicate
+ * that's since been deduped, a core uninstalled by the user, etc.) is
+ * cleaned up the next time we touch it.
+ *
+ * Lookups are case-insensitive against `currentCores` so a ledger
+ * written with one case continues to match an entry whose canonical
+ * id has shifted (e.g. APOGEE → Apogee after the case-dedupe step).
+ *
+ * Returns the same ledger object if nothing was dropped — callers can
+ * use referential equality to skip a needless rewrite.
+ */
+export function healLedger(
+  ledger: HideLedger,
+  currentCores: readonly CoreEntry[],
+): HideLedger {
+  if (ledger.hiddenCores.length === 0) return ledger;
+
+  const byLowerId = new Map<string, CoreEntry>();
+  for (const c of currentCores) byLowerId.set(c.id.toLowerCase(), c);
+
+  let dropped = 0;
+  const kept: HiddenCoreEntry[] = [];
+  for (const entry of ledger.hiddenCores) {
+    const core = byLowerId.get(entry.coreId.toLowerCase());
+    if (!core) {
+      // The cores list is the source of truth for "what's on the device
+      // right now". If a ledger entry doesn't map to any current core,
+      // the underlying paths are gone (or the case-dedupe dropped them
+      // as MiSTer leftover) — drop the entry.
+      dropped += 1;
+      continue;
+    }
+    if (!isRealCore(core)) {
+      // The core resolves to a non-real entry (Arcade placeholder,
+      // user folder, etc). The ledger should never carry these; clean
+      // up so the user-folder bug from earlier rounds can't linger.
+      dropped += 1;
+      continue;
+    }
+    kept.push(entry);
+  }
+
+  if (dropped === 0) return ledger;
+  return { ...ledger, hiddenCores: kept };
+}
+
+/**
+ * Structural equality for two ledgers. Used by callers that want to
+ * skip a rewrite when `healLedger` was a no-op. Order-sensitive
+ * because we don't promise a particular sort.
+ */
+export function ledgerEqual(a: HideLedger, b: HideLedger): boolean {
+  if (a === b) return true;
+  if (a.schemaVersion !== b.schemaVersion) return false;
+  if (a.hiddenCores.length !== b.hiddenCores.length) return false;
+  for (let i = 0; i < a.hiddenCores.length; i += 1) {
+    const ea = a.hiddenCores[i]!;
+    const eb = b.hiddenCores[i]!;
+    if (ea.coreId !== eb.coreId) return false;
+    if (ea.gamesDirHidden !== eb.gamesDirHidden) return false;
+    if (ea.gamesDirName !== eb.gamesDirName) return false;
+    if (ea.hiddenAt !== eb.hiddenAt) return false;
+    if (ea.rbfPaths.length !== eb.rbfPaths.length) return false;
+    for (let j = 0; j < ea.rbfPaths.length; j += 1) {
+      if (ea.rbfPaths[j] !== eb.rbfPaths[j]) return false;
+    }
+  }
+  return true;
 }
 
 function isLedgerObject(v: unknown): v is HideLedger {

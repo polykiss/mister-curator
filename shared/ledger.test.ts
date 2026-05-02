@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import type { HiddenCoreEntry, HideLedger } from '@shared/types';
 
+import type { CoreEntry } from '@shared/types';
+
 import {
   EMPTY_LEDGER,
+  healLedger,
+  ledgerEqual,
   LEDGER_HEREDOC_DELIMITER,
   parseLedger,
   serializeLedger,
@@ -118,5 +122,112 @@ describe('withCoreShown', () => {
   it('is a no-op when no entry matches', () => {
     const next = withCoreShown(sampleLedger, 'SNES');
     expect(next.hiddenCores).toEqual(sampleLedger.hiddenCores);
+  });
+
+  it('removes by case-insensitive id match (defensive)', () => {
+    const ledger = withCoreHidden(EMPTY_LEDGER, { ...sampleEntry, coreId: 'APOGEE' });
+    const next = withCoreShown(ledger, 'Apogee');
+    expect(next.hiddenCores).toEqual([]);
+  });
+});
+
+describe('healLedger', () => {
+  function makeCore(overrides: Partial<CoreEntry> = {}): CoreEntry {
+    return {
+      id: 'NES',
+      name: 'NES',
+      romCount: 0,
+      hiddenCount: 0,
+      category: 'Console',
+      rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
+      gamesDirExists: true,
+      gamesDirHidden: false,
+      ...overrides,
+    };
+  }
+
+  const ledgerWith = (...entries: HiddenCoreEntry[]): HideLedger => ({
+    schemaVersion: 1,
+    hiddenCores: entries,
+  });
+
+  it('returns the same ledger reference when nothing is stale', () => {
+    const ledger = ledgerWith(sampleEntry);
+    const cores = [makeCore({ id: 'NES' })];
+    expect(healLedger(ledger, cores)).toBe(ledger);
+  });
+
+  it('drops an entry whose coreId no longer exists in current cores', () => {
+    const ledger = ledgerWith({
+      coreId: '_hidden',
+      gamesDirHidden: true,
+      rbfPaths: [],
+      hiddenAt: '2026-01-01T00:00:00Z',
+    });
+    const cores: CoreEntry[] = []; // no current cores at all
+    const healed = healLedger(ledger, cores);
+    expect(healed.hiddenCores).toEqual([]);
+    expect(healed).not.toBe(ledger);
+  });
+
+  it('drops an entry whose current core fails the isRealCore check', () => {
+    const ledger = ledgerWith({
+      coreId: 'Bogus',
+      gamesDirHidden: true,
+      rbfPaths: [],
+      hiddenAt: '2026-01-01T00:00:00Z',
+    });
+    // Simulate a CoreEntry that somehow exists but isn't a real core —
+    // e.g. an Arcade-category entry that snuck through.
+    const cores = [
+      makeCore({ id: 'Bogus', category: 'Arcade', rbfPaths: [], gamesDirExists: false }),
+    ];
+    const healed = healLedger(ledger, cores);
+    expect(healed.hiddenCores).toEqual([]);
+  });
+
+  it('matches ledger entries to cores case-insensitively', () => {
+    const ledger = ledgerWith({
+      coreId: 'APOGEE', // pre-dedupe casing
+      gamesDirHidden: true,
+      rbfPaths: [],
+      hiddenAt: '2026-01-01T00:00:00Z',
+    });
+    const cores = [makeCore({ id: 'Apogee' })]; // post-dedupe canonical
+    expect(healLedger(ledger, cores)).toBe(ledger);
+  });
+
+  it('keeps survivors and drops stale ones in a mixed batch', () => {
+    const ledger = ledgerWith(
+      { ...sampleEntry, coreId: 'NES' },
+      { ...sampleEntry, coreId: '_hidden' },
+      { ...sampleEntry, coreId: 'SNES' },
+    );
+    const cores = [makeCore({ id: 'NES' }), makeCore({ id: 'SNES' })];
+    const healed = healLedger(ledger, cores);
+    expect(healed.hiddenCores.map((e) => e.coreId)).toEqual(['NES', 'SNES']);
+  });
+});
+
+describe('ledgerEqual', () => {
+  it('returns true for two empty ledgers', () => {
+    expect(ledgerEqual(EMPTY_LEDGER, EMPTY_LEDGER)).toBe(true);
+  });
+
+  it('returns true for the same ledger reference', () => {
+    expect(ledgerEqual(sampleLedger, sampleLedger)).toBe(true);
+  });
+
+  it('returns false when entries differ in length', () => {
+    expect(ledgerEqual(EMPTY_LEDGER, sampleLedger)).toBe(false);
+  });
+
+  it('returns false when entry contents differ', () => {
+    const a = sampleLedger;
+    const b: HideLedger = {
+      schemaVersion: 1,
+      hiddenCores: [{ ...sampleEntry, coreId: 'OTHER' }],
+    };
+    expect(ledgerEqual(a, b)).toBe(false);
   });
 });

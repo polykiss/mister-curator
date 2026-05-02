@@ -17,6 +17,7 @@ function makeRom(filename: string, hidden: boolean): Rom {
     sizeBytes: 1024,
     hidden,
     path: `/media/fat/games/NES/${filename}`,
+    kind: 'file',
   };
 }
 
@@ -32,6 +33,7 @@ describe('applyVisibilityChange', () => {
       sizeBytes: 1024,
       hidden: true,
       path: '/media/fat/games/NES/.foo.nes',
+      kind: 'file',
     });
     expect(next[1]).toBe(roms[1]); // unchanged reference
   });

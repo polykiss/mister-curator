@@ -27,9 +27,9 @@ export type CoreCategory = 'Console' | 'Computer' | 'Other' | 'Utility' | 'Arcad
  * (`category: 'Unknown'`).
  *
  * Counts (`romCount`, `hiddenCount`) are zero when `gamesDirExists` is
- * false. `rbfPaths` lists every matching .rbf file or folder-shaped core
- * directory under `_Console/_Computer/_Other/_Utility/_Arcade/`; multiple
- * versions of the same core map to multiple entries in this list.
+ * false. `rbfPaths` lists every matching .rbf / .mgl file or folder-shaped
+ * core directory; multiple versions of the same core map to multiple
+ * entries in this list.
  */
 export interface CoreEntry {
   readonly id: string;
@@ -40,6 +40,22 @@ export interface CoreEntry {
   readonly rbfPaths: readonly string[];
   readonly gamesDirExists: boolean;
   readonly gamesDirHidden: boolean;
+  /**
+   * On-disk basename of the games directory in its undotted (visible) form,
+   * preserved exactly as it appears on the device. Set whenever
+   * `gamesDirExists` is true. Distinct from `id` to handle case mismatches
+   * between the .rbf prefix and the games dir name (e.g. `.Apogee*.rbf`
+   * paired with `games/.APOGEE`).
+   */
+  readonly gamesDirName?: string;
+  /**
+   * True iff this core's hidden state was caused by MiSTerCurator (i.e.
+   * there is a matching entry in the on-MiSTer ledger). Set by
+   * ConnectionManager after merging the ledger with the device snapshot;
+   * undefined at the IMisterClient layer. The renderer treats undefined
+   * as false (defensive).
+   */
+  readonly managedByApp?: boolean;
 }
 
 export interface Rom {
@@ -49,6 +65,13 @@ export interface Rom {
   readonly sizeBytes: number;
   readonly hidden: boolean;
   readonly path: string;
+  /**
+   * 'file' for a single-file ROM (typical NES/SNES/Genesis cartridge dump);
+   * 'folder' for a multi-file disc dump (Saturn, MegaCD, X68000 …) where
+   * the directory itself is the unit of hide/show. Folder ROMs are renamed
+   * with a leading dot just like file ROMs.
+   */
+  readonly kind: 'file' | 'folder';
 }
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -82,6 +105,12 @@ export class MisterConnectionError extends Error implements ConnectionError {
 export interface HiddenCoreEntry {
   readonly coreId: string;
   readonly gamesDirHidden: boolean;
+  /**
+   * On-disk basename (undotted form) of the games dir at the time of hide.
+   * Lets us un-hide a case-mismatched dir later (e.g. games/.APOGEE while
+   * the canonical id is `Apogee`). Defaults to coreId when absent.
+   */
+  readonly gamesDirName?: string;
   readonly rbfPaths: readonly string[];
   readonly hiddenAt: string;
 }

@@ -3,7 +3,12 @@ import {
   isCoreHidden,
   isRealCore,
 } from '@shared/core-matching';
-import { withCoreHidden, withCoreShown } from '@shared/ledger';
+import {
+  EMPTY_LEDGER,
+  ledgerEqual,
+  withCoreHidden,
+  withCoreShown,
+} from '@shared/ledger';
 import type {
   BulkCoreResult,
   BulkRomResult,
@@ -34,20 +39,34 @@ export interface ConnectResult {
  * The renderer talks to this through IPC; main pushes status transitions
  * back to any registered listener (typically a webContents.send adapter).
  *
- * The manager also owns the on-MiSTer hide ledger I/O — the IPC bridge
- * intentionally does not expose ledger reads/writes to the renderer, so
- * the ledger is only ever touched here.
+ * Owns the on-MiSTer hide ledger. Treats it as a *permission slip*:
  *
- * Bulk operations forward partial-success results from the client up to
- * the IPC layer, but the manager filters non-real cores out of the input
- * up front (defense-in-depth: the renderer's cores list also filters
- * via isRealCore, but this layer enforces the same guarantee).
+ *   - The cores list returned to the renderer is enriched with
+ *     `managedByApp = true` iff the ledger has an entry for the core.
+ *     The renderer uses this to gate the un-hide UI and to count
+ *     "hidden externally" cores separately.
+ *   - `showCore` / un-hide paths refuse to operate on a core that is
+ *     NOT in the ledger. Pre-existing dot-prefixed directories from
+ *     MiSTer's stock state (or other tools) are left alone.
+ *   - `hideCore` / hide paths only ever add entries we just renamed.
+ *     The ledger is therefore always a strict subset of the things on
+ *     disk that we intend to manage.
+ *
+ * Ledger I/O is intentionally NOT exposed on the IPC bridge — the
+ * renderer only sees its consequences (managedByApp, the reappliedCount
+ * from connect, success/failure of hide/show).
  */
 export class ConnectionManager {
   private status: ConnectionStatus = 'disconnected';
   private currentProfileId: string | null = null;
   private readonly listeners = new Set<StatusListener>();
   private coresCache: CoreEntry[] = [];
+  /**
+   * In-memory copy of the on-MiSTer ledger. Populated by `readLedgerFresh`
+   * on connect, and kept in sync with every successful hide/show. The
+   * renderer's cores list is enriched against this cache.
+   */
+  private ledgerCache: HideLedger = EMPTY_LEDGER;
 
   constructor(
     private readonly client: IMisterClient,
@@ -80,6 +99,7 @@ export class ConnectionManager {
 
     this.setStatus('connecting');
     this.coresCache = [];
+    this.ledgerCache = EMPTY_LEDGER;
 
     try {
       const profile = await this.store.get(profileId);
@@ -89,6 +109,10 @@ export class ConnectionManager {
       const secret: MisterSecret = await this.store.getSecret(profileId);
       await this.client.connect(profile, secret);
       this.currentProfileId = profileId;
+
+      // Prime the ledger cache. readHideLedger self-heals as a side
+      // effect — drops stale `_hidden` etc. entries and rewrites.
+      this.ledgerCache = await this.client.readHideLedger();
 
       let reappliedCount = 0;
       if (profile.autoReapplyHides === true) {
@@ -110,15 +134,20 @@ export class ConnectionManager {
     } finally {
       this.currentProfileId = null;
       this.coresCache = [];
+      this.ledgerCache = EMPTY_LEDGER;
       this.setStatus('disconnected');
     }
   }
 
   async listAllCoresWithFiles(): Promise<CoreEntry[]> {
     this.assertConnected();
-    const cores = await this.client.listAllCoresWithFiles();
-    this.coresCache = [...cores];
-    return cores;
+    const raw = await this.client.listAllCoresWithFiles();
+    const enriched = raw.map((c) => ({
+      ...c,
+      managedByApp: this.ledgerHasCore(c.id),
+    }));
+    this.coresCache = enriched;
+    return enriched;
   }
 
   async listRoms(coreId: string): Promise<Rom[]> {
@@ -147,9 +176,7 @@ export class ConnectionManager {
     this.assertConnected();
     const core = await this.lookupCore(coreId);
     if (!isRealCore(core)) {
-      throw new Error(
-        `Refusing to hide '${coreId}': not a real core.`,
-      );
+      throw new Error(`Refusing to hide '${coreId}': not a real core.`);
     }
     await this.client.hideCore(core);
     await this.recordHide(core);
@@ -159,8 +186,11 @@ export class ConnectionManager {
     this.assertConnected();
     const core = await this.lookupCore(coreId);
     if (!isRealCore(core)) {
+      throw new Error(`Refusing to show '${coreId}': not a real core.`);
+    }
+    if (!this.ledgerHasCore(core.id)) {
       throw new Error(
-        `Refusing to show '${coreId}': not a real core.`,
+        `Refusing to show '${core.id}': not managed by MiSTerCurator (likely hidden by another tool — we will not modify it).`,
       );
     }
     await this.client.showCore(core);
@@ -173,9 +203,6 @@ export class ConnectionManager {
     this.assertConnected();
     if (changes.length === 0) return { succeeded: [], failed: [] };
 
-    // Resolve coreIds to CoreEntries and filter out anything that isn't a
-    // real core. Non-real entries (user folders, arcade placeholder) are
-    // reported as failed in the result rather than aborting the batch.
     const resolved: CoreVisibilityChange[] = [];
     const upfrontFailed: { coreId: string; reason: string }[] = [];
     for (const c of changes) {
@@ -196,6 +223,17 @@ export class ConnectionManager {
         });
         continue;
       }
+      if (!c.hidden && !this.ledgerHasCore(core.id)) {
+        // Permission slip: the un-hide path refuses cores the app didn't
+        // hide. This is what protects the ~40+ pre-existing dot-prefixed
+        // directories on a real MiSTer from being un-hidden by the user
+        // accidentally clicking "Show all hidden".
+        upfrontFailed.push({
+          coreId: core.id,
+          reason: 'not managed by MiSTerCurator (we will not modify it)',
+        });
+        continue;
+      }
       resolved.push({ core, hidden: c.hidden });
     }
 
@@ -206,31 +244,30 @@ export class ConnectionManager {
     const result = await this.client.setBulkCoreVisibility(resolved);
     const failed = [...upfrontFailed, ...result.failed];
 
-    // Ledger update: only for cores whose renames fully succeeded. A
-    // partial failure within a core is impossible because the client
-    // wraps each core's renames in `set -e`, so per-core success is
-    // all-or-nothing.
+    // Ledger update: only for cores whose renames fully succeeded.
     const succeededIds = new Set(result.succeeded);
-    let ledger: HideLedger = await this.client.readHideLedger();
+    let ledger = this.ledgerCache;
     for (const c of resolved) {
       if (!succeededIds.has(c.core.id)) continue;
       ledger = c.hidden
         ? withCoreHidden(ledger, this.toHiddenEntry(c.core))
         : withCoreShown(ledger, c.core.id);
     }
-    await this.client.writeHideLedger(ledger);
+    if (!ledgerEqual(ledger, this.ledgerCache)) {
+      await this.client.writeHideLedger(ledger);
+      this.ledgerCache = ledger;
+    }
 
     return { succeeded: result.succeeded, failed };
   }
 
   private async runAutoReapply(): Promise<number> {
-    const ledger = await this.client.readHideLedger();
-    if (ledger.hiddenCores.length === 0) return 0;
+    if (this.ledgerCache.hiddenCores.length === 0) return 0;
 
     const cores = await this.client.listAllCoresWithFiles();
-    this.coresCache = [...cores];
+    this.coresCache = cores;
 
-    const changes = computeAutoReapplyChanges(ledger, cores);
+    const changes = computeAutoReapplyChanges(this.ledgerCache, cores);
     if (changes.length === 0) return 0;
 
     const coresById = new Map(cores.map((c) => [c.id, c]));
@@ -238,8 +275,6 @@ export class ConnectionManager {
     for (const c of changes) {
       const core = coresById.get(c.coreId);
       if (!core) continue;
-      // computeAutoReapplyChanges already filters arcade and missing,
-      // but defense-in-depth: skip anything that isn't a real core.
       if (!isRealCore(core)) continue;
       resolved.push({ core, hidden: c.hidden });
     }
@@ -249,21 +284,24 @@ export class ConnectionManager {
 
     // Refresh the cache so subsequent hideCore lookups see the new state.
     const refreshed = await this.client.listAllCoresWithFiles();
-    this.coresCache = [...refreshed];
+    this.coresCache = refreshed.map((c) => ({
+      ...c,
+      managedByApp: this.ledgerHasCore(c.id),
+    }));
 
     return result.succeeded.length;
   }
 
   private async recordHide(core: CoreEntry): Promise<void> {
-    const ledger = await this.client.readHideLedger();
-    const next = withCoreHidden(ledger, this.toHiddenEntry(core));
+    const next = withCoreHidden(this.ledgerCache, this.toHiddenEntry(core));
     await this.client.writeHideLedger(next);
+    this.ledgerCache = next;
   }
 
   private async recordShow(core: CoreEntry): Promise<void> {
-    const ledger = await this.client.readHideLedger();
-    const next = withCoreShown(ledger, core.id);
+    const next = withCoreShown(this.ledgerCache, core.id);
     await this.client.writeHideLedger(next);
+    this.ledgerCache = next;
   }
 
   private toHiddenEntry(core: CoreEntry): HiddenCoreEntry {
@@ -277,23 +315,31 @@ export class ConnectionManager {
     return {
       coreId: core.id,
       gamesDirHidden: core.gamesDirExists,
+      gamesDirName: core.gamesDirName,
       rbfPaths: canonicalRbfs,
       hiddenAt: new Date().toISOString(),
     };
   }
 
   private async lookupCore(coreId: string): Promise<CoreEntry> {
-    const cached = this.coresCache.find((c) => c.id === coreId);
+    const lower = coreId.toLowerCase();
+    const cached = this.coresCache.find((c) => c.id.toLowerCase() === lower);
     if (cached) return cached;
 
     // Cache miss — refresh and retry once.
-    const cores = await this.client.listAllCoresWithFiles();
-    this.coresCache = [...cores];
-    const fresh = cores.find((c) => c.id === coreId);
+    await this.listAllCoresWithFiles();
+    const fresh = this.coresCache.find((c) => c.id.toLowerCase() === lower);
     if (!fresh) {
       throw new Error(`Unknown core: ${coreId}`);
     }
     return fresh;
+  }
+
+  private ledgerHasCore(coreId: string): boolean {
+    const lower = coreId.toLowerCase();
+    return this.ledgerCache.hiddenCores.some(
+      (e) => e.coreId.toLowerCase() === lower,
+    );
   }
 
   private assertConnected(): void {

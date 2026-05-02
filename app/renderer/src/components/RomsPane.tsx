@@ -1,4 +1,4 @@
-import { Eye, EyeOff } from 'lucide-react';
+import { Eye, EyeOff, Folder } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
@@ -221,7 +221,15 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         rom.hidden && 'italic text-muted-foreground line-through',
                       )}
                     >
-                      {rom.displayName}
+                      <span className="inline-flex items-center gap-1.5">
+                        {rom.kind === 'folder' ? (
+                          <Folder
+                            className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                            aria-label="folder ROM"
+                          />
+                        ) : null}
+                        <span className="truncate">{rom.displayName}</span>
+                      </span>
                     </TableCell>
                     <TableCell className="text-right text-xs text-muted-foreground">
                       {formatBytes(rom.sizeBytes)}

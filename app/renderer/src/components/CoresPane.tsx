@@ -32,10 +32,20 @@ export function CoresPane(): JSX.Element {
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
 
-  const visibleCores = useMemo(() => {
+  // Cores list excludes externally-hidden entries. They're cores whose
+  // hidden state pre-dates our ledger (MiSTer's stock layout, other
+  // tools). The user can still see they exist via the header count.
+  const presentableCores = useMemo(() => {
     if (!cores) return null;
-    return showHidden ? cores : cores.filter((c) => !isCoreHidden(c));
-  }, [cores, showHidden]);
+    return cores.filter((c) => !isCoreHidden(c) || c.managedByApp === true);
+  }, [cores]);
+
+  const visibleCores = useMemo(() => {
+    if (!presentableCores) return null;
+    return showHidden
+      ? presentableCores
+      : presentableCores.filter((c) => !isCoreHidden(c));
+  }, [presentableCores, showHidden]);
 
   const emptyHideableCores = useMemo(
     () =>
@@ -45,8 +55,22 @@ export function CoresPane(): JSX.Element {
     [cores],
   );
 
-  const allHiddenCores = useMemo(
-    () => (cores ?? []).filter((c) => isCoreHidden(c) && c.category !== 'Arcade'),
+  // "Show all hidden (N)" only counts cores we hid ourselves. Pre-existing
+  // dot-prefixed dirs from MiSTer's stock state stay alone.
+  const appHiddenCores = useMemo(
+    () =>
+      (cores ?? []).filter(
+        (c) => isCoreHidden(c) && c.managedByApp === true && c.category !== 'Arcade',
+      ),
+    [cores],
+  );
+
+  const externalHiddenCount = useMemo(
+    () =>
+      (cores ?? []).filter(
+        (c) =>
+          isCoreHidden(c) && c.managedByApp !== true && c.category !== 'Arcade',
+      ).length,
     [cores],
   );
 
@@ -111,8 +135,8 @@ export function CoresPane(): JSX.Element {
   };
 
   const onShowAllHidden = async (): Promise<void> => {
-    if (allHiddenCores.length === 0) return;
-    const changes = allHiddenCores.map((c) => ({ coreId: c.id, hidden: false }));
+    if (appHiddenCores.length === 0) return;
+    const changes = appHiddenCores.map((c) => ({ coreId: c.id, hidden: false }));
     try {
       const result = await setBulkCoreVisibility(changes);
       const summary = summarizeBulkResult({
@@ -173,11 +197,11 @@ export function CoresPane(): JSX.Element {
             variant="outline"
             size="sm"
             onClick={() => void onShowAllHidden()}
-            disabled={allHiddenCores.length === 0}
-            title="Restore visibility for every hidden core in one batch"
+            disabled={appHiddenCores.length === 0}
+            title="Restore visibility for every core MiSTerCurator hid"
           >
             <Undo2 />
-            Show all hidden ({allHiddenCores.length})
+            Show all hidden ({appHiddenCores.length})
           </Button>
         </div>
         <label className="flex items-center gap-1.5">
@@ -189,6 +213,15 @@ export function CoresPane(): JSX.Element {
           Show hidden
         </label>
       </header>
+      {externalHiddenCount > 0 ? (
+        <div
+          className="border-b bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+          title="These cores were already hidden when MiSTerCurator first connected. We won't modify them."
+        >
+          {String(externalHiddenCount)} cores hidden externally — managed by other
+          tools, not by MiSTerCurator.
+        </div>
+      ) : null}
 
       {renderCoreList({
         cores,
@@ -267,6 +300,10 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                 !isSelected && 'hover:bg-accent/50',
                 // Hidden cores get a strong, unambiguous visual treatment.
                 isHiddenCore && 'bg-muted/60 text-muted-foreground italic',
+                // Arcade placeholder is read-only; render in a subtle
+                // "coming soon" style so it doesn't compete visually
+                // with active cores.
+                isPlaceholder && 'italic text-muted-foreground/80',
               )}
             >
               <button
@@ -324,15 +361,17 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                   </Button>
                 </div>
               ) : isArcade ? (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  disabled
+                // Arcade is read-only. No checkbox, no eye icon — it's
+                // a label-only row. The tooltip on the row itself
+                // surfaces the "coming later" message; a screen reader
+                // gets the same message via aria-label on the row.
+                <span
+                  className="shrink-0 px-2 text-xs italic text-muted-foreground/70"
                   title={ARCADE_TOOLTIP}
                   aria-label={ARCADE_TOOLTIP}
                 >
-                  <EyeOff />
-                </Button>
+                  read-only
+                </span>
               ) : isHiddenCore ? (
                 // State icon: crossed-out eye = currently hidden. Click to show.
                 <Button

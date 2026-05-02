@@ -17,7 +17,12 @@ import {
   type RawGamesDirInput,
   type RawRbfInput,
 } from '@shared/core-matching';
-import { parseLedger, serializeLedger } from '@shared/ledger';
+import {
+  healLedger,
+  ledgerEqual,
+  parseLedger,
+  serializeLedger,
+} from '@shared/ledger';
 import { MisterConnectionError } from '@shared/types';
 import type {
   CoreEntry,
@@ -140,10 +145,13 @@ export class FakeMisterClient implements IMisterClient {
       if (!entry.isDirectory()) continue;
       const dirPath = path.join(localGamesRoot, entry.name);
       const inner = await fs.readdir(dirPath, { withFileTypes: true });
+      // ROM count = files + folder-shaped ROMs (subdirectories). Disc-
+      // based cores like Saturn ship as 1 file + 17 dirs and must NOT be
+      // treated as empty just because they have one .cue file.
       let romCount = 0;
       let hiddenCount = 0;
       for (const f of inner) {
-        if (!f.isFile()) continue;
+        if (!f.isFile() && !f.isDirectory()) continue;
         romCount += 1;
         if (f.name.startsWith('.')) hiddenCount += 1;
       }
@@ -180,19 +188,37 @@ export class FakeMisterClient implements IMisterClient {
 
     const roms: Rom[] = [];
     for (const entry of entries) {
-      if (!entry.isFile()) continue;
       const filename = entry.name;
-      const stat = await fs.stat(path.join(localDir, filename));
       const hidden = filename.startsWith('.');
       const displayName = hidden ? filename.slice(1) : filename;
-      roms.push({
-        coreId,
-        filename,
-        displayName,
-        sizeBytes: stat.size,
-        hidden,
-        path: `${MISTER_GAMES_DIR}/${coreId}/${filename}`,
-      });
+      const fullPath = path.join(localDir, filename);
+
+      if (entry.isFile()) {
+        const stat = await fs.stat(fullPath);
+        roms.push({
+          coreId,
+          filename,
+          displayName,
+          sizeBytes: stat.size,
+          hidden,
+          path: `${MISTER_GAMES_DIR}/${coreId}/${filename}`,
+          kind: 'file',
+        });
+      } else if (entry.isDirectory()) {
+        // Folder ROMs (Saturn, MegaCD, X68000 …) — the directory itself
+        // is the unit of hide/show. Size is the recursive byte total of
+        // everything inside.
+        const sizeBytes = await sumDirectoryBytes(fullPath);
+        roms.push({
+          coreId,
+          filename,
+          displayName,
+          sizeBytes,
+          hidden,
+          path: `${MISTER_GAMES_DIR}/${coreId}/${filename}`,
+          kind: 'folder',
+        });
+      }
     }
 
     roms.sort((a, b) => a.displayName.localeCompare(b.displayName));
@@ -314,13 +340,29 @@ export class FakeMisterClient implements IMisterClient {
     this.assertConnected();
     await this.delay();
     const localPath = this.toLocal(MISTER_LEDGER_PATH);
+    let raw: HideLedger;
     try {
-      const raw = await fs.readFile(localPath, 'utf-8');
-      return parseLedger(raw);
+      const text = await fs.readFile(localPath, 'utf-8');
+      raw = parseLedger(text);
     } catch (err) {
-      if (isNodeError(err) && err.code === 'ENOENT') return parseLedger('');
-      throw err;
+      if (isNodeError(err) && err.code === 'ENOENT') {
+        raw = parseLedger('');
+      } else {
+        throw err;
+      }
     }
+
+    if (raw.hiddenCores.length === 0) return raw;
+
+    // Self-heal: drop entries that no longer correspond to a real core.
+    const cores = await this.listAllCoresWithFiles();
+    const healed = healLedger(raw, cores);
+    if (!ledgerEqual(raw, healed)) {
+      const dropped = raw.hiddenCores.length - healed.hiddenCores.length;
+      console.log(`Ledger self-healed: dropped ${String(dropped)} stale entries.`);
+      await this.writeHideLedger(healed);
+    }
+    return healed;
   }
 
   async writeHideLedger(ledger: HideLedger): Promise<void> {
@@ -452,4 +494,24 @@ export class FakeMisterClient implements IMisterClient {
 
 function isNodeError(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && 'code' in err;
+}
+
+/**
+ * Sums byte sizes of every regular file under `dir`, recursively. Mirrors
+ * the real client's `du -sb` behaviour so the fake reports identical
+ * sizes for folder ROMs against the same fixture content.
+ */
+async function sumDirectoryBytes(dir: string): Promise<number> {
+  let total = 0;
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isFile()) {
+      const stat = await fs.stat(full);
+      total += stat.size;
+    } else if (entry.isDirectory()) {
+      total += await sumDirectoryBytes(full);
+    }
+  }
+  return total;
 }

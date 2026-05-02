@@ -424,4 +424,106 @@ describe('FakeMisterClient', () => {
       expect(result.failed.map((f) => f.filename)).toEqual(['IDoNotExist.nes']);
     });
   });
+
+  describe('folder ROMs', () => {
+    it('lists folder ROMs alongside file ROMs in mixed cores', async () => {
+      const roms = await client.listRoms('AO486');
+      const file = roms.find((r) => r.filename === 'Default.img');
+      const folder = roms.find((r) => r.filename === 'Boot Disk Compilation');
+      expect(file?.kind).toBe('file');
+      expect(folder).toBeDefined();
+      expect(folder?.kind).toBe('folder');
+      // Folder size aggregates contained files (both touch'd to 0 bytes).
+      expect(folder?.sizeBytes).toBe(0);
+    });
+
+    it('lists folder ROMs in a disc-based core (Saturn)', async () => {
+      const roms = await client.listRoms('Saturn');
+      const filenames = roms.map((r) => r.filename);
+      expect(filenames).toContain('sega_bios.rom'); // file
+      expect(filenames).toContain('Panzer Dragoon (USA) (1S)'); // folder
+      expect(filenames).toContain('Burning Rangers (USA)'); // folder
+
+      const panzer = roms.find((r) => r.filename === 'Panzer Dragoon (USA) (1S)');
+      expect(panzer?.kind).toBe('folder');
+      expect(panzer?.hidden).toBe(false);
+      expect(panzer?.path).toBe('/media/fat/games/Saturn/Panzer Dragoon (USA) (1S)');
+
+      const hiddenFolder = roms.find((r) => r.filename === '.Hidden Disc Game');
+      expect(hiddenFolder?.kind).toBe('folder');
+      expect(hiddenFolder?.hidden).toBe(true);
+      expect(hiddenFolder?.displayName).toBe('Hidden Disc Game');
+    });
+
+    it('hide-by-rename works on folder ROMs', async () => {
+      await client.setRomVisibility('Saturn', 'Panzer Dragoon (USA) (1S)', true);
+      const after = await client.listRoms('Saturn');
+      expect(after.find((r) => r.filename === '.Panzer Dragoon (USA) (1S)')).toBeDefined();
+      await fs.access(
+        path.join(workDir, 'games', 'Saturn', '.Panzer Dragoon (USA) (1S)', 'Panzer Dragoon.cue'),
+      );
+    });
+
+    it('counts a disc core (Saturn) as non-empty even with only one file', async () => {
+      const cores = await client.listAllCoresWithFiles();
+      const saturn = cores.find((c) => c.id === 'Saturn');
+      expect(saturn).toBeDefined();
+      // 1 file + 3 dirs (2 visible + 1 hidden) = 4
+      expect(saturn!.romCount).toBe(4);
+      // The hidden folder counts toward hiddenCount.
+      expect(saturn!.hiddenCount).toBe(1);
+    });
+  });
+
+  describe('ledger self-heal', () => {
+    it('drops a stale entry that names a non-existent core', async () => {
+      // Pre-seed the ledger with a `_hidden` entry that no real core
+      // matches in our fixture tree.
+      await client.writeHideLedger({
+        schemaVersion: 1,
+        hiddenCores: [
+          {
+            coreId: '_hidden',
+            gamesDirHidden: true,
+            rbfPaths: [],
+            hiddenAt: '2026-05-01T00:00:00Z',
+          },
+          {
+            coreId: 'NES',
+            gamesDirHidden: true,
+            rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
+            hiddenAt: '2026-05-01T00:00:00Z',
+          },
+        ],
+      });
+
+      // First, hide NES so the NES entry stays valid.
+      const cores = await client.listAllCoresWithFiles();
+      const nes = cores.find((c) => c.id === 'NES');
+      await client.hideCore(nes!);
+      // After hideCore, the ledger has both entries (the one we
+      // pre-seeded for NES is replaced via withCoreHidden).
+
+      const healed = await client.readHideLedger();
+      expect(healed.hiddenCores.map((e) => e.coreId)).toEqual(['NES']);
+
+      // The on-disk ledger should have been rewritten without `_hidden`.
+      const onDisk = await fs.readFile(
+        path.join(workDir, '.mistercurator', 'state.json'),
+        'utf-8',
+      );
+      expect(onDisk).not.toContain('"coreId": "_hidden"');
+    });
+
+    it('keeps the ledger as-is when nothing is stale', async () => {
+      const cores = await client.listAllCoresWithFiles();
+      const nes = cores.find((c) => c.id === 'NES');
+      await client.hideCore(nes!);
+
+      const before = await client.readHideLedger();
+      const after = await client.readHideLedger();
+      // Same shape, same content — heal was a no-op.
+      expect(after).toEqual(before);
+    });
+  });
 });

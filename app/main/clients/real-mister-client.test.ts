@@ -321,12 +321,18 @@ describe('RealMisterClient', () => {
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
 
+      // The listRoms script emits `F\t<name>\t<size>` for files and
+      // `D\t<name>\t<size>` for folder ROMs. Mix both in the test to
+      // cover Saturn-style discs (folder ROMs) alongside NES-style
+      // cartridges in one core.
       mocks.execCommand.mockResolvedValueOnce(
         execOk(
           [
-            '.Action 52 (USA) (Unl).nes\t131072',
-            'Castlevania (USA, Europe).nes\t131072',
-            'Super Mario Bros. (USA).nes\t40960',
+            'F\t.Action 52 (USA) (Unl).nes\t131072',
+            'F\tCastlevania (USA, Europe).nes\t131072',
+            'F\tSuper Mario Bros. (USA).nes\t40960',
+            'D\tPanzer Dragoon Saga (USA)\t1958295552',
+            'D\t.Hidden Disc Game\t125829120',
             '',
           ].join('\n'),
         ),
@@ -334,22 +340,35 @@ describe('RealMisterClient', () => {
 
       const roms = await client.listRoms('NES');
 
-      expect(roms).toHaveLength(3);
+      expect(roms).toHaveLength(5);
 
-      const hidden = roms.find((r) => r.filename === '.Action 52 (USA) (Unl).nes');
-      expect(hidden).toBeDefined();
-      expect(hidden?.hidden).toBe(true);
-      expect(hidden?.displayName).toBe('Action 52 (USA) (Unl).nes');
-      expect(hidden?.path).toBe('/media/fat/games/NES/.Action 52 (USA) (Unl).nes');
-      expect(hidden?.sizeBytes).toBe(131072);
+      const hiddenFile = roms.find((r) => r.filename === '.Action 52 (USA) (Unl).nes');
+      expect(hiddenFile?.kind).toBe('file');
+      expect(hiddenFile?.hidden).toBe(true);
+      expect(hiddenFile?.displayName).toBe('Action 52 (USA) (Unl).nes');
+      expect(hiddenFile?.sizeBytes).toBe(131072);
 
-      const visible = roms.find((r) => r.filename === 'Castlevania (USA, Europe).nes');
-      expect(visible?.hidden).toBe(false);
-      expect(visible?.displayName).toBe('Castlevania (USA, Europe).nes');
+      const visibleFile = roms.find((r) => r.filename === 'Castlevania (USA, Europe).nes');
+      expect(visibleFile?.kind).toBe('file');
+      expect(visibleFile?.hidden).toBe(false);
+
+      const folderRom = roms.find((r) => r.filename === 'Panzer Dragoon Saga (USA)');
+      expect(folderRom).toBeDefined();
+      expect(folderRom?.kind).toBe('folder');
+      expect(folderRom?.hidden).toBe(false);
+      expect(folderRom?.sizeBytes).toBe(1958295552);
+      expect(folderRom?.path).toBe('/media/fat/games/NES/Panzer Dragoon Saga (USA)');
+
+      const hiddenFolder = roms.find((r) => r.filename === '.Hidden Disc Game');
+      expect(hiddenFolder?.kind).toBe('folder');
+      expect(hiddenFolder?.hidden).toBe(true);
+      expect(hiddenFolder?.displayName).toBe('Hidden Disc Game');
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
       expect(script).toContain(`cd '/media/fat/games/NES'`);
-      expect(script).toContain('for f in * .[!.]*');
+      // File branch (find -printf) and directory branch (du -sb).
+      expect(script).toContain('-type f -printf');
+      expect(script).toContain('-type d -exec du -sb');
     });
 
     it('throws "Unknown core" when the core directory is missing', async () => {
@@ -828,6 +847,12 @@ describe('RealMisterClient', () => {
         ],
       });
       mocks.execCommand.mockResolvedValueOnce(execOk(ledgerJson));
+      // The self-heal step inside readHideLedger calls
+      // listAllCoresWithFiles to verify each entry. Return a snapshot
+      // that includes NES so the entry survives.
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk('R\tConsole\tfile\tNES_20240115.rbf\nG\tNES\t9\t2'),
+      );
 
       const ledger = await client.readHideLedger();
       expect(ledger.hiddenCores).toHaveLength(1);
@@ -837,6 +862,51 @@ describe('RealMisterClient', () => {
       expect(command).toContain(`cat '/media/fat/.mistercurator/state.json'`);
       // Tolerates the missing-file case at the shell level.
       expect(command).toContain('|| true');
+    });
+
+    it('readHideLedger self-heals: drops a stale entry and rewrites the ledger', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      // The ledger references a `_hidden` user folder from before the
+      // closeout fix, plus a real NES entry.
+      const ledgerJson = JSON.stringify({
+        schemaVersion: 1,
+        hiddenCores: [
+          {
+            coreId: '_hidden',
+            gamesDirHidden: true,
+            rbfPaths: [],
+            hiddenAt: '2026-05-01T12:00:00Z',
+          },
+          {
+            coreId: 'NES',
+            gamesDirHidden: true,
+            rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
+            hiddenAt: '2026-05-01T12:00:00Z',
+          },
+        ],
+      });
+      mocks.execCommand.mockResolvedValueOnce(execOk(ledgerJson));
+      // listAllCoresWithFiles snapshot: only NES exists. _hidden doesn't.
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk('R\tConsole\tfile\tNES_20240115.rbf\nG\tNES\t9\t2'),
+      );
+      // The heal triggers a writeHideLedger.
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      const ledger = await client.readHideLedger();
+      expect(ledger.hiddenCores).toHaveLength(1);
+      expect(ledger.hiddenCores[0]?.coreId).toBe('NES');
+
+      // Three execCommands total: cat ledger, list cores, write cleaned ledger.
+      expect(mocks.execCommand).toHaveBeenCalledTimes(3);
+      const writeScript = mocks.execCommand.mock.calls[2]?.[0] as string;
+      expect(writeScript).toContain(`mkdir -p '/media/fat/.mistercurator'`);
+      // The rewrite contains NES but not _hidden.
+      expect(writeScript).toContain('"coreId": "NES"');
+      expect(writeScript).not.toContain('"coreId": "_hidden"');
     });
 
     it('readHideLedger returns empty ledger when cat returns nothing (file missing)', async () => {

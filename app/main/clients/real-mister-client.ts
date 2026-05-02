@@ -17,6 +17,8 @@ import {
   type RawRbfInput,
 } from '@shared/core-matching';
 import {
+  healLedger,
+  ledgerEqual,
   LEDGER_HEREDOC_DELIMITER,
   parseLedger,
   serializeLedger,
@@ -169,14 +171,21 @@ export class RealMisterClient implements IMisterClient {
 
     const coreDir = `${MISTER_GAMES_DIR}/${coreId}`;
 
+    // Single batched script that emits ROM entries in two flavours:
+    //   F\t<filename>\t<size>     for regular files (cartridge dumps)
+    //   D\t<dirname>\t<size>      for folder ROMs (Saturn / MegaCD discs)
+    // Folder ROMs use `du -sb` for recursive byte totals; `find ... -exec
+    // du -sb {} +` batches all subdirs into as few du invocations as the
+    // command-line length allows (one in practice).
     const script = [
       'set -e',
       `cd ${shellQuote(coreDir)}`,
-      'for f in * .[!.]*; do',
-      '  [ -f "$f" ] || continue',
-      `  size=$(stat -c '%s' "$f")`,
-      `  printf '%s\\t%s\\n' "$f" "$size"`,
-      'done',
+      // Files (visible + dot-hidden) — find handles both because find is
+      // not subject to the shell's dotglob default.
+      `find . -mindepth 1 -maxdepth 1 -type f -printf 'F\\t%f\\t%s\\n' 2>/dev/null || true`,
+      // Directories with their recursive sizes. du output is `<size>\t<path>`
+      // with paths prefixed by `./`. awk strips the prefix and reorders.
+      `find . -mindepth 1 -maxdepth 1 -type d -exec du -sb {} + 2>/dev/null | awk -F'\\t' '{ name=$2; sub(/^\\.\\//, "", name); printf "D\\t%s\\t%s\\n", name, $1 }' || true`,
     ].join('\n');
 
     const result = await this.ssh.execCommand(script);
@@ -187,12 +196,13 @@ export class RealMisterClient implements IMisterClient {
     const roms: Rom[] = [];
     for (const line of result.stdout.split('\n')) {
       if (line === '') continue;
-      const tabIndex = line.lastIndexOf('\t');
-      if (tabIndex < 0) continue;
-      const filename = line.slice(0, tabIndex);
-      const sizeStr = line.slice(tabIndex + 1);
-      const sizeBytes = Number.parseInt(sizeStr, 10);
-      if (Number.isNaN(sizeBytes)) continue;
+      const parts = line.split('\t');
+      if (parts.length < 3) continue;
+      const tag = parts[0];
+      if (tag !== 'F' && tag !== 'D') continue;
+      const filename = parts[1] ?? '';
+      const sizeBytes = Number.parseInt(parts[2] ?? '0', 10);
+      if (filename === '' || Number.isNaN(sizeBytes)) continue;
 
       const hidden = filename.startsWith('.');
       const displayName = hidden ? filename.slice(1) : filename;
@@ -204,6 +214,7 @@ export class RealMisterClient implements IMisterClient {
         sizeBytes,
         hidden,
         path: `${MISTER_GAMES_DIR}/${coreId}/${filename}`,
+        kind: tag === 'D' ? 'folder' : 'file',
       });
     }
 
@@ -377,7 +388,22 @@ export class RealMisterClient implements IMisterClient {
     const result = await this.ssh.execCommand(
       `cat ${shellQuote(MISTER_LEDGER_PATH)} 2>/dev/null || true`,
     );
-    return parseLedger(result.stdout);
+    const raw = parseLedger(result.stdout);
+
+    // Self-heal: drop entries that no longer correspond to a real core
+    // on disk and rewrite the cleaned ledger. Costs an extra
+    // listAllCoresWithFiles + a writeHideLedger when entries actually
+    // got dropped, in exchange for keeping the ledger truthful.
+    if (raw.hiddenCores.length === 0) return raw;
+
+    const cores = await this.listAllCoresWithFiles();
+    const healed = healLedger(raw, cores);
+    if (!ledgerEqual(raw, healed)) {
+      const dropped = raw.hiddenCores.length - healed.hiddenCores.length;
+      console.log(`Ledger self-healed: dropped ${String(dropped)} stale entries.`);
+      await this.writeHideLedger(healed);
+    }
+    return healed;
   }
 
   async writeHideLedger(ledger: HideLedger): Promise<void> {
@@ -457,13 +483,17 @@ function buildListAllCoresScript(): string {
     ].join('\n');
   }).join('\n');
 
+  // Counts include BOTH files AND directories at depth 1, because
+  // folder-shaped ROMs (Saturn/MegaCD/X68000) live as subdirectories.
+  // Counting only files would mis-classify Saturn (1 file + 17 dirs) as
+  // empty and let "Hide empty cores" nuke a disc collection.
   const gamesScript = [
     `if [ -d ${shellQuote(MISTER_GAMES_DIR)} ]; then`,
     `  cd ${shellQuote(MISTER_GAMES_DIR)}`,
     '  for d in * .[!.]*; do',
     '    [ -d "$d" ] || continue',
-    `    visible=$(find "$d" -maxdepth 1 -type f ! -name '.*' 2>/dev/null | wc -l)`,
-    `    hidden=$(find "$d" -maxdepth 1 -type f -name '.*' 2>/dev/null | wc -l)`,
+    `    visible=$(find "$d" -maxdepth 1 -mindepth 1 \\( -type f -o -type d \\) ! -name '.*' 2>/dev/null | wc -l)`,
+    `    hidden=$(find "$d" -maxdepth 1 -mindepth 1 \\( -type f -o -type d \\) -name '.*' 2>/dev/null | wc -l)`,
     '    total=$((visible + hidden))',
     `    printf 'G\\t%s\\t%s\\t%s\\n' "$d" "$total" "$hidden"`,
     '  done',

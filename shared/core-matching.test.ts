@@ -5,6 +5,7 @@ import type { CoreEntry, HideLedger } from '@shared/types';
 import {
   ARCADE_PLACEHOLDER_ID,
   computeAutoReapplyChanges,
+  computeCoreRenames,
   dottedPath,
   extractCorePrefix,
   isArcadePlaceholder,
@@ -139,6 +140,7 @@ describe('matchRbfsToGamesDirs', () => {
         rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
         gamesDirExists: true,
         gamesDirHidden: false,
+        gamesDirName: 'NES',
       },
     ]);
   });
@@ -342,6 +344,90 @@ describe('matchRbfsToGamesDirs', () => {
     });
     expect(result.map((c) => c.id)).toEqual(['apollo', 'NES', 'Zebra']);
   });
+
+  describe('case-duplicate dedupe', () => {
+    it('keeps the visible entry when one sibling is hidden (visible+hidden)', () => {
+      // The exact shape from the real-MiSTer snapshot:
+      //   _Console/Vectrex_20240524.rbf   (visible canonical .rbf)
+      //   games/.VECTREX                  (hidden games dir, different case)
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: 'Vectrex_20240524.rbf',
+            fullPath: '/media/fat/_Console/Vectrex_20240524.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [{ rawName: '.VECTREX', romCount: 0, hiddenCount: 0 }],
+      });
+
+      const matches = result.filter((c) => c.id.toLowerCase() === 'vectrex');
+      expect(matches).toHaveLength(1);
+      const merged = matches[0]!;
+      // The visible rbf entry survives — its id (canonical case) wins.
+      expect(merged.id).toBe('Vectrex');
+      // ...but the case-mismatched games dir name is preserved so
+      // operations target the on-disk basename.
+      expect(merged.gamesDirExists).toBe(true);
+      expect(merged.gamesDirHidden).toBe(true);
+      expect(merged.gamesDirName).toBe('VECTREX');
+      expect(merged.rbfPaths).toEqual(['/media/fat/_Console/Vectrex_20240524.rbf']);
+    });
+
+    it('drops the entire group when every case-sibling is hidden (both hidden)', () => {
+      // Real MiSTer: `_Computer/.Apogee_*.rbf` next to `games/.APOGEE`.
+      // Both hidden → MiSTer leftover, drop both.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Computer',
+            filename: '.Apogee_20240502.rbf',
+            fullPath: '/media/fat/_Computer/.Apogee_20240502.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [{ rawName: '.APOGEE', romCount: 0, hiddenCount: 0 }],
+      });
+      expect(result.find((c) => c.id.toLowerCase() === 'apogee')).toBeUndefined();
+    });
+
+    it('keeps a single hidden entry when there are no case siblings', () => {
+      // A regular hidden core (NES alone, no case duplicate) is kept.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: '.NES_20240115.rbf',
+            fullPath: '/media/fat/_Console/.NES_20240115.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [],
+      });
+      expect(result.find((c) => c.id === 'NES')).toBeDefined();
+    });
+
+    it('preserves the gamesDirName when the case differs from the rbf prefix', () => {
+      // `_Computer/SAMCoupe_20240421.rbf` (visible) + `games/.SAMCOUPE`
+      // (hidden) — visible wins, gamesDirName preserves the `SAMCOUPE`
+      // case so a future hide hits the right path.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Computer',
+            filename: 'SAMCoupe_20240421.rbf',
+            fullPath: '/media/fat/_Computer/SAMCoupe_20240421.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [{ rawName: '.SAMCOUPE', romCount: 0, hiddenCount: 0 }],
+      });
+      const merged = result.find((c) => c.id.toLowerCase() === 'samcoupe');
+      expect(merged?.id).toBe('SAMCoupe');
+      expect(merged?.gamesDirName).toBe('SAMCOUPE');
+    });
+  });
 });
 
 describe('isRealCore', () => {
@@ -447,6 +533,70 @@ describe('isCoreHidden', () => {
     expect(
       isCoreHidden(makeCore({ rbfPaths: ['/x/.X_20240115.rbf'] })),
     ).toBe(true);
+  });
+});
+
+describe('computeCoreRenames', () => {
+  function makeCore(overrides: Partial<CoreEntry> = {}): CoreEntry {
+    return {
+      id: 'NES',
+      name: 'NES',
+      romCount: 0,
+      hiddenCount: 0,
+      category: 'Console',
+      rbfPaths: [],
+      gamesDirExists: false,
+      gamesDirHidden: false,
+      ...overrides,
+    };
+  }
+
+  it('returns an empty list when the core is already in the desired state', () => {
+    const core = makeCore({
+      gamesDirExists: true,
+      gamesDirName: 'NES',
+      gamesDirHidden: true,
+      rbfPaths: ['/media/fat/_Console/.NES_20240115.rbf'],
+    });
+    expect(computeCoreRenames(core, true)).toEqual([]);
+  });
+
+  it('uses the id when gamesDirName is absent', () => {
+    const core = makeCore({
+      gamesDirExists: true,
+      gamesDirName: undefined,
+    });
+    const renames = computeCoreRenames(core, true);
+    expect(renames).toEqual([
+      { from: '/media/fat/games/NES', to: '/media/fat/games/.NES' },
+    ]);
+  });
+
+  it('uses gamesDirName for path construction when it differs from id (case-mismatch)', () => {
+    // canonical id is "Apogee" but the on-disk dir is "APOGEE"
+    const core = makeCore({
+      id: 'Apogee',
+      name: 'Apogee',
+      gamesDirExists: true,
+      gamesDirName: 'APOGEE',
+    });
+    const renames = computeCoreRenames(core, true);
+    expect(renames).toEqual([
+      { from: '/media/fat/games/APOGEE', to: '/media/fat/games/.APOGEE' },
+    ]);
+  });
+
+  it('un-hides a core whose games dir was hidden under a case-mismatched name', () => {
+    const core = makeCore({
+      id: 'Apogee',
+      gamesDirExists: true,
+      gamesDirHidden: true,
+      gamesDirName: 'APOGEE',
+    });
+    const renames = computeCoreRenames(core, false);
+    expect(renames).toEqual([
+      { from: '/media/fat/games/.APOGEE', to: '/media/fat/games/APOGEE' },
+    ]);
   });
 });
 

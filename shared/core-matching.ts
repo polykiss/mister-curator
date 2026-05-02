@@ -92,6 +92,7 @@ interface MutableCoreEntry {
   rbfPaths: string[];
   gamesDirExists: boolean;
   gamesDirHidden: boolean;
+  gamesDirName?: string;
 }
 
 /**
@@ -147,6 +148,7 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     if (existing) {
       existing.gamesDirExists = true;
       existing.gamesDirHidden = isHidden;
+      existing.gamesDirName = visibleName;
       existing.romCount = gd.romCount;
       existing.hiddenCount = gd.hiddenCount;
     } else {
@@ -159,11 +161,12 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
         rbfPaths: [],
         gamesDirExists: true,
         gamesDirHidden: isHidden,
+        gamesDirName: visibleName,
       });
     }
   }
 
-  const all: CoreEntry[] = Array.from(byId.values()).map((e) => ({
+  const allRaw: CoreEntry[] = Array.from(byId.values()).map((e) => ({
     id: e.id,
     name: e.name,
     romCount: e.romCount,
@@ -172,7 +175,14 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     rbfPaths: [...e.rbfPaths],
     gamesDirExists: e.gamesDirExists,
     gamesDirHidden: e.gamesDirHidden,
+    gamesDirName: e.gamesDirName,
   }));
+
+  // Dedupe by lowercase id. Real MiSTers carry case-mismatched siblings —
+  // e.g. `_Computer/.Apogee_*.rbf` next to `games/.APOGEE`. Both refer to
+  // the same logical core; we collapse them and remember the on-disk
+  // `gamesDirName` so renames target the correct path.
+  const all = dedupeByLowercaseId(allRaw);
 
   // Collapse arcade into a single placeholder row. Arcade is out of scope
   // for the hide feature (per AGENTS.md), but users still expect to see
@@ -201,6 +211,112 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
 
 export function isArcadePlaceholder(core: CoreEntry): boolean {
   return core.id === ARCADE_PLACEHOLDER_ID;
+}
+
+/**
+ * Collapse case-duplicate CoreEntries (e.g. `Apogee` from a `.rbf` and
+ * `APOGEE` from a games dir) into one logical entry per lowercase id.
+ *
+ * Rules (from the closeout spec):
+ *   - One visible + (any number of) hidden → the visible one wins. Fields
+ *     from the hidden sibling that the visible one lacks are merged in
+ *     (notably `gamesDirName` for the case-mismatch case).
+ *   - Multiple visible (rare) → canonical one wins. We pick the entry
+ *     that has a games dir over one that doesn't, then tie-break
+ *     alphabetically. Same merge.
+ *   - Multiple hidden (no visible) → MiSTer's leftover internal state.
+ *     Drop the entire group.
+ *   - Single entry → keep as-is.
+ *
+ * The result preserves operational paths: `gamesDirName` is the exact
+ * on-disk basename of the games dir (preserving its case), `rbfPaths`
+ * are the exact on-disk paths from the rbf entries.
+ */
+function dedupeByLowercaseId(entries: readonly CoreEntry[]): CoreEntry[] {
+  const groups = new Map<string, CoreEntry[]>();
+  for (const e of entries) {
+    if (e.category === 'Arcade') {
+      // Arcade entries are collapsed downstream into the placeholder;
+      // skip the case-dedupe step for them.
+      const key = `__arcade__:${e.id}`;
+      const existing = groups.get(key);
+      if (existing) existing.push(e);
+      else groups.set(key, [e]);
+      continue;
+    }
+    const key = e.id.toLowerCase();
+    const existing = groups.get(key);
+    if (existing) existing.push(e);
+    else groups.set(key, [e]);
+  }
+
+  const out: CoreEntry[] = [];
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      out.push(group[0]!);
+      continue;
+    }
+
+    const visible = group.filter((c) => !isCoreHidden(c));
+
+    if (visible.length === 0) {
+      // All siblings are hidden. Per spec, treat as MiSTer leftover and
+      // drop the whole group.
+      continue;
+    }
+
+    // Pick a winner from the visible side: prefer one that has a games
+    // dir (more useful), then alphabetical first.
+    const sorted = [...visible].sort((a, b) => {
+      if (a.gamesDirExists !== b.gamesDirExists) {
+        return a.gamesDirExists ? -1 : 1;
+      }
+      return a.id.localeCompare(b.id, 'en-US');
+    });
+    const winner = sorted[0]!;
+    const losers = group.filter((c) => c !== winner);
+    out.push(mergeAliases(winner, losers));
+  }
+
+  return out;
+}
+
+/**
+ * Merge fields from `losers` (case-duplicate siblings) into `winner` so
+ * operations on the winner reach the right paths. `gamesDirName` from
+ * the loser is preserved when the winner doesn't have a games dir of
+ * its own; `rbfPaths` are unioned (de-duplicated by string equality).
+ */
+function mergeAliases(winner: CoreEntry, losers: readonly CoreEntry[]): CoreEntry {
+  let gamesDirExists = winner.gamesDirExists;
+  let gamesDirHidden = winner.gamesDirHidden;
+  let gamesDirName = winner.gamesDirName;
+  let romCount = winner.romCount;
+  let hiddenCount = winner.hiddenCount;
+  const rbfPaths = [...winner.rbfPaths];
+
+  for (const loser of losers) {
+    for (const p of loser.rbfPaths) {
+      if (!rbfPaths.includes(p)) rbfPaths.push(p);
+    }
+    if (!gamesDirExists && loser.gamesDirExists) {
+      gamesDirExists = true;
+      gamesDirHidden = loser.gamesDirHidden;
+      gamesDirName = loser.gamesDirName;
+      romCount = loser.romCount;
+      hiddenCount = loser.hiddenCount;
+    }
+  }
+
+  return {
+    ...winner,
+    rbfPaths,
+    gamesDirExists,
+    gamesDirHidden,
+    gamesDirName,
+    romCount,
+    hiddenCount,
+  };
 }
 
 /**
@@ -301,8 +417,13 @@ export function computeCoreRenames(core: CoreEntry, hidden: boolean): CoreRename
   const renames: CoreRename[] = [];
 
   if (core.gamesDirExists) {
-    const visibleDir = `${MISTER_GAMES_DIR}/${core.id}`;
-    const hiddenDir = `${MISTER_GAMES_DIR}/.${core.id}`;
+    // Use the on-disk basename when known so case-mismatched siblings
+    // (e.g. games/.APOGEE while id is 'Apogee') still target the right
+    // path. Falls back to the id when gamesDirName isn't populated
+    // (legacy callers / synthetic test entries).
+    const baseName = core.gamesDirName ?? core.id;
+    const visibleDir = `${MISTER_GAMES_DIR}/${baseName}`;
+    const hiddenDir = `${MISTER_GAMES_DIR}/.${baseName}`;
     const currentDir = core.gamesDirHidden ? hiddenDir : visibleDir;
     const targetDir = hidden ? hiddenDir : visibleDir;
     if (currentDir !== targetDir) {
