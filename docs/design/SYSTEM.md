@@ -252,9 +252,12 @@ once here, and per-component below.
 **Shape changes (scope-limited):**
 1. Buttons lose their solid-fill default; primary becomes the *only*
    filled button on a screen.
-2. Badges go from filled chips to outline pills.
+2. Row state (HIDDEN, SYSTEM) is expressed by **dimming the row** and
+   placing a small icon to the left of the name. No badge pills.
 3. Breadcrumbs gain a path-style mono treatment.
 4. Active row gains a 2px left-edge accent (no background change).
+5. Each list row carries a **full-height density rectangle** at its
+   far right — see §10.
 
 **Everything else: restyle in place.** The DOM shapes from PR #6 / #7
 are correct.
@@ -262,19 +265,32 @@ are correct.
 ### List row (CoreRow, RomRow)
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ ▌  [icon]  Label name                  metadata · counts   ⋯    │
-└─────────────────────────────────────────────────────────────────┘
-  ↑                                                            ↑
-  2px accent edge (active)                          actions on hover
+┌──────────────────────────────────────────────────────────────────┐
+│ ▌  [icon]  Label name                  metadata · counts   ⋯  ▰  │
+└──────────────────────────────────────────────────────────────────┘
+  ↑                                                            ↑  ↑
+  2px accent edge (active)                  actions on hover     density
+                                                                rectangle
 ```
 
 - Height 40px, paddingX 16px, no borders by default
 - Bottom: `border-subtle` (one-line separator across the panel)
-- Hover: `bg-elevated`, actions slot reveals
-- Active: `bg-overlay` + 2px left-edge `accent` bar (the SmartShort move)
-- Hidden state (whole row dimmed): row body uses `fg-muted`, badge
-  pinned right
+- Hover: `bg-elevated` (cores) / `bg-overlay` (ROMs, since the ROMs
+  pane sits on `bg-elevated` already — see §4 / pane elevation), with
+  trailing actions slot revealing
+- Active (cores list): `bg-overlay` + 2px left-edge `accent` bar (the
+  SmartShort move)
+- Density rectangle: pinned to the right edge, full row height, 50%
+  of row height wide (~20px on a 40px row), zero radius. Color
+  computed once per row from `value / max` — see §10.
+- Hidden state: `opacity-50` on the row, `italic` on the row label,
+  text color steps down to `fg-disabled`. **No badge.** Dimming is
+  the entire signal.
+- System state: same dimming as Hidden + a 14px lucide `Settings`
+  (gear) icon at the **left of the name**, inheriting the row's
+  current text color so it dims with the row. **No badge.**
+- A row that is *both* hidden and system: gear icon on the left, single
+  application of the dimming treatment.
 - Selection (multi-select): no checkbox visual at rest — Cmd/Shift-click
   selection inserts a 1px `border-emphasis` ring inside the row hover
 
@@ -297,21 +313,17 @@ The PR #8 round-4 lesson is encoded here: *only one filled button per
 screen.* Stacked rows of solid buttons read as shouting; outlined
 buttons keep the slate-vs-accent cue without weight.
 
-### Badges (HIDDEN, SYSTEM)
+### Badges (deprecated for row state)
 
-```
- ┌──────────┐    ┌──────────┐
- │  HIDDEN  │    │  SYSTEM  │
- └──────────┘    └──────────┘
-```
+The HIDDEN and SYSTEM pill badges that PR #7 introduced have been
+removed (Round 2 of the design pass). Row state is now expressed
+through dimming (opacity + italic + `fg-disabled`) plus, for system
+rows, a 14px gear icon left of the name. See "List row" above.
 
-- 18px height, 8px paddingX, 1px border, 4px radius
-- Caption type (11px, +0.08em tracking, UPPERCASE, weight 500)
-- `HIDDEN`: `border-default` + `fg-muted` — receded, signals "this row
-  is currently downplayed"
-- `SYSTEM`: `border-info` + `info` — neutral identification, not
-  alarming
-- **No backgrounds.** These are metadata flags, not status alerts.
+The `Badge` primitive remains in the codebase (`components/ui/badge.tsx`)
+in case a future surface — non-row metadata, neutral tags, etc. — has
+a genuine need for outline pills. We just don't use it for row state
+anymore.
 
 ### Inputs
 
@@ -437,7 +449,7 @@ stays consistent):
 | Folder (drillable)| `Folder`          |
 | Folder (atomic)   | `FolderArchive`   |
 | Hidden            | `EyeOff`          |
-| System file       | `Wrench`          |
+| System file       | `Settings`        |
 | Connect           | `Plug` / `Link2`  |
 | Disconnect        | `Unplug`          |
 | Error             | `AlertCircle`     |
@@ -488,18 +500,24 @@ ambient texture. That's the bar.
    for v0.1.0; light tokens stay wired for the post-v0.1.0 follow-up.
 3. **Buttons** — `cva` variants restructured: only `primary` is
    filled; default-action becomes outlined `secondary`.
-4. **Badges** — outline pills, no fills.
+4. **Row state** (Round 2) — HIDDEN/SYSTEM badges removed. Hidden +
+   system rows recede via `opacity-50` + italic + `fg-disabled`, with
+   a 14px `Settings` (gear) icon left of the name on system rows.
 5. **Rows** — 40px height, no rest borders, hover/active styles match
-   spec, 2px left-edge active marker.
-6. **Breadcrumbs** — restyled to mono path with `/` separators.
-7. **Banners** — left-bar variant introduced; existing inline error
+   spec, 2px left-edge active marker. Trailing density rectangle (§10).
+6. **Pane elevation** (Round 2) — Cores pane sits on `bg-surface`;
+   ROMs pane sits on `bg-elevated` so the right side of the split
+   reads as one step closer to the viewer.
+7. **Breadcrumbs** — restyled to mono path with `/` separators.
+8. **Banners** — left-bar variant introduced; existing inline error
    surfaces converted.
-8. **Status bar** — slot layout normalized; host segment becomes mono.
-9. **Connection screen** — display wordmark, breathing scale.
-10. **Modals** — surface tone, no blur, soft shadow.
-11. **Toasts (sonner)** — themed with the system tokens.
-12. **Icons** — strokeWidth 1.5 override applied globally; sizing
-    standardized.
+9. **Status bar** — slot layout normalized; host segment becomes mono.
+10. **Connection screen** — display wordmark, breathing scale.
+11. **Modals** — surface tone, no blur, soft shadow.
+12. **Toasts (sonner)** — themed with the system tokens.
+13. **Icons** — strokeWidth 1.5 override applied globally; sizing
+    standardized. System-file icon swapped from `Wrench` to `Settings`
+    (Round 2).
 
 ### Stays (no behavioral or structural change)
 
@@ -555,63 +573,83 @@ A few notes on the choices:
 
 ## 10. Density indicator addendum
 
-The "no gradients" rule in section 7 has one carve-out: a small
-per-row density indicator. This is the only gradient-adjacent visual
-in the system; the rule otherwise stands.
+The "no gradients" rule in section 7 has one carve-out: a per-row
+density indicator. Round 2 of the design pass replaces the original
+sparkline with a **full-height intensity rectangle** — a single solid
+fill whose color is interpolated, in OKLCH space, between the row's
+background tone and `accent`. This is the only place in the system
+where two colors mix into one fill.
 
 ### What it is
 
-A sparkline-style filled bar inline with the row's count metadata.
-The bar's fill width represents the row's value (ROM count for a
-core, file size for a ROM, total folder size for a folder ROM)
-relative to the maximum value among the rows currently visible.
+A solid-filled rectangle pinned to the right edge of every list row.
+The fill *color* (not width) varies with the row's `value / max`.
+Rows that lead the pane glow signal-green; rows at the bottom fade
+nearly invisible against the pane's surface tone.
 
 ```
-Cores list                                ROMs list
-┌────────────────────────────┐            ┌────────────────────────────┐
-│  SNES         ▰▰▰▰▰▰▱▱  227 │            │  Final Fantasy III  ▰▰▰▰▰  4.0M │
-│  NES          ▰▰▰▰▱▱▱▱  118 │            │  Chrono Trigger     ▰▰▰▰   3.8M │
-│  Game Boy     ▰▰▱▱▱▱▱▱   59 │            │  Earthbound         ▰▰▰    2.4M │
-└────────────────────────────┘            └────────────────────────────┘
+Cores list (bg-surface)              ROMs list (bg-elevated)
+┌──────────────────────────────┐     ┌──────────────────────────────┐
+│ SNES                  227   ▰│     │ Final Fantasy III   4.0M    ▰│
+│ NES                   118   ▰│     │ Chrono Trigger      3.8M    ▰│
+│ Game Boy               59   ▰│     │ Earthbound          2.4M    ▰│
+└──────────────────────────────┘     └──────────────────────────────┘
+                              ↑                                    ↑
+       intensity = romCount / maxRomCount    intensity = sizeBytes / maxSize
 ```
 
 ### Visual spec
 
-- **Track**: 40px wide × 3px tall, 1.5px radius, sits to the LEFT of
-  the count text with 8px gap.
-- **Track background**: `bg-elevated`.
-- **Fill**: linear-gradient from `fg-muted` at 0% to `accent` at
-  100%, clipped at the actual fill ratio. The gradient stops are
-  fixed in the *track* coordinate space — a 25%-filled bar shows the
-  bottom 25% of the gradient (still mostly muted), a 100%-filled bar
-  shows the full muted-to-signal-green ramp. This is the only place
-  in the system where two colors mix into one fill.
-- **No glow, no halo, no ambient bleed.** The bar is contained inside
-  its 40×3 track; nothing escapes.
+- **Geometry**: pinned to the row's right edge, after any trailing
+  actions. Width = 50% of the row height (~20px on a 40px row),
+  height = full row height, no border-radius (sharp rectangle).
+- **Fill**: `color-mix(in oklch, <row-bg> <(1 - r) × 100%>, hsl(var(--accent)))`
+  where `r = clamp(value / max, 0, 1)`. The mix happens in OKLCH so
+  the perceptual midpoint reads as a midpoint, not a muddy lerp
+  through HSL grey.
+- **Row-bg basis**: matches the pane the row lives in.
+  - Cores list (sits on `bg-surface`): floor color is `bg-surface`.
+  - ROMs list (sits on `bg-elevated`, see §4 / pane elevation): floor
+    color is `bg-elevated`.
+  At `r = 0` the rectangle is invisible against the row; at `r = 1`
+  it is full signal-green.
+- **No glow, no halo, no ambient bleed, no animation.** Computed
+  once per render, stable across hover.
 
 ### Where it appears
 
-- **Cores list** (CoreRow): bar = `core.romCount` / max(romCount over
-  visible cores). Cores with zero ROMs render no bar at all (a single
-  pixel of accent on a flat row reads as a glitch). The bar sits to
-  the left of the existing count text in the metadata slot.
-- **ROMs list** (RomRow), file rows: bar = `rom.sizeBytes` / max
-  visible. Files of unknown size render no bar.
-- **ROMs list**, folder rows (atomic + container): bar = total
-  contained size if available, else hidden. Folder size is the same
-  byte count `formatBytes` already shows for folder rows.
+- **Cores list** (CoreRow): `r = core.romCount / max(romCount over
+  visible cores)`. Empty cores (`romCount === 0`) render the
+  rectangle at floor color (effectively invisible against the row).
+- **ROMs list** (RomRow), file rows: `r = rom.sizeBytes / maxSize`.
+- **ROMs list**, folder rows (atomic + container): same — folder
+  size is the byte count `formatBytes` already shows.
+- **Excluded**: system files (no rectangle at all), the arcade
+  placeholder row, the back-row, and any row missing a value.
 
 ### What it is not
 
 - Not a focus glow, not a hover highlight, not a selection halo.
 - Not a progress bar (no animation, no shimmer).
 - Not used on any non-list surface. The status bar's progress bar
-  during a bulk op is a separate component that does not use the
-  density gradient.
+  during a bulk op is a separate component that does not use this
+  interpolation.
 
-If a future PR is tempted to apply this gradient to anything besides
-these per-row indicators, it should propose it as a new addendum and
-get explicit approval. The constraint is the design.
+### Why a rectangle instead of a sparkline
+
+The sparkline encoded `value / max` as fractional width inside a
+fixed track. Width-as-magnitude works for charts but reads as
+*progress* on a row — every row looks like a partially-completed
+task. The intensity rectangle encodes the same magnitude as
+saturation against the row surface, which is what hardware-tool
+audiences associate with "this is the heavyweight in the list" (level
+meters, signal strength). The geometry also makes the indicator
+**always present** at the same position, so the eye has a fixed
+column to track.
+
+If a future PR is tempted to apply this OKLCH interpolation to
+anything besides these per-row indicators, it should propose it as a
+new addendum and get explicit approval. The constraint is the design.
 
 ---
 
