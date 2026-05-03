@@ -862,23 +862,25 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                           read-only
                         </span>
                       ) : (
-                        // Round 3: filled prominence. Hide gets a slate
-                        // fill (visible but not aggressive); Show gets
-                        // the primary fill (emphatic positive). Same
-                        // dimensions both ways so layout stays steady
-                        // when a row flips state.
+                        // Round 4: rolled back the round-3 fills.
+                        // 9 stacked rows of solid Hide buttons read as
+                        // shouting; outlined variants keep the slate-
+                        // vs-primary colour cue but with less visual
+                        // weight. The full design pass lives in PR #9.
+                        // `min-w-[5.5rem]` retained so a row's button
+                        // cell doesn't reflow when its state flips.
                         <Button
-                          variant="default"
+                          variant="outline"
                           size="sm"
                           onClick={() => void onSingleToggle(rom)}
                           disabled={!canMutate}
                           className={cn(
                             'min-w-[5.5rem] not-italic',
                             rom.hidden
-                              ? // Show: primary fill
-                                undefined
-                              : // Hide: slate fill (works in both themes)
-                                'bg-slate-700 text-slate-50 hover:bg-slate-600 dark:bg-slate-600 dark:hover:bg-slate-500',
+                              ? // Show: primary-tinted outline
+                                'border-primary/40 text-primary hover:bg-primary/10 hover:text-primary'
+                              : // Hide: muted slate outline
+                                'border-slate-300 text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800/50 dark:hover:text-slate-100',
                           )}
                           title={
                             canMutate

@@ -413,16 +413,15 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                   read-only
                 </span>
               ) : isHiddenCore ? (
-                // Round 3: filled prominence — Show is the primary
-                // action when looking at a hidden core. Same slate /
-                // primary scheme as the per-ROM buttons keeps the
-                // visual language consistent across the two panes.
+                // Round 4: rolled back the round-3 solid fills.
+                // Outlined variants keep the slate-vs-primary
+                // colour cue without 9 stacked rows shouting.
                 <Button
-                  variant="default"
+                  variant="outline"
                   size="sm"
                   onClick={() => void args.onShow(core)}
                   disabled={isPending || !args.canMutate}
-                  className="min-w-[5.5rem] not-italic"
+                  className="min-w-[5.5rem] border-primary/40 text-primary hover:bg-primary/10 hover:text-primary"
                   title={
                     args.canMutate
                       ? `Show ${core.name}`
@@ -434,14 +433,14 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                   Show
                 </Button>
               ) : (
-                // Filled slate Hide button. Triggers the confirm
-                // step (askHide) — same flow, more visible affordance.
+                // Slate-outlined Hide. Triggers the confirm step
+                // (askHide) — same flow, restrained affordance.
                 <Button
-                  variant="default"
+                  variant="outline"
                   size="sm"
                   onClick={() => args.onAskHide(core.id)}
                   disabled={isPending || !args.canMutate}
-                  className="min-w-[5.5rem] bg-slate-700 text-slate-50 hover:bg-slate-600 dark:bg-slate-600 dark:hover:bg-slate-500"
+                  className="min-w-[5.5rem] border-slate-300 text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800/50 dark:hover:text-slate-100"
                   title={
                     args.canMutate
                       ? `Hide ${core.name}`
