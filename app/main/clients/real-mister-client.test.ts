@@ -4,13 +4,28 @@ import { MisterConnectionError } from '@shared/types';
 import type { CoreEntry, MisterProfile } from '@shared/types';
 import type { MisterSecret } from '@shared/mister-client';
 
-const mocks = vi.hoisted(() => ({
-  connect: vi.fn(),
-  dispose: vi.fn(),
-  execCommand: vi.fn(),
-  exec: vi.fn(),
-  isConnected: vi.fn(),
-}));
+/**
+ * The connection mock simulates the underlying ssh2 Client. Tests can
+ * call `connectionListeners.get('close')?.()` to fake an unexpected
+ * disconnect — that's what the real ssh2 transport does on close/
+ * error.
+ */
+const mocks = vi.hoisted(() => {
+  const connectionListeners = new Map<string, () => void>();
+  return {
+    connect: vi.fn(),
+    dispose: vi.fn(),
+    execCommand: vi.fn(),
+    exec: vi.fn(),
+    isConnected: vi.fn(),
+    connectionListeners,
+    connection: {
+      once: vi.fn((event: string, handler: () => void) => {
+        connectionListeners.set(event, handler);
+      }),
+    },
+  };
+});
 
 vi.mock('node-ssh', () => ({
   NodeSSH: vi.fn().mockImplementation(() => ({
@@ -19,6 +34,7 @@ vi.mock('node-ssh', () => ({
     execCommand: mocks.execCommand,
     exec: mocks.exec,
     isConnected: mocks.isConnected,
+    connection: mocks.connection,
   })),
 }));
 
@@ -53,6 +69,8 @@ describe('RealMisterClient', () => {
     mocks.execCommand.mockReset().mockResolvedValue(execOk());
     mocks.exec.mockReset().mockResolvedValue('');
     mocks.isConnected.mockReset().mockReturnValue(true);
+    mocks.connection.once.mockClear();
+    mocks.connectionListeners.clear();
   });
 
   describe('connect', () => {
@@ -72,6 +90,19 @@ describe('RealMisterClient', () => {
       expect(mocks.execCommand).toHaveBeenCalledTimes(1);
       const dirCheck = mocks.execCommand.mock.calls[0]?.[0] as string;
       expect(dirCheck).toBe(`[ -d '/media/fat/games' ]`);
+    });
+
+    it('configures SSH-level keepalive on the underlying ssh2 client', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+
+      const args = mocks.connect.mock.calls[0]?.[0] as Record<string, unknown>;
+      // Round 3 of PR #8: tightened from 10s × 2 (~30s detection)
+      // to 5s × 2 (~10–15s detection). ssh2 sends a packet every
+      // `keepaliveInterval`; after `keepaliveCountMax` missed replies
+      // it fires `'close'` / `'error'`.
+      expect(args.keepaliveInterval).toBe(5_000);
+      expect(args.keepaliveCountMax).toBe(2);
     });
 
     it('passes the private key (not the path) when authMethod is key', async () => {
@@ -169,6 +200,95 @@ describe('RealMisterClient', () => {
 
       await client.disconnect();
       expect(mocks.dispose).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('onUnexpectedDisconnect', () => {
+    it('attaches close + error listeners after a successful connect', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+
+      // The real client subscribes once each on the underlying ssh2
+      // Client. Both events flow into the same handler so the manager
+      // sees a single "unexpected disconnect" regardless of which one
+      // ssh2 fired first.
+      expect(mocks.connection.once).toHaveBeenCalledWith(
+        'close',
+        expect.any(Function),
+      );
+      expect(mocks.connection.once).toHaveBeenCalledWith(
+        'error',
+        expect.any(Function),
+      );
+    });
+
+    it('fires registered listeners when the transport closes mid-session', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      const listener = vi.fn();
+      client.onUnexpectedDisconnect(listener);
+
+      mocks.connectionListeners.get('close')?.();
+
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it('fires once even when both close and error fire (ssh2 dedup)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      const listener = vi.fn();
+      client.onUnexpectedDisconnect(listener);
+
+      mocks.connectionListeners.get('error')?.();
+      mocks.connectionListeners.get('close')?.();
+
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it('suppresses the unexpected path during a clean disconnect()', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      const listener = vi.fn();
+      client.onUnexpectedDisconnect(listener);
+
+      mocks.isConnected.mockReturnValue(true);
+      await client.disconnect();
+
+      // ssh2 will still fire 'close' as part of dispose. The flag set
+      // inside disconnect() must squelch the listener.
+      mocks.connectionListeners.get('close')?.();
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('returns an unsubscribe function that removes the listener', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      const listener = vi.fn();
+      const unsubscribe = client.onUnexpectedDisconnect(listener);
+      unsubscribe();
+
+      mocks.connectionListeners.get('close')?.();
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('rearms after a fresh connect() — listeners can fire again on the next session', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      const listener = vi.fn();
+      client.onUnexpectedDisconnect(listener);
+      mocks.connectionListeners.get('close')?.();
+      expect(listener).toHaveBeenCalledTimes(1);
+
+      // Reconnect — ssh2 attaches new listeners; the unexpectedFired
+      // dedup flag resets.
+      mocks.connection.once.mockClear();
+      mocks.connectionListeners.clear();
+      await client.connect(profile, secret);
+      mocks.connectionListeners.get('close')?.();
+
+      expect(listener).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -1344,6 +1464,192 @@ describe('RealMisterClient', () => {
       await client.removeSystemFileMark('C64', 'never_marked.rom');
 
       expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('per-op timeout (round 2)', () => {
+    /**
+     * Helper: makes the next `ssh.execCommand` call hang forever.
+     * The runSshOp wrapper should fire its 10 s timeout and bail out.
+     */
+    function hangOnce(): void {
+      mocks.execCommand.mockImplementationOnce(
+        () =>
+          new Promise(() => {
+            /* never resolves */
+          }),
+      );
+    }
+
+    it('rejects with a typed MisterConnectionError after 10 s of silence', async () => {
+      vi.useFakeTimers();
+      const client = new RealMisterClient();
+      try {
+        await client.connect(profile, secret);
+        hangOnce();
+
+        const promise = client.listRoms('NES').catch((err: unknown) => err);
+        await vi.advanceTimersByTimeAsync(10_001);
+        const result = await promise;
+
+        expect(result).toBeInstanceOf(MisterConnectionError);
+        if (result instanceof MisterConnectionError) {
+          expect(result.code).toBe('unknown');
+          expect(result.message).toMatch(/no reply within 10s/);
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('triggers the unexpected-disconnect handler so the manager kicks off auto-retry', async () => {
+      vi.useFakeTimers();
+      const client = new RealMisterClient();
+      try {
+        await client.connect(profile, secret);
+        const listener = vi.fn();
+        client.onUnexpectedDisconnect(listener);
+
+        hangOnce();
+        const promise = client.listRoms('NES').catch(() => undefined);
+        await vi.advanceTimersByTimeAsync(10_001);
+        await promise;
+
+        expect(listener).toHaveBeenCalledTimes(1);
+        // Same dispose path as a real socket close so subsequent
+        // calls fail fast rather than queueing on the dead socket.
+        expect(mocks.dispose).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does NOT fire the timeout when the operation completes promptly', async () => {
+      vi.useFakeTimers();
+      const client = new RealMisterClient();
+      try {
+        await client.connect(profile, secret);
+        const listener = vi.fn();
+        client.onUnexpectedDisconnect(listener);
+
+        // listRoms uses execCommand; the default mock resolves
+        // immediately. We then walk past the 10s window to confirm
+        // the dangling timer has been cleared.
+        await client.listRoms('NES');
+        await vi.advanceTimersByTimeAsync(15_000);
+
+        expect(listener).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('streaming bulk exec keeps the timeout reset while progress flows', async () => {
+      vi.useFakeTimers();
+      const client = new RealMisterClient();
+      try {
+        await client.connect(profile, secret);
+        const listener = vi.fn();
+        client.onUnexpectedDisconnect(listener);
+
+        // The streaming exec resolves only after we manually push a
+        // `chunk` through `onStdout`. Each chunk arrival should bump
+        // the deadline forward so a slow-but-progressing batch
+        // never trips the timeout. Using mutable holders so TS can't
+        // narrow the assigned values to `never` inside the closure.
+        const streamResolveHolder: { current: (() => void) | null } = {
+          current: null,
+        };
+        const onStdoutHolder: { current: ((c: Buffer) => void) | null } = {
+          current: null,
+        };
+        mocks.exec.mockImplementationOnce(
+          (
+            _cmd: string,
+            _params: readonly string[],
+            options: { onStdout?: (c: Buffer) => void },
+          ) =>
+            new Promise<string>((resolve) => {
+              onStdoutHolder.current = options.onStdout ?? null;
+              streamResolveHolder.current = () => resolve('');
+            }),
+        );
+
+        const cores = [
+          {
+            id: 'NES',
+            name: 'NES',
+            romCount: 1,
+            hiddenCount: 0,
+            category: 'Console',
+            rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
+            gamesDirExists: true,
+            gamesDirHidden: false,
+          },
+        ];
+        const bulkPromise = client
+          .setBulkCoreVisibility(
+            cores.map((core) => ({ core: core as never, hidden: true })),
+          )
+          .catch((err: unknown) => err);
+
+        // 8s in, push a progress chunk; deadline resets.
+        await vi.advanceTimersByTimeAsync(8_000);
+        onStdoutHolder.current?.(Buffer.from('PROGRESS\t1\t1\tNES\n'));
+        // Another 8s — would have fired without the touch().
+        await vi.advanceTimersByTimeAsync(8_000);
+        // Resolve cleanly.
+        streamResolveHolder.current?.();
+        await vi.advanceTimersByTimeAsync(0);
+        const result = await bulkPromise;
+
+        expect(listener).not.toHaveBeenCalled();
+        expect(result).toMatchObject({ succeeded: ['NES'] });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('streaming bulk exec fires the timeout after 10s with no chunks', async () => {
+      vi.useFakeTimers();
+      const client = new RealMisterClient();
+      try {
+        await client.connect(profile, secret);
+        const listener = vi.fn();
+        client.onUnexpectedDisconnect(listener);
+
+        mocks.exec.mockImplementationOnce(
+          () =>
+            new Promise(() => {
+              /* never resolves, never produces chunks */
+            }),
+        );
+
+        const cores = [
+          {
+            id: 'NES',
+            name: 'NES',
+            romCount: 1,
+            hiddenCount: 0,
+            category: 'Console',
+            rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
+            gamesDirExists: true,
+            gamesDirHidden: false,
+          },
+        ];
+        const promise = client
+          .setBulkCoreVisibility(
+            cores.map((core) => ({ core: core as never, hidden: true })),
+          )
+          .catch((err: unknown) => err);
+        await vi.advanceTimersByTimeAsync(10_001);
+        const result = await promise;
+
+        expect(result).toBeInstanceOf(MisterConnectionError);
+        expect(listener).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

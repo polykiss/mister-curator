@@ -6,6 +6,7 @@ import { isArcadePlaceholder } from '@shared/core-matching';
 
 import { Button } from '@app/renderer/src/components/ui/button';
 import { CoresPane } from '@app/renderer/src/components/CoresPane';
+import { DisconnectBanner } from '@app/renderer/src/components/DisconnectBanner';
 import { RomsPane } from '@app/renderer/src/components/RomsPane';
 import { StatusBar } from '@app/renderer/src/components/StatusBar';
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
@@ -18,7 +19,7 @@ const CORES_PANE_MIN_WIDTH = 200;
 const ROMS_PANE_MIN_WIDTH = 300;
 
 export function BrowserScreen(): JSX.Element {
-  const { currentProfile, disconnect } = useConnection();
+  const { currentProfile, disconnect, lostConnection } = useConnection();
   const { selectedCore, refresh, coresLoading } = useCores();
 
   const {
@@ -61,6 +62,7 @@ export function BrowserScreen(): JSX.Element {
         isDragging && 'select-none',
       )}
     >
+      <DisconnectBanner />
       <header className="flex items-center justify-between gap-3 border-b px-4 py-3">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold">
@@ -89,7 +91,16 @@ export function BrowserScreen(): JSX.Element {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1">
+      {/* While the SSH session is lost we keep the panes mounted so
+          the user can still browse cached state — but dim them so the
+          stale-vs-live difference is visible at a glance. The banner
+          above is the primary signal; this is the secondary one. */}
+      <div
+        className={cn(
+          'flex min-h-0 flex-1',
+          lostConnection && 'opacity-70 transition-opacity',
+        )}
+      >
         <aside
           style={{ width: `${String(coresWidth)}px` }}
           className="shrink-0 overflow-auto border-r bg-muted/30"

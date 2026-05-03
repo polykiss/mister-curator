@@ -1,3 +1,4 @@
+import type { ConnectionEvent } from '@shared/connection';
 import type {
   BulkCoreProgress,
   BulkCoreResult,
@@ -37,6 +38,7 @@ export const IPC_CHANNELS = {
   bulkCoreProgress: 'mister:bulkCoreProgress',
   listFolderClassifications: 'mister:listFolderClassifications',
   setFolderClassification: 'mister:setFolderClassification',
+  connectionEvent: 'mister:connectionEvent',
 } as const;
 
 /**
@@ -143,6 +145,17 @@ export interface MisterApi {
   pickKeyFile(): Promise<PickedKeyFile | null>;
   onConnectionStatusChanged(handler: (status: ConnectionStatus) => void): () => void;
   /**
+   * Subscribe to lifecycle events outside the four-state status
+   * machine — connecting-elapsed ticks, auto-retry attempts, the
+   * unexpected-disconnect signal, the "we got back in" signal. The
+   * renderer uses these to drive the per-profile connecting indicator
+   * (round 11 spec: hide for 3s, soften at 8s) and the disconnect
+   * banner (round 11 spec: persistent until user dismisses).
+   */
+  onConnectionEvent(
+    handler: (event: ConnectionEvent) => void,
+  ): () => void;
+  /**
    * Returns the cached user-marks list. Cache is primed on connect and
    * refreshed after every add/remove, so the renderer can call this
    * eagerly without triggering an SSH round-trip.
@@ -196,17 +209,119 @@ const VALID_CONNECTION_ERROR_CODES: ReadonlySet<ConnectionErrorCode> = new Set([
 ]);
 
 /**
- * Recognises the wire shape of a serialized MisterConnectionError that has
- * crossed the IPC boundary. Used by the preload bridge to rebuild a proper
- * MisterConnectionError instance so renderer code can `instanceof`-check it.
+ * Sentinel that lets us smuggle structured error payloads through
+ * Electron's `ipcMain.handle` ↔ `ipcRenderer.invoke` channel.
+ *
+ * Why: Electron serializes thrown Error objects by calling
+ * `error.message` + `error.stack`, then wraps the message with
+ * "Error invoking remote method '<channel>': ". Custom fields on
+ * `Error` subclasses (such as `MisterConnectionError.code`) are
+ * stripped. Without help, the renderer sees an opaque `Error` whose
+ * `.message` reads like a stack trace fragment — that's how the
+ * inline failure card ended up showing the wrapping prefix instead of
+ * the friendly copy.
+ *
+ * The fix is to encode the structured fields *inside* `error.message`
+ * with a unique prefix that survives Electron's wrapping verbatim. The
+ * preload then scans the wrapped message for the prefix, parses the
+ * JSON, and reconstructs a typed error. Any non-marker error passes
+ * through untouched.
  */
-export function isSerializedMisterConnectionError(
-  err: unknown,
-): err is { name: 'MisterConnectionError'; code: ConnectionErrorCode; message: string } {
-  if (err === null || typeof err !== 'object') return false;
-  const candidate = err as Record<string, unknown>;
-  if (candidate.name !== 'MisterConnectionError') return false;
-  if (typeof candidate.message !== 'string') return false;
-  if (typeof candidate.code !== 'string') return false;
-  return VALID_CONNECTION_ERROR_CODES.has(candidate.code as ConnectionErrorCode);
+const IPC_ERROR_MARKER = '__MC_IPC_ERROR_v1__:';
+
+/**
+ * Wraps a raw error so it can survive an `ipcMain.handle` round-trip
+ * with its structured fields intact. Currently only `MisterConnectionError`
+ * gets the structured treatment — anything else passes through.
+ */
+export function encodeIpcError(err: unknown): unknown {
+  if (
+    err !== null &&
+    typeof err === 'object' &&
+    (err as { name?: unknown }).name === 'MisterConnectionError'
+  ) {
+    const e = err as { code?: unknown; message?: unknown };
+    if (typeof e.code === 'string' && typeof e.message === 'string') {
+      const payload = JSON.stringify({
+        kind: 'MisterConnectionError',
+        code: e.code,
+        message: e.message,
+      });
+      return new Error(`${IPC_ERROR_MARKER}${payload}`);
+    }
+  }
+  return err;
 }
+
+/**
+ * Inverse of `encodeIpcError`. Looks for the marker anywhere in the
+ * thrown error's message — Electron prepends its own preamble, so
+ * `indexOf` is the right semantic, not `startsWith`.
+ */
+export function decodeIpcError(err: unknown): unknown {
+  const message = err instanceof Error ? err.message : '';
+  const idx = message.indexOf(IPC_ERROR_MARKER);
+  if (idx < 0) return err;
+  try {
+    const json = message.slice(idx + IPC_ERROR_MARKER.length);
+    const parsed: unknown = JSON.parse(json);
+    if (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      (parsed as { kind?: unknown }).kind === 'MisterConnectionError'
+    ) {
+      const p = parsed as { code?: unknown; message?: unknown };
+      if (
+        typeof p.code === 'string' &&
+        VALID_CONNECTION_ERROR_CODES.has(p.code as ConnectionErrorCode) &&
+        typeof p.message === 'string'
+      ) {
+        // Construct the typed error with the original message — the
+        // renderer's failure card layer pivots off `code` to look up
+        // the friendly copy, but having `message` available preserves
+        // the underlying detail for the `'unknown'` branch.
+        return rebuildMisterConnectionError(
+          p.code as ConnectionErrorCode,
+          p.message,
+        );
+      }
+    }
+  } catch {
+    // Malformed payload — fall through to the raw error.
+  }
+  return err;
+}
+
+/**
+ * Indirection through a getter so this module doesn't pull in
+ * `MisterConnectionError` (a class) at preload-bundle time when the
+ * renderer is the only place that imports it. Set lazily by the
+ * preload at startup.
+ */
+let misterConnectionErrorFactory:
+  | ((code: ConnectionErrorCode, message: string) => Error)
+  | null = null;
+
+export function setMisterConnectionErrorFactory(
+  factory: (code: ConnectionErrorCode, message: string) => Error,
+): void {
+  misterConnectionErrorFactory = factory;
+}
+
+function rebuildMisterConnectionError(
+  code: ConnectionErrorCode,
+  message: string,
+): Error {
+  if (misterConnectionErrorFactory !== null) {
+    return misterConnectionErrorFactory(code, message);
+  }
+  // Fallback: a plain Error tagged with the fields. Better than
+  // losing the code entirely in the unlikely case the factory wasn't
+  // wired up; the renderer can still feature-test the shape.
+  const fallback = new Error(message);
+  Object.assign(fallback, { name: 'MisterConnectionError', code });
+  return fallback;
+}
+
+/** Test-only: exposed so unit tests can assert on the marker. */
+export const __TEST_IPC_ERROR_MARKER = IPC_ERROR_MARKER;

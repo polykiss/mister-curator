@@ -9,11 +9,14 @@ import type { CoreEntry } from '@shared/types';
 import { Button } from '@app/renderer/src/components/ui/button';
 import { HideEmptyCoresDialog } from '@app/renderer/src/components/HideEmptyCoresDialog';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
+import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
 import { summarizeBulkResult } from '@app/renderer/src/lib/format';
+import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
 
 const ARCADE_TOOLTIP = "Arcade cores aren't supported yet — coming in a later release.";
+const DISCONNECTED_TOOLTIP = 'Reconnect to make changes.';
 
 export function CoresPane(): JSX.Element {
   const {
@@ -26,8 +29,15 @@ export function CoresPane(): JSX.Element {
     showCore,
     setBulkCoreVisibility,
   } = useCores();
+  const { status } = useConnection();
+  const canMutate = status === 'connected';
 
-  const [showHidden, setShowHidden] = useState(false);
+  // Hidden cores are intentionally permanent decisions — keep them
+  // off the default cores list. The user's last choice persists.
+  const [showHidden, setShowHidden] = usePersistedBool(
+    'mistercurator.showHiddenCores',
+    false,
+  );
   const [confirmHideId, setConfirmHideId] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -194,7 +204,8 @@ export function CoresPane(): JSX.Element {
             variant="outline"
             size="sm"
             onClick={() => setBulkOpen(true)}
-            disabled={emptyHideableCores.length === 0}
+            disabled={!canMutate || emptyHideableCores.length === 0}
+            title={canMutate ? undefined : DISCONNECTED_TOOLTIP}
           >
             <Sparkles />
             Hide empty ({emptyHideableCores.length})
@@ -203,8 +214,12 @@ export function CoresPane(): JSX.Element {
             variant="outline"
             size="sm"
             onClick={() => void onShowAllHidden()}
-            disabled={appHiddenCores.length === 0}
-            title="Restore visibility for every core MiSTerCurator hid"
+            disabled={!canMutate || appHiddenCores.length === 0}
+            title={
+              canMutate
+                ? 'Restore visibility for every core MiSTerCurator hid'
+                : DISCONNECTED_TOOLTIP
+            }
           >
             <Undo2 />
             Unhide all ({appHiddenCores.length})
@@ -237,6 +252,7 @@ export function CoresPane(): JSX.Element {
         selectedCoreId,
         confirmHideId,
         pendingId,
+        canMutate,
         onSelect: selectCore,
         onAskHide: setConfirmHideId,
         onConfirmHide: onHide,
@@ -261,6 +277,8 @@ interface RenderArgs {
   readonly selectedCoreId: string | null;
   readonly confirmHideId: string | null;
   readonly pendingId: string | null;
+  /** Disables every per-row hide/show button when not connected. */
+  readonly canMutate: boolean;
   readonly onSelect: (id: string | null) => void;
   readonly onAskHide: (id: string) => void;
   readonly onConfirmHide: (core: CoreEntry) => Promise<void>;
@@ -395,28 +413,43 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                   read-only
                 </span>
               ) : isHiddenCore ? (
-                // State icon: crossed-out eye = currently hidden. Click to show.
+                // Round 4: rolled back the round-3 solid fills.
+                // Outlined variants keep the slate-vs-primary
+                // colour cue without 9 stacked rows shouting.
                 <Button
-                  variant="ghost"
-                  size="icon"
+                  variant="outline"
+                  size="sm"
                   onClick={() => void args.onShow(core)}
-                  disabled={isPending}
-                  title={`Show ${core.name}`}
+                  disabled={isPending || !args.canMutate}
+                  className="min-w-[5.5rem] border-primary/40 text-primary hover:bg-primary/10 hover:text-primary"
+                  title={
+                    args.canMutate
+                      ? `Show ${core.name}`
+                      : 'Reconnect to make changes.'
+                  }
                   aria-label={`Show ${core.name}`}
                 >
                   <EyeOff />
+                  Show
                 </Button>
               ) : (
-                // State icon: open eye = currently visible. Click to hide.
+                // Slate-outlined Hide. Triggers the confirm step
+                // (askHide) — same flow, restrained affordance.
                 <Button
-                  variant="ghost"
-                  size="icon"
+                  variant="outline"
+                  size="sm"
                   onClick={() => args.onAskHide(core.id)}
-                  disabled={isPending}
-                  title={`Hide ${core.name}`}
+                  disabled={isPending || !args.canMutate}
+                  className="min-w-[5.5rem] border-slate-300 text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800/50 dark:hover:text-slate-100"
+                  title={
+                    args.canMutate
+                      ? `Hide ${core.name}`
+                      : 'Reconnect to make changes.'
+                  }
                   aria-label={`Hide ${core.name}`}
                 >
                   <Eye />
+                  Hide
                 </Button>
               )}
             </div>

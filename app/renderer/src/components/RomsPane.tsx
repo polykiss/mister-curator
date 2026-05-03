@@ -39,6 +39,7 @@ import {
   TableRow,
 } from '@app/renderer/src/components/ui/table';
 import { romsKey, useCores } from '@app/renderer/src/contexts/CoresContext';
+import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import {
   computeBackRow,
   computeBreadcrumb,
@@ -47,6 +48,13 @@ import {
 import { cn } from '@app/renderer/src/lib/cn';
 import { formatBytes, summarizeBulkResult } from '@app/renderer/src/lib/format';
 import type { VisibilityChange } from '@app/renderer/src/lib/optimistic';
+import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
+
+/**
+ * Tooltip for buttons disabled because the SSH session is in a
+ * lost-connection / reconnecting state. Mirrors the spec wording.
+ */
+const DISCONNECTED_TOOLTIP = 'Reconnect to make changes.';
 
 interface RomsPaneProps {
   readonly core: CoreEntry;
@@ -67,14 +75,30 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     setSystemFileMarks,
     setFolderClassification,
   } = useCores();
+  const { status } = useConnection();
+  // Mid-session disconnect / pre-reconnect state — every mutating
+  // button gates on this. Reads (browse, drill, filter) stay enabled
+  // so the user can still inspect the cached state.
+  const canMutate = status === 'connected';
   // Drilled-in path inside the core. Empty string means top-level.
   // Slash-joined for nested folders (`'1 World A-Z'`,
   // `'parent/child'`). Used for every ROM-level operation; the cores
   // pane and counts always reflect the top-level view.
   const [subPath, setSubPath] = useState<string>('');
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
-  const [showHidden, setShowHidden] = useState(false);
-  const [showSystem, setShowSystem] = useState(false);
+  // Round 3 default: show hidden ROMs by default — they're typically
+  // the user's recent work and they want to see what they did. The
+  // user's last choice persists across sessions via localStorage.
+  const [showHidden, setShowHidden] = usePersistedBool(
+    'mistercurator.showHiddenRoms',
+    true,
+  );
+  // System files stay off by default — they're noise (BIOSes, palettes,
+  // configs) and the system-files-marks UI is the place to manage them.
+  const [showSystem, setShowSystem] = usePersistedBool(
+    'mistercurator.showSystemFiles',
+    false,
+  );
   const [menuFor, setMenuFor] = useState<{
     readonly rom: Rom;
     readonly x: number;
@@ -448,20 +472,26 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
 
     // Folder rows get classification overrides — the user can pin a
     // specific folder to container/atomic against the auto-detector.
+    // Classification overrides write to an on-MiSTer marks file, so
+    // they're gated on a live connection just like system-file marks.
     if (rom.kind !== 'file') {
       const isContainer = rom.kind === 'folder-container';
       items.push({
         label: isContainer ? 'Treat as atomic (one game)' : 'Treat as container (drill in)',
         onSelect: () =>
           void onSetClassification(rom, isContainer ? 'atomic' : 'container'),
-        title:
-          'Override the auto-detector for this folder. Persists in the on-MiSTer marks file.',
+        disabled: !canMutate,
+        title: canMutate
+          ? 'Override the auto-detector for this folder. Persists in the on-MiSTer marks file.'
+          : DISCONNECTED_TOOLTIP,
       });
       items.push({
         label: 'Reset to auto-detected',
         onSelect: () => void onSetClassification(rom, null),
-        title:
-          'Drop the user override and let the heuristic classify this folder.',
+        disabled: !canMutate,
+        title: canMutate
+          ? 'Drop the user override and let the heuristic classify this folder.'
+          : DISCONNECTED_TOOLTIP,
       });
     }
 
@@ -485,15 +515,19 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
       items.push({
         label: 'Unmark as system file',
         onSelect: () => void onUnmarkSystem(rom),
-        title:
-          'Treat this file as a regular ROM again. Removes it from the system-files list.',
+        disabled: !canMutate,
+        title: canMutate
+          ? 'Treat this file as a regular ROM again. Removes it from the system-files list.'
+          : DISCONNECTED_TOOLTIP,
       });
     } else {
       items.push({
         label: 'Mark as system file',
         onSelect: () => void onMarkAsSystem(rom),
-        title:
-          'Hide this file from the ROM list and exclude it from bulk operations.',
+        disabled: !canMutate,
+        title: canMutate
+          ? 'Hide this file from the ROM list and exclude it from bulk operations.'
+          : DISCONNECTED_TOOLTIP,
       });
     }
 
@@ -579,7 +613,8 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             variant="outline"
             size="sm"
             onClick={onHideAll}
-            disabled={candidates.every((r) => r.hidden)}
+            disabled={!canMutate || candidates.every((r) => r.hidden)}
+            title={canMutate ? undefined : DISCONNECTED_TOOLTIP}
           >
             Hide all
           </Button>
@@ -587,7 +622,8 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             variant="outline"
             size="sm"
             onClick={onShowAll}
-            disabled={candidates.every((r) => !r.hidden)}
+            disabled={!canMutate || candidates.every((r) => !r.hidden)}
+            title={canMutate ? undefined : DISCONNECTED_TOOLTIP}
           >
             Unhide all
           </Button>
@@ -595,7 +631,8 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             variant="outline"
             size="sm"
             onClick={onHideSelected}
-            disabled={visibleSelectedCount === 0}
+            disabled={!canMutate || visibleSelectedCount === 0}
+            title={canMutate ? undefined : DISCONNECTED_TOOLTIP}
           >
             Hide selected ({visibleSelectedCount})
           </Button>
@@ -603,7 +640,8 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             variant="outline"
             size="sm"
             onClick={onShowSelected}
-            disabled={hiddenSelectedCount === 0}
+            disabled={!canMutate || hiddenSelectedCount === 0}
+            title={canMutate ? undefined : DISCONNECTED_TOOLTIP}
           >
             Unhide selected ({hiddenSelectedCount})
           </Button>
@@ -611,8 +649,12 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             variant="outline"
             size="sm"
             onClick={() => void onMarkSelectedAsSystem()}
-            disabled={markableSelected.length === 0}
-            title="Treat the selected files as system files (BIOS, palette, config). Hidden by default; visible when 'Show system files' is on."
+            disabled={!canMutate || markableSelected.length === 0}
+            title={
+              canMutate
+                ? "Treat the selected files as system files (BIOS, palette, config). Hidden by default; visible when 'Show system files' is on."
+                : DISCONNECTED_TOOLTIP
+            }
           >
             Mark as system ({markableSelected.length})
           </Button>
@@ -620,8 +662,12 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             variant="outline"
             size="sm"
             onClick={() => void onUnmarkSelected()}
-            disabled={unmarkableSelected.length === 0}
-            title="Remove the user-system mark from the selected files. Auto-detected system files are not affected."
+            disabled={!canMutate || unmarkableSelected.length === 0}
+            title={
+              canMutate
+                ? 'Remove the user-system mark from the selected files. Auto-detected system files are not affected.'
+                : DISCONNECTED_TOOLTIP
+            }
           >
             Unmark system ({unmarkableSelected.length})
           </Button>
@@ -816,14 +862,32 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                           read-only
                         </span>
                       ) : (
+                        // Round 4: rolled back the round-3 fills.
+                        // 9 stacked rows of solid Hide buttons read as
+                        // shouting; outlined variants keep the slate-
+                        // vs-primary colour cue but with less visual
+                        // weight. The full design pass lives in PR #9.
+                        // `min-w-[5.5rem]` retained so a row's button
+                        // cell doesn't reflow when its state flips.
                         <Button
-                          variant="ghost"
+                          variant="outline"
                           size="sm"
                           onClick={() => void onSingleToggle(rom)}
-                          title={
+                          disabled={!canMutate}
+                          className={cn(
+                            'min-w-[5.5rem] not-italic',
                             rom.hidden
-                              ? `Show ${rom.displayName}`
-                              : `Hide ${rom.displayName}`
+                              ? // Show: primary-tinted outline
+                                'border-primary/40 text-primary hover:bg-primary/10 hover:text-primary'
+                              : // Hide: muted slate outline
+                                'border-slate-300 text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800/50 dark:hover:text-slate-100',
+                          )}
+                          title={
+                            canMutate
+                              ? rom.hidden
+                                ? `Show ${rom.displayName}`
+                                : `Hide ${rom.displayName}`
+                              : DISCONNECTED_TOOLTIP
                           }
                         >
                           {rom.hidden ? (

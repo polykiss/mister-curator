@@ -79,6 +79,7 @@ export class FakeMisterClient implements IMisterClient {
   private readonly pristineRootPath: string | undefined;
   private readonly latencyMs: number;
   private connected = false;
+  private readonly unexpectedDisconnectListeners = new Set<() => void>();
 
   constructor(options: FakeMisterClientOptions) {
     this.rootPath = options.rootPath;
@@ -108,6 +109,29 @@ export class FakeMisterClient implements IMisterClient {
 
   isConnected(): boolean {
     return this.connected;
+  }
+
+  onUnexpectedDisconnect(listener: () => void): () => void {
+    this.unexpectedDisconnectListeners.add(listener);
+    return () => {
+      this.unexpectedDisconnectListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Test-only: simulate the underlying SSH transport dropping mid-
+   * session. Exposed because there's no real socket to break in unit
+   * tests; production code never calls this.
+   */
+  simulateUnexpectedDisconnect(): void {
+    this.connected = false;
+    for (const listener of this.unexpectedDisconnectListeners) {
+      try {
+        listener();
+      } catch {
+        /* swallow */
+      }
+    }
   }
 
   async listAllCoresWithFiles(
