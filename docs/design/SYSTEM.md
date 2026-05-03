@@ -1,10 +1,12 @@
-# MiSTerCurator Design System (Proposal)
+# MiSTerCurator Design System
 
-Status: **Phase 1 proposal.** Awaiting user review before any code changes.
+Status: **Locked.** Phase 1 proposal accepted with revisions; Phase 2
+applies it across the app. See section 9 (Decisions) for what changed
+between proposal and lock-in.
 
-This document proposes a single, coherent visual identity to replace the
+This document is the single coherent visual identity that replaces the
 cumulative drift accumulated across MVP iterations. It is the reference
-that `feat/design-pass` Phase 2 will apply across every screen.
+that every component restyles against.
 
 ---
 
@@ -148,19 +150,22 @@ only if user-tested. See open questions.
 
 ## 3. Typography
 
-**Family: Geist + Geist Mono** (Vercel; SIL OFL; available via Google
-Fonts).
+**Family: IBM Plex Sans + IBM Plex Mono** (IBM; SIL OFL; available via
+Google Fonts; self-hosted in this project).
 
-This is the strongest free pair available that:
-- explicitly is **not** Inter / Roboto / Arial / system-ui,
-- has matched proportions across sans + mono (so a path rendered next
-  to a name doesn't break optical rhythm),
-- carries the technical-tool character the audience expects,
-- ships in the weight range we need (400 / 500 / 600 / 700).
+IBM Plex carries technical-tool character without sliding into the
+default-developer-tool aesthetic that Geist or Inter would. It is:
 
-Geist is a defensible choice for this product, and it's free. It is
-also the *least* distinctive of the candidates we considered — see open
-questions for IBM Plex / Commit Mono / paid alternatives.
+- explicitly **not** Inter / Roboto / Arial / system-ui,
+- a paired sans + mono family with matched proportions, so a path
+  rendered next to a name never breaks optical rhythm,
+- rich in personality at display sizes (the wordmark uses Plex Sans
+  700 with tight tracking — see section 5),
+- shipped in the weight range we need (400 / 500 / 600 / 700).
+
+We **self-host** the woff2 files (CSP `default-src 'self'` would block
+the Google Fonts CDN, and we want the renderer to paint correctly when
+the user is offline on a LAN-only setup).
 
 ### Type scale
 
@@ -192,8 +197,8 @@ the typography carries it.
 
 ### Mono usage rules
 
-Geist Mono is reserved for **content that is technically meaningful as
-a string**:
+IBM Plex Mono is reserved for **content that is technically meaningful
+as a string**:
 - File and directory paths (breadcrumb segments, ledger paths)
 - Hostnames, IPs, ports
 - Counts where alignment matters (`1,247 ROMs · 312 hidden`)
@@ -336,7 +341,7 @@ Mono path, lives in the panel header above ROMs:
 mister:games / SNES / 1 World A-Z
 ```
 
-- Geist Mono, body-sm
+- IBM Plex Mono, body-sm
 - Segments: `fg-body`, hover `fg-primary`
 - Separators (` / `): `fg-disabled`
 - No icons, no chevrons — the slash is the visual
@@ -477,9 +482,10 @@ ambient texture. That's the bar.
 ### Changes (require code in Phase 2)
 
 1. **Tailwind config** — palette tokens, type scale, spacing tokens,
-   font-family Geist + Geist Mono, radius scale.
-2. **Global CSS** — CSS variables for both modes; load Geist via
-   Google Fonts (or self-host) at build time.
+   font-family IBM Plex Sans + IBM Plex Mono, radius scale.
+2. **Global CSS** — CSS variables for both modes; load IBM Plex via
+   self-hosted woff2 + `@font-face`. Force `dark` class on `<body>`
+   for v0.1.0; light tokens stay wired for the post-v0.1.0 follow-up.
 3. **Buttons** — `cva` variants restructured: only `primary` is
    filled; default-action becomes outlined `secondary`.
 4. **Badges** — outline pills, no fills.
@@ -510,73 +516,102 @@ ambient texture. That's the bar.
 
 ---
 
-## 9. Open questions
+## 9. Decisions
 
-These are choices where multiple coherent paths exist, or where the
-proposal makes a defensible call that the user should still get a vote
-on. Phase 2 cannot start until each is resolved.
+The five questions raised in the Phase 1 proposal are resolved. This
+section records what was chosen and why so the lock-in is legible to
+anyone re-reading the document.
 
-### Q1. Accent color: signal green, magenta, or cool cyan?
+| #  | Topic        | Decision                                                                                  |
+| -- | ------------ | ----------------------------------------------------------------------------------------- |
+| Q1 | Accent       | **Signal green `#B8F500`**. No dual-accent rule — cores and ROMs differ by icon + layout. |
+| Q2 | Typography   | **IBM Plex Sans + IBM Plex Mono**. Self-hosted woff2 (CSP blocks Google Fonts CDN).       |
+| Q3 | Row density  | **40px** rows.                                                                            |
+| Q4 | Light mode   | **Defer to post-v0.1.0.** Tokens wired for both modes; `<body>` forced to `dark`.         |
+| Q5 | Wordmark     | **Restrained.** Plex Sans 700 with letter-spacing `-0.02em`. No separate display font.    |
 
-The proposal picks **signal green (`#B8F500`)** — culturally aligned
-with the audience (LED indicators, CRT phosphor), and lifted directly
-from the SmartShort reference. It also lets us leave success-teal
-distinct.
+A few notes on the choices:
 
-Alternatives:
-- **Magenta `#E6298A`** (Nextmove / GR8R reference) — more
-  designer-forward, slightly less product-fit for retro hardware, but
-  the references the user picked include it twice out of five.
-- **Cool cyan `#5FD3FF`** — more terminal-feel, sits comfortably with
-  the blue-black palette, costs us some "warmth."
+- **Signal green** stays culturally true to the references (SmartShort
+  lime) and the audience (LED indicators, CRT phosphor). The "no
+  dual-accents" rule is now load-bearing — if a future PR is tempted
+  to introduce pink for cores or teal for ROMs, the panes should
+  differentiate via icon and layout instead.
+- **IBM Plex** carries more personality than Geist at display sizes
+  (the connection-screen wordmark earns the space), and pairs with the
+  deep-blue palette. Self-hosting is a mechanical workaround for the
+  renderer's strict `default-src 'self'` CSP, not a stylistic choice.
+- **40px rows** balance ROM-list scannability (50+ visible at a
+  reasonable window height) against fingerprint-readiness; the
+  references skew looser but they're not list-heavy.
+- **Dark-only ship** keeps the visual-QA surface contained for the
+  v0.1.0 release. The light tokens are already in `index.css` and the
+  Tailwind config — flipping the body class is a one-line change in a
+  follow-up PR.
+- **Restrained wordmark** keeps the brand moment in-family and avoids
+  another font load.
 
-Which accent?
+---
 
-### Q2. Typography: Geist, IBM Plex, or something more distinctive?
+## 10. Density indicator addendum
 
-The proposal picks **Geist + Geist Mono**: free, modern, technical,
-not Inter. It is also possibly *too* default for our audience — Geist
-has saturated developer tools and could feel undifferentiated.
+The "no gradients" rule in section 7 has one carve-out: a small
+per-row density indicator. This is the only gradient-adjacent visual
+in the system; the rule otherwise stands.
 
-Alternatives:
-- **IBM Plex Sans + IBM Plex Mono** — free, more characterful,
-  slightly editorial. Pairs well with deep-blue palette. My second
-  choice if Geist feels safe.
-- **Commit Mono + Geist** — Commit has stronger personality than Geist
-  Mono; risk is mono-as-display can read juvenile.
-- **Berkeley Mono + Söhne** — paid; would need approval and
-  budget; would land the strongest distinctive identity.
+### What it is
 
-Which family pairing?
+A sparkline-style filled bar inline with the row's count metadata.
+The bar's fill width represents the row's value (ROM count for a
+core, file size for a ROM, total folder size for a folder ROM)
+relative to the maximum value among the rows currently visible.
 
-### Q3. Row density: 40px (proposed), 36px, or 48px?
+```
+Cores list                                ROMs list
+┌────────────────────────────┐            ┌────────────────────────────┐
+│  SNES         ▰▰▰▰▰▰▱▱  227 │            │  Final Fantasy III  ▰▰▰▰▰  4.0M │
+│  NES          ▰▰▰▰▱▱▱▱  118 │            │  Chrono Trigger     ▰▰▰▰   3.8M │
+│  Game Boy     ▰▰▱▱▱▱▱▱   59 │            │  Earthbound         ▰▰▰    2.4M │
+└────────────────────────────┘            └────────────────────────────┘
+```
 
-Proposal: **40px**. ROM lists need density (50+ visible). 36px is
-tighter still and matches some pro-tool conventions (Finder list view
-is 24px, but that's the OS tier). 48px matches the references but
-those have far fewer rows on screen.
+### Visual spec
 
-Anything we should know about row heights baked into existing tests?
+- **Track**: 40px wide × 3px tall, 1.5px radius, sits to the LEFT of
+  the count text with 8px gap.
+- **Track background**: `bg-elevated`.
+- **Fill**: linear-gradient from `fg-muted` at 0% to `accent` at
+  100%, clipped at the actual fill ratio. The gradient stops are
+  fixed in the *track* coordinate space — a 25%-filled bar shows the
+  bottom 25% of the gradient (still mostly muted), a 100%-filled bar
+  shows the full muted-to-signal-green ramp. This is the only place
+  in the system where two colors mix into one fill.
+- **No glow, no halo, no ambient bleed.** The bar is contained inside
+  its 40×3 track; nothing escapes.
 
-### Q4. Light mode: ship at parity, or defer to post-v0.1.0?
+### Where it appears
 
-The references are uniformly dark. The audience uses this app at
-night. Building light mode at parity doubles the visual-QA surface
-for Phase 2. Proposal: **ship dark-only for v0.1.0**, with the CSS
-variables already wired so light is a one-PR follow-up.
+- **Cores list** (CoreRow): bar = `core.romCount` / max(romCount over
+  visible cores). Cores with zero ROMs render no bar at all (a single
+  pixel of accent on a flat row reads as a glitch). The bar sits to
+  the left of the existing count text in the metadata slot.
+- **ROMs list** (RomRow), file rows: bar = `rom.sizeBytes` / max
+  visible. Files of unknown size render no bar.
+- **ROMs list**, folder rows (atomic + container): bar = total
+  contained size if available, else hidden. Folder size is the same
+  byte count `formatBytes` already shows for folder rows.
 
-Defer light, or commit now?
+### What it is not
 
-### Q5. Brand wordmark — restraint or one display moment?
+- Not a focus glow, not a hover highlight, not a selection halo.
+- Not a progress bar (no animation, no shimmer).
+- Not used on any non-list surface. The status bar's progress bar
+  during a bulk op is a separate component that does not use the
+  density gradient.
 
-Proposal: render "MiSTerCurator" in the connection screen and header
-using **Geist 700 with letter-spacing -0.02em** — restrained, in
-family. Alternative: license **PP Neue Machina** or load
-**Departure Mono** (free) for *one* display moment (the wordmark on
-the connection screen) and nowhere else. This buys distinctiveness at
-the cost of one extra font load.
-
-Stay restrained, or buy the brand moment?
+If a future PR is tempted to apply this gradient to anything besides
+these per-row indicators, it should propose it as a new addendum and
+get explicit approval. The constraint is the design.
 
 ---
 
@@ -606,8 +641,8 @@ colors:
   accent.fg      → accent-fg
   success / warning / destructive / info
 fontFamily:
-  sans → ['Geist', 'system-ui', 'sans-serif']
-  mono → ['Geist Mono', 'ui-monospace', 'monospace']
+  sans → ['IBM Plex Sans', 'system-ui', 'sans-serif']
+  mono → ['IBM Plex Mono', 'ui-monospace', 'monospace']
 fontSize:
   caption / body-sm / body / body-lg / heading-sm /
   heading / heading-lg / display
