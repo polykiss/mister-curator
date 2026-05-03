@@ -442,7 +442,8 @@ describe('FakeMisterClient', () => {
       const folder = roms.find((r) => r.filename === 'Boot Disk Compilation');
       expect(file?.kind).toBe('file');
       expect(folder).toBeDefined();
-      expect(folder?.kind).toBe('folder');
+      // AO486's "Boot Disk Compilation" has sub-folders → container.
+      expect(folder?.kind === 'folder-container' || folder?.kind === 'folder-atomic').toBe(true);
       // Folder size aggregates contained files (both touch'd to 0 bytes).
       expect(folder?.sizeBytes).toBe(0);
     });
@@ -455,12 +456,20 @@ describe('FakeMisterClient', () => {
       expect(filenames).toContain('Burning Rangers (USA)'); // folder
 
       const panzer = roms.find((r) => r.filename === 'Panzer Dragoon (USA) (1S)');
-      expect(panzer?.kind).toBe('folder');
+      // Saturn disc folders carry .cue files → atomic.
+      expect(panzer?.kind).toBe('folder-atomic');
       expect(panzer?.hidden).toBe(false);
       expect(panzer?.path).toBe('/media/fat/games/Saturn/Panzer Dragoon (USA) (1S)');
 
       const hiddenFolder = roms.find((r) => r.filename === '.Hidden Disc Game');
-      expect(hiddenFolder?.kind).toBe('folder');
+      // The classification heuristic doesn't peer inside dot-prefixed
+      // folders' contents to know they're discs — but the override
+      // path or its actual contents may resolve it. We only require
+      // it to be one of the folder shapes.
+      expect(
+        hiddenFolder?.kind === 'folder-atomic' ||
+          hiddenFolder?.kind === 'folder-container',
+      ).toBe(true);
       expect(hiddenFolder?.hidden).toBe(true);
       expect(hiddenFolder?.displayName).toBe('Hidden Disc Game');
     });
@@ -483,6 +492,63 @@ describe('FakeMisterClient', () => {
       expect(saturn!.romCount).toBe(3);
       // The hidden folder counts toward hiddenCount.
       expect(saturn!.hiddenCount).toBe(1);
+    });
+  });
+
+  describe('setBulkCoreVisibility progress callback', () => {
+    it('emits one onProgress tick per plan with 1-based done counts', async () => {
+      const cores = await client.listAllCoresWithFiles();
+      const ids = ['NES', 'SNES', 'Genesis'];
+      const targets = ids
+        .map((id) => cores.find((c) => c.id === id))
+        .filter((c): c is NonNullable<typeof c> => c !== undefined);
+      expect(targets).toHaveLength(3);
+
+      const events: { done: number; total: number; coreId: string; result: string }[] = [];
+      await client.setBulkCoreVisibility(
+        targets.map((core) => ({ core, hidden: true })),
+        {
+          onProgress: (e) =>
+            events.push({
+              done: e.done,
+              total: e.total,
+              coreId: e.coreId,
+              result: e.result,
+            }),
+        },
+      );
+
+      expect(events).toHaveLength(3);
+      expect(events[0]?.total).toBe(3);
+      expect(events.map((e) => e.done)).toEqual([1, 2, 3]);
+      expect(events.every((e) => e.result === 'ok')).toBe(true);
+    });
+
+    it('reports a fail tick with reason when one core fails mid-batch', async () => {
+      const cores = await client.listAllCoresWithFiles();
+      const nes = cores.find((c) => c.id === 'NES')!;
+      const snes = cores.find((c) => c.id === 'SNES')!;
+      // Synthesize a broken plan that points at a missing path.
+      const broken: CoreEntry = {
+        ...snes,
+        rbfPaths: ['/media/fat/_Console/IDoNotExist_20240115.rbf'],
+      };
+
+      const events: { result: string; coreId: string }[] = [];
+      await client.setBulkCoreVisibility(
+        [
+          { core: nes, hidden: true },
+          { core: broken, hidden: true },
+        ],
+        {
+          onProgress: (e) => events.push({ result: e.result, coreId: e.coreId }),
+        },
+      );
+
+      expect(events).toEqual([
+        { result: 'ok', coreId: 'NES' },
+        { result: 'fail', coreId: 'SNES' },
+      ]);
     });
   });
 
@@ -551,6 +617,97 @@ describe('FakeMisterClient', () => {
       await client.connect(profile, secret);
       const marks = await client.readSystemFilesMarks();
       expect(marks.marked).toHaveLength(0);
+    });
+  });
+
+  describe('folder drilling + classification', () => {
+    it('classifies NEOGEO subfolders as containers (cart-shape)', async () => {
+      const cores = await client.listAllCoresWithFiles();
+      const neogeo = cores.find((c) => c.id === 'NEOGEO');
+      expect(neogeo).toBeDefined();
+
+      const roms = await client.listRoms('NEOGEO');
+      const sub = roms.find((r) => r.filename === '1 World A-Z');
+      expect(sub).toBeDefined();
+      expect(sub?.kind).toBe('folder-container');
+    });
+
+    it('classifies Saturn disc folders as atomic', async () => {
+      const roms = await client.listRoms('Saturn');
+      const panzer = roms.find((r) => r.filename === 'Panzer Dragoon (USA) (1S)');
+      expect(panzer?.kind).toBe('folder-atomic');
+    });
+
+    it('lists ROMs at a sub-path with relative paths threaded through', async () => {
+      const roms = await client.listRoms('NEOGEO', '1 World A-Z');
+      const filenames = roms.map((r) => r.filename).sort();
+      expect(filenames).toContain('mslug.zip');
+      expect(filenames).toContain('kof97.zip');
+      const mslug = roms.find((r) => r.filename === 'mslug.zip');
+      expect(mslug?.relativePath).toBe('1 World A-Z/mslug.zip');
+      // Display strips the .zip wrapper.
+      expect(mslug?.displayName).toBe('mslug');
+      expect(mslug?.path).toBe(
+        '/media/fat/games/NEOGEO/1 World A-Z/mslug.zip',
+      );
+    });
+
+    it('rejects subPaths that climb out of the core dir', async () => {
+      await expect(client.listRoms('NEOGEO', '..')).rejects.toThrow(
+        /Invalid subPath/,
+      );
+      await expect(client.listRoms('NEOGEO', '/etc')).rejects.toThrow(
+        /Invalid subPath/,
+      );
+    });
+
+    it('hides a ROM at a sub-path via setRomVisibility', async () => {
+      await client.setRomVisibility(
+        'NEOGEO',
+        'mslug.zip',
+        true,
+        '1 World A-Z',
+      );
+      const roms = await client.listRoms('NEOGEO', '1 World A-Z');
+      expect(roms.find((r) => r.filename === '.mslug.zip')).toBeDefined();
+      expect(roms.find((r) => r.filename === 'mslug.zip')).toBeUndefined();
+    });
+
+    it('user override flips classification and persists across reads', async () => {
+      // Saturn's "Panzer Dragoon (USA) (1S)" auto-detects as atomic.
+      // Override to container.
+      await client.setFolderClassification({
+        coreId: 'Saturn',
+        folderPath: 'Panzer Dragoon (USA) (1S)',
+        classification: 'container',
+        setAt: '2026-05-02',
+      });
+      // The client's listRoms takes the marks as a parameter — at the
+      // production layer the ConnectionManager threads its cache
+      // through. For this unit test we read the file ourselves and
+      // pass it in.
+      const marks = await client.readFolderClassifications();
+      const roms = await client.listRoms('Saturn', '', marks);
+      const panzer = roms.find((r) => r.filename === 'Panzer Dragoon (USA) (1S)');
+      expect(panzer?.kind).toBe('folder-container');
+
+      // Reset back to auto.
+      await client.setFolderClassification({
+        coreId: 'Saturn',
+        folderPath: 'Panzer Dragoon (USA) (1S)',
+        classification: undefined,
+      });
+      const marks2 = await client.readFolderClassifications();
+      const roms2 = await client.listRoms('Saturn', '', marks2);
+      const panzer2 = roms2.find(
+        (r) => r.filename === 'Panzer Dragoon (USA) (1S)',
+      );
+      expect(panzer2?.kind).toBe('folder-atomic');
+    });
+
+    it('readFolderClassifications returns the empty file when missing', async () => {
+      const marks = await client.readFolderClassifications();
+      expect(marks).toEqual({ schemaVersion: 1, overrides: [] });
     });
   });
 

@@ -21,10 +21,11 @@ installed on the device. Helper scripts in `agent/` are copied to
 `/tmp/mistercurator/` on demand, executed, and may be left there for the
 session but must never be assumed to persist.
 
-The hide-core feature persists a small JSON ledger at
-`/media/fat/.mistercurator/state.json` so we can re-apply the user's
-hides after a MiSTer update. That directory is reserved for this app and
-is the only persistent thing the app writes outside of file renames.
+The app persists a handful of small JSON state files under
+`/media/fat/.mistercurator/` (the hide ledger, user-marked system
+files, per-folder classification overrides). The directory is reserved
+for this app; aside from these files and the renames that implement
+hide/show, nothing is written outside of `/tmp/mistercurator/`.
 
 The app must work correctly against a freshly-flashed MiSTer with default
 settings. If you're tempted to add a "first run setup on the MiSTer"
@@ -106,6 +107,13 @@ Update it before changing consumers.
 - App data folder: resolved via Electron's `app.getPath('userData')` —
   yields `MiSTerCurator/` on each platform automatically
 - On-MiSTer agent directory: `/tmp/mistercurator/`
+- On-MiSTer state directory: `/media/fat/.mistercurator/` — holds the
+  small JSON state files the app persists across sessions:
+  - `state.json` — hide ledger (which cores the app hid)
+  - `system-files.json` — user-marked system files (`(coreId, filename)` pairs)
+  - `folder-classifications.json` — per-folder container/atomic overrides
+
+  All small, all our domain. Add new state files here as the app grows.
 - Bundle identifier (for code signing): TBD at packaging time
 
 ## Conventions

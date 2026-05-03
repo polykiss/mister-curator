@@ -4,6 +4,7 @@ import { shellQuote } from '@app/main/clients/shell';
 import {
   HIDEABLE_CATEGORIES,
   MISTER_CATEGORY_DIRS,
+  MISTER_FOLDER_CLASSIFICATIONS_PATH,
   MISTER_GAMES_DIR,
   MISTER_LEDGER_DIR,
   MISTER_LEDGER_PATH,
@@ -18,6 +19,16 @@ import {
   type RawRbfInput,
 } from '@shared/core-matching';
 import { displayRomName } from '@shared/display';
+import {
+  EMPTY_FOLDER_CLASSIFICATIONS,
+  FOLDER_CLASSIFICATIONS_HEREDOC_DELIMITER,
+  getFolderOverride,
+  parseFolderClassifications,
+  serializeFolderClassifications,
+  withFolderOverride,
+  withoutFolderOverride,
+} from '@shared/folder-classifications';
+import { classifyFromFlags, resolveClassification } from '@shared/folder-rom';
 import {
   healLedger,
   ledgerEqual,
@@ -36,18 +47,22 @@ import { MisterConnectionError } from '@shared/types';
 import type {
   CoreCategory,
   CoreEntry,
+  FolderClassificationOverride,
+  FolderClassifications,
   HideLedger,
   MisterProfile,
   Rom,
   SystemFilesMarks,
 } from '@shared/types';
 import type {
+  BulkCoreOptions,
   BulkCoreResult,
   BulkRomResult,
   CoreVisibilityChange,
   IMisterClient,
   MisterSecret,
   RomVisibilityChange,
+  SystemFileMarkChange,
 } from '@shared/mister-client';
 
 const CONNECT_TIMEOUT_MS = 8000;
@@ -217,57 +232,120 @@ export class RealMisterClient implements IMisterClient {
     });
   }
 
-  async listRoms(coreId: string): Promise<Rom[]> {
+  async listRoms(
+    coreId: string,
+    subPath = '',
+    folderClassifications: FolderClassifications = EMPTY_FOLDER_CLASSIFICATIONS,
+  ): Promise<Rom[]> {
     this.assertConnected();
     assertSafeSegment('coreId', coreId);
+    assertSafeSubPath(subPath);
 
-    const coreDir = `${MISTER_GAMES_DIR}/${coreId}`;
+    const targetDir =
+      subPath === ''
+        ? `${MISTER_GAMES_DIR}/${coreId}`
+        : `${MISTER_GAMES_DIR}/${coreId}/${subPath}`;
+    const relPrefix = subPath === '' ? '' : `${subPath}/`;
 
-    // Single batched script that emits ROM entries in two flavours:
-    //   F\t<filename>\t<size>     for regular files (cartridge dumps)
-    //   D\t<dirname>\t<size>      for folder ROMs (Saturn / MegaCD discs)
-    // Folder ROMs use `du -sb` for recursive byte totals; `find ... -exec
-    // du -sb {} +` batches all subdirs into as few du invocations as the
-    // command-line length allows (one in practice).
+    // Single batched script that emits per-entry rows. For folders we
+    // also emit four classification flags (disc / track / cart / sub-
+    // dir) computed by a single case-statement scan over their direct
+    // contents — keeps classification on the device but the *decision*
+    // in JS so we can layer user overrides without re-deploying the
+    // shell.
+    //
+    // Lines:
+    //   F\t<filename>\t<size>
+    //   D\t<dirname>\t<size>\t<has_disc>\t<has_track>\t<has_cart>\t<has_subdir>
     const script = [
-      'set -e',
-      `cd ${shellQuote(coreDir)}`,
-      // Files (visible + dot-hidden) — find handles both because find is
-      // not subject to the shell's dotglob default.
+      `cd ${shellQuote(targetDir)} 2>/dev/null || { echo MISSING_DIR; exit 1; }`,
       `find . -mindepth 1 -maxdepth 1 -type f -printf 'F\\t%f\\t%s\\n' 2>/dev/null || true`,
-      // Directories with their recursive sizes. du output is `<size>\t<path>`
-      // with paths prefixed by `./`. awk strips the prefix and reorders.
-      `find . -mindepth 1 -maxdepth 1 -type d -exec du -sb {} + 2>/dev/null | awk -F'\\t' '{ name=$2; sub(/^\\.\\//, "", name); printf "D\\t%s\\t%s\\n", name, $1 }' || true`,
+      // For each immediate dir: collect a recursive byte total (du -sb)
+      // AND a quick four-flag scan of its top level.
+      'for d in */ .[!.]*/; do',
+      '  [ -d "$d" ] || continue',
+      '  d="${d%/}"',
+      '  size=$(du -sb -- "$d" 2>/dev/null | awk \'{print $1; exit}\')',
+      '  [ -z "$size" ] && size=0',
+      '  has_disc=0; has_track=0; has_cart=0; has_subdir=0',
+      '  for child in "$d"/* "$d"/.[!.]*; do',
+      '    [ -e "$child" ] || continue',
+      '    base="${child##*/}"',
+      '    if [ -d "$child" ]; then has_subdir=1; continue; fi',
+      '    case "$base" in',
+      '      *.cue|*.CUE|*.gdi|*.GDI|*.iso|*.ISO|*.chd|*.CHD) has_disc=1 ;;',
+      '    esac',
+      '    case "$base" in',
+      '      *Track\\ *|*track\\ *|*Track[0-9]*|*track[0-9]*) has_track=1 ;;',
+      '    esac',
+      '    case "$base" in',
+      '      *.zip|*.ZIP|*.7z|*.7Z|*.rar|*.RAR|*.sfc|*.SFC|*.smc|*.SMC|*.nes|*.NES|*.gba|*.GBA|*.gb|*.GB|*.gbc|*.GBC|*.md|*.MD|*.gen|*.GEN|*.pce|*.PCE|*.lnx|*.LNX|*.col|*.COL|*.gg|*.GG|*.sms|*.SMS|*.a78|*.A78|*.a26|*.A26|*.bin|*.BIN) has_cart=1 ;;',
+      '    esac',
+      '  done',
+      '  printf "D\\t%s\\t%s\\t%d\\t%d\\t%d\\t%d\\n" "$d" "$size" "$has_disc" "$has_track" "$has_cart" "$has_subdir"',
+      'done',
     ].join('\n');
 
     const result = await this.ssh.execCommand(script);
-    if (result.code !== 0) {
+    if (result.code !== 0 || result.stdout.includes('MISSING_DIR')) {
       throw new Error(`Unknown core: ${coreId}`);
     }
 
     const roms: Rom[] = [];
     for (const line of result.stdout.split('\n')) {
-      if (line === '') continue;
+      if (line === '' || line === 'MISSING_DIR') continue;
       const parts = line.split('\t');
-      if (parts.length < 3) continue;
       const tag = parts[0];
-      if (tag !== 'F' && tag !== 'D') continue;
-      const filename = parts[1] ?? '';
-      const sizeBytes = Number.parseInt(parts[2] ?? '0', 10);
-      if (filename === '' || Number.isNaN(sizeBytes)) continue;
-
-      const hidden = filename.startsWith('.');
-      const displayName = displayRomName(hidden ? filename.slice(1) : filename);
-
-      roms.push({
-        coreId,
-        filename,
-        displayName,
-        sizeBytes,
-        hidden,
-        path: `${MISTER_GAMES_DIR}/${coreId}/${filename}`,
-        kind: tag === 'D' ? 'folder' : 'file',
-      });
+      if (tag === 'F' && parts.length >= 3) {
+        const filename = parts[1] ?? '';
+        const sizeBytes = Number.parseInt(parts[2] ?? '0', 10);
+        if (filename === '' || Number.isNaN(sizeBytes)) continue;
+        const hidden = filename.startsWith('.');
+        const visibleBase = hidden ? filename.slice(1) : filename;
+        const relativePath = `${relPrefix}${filename}`;
+        roms.push({
+          coreId,
+          filename,
+          displayName: displayRomName(visibleBase),
+          sizeBytes,
+          hidden,
+          path: `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`,
+          kind: 'file',
+          relativePath,
+        });
+      } else if (tag === 'D' && parts.length >= 7) {
+        const filename = parts[1] ?? '';
+        const sizeBytes = Number.parseInt(parts[2] ?? '0', 10);
+        if (filename === '' || Number.isNaN(sizeBytes)) continue;
+        const hidden = filename.startsWith('.');
+        const visibleBase = hidden ? filename.slice(1) : filename;
+        const flags = {
+          hasDisc: parts[3] === '1',
+          hasTrack: parts[4] === '1',
+          hasCart: parts[5] === '1',
+          hasSubdir: parts[6] === '1',
+        };
+        const relativePath = `${relPrefix}${filename}`;
+        const visibleRelPath = `${relPrefix}${visibleBase}`;
+        const heuristic = classifyFromFlags(flags);
+        const override = getFolderOverride(
+          folderClassifications,
+          coreId,
+          visibleRelPath,
+        );
+        const classification = resolveClassification(heuristic, override);
+        roms.push({
+          coreId,
+          filename,
+          displayName: displayRomName(visibleBase),
+          sizeBytes,
+          hidden,
+          path: `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`,
+          kind:
+            classification === 'container' ? 'folder-container' : 'folder-atomic',
+          relativePath,
+        });
+      }
     }
 
     roms.sort((a, b) => a.displayName.localeCompare(b.displayName));
@@ -278,10 +356,12 @@ export class RealMisterClient implements IMisterClient {
     coreId: string,
     filename: string,
     hidden: boolean,
+    subPath = '',
   ): Promise<void> {
     this.assertConnected();
     assertSafeSegment('coreId', coreId);
     assertSafeSegment('filename', filename);
+    assertSafeSubPath(subPath);
 
     const visibleName = filename.startsWith('.') ? filename.slice(1) : filename;
     const targetName = hidden ? `.${visibleName}` : visibleName;
@@ -289,8 +369,12 @@ export class RealMisterClient implements IMisterClient {
       return;
     }
 
-    const src = `${MISTER_GAMES_DIR}/${coreId}/${filename}`;
-    const dst = `${MISTER_GAMES_DIR}/${coreId}/${targetName}`;
+    const dirPart =
+      subPath === ''
+        ? `${MISTER_GAMES_DIR}/${coreId}`
+        : `${MISTER_GAMES_DIR}/${coreId}/${subPath}`;
+    const src = `${dirPart}/${filename}`;
+    const dst = `${dirPart}/${targetName}`;
     const command = `mv ${shellQuote(src)} ${shellQuote(dst)}`;
 
     const result = await this.ssh.execCommand(command);
@@ -304,9 +388,11 @@ export class RealMisterClient implements IMisterClient {
   async setBulkRomVisibility(
     coreId: string,
     changes: readonly RomVisibilityChange[],
+    subPath = '',
   ): Promise<BulkRomResult> {
     this.assertConnected();
     assertSafeSegment('coreId', coreId);
+    assertSafeSubPath(subPath);
     for (const change of changes) {
       assertSafeSegment('filename', change.filename);
     }
@@ -331,7 +417,10 @@ export class RealMisterClient implements IMisterClient {
       return { succeeded: [], failed: [] };
     }
 
-    const coreDir = `${MISTER_GAMES_DIR}/${coreId}`;
+    const coreDir =
+      subPath === ''
+        ? `${MISTER_GAMES_DIR}/${coreId}`
+        : `${MISTER_GAMES_DIR}/${coreId}/${subPath}`;
     const lines: string[] = [`cd ${shellQuote(coreDir)}`];
     for (const p of pending) {
       const id = shellQuote(p.filename);
@@ -381,6 +470,7 @@ export class RealMisterClient implements IMisterClient {
 
   async setBulkCoreVisibility(
     changes: readonly CoreVisibilityChange[],
+    options: BulkCoreOptions = {},
   ): Promise<BulkCoreResult> {
     this.assertConnected();
 
@@ -408,8 +498,10 @@ export class RealMisterClient implements IMisterClient {
       return { succeeded: [], failed: [] };
     }
 
+    const total = plans.length;
     const lines: string[] = [];
-    for (const plan of plans) {
+    for (let i = 0; i < plans.length; i += 1) {
+      const plan = plans[i]!;
       // Each core's renames run in a `(set -e ...)` subshell so the
       // core itself is atomic — partial state is impossible inside one
       // core. But subshells are independent, so a failure in core A
@@ -418,18 +510,80 @@ export class RealMisterClient implements IMisterClient {
         .map((r) => `mv ${shellQuote(r.from)} ${shellQuote(r.to)}`)
         .join('\n  ');
       const id = shellQuote(plan.coreId);
+      const done = String(i + 1);
+      const totalStr = String(total);
       lines.push(
         `if err=$( (set -e\n  ${moves}) 2>&1 ); then`,
-        `  printf 'OK\\t%s\\n' ${id}`,
+        // PROGRESS lines are the *only* per-core output now. The renderer
+        // streams them off the SSH channel as ticks; the parser at the
+        // end builds the BulkCoreResult from the same stream.
+        `  printf 'PROGRESS\\t${done}\\t${totalStr}\\t%s\\n' ${id}`,
         `else`,
-        `  printf 'FAIL\\t%s\\t%s\\n' ${id} "$(printf '%s' "$err" | tr '\\n\\t' '  ' | head -c 200)"`,
+        `  printf 'PROGRESS_FAIL\\t${done}\\t${totalStr}\\t%s\\t%s\\n' ${id} "$(printf '%s' "$err" | tr '\\n\\t' '  ' | head -c 200)"`,
         `fi`,
       );
     }
 
     const script = lines.join('\n');
-    const result = await this.ssh.execCommand(script);
-    return parseBulkResult<BulkCoreResult>(result.stdout, 'coreId');
+    const succeeded: string[] = [];
+    const failed: { coreId: string; reason: string }[] = [];
+    let buffer = '';
+
+    const handleLine = (line: string): void => {
+      if (line === '') return;
+      const parts = line.split('\t');
+      const tag = parts[0];
+      if (tag === 'PROGRESS' && parts.length >= 4) {
+        const done = Number.parseInt(parts[1] ?? '0', 10);
+        const totalParsed = Number.parseInt(parts[2] ?? '0', 10);
+        const coreId = parts.slice(3).join('\t');
+        if (Number.isNaN(done) || Number.isNaN(totalParsed)) return;
+        succeeded.push(coreId);
+        try {
+          options.onProgress?.({ done, total: totalParsed, coreId, result: 'ok' });
+        } catch {
+          /* swallow renderer-side throws so the bulk op continues */
+        }
+      } else if (tag === 'PROGRESS_FAIL' && parts.length >= 5) {
+        const done = Number.parseInt(parts[1] ?? '0', 10);
+        const totalParsed = Number.parseInt(parts[2] ?? '0', 10);
+        const coreId = parts[3] ?? '';
+        const reason = parts.slice(4).join('\t') || 'unknown error';
+        if (Number.isNaN(done) || Number.isNaN(totalParsed)) return;
+        failed.push({ coreId, reason });
+        try {
+          options.onProgress?.({
+            done,
+            total: totalParsed,
+            coreId,
+            result: 'fail',
+            reason,
+          });
+        } catch {
+          /* swallow */
+        }
+      }
+      // Lines that don't match either prefix are ignored — defensive
+      // against shell preamble/echoes that some hosts inject.
+    };
+
+    await this.ssh.exec(script, [], {
+      stream: 'stdout',
+      onStdout: (chunk: Buffer) => {
+        buffer += chunk.toString('utf-8');
+        for (;;) {
+          const i = buffer.indexOf('\n');
+          if (i < 0) break;
+          const line = buffer.slice(0, i);
+          buffer = buffer.slice(i + 1);
+          handleLine(line);
+        }
+      },
+    });
+    // Flush any trailing partial line (no terminating newline).
+    if (buffer !== '') handleLine(buffer);
+
+    return { succeeded, failed };
   }
 
   async readHideLedger(): Promise<HideLedger> {
@@ -517,6 +671,31 @@ export class RealMisterClient implements IMisterClient {
     await this.writeSystemFilesMarks(next);
   }
 
+  async setSystemFileMarks(
+    coreId: string,
+    changes: readonly SystemFileMarkChange[],
+  ): Promise<void> {
+    this.assertConnected();
+    assertSafeSegment('coreId', coreId);
+    for (const c of changes) {
+      if (c.filename === '' || c.filename.includes('\0')) {
+        throw new Error(`Invalid filename: ${c.filename}`);
+      }
+    }
+    if (changes.length === 0) return;
+
+    const current = await this.readSystemFilesMarks();
+    const markedAt = new Date().toISOString();
+    let next = current;
+    for (const change of changes) {
+      next = change.marked
+        ? withMark(next, { coreId, filename: change.filename, markedAt })
+        : withoutMark(next, coreId, change.filename);
+    }
+    if (next === current) return;
+    await this.writeSystemFilesMarks(next);
+  }
+
   private async writeSystemFilesMarks(marks: SystemFilesMarks): Promise<void> {
     const json = serializeSystemFilesMarks(marks);
     const tmpPath = `${MISTER_SYSTEM_FILES_PATH}.tmp`;
@@ -531,6 +710,58 @@ export class RealMisterClient implements IMisterClient {
     if (result.code !== 0) {
       throw new Error(
         `Failed to write system-files marks: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+      );
+    }
+  }
+
+  async readFolderClassifications(): Promise<FolderClassifications> {
+    this.assertConnected();
+    const result = await this.ssh.execCommand(
+      `cat ${shellQuote(MISTER_FOLDER_CLASSIFICATIONS_PATH)} 2>/dev/null || true`,
+    );
+    return parseFolderClassifications(result.stdout);
+  }
+
+  async setFolderClassification(
+    override:
+      | FolderClassificationOverride
+      | { coreId: string; folderPath: string; classification: undefined },
+  ): Promise<void> {
+    this.assertConnected();
+    assertSafeSegment('coreId', override.coreId);
+    assertSafeSubPath(override.folderPath);
+    const current = await this.readFolderClassifications();
+    let next: FolderClassifications;
+    if (override.classification === undefined) {
+      next = withoutFolderOverride(current, override.coreId, override.folderPath);
+    } else {
+      next = withFolderOverride(current, {
+        coreId: override.coreId,
+        folderPath: override.folderPath,
+        classification: override.classification,
+        setAt: new Date().toISOString(),
+      });
+    }
+    if (next === current) return;
+    await this.writeFolderClassifications(next);
+  }
+
+  private async writeFolderClassifications(
+    marks: FolderClassifications,
+  ): Promise<void> {
+    const json = serializeFolderClassifications(marks);
+    const tmpPath = `${MISTER_FOLDER_CLASSIFICATIONS_PATH}.tmp`;
+    const script =
+      `mkdir -p ${shellQuote(MISTER_LEDGER_DIR)}\n` +
+      `cat > ${shellQuote(tmpPath)} <<'${FOLDER_CLASSIFICATIONS_HEREDOC_DELIMITER}'\n` +
+      json +
+      `${FOLDER_CLASSIFICATIONS_HEREDOC_DELIMITER}\n` +
+      `mv ${shellQuote(tmpPath)} ${shellQuote(MISTER_FOLDER_CLASSIFICATIONS_PATH)}\n`;
+
+    const result = await this.ssh.execCommand(script);
+    if (result.code !== 0) {
+      throw new Error(
+        `Failed to write folder classifications: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
       );
     }
   }
@@ -674,6 +905,18 @@ function parseCategory(name: string): CoreCategory | null {
 function assertSafeSegment(label: string, value: string): void {
   if (value === '' || value.includes('/') || value.includes('..') || value.includes('\0')) {
     throw new Error(`Invalid ${label}: ${value}`);
+  }
+}
+
+function assertSafeSubPath(subPath: string): void {
+  if (subPath === '') return;
+  if (subPath.includes('\0') || subPath.startsWith('/') || subPath.endsWith('/')) {
+    throw new Error(`Invalid subPath: ${subPath}`);
+  }
+  for (const segment of subPath.split('/')) {
+    if (segment === '' || segment === '..' || segment === '.') {
+      throw new Error(`Invalid subPath: ${subPath}`);
+    }
   }
 }
 

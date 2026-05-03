@@ -7,6 +7,8 @@ export const MISTER_LEDGER_DIR = '/media/fat/.mistercurator';
 export const MISTER_LEDGER_PATH = '/media/fat/.mistercurator/state.json';
 export const MISTER_SYSTEM_FILES_PATH =
   '/media/fat/.mistercurator/system-files.json';
+export const MISTER_FOLDER_CLASSIFICATIONS_PATH =
+  '/media/fat/.mistercurator/folder-classifications.json';
 
 /**
  * Core category dirs under `/media/fat/`. The hide-core feature only

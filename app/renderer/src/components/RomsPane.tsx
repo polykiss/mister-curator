@@ -1,10 +1,29 @@
-import { Cog, Eye, EyeOff, Folder, MoreHorizontal } from 'lucide-react';
+import {
+  ChevronLeft,
+  ChevronRight,
+  Cog,
+  Eye,
+  EyeOff,
+  Folder,
+  FolderOpen,
+  MoreHorizontal,
+} from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
 import { isAutoDetectedSystemFile, isSystemFile } from '@shared/system-files';
 import type { CoreEntry, Rom } from '@shared/types';
+
+/**
+ * Narrows a `Rom.kind` (file / folder-atomic / folder-container) down
+ * to the simpler `'file' | 'folder'` shape that `isSystemFile` and
+ * `isAutoDetectedSystemFile` expect. The atomic/container distinction
+ * doesn't matter for system-file detection — both are folders.
+ */
+function romKindForSystemCheck(kind: Rom['kind']): 'file' | 'folder' {
+  return kind === 'file' ? 'file' : 'folder';
+}
 
 import {
   RomRowMenu,
@@ -20,7 +39,7 @@ import {
   TableHeader,
   TableRow,
 } from '@app/renderer/src/components/ui/table';
-import { useCores } from '@app/renderer/src/contexts/CoresContext';
+import { romsKey, useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
 import { formatBytes, summarizeBulkResult } from '@app/renderer/src/lib/format';
 import type { VisibilityChange } from '@app/renderer/src/lib/optimistic';
@@ -34,15 +53,24 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     romsByCore,
     romsLoading,
     ensureRoms,
+    refetchRoms,
     setRomVisibility,
     setBulkRomVisibility,
     systemFilesMarks,
     isUserMarked,
     addSystemFileMark,
     removeSystemFileMark,
+    setSystemFileMarks,
+    setFolderClassification,
   } = useCores();
-  const roms = romsByCore[core.id];
-  const loading = romsLoading[core.id] ?? false;
+  // Drilled-in path inside the core. Empty string means top-level.
+  // Slash-joined for nested folders (`'1 World A-Z'`,
+  // `'parent/child'`). Used for every ROM-level operation; the cores
+  // pane and counts always reflect the top-level view.
+  const [subPath, setSubPath] = useState<string>('');
+  const cacheKey = romsKey(core.id, subPath);
+  const roms = romsByCore[cacheKey];
+  const loading = romsLoading[cacheKey] ?? false;
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
   const [showHidden, setShowHidden] = useState(false);
   const [showSystem, setShowSystem] = useState(false);
@@ -52,15 +80,24 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     readonly y: number;
   } | null>(null);
 
-  // Reset selection when the visible core changes.
+  // Reset selection AND drilled path when the visible core changes —
+  // we don't carry "I was 2 levels deep in NEOGEO" into Saturn.
   useEffect(() => {
     setSelected(new Set());
+    setSubPath('');
   }, [core.id]);
 
-  // Lazy-fetch ROMs for the active core.
+  // Reset selection on every drill in/out so a ghost selection from
+  // the previous level never leaks into a different list.
   useEffect(() => {
-    void ensureRoms(core.id);
-  }, [core.id, ensureRoms]);
+    setSelected(new Set());
+  }, [subPath]);
+
+  // Lazy-fetch ROMs at the current (core, subPath) — including after
+  // a drill into a container.
+  useEffect(() => {
+    void ensureRoms(core.id, subPath);
+  }, [core.id, subPath, ensureRoms]);
 
   // System-file classification is keyed on (filename, kind). Cache for
   // the current rom list so the renderer doesn't re-classify on every
@@ -71,7 +108,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
       map.set(
         r.filename,
         isSystemFile(
-          { filename: r.filename, kind: r.kind },
+          { filename: r.filename, kind: romKindForSystemCheck(r.kind) },
           { marks: systemFilesMarks, coreId: core.id },
         ),
       );
@@ -116,6 +153,33 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     return presentableRoms.filter((r) => selected.has(r.filename) && r.hidden).length;
   }, [presentableRoms, selected]);
 
+  // The "Mark selected as system" / "Unmark selected" toolbar buttons
+  // operate on whatever the user has selected:
+  //   - markable: not currently flagged as system at all (so we won't
+  //     touch auto-detected files; they're system already and can't be
+  //     unmarked anyway) AND not yet in the marks list
+  //   - unmarkable: currently in the marks list (auto-detected files
+  //     are excluded — they're heuristic, not stored)
+  const markableSelected = useMemo(() => {
+    if (!roms) return [];
+    return roms.filter((r) => {
+      if (!selected.has(r.filename)) return false;
+      const auto = isAutoDetectedSystemFile({
+        filename: r.filename,
+        kind: romKindForSystemCheck(r.kind),
+      });
+      if (auto) return false;
+      return !isUserMarked(core.id, r.filename);
+    });
+  }, [roms, selected, core.id, isUserMarked]);
+
+  const unmarkableSelected = useMemo(() => {
+    if (!roms) return [];
+    return roms.filter(
+      (r) => selected.has(r.filename) && isUserMarked(core.id, r.filename),
+    );
+  }, [roms, selected, core.id, isUserMarked]);
+
   const onToggleSelect = (filename: string, checked: boolean): void => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -132,7 +196,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
 
   const onSingleToggle = async (rom: Rom): Promise<void> => {
     try {
-      await setRomVisibility(core.id, rom.filename, !rom.hidden);
+      await setRomVisibility(core.id, rom.filename, !rom.hidden, subPath);
     } catch (err) {
       toast.error(`Could not ${rom.hidden ? 'show' : 'hide'} ${rom.displayName}`, {
         description: err instanceof Error ? err.message : 'Unexpected error.',
@@ -147,7 +211,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     if (changes.length === 0) return;
     let result;
     try {
-      result = await setBulkRomVisibility(core.id, changes);
+      result = await setBulkRomVisibility(core.id, changes, subPath);
     } catch (err) {
       toast.error(`${action} failed`, {
         description: err instanceof Error ? err.message : 'Unexpected error.',
@@ -219,6 +283,10 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   const onMarkAsSystem = async (rom: Rom): Promise<void> => {
     try {
       await addSystemFileMark(core.id, rom.filename);
+      // The CoresContext refetches the top-level ROM list; if we're
+      // drilled in we need to also refetch THIS level so the row picks
+      // up its new system status.
+      if (subPath !== '') await refetchRoms(core.id, subPath);
       toast.success(`Marked ${rom.displayName} as system file`, {
         action: {
           label: 'Undo',
@@ -240,9 +308,80 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     }
   };
 
+  const onMarkSelectedAsSystem = async (): Promise<void> => {
+    const targets = markableSelected;
+    if (targets.length === 0) return;
+    const changes = targets.map((r) => ({ filename: r.filename, marked: true }));
+    try {
+      await setSystemFileMarks(core.id, changes);
+      if (subPath !== '') await refetchRoms(core.id, subPath);
+      toast.success(
+        `Marked ${String(targets.length)} file${targets.length === 1 ? '' : 's'} as system`,
+        {
+          action: {
+            label: 'Undo',
+            onClick: () => {
+              void (async () => {
+                try {
+                  await setSystemFileMarks(
+                    core.id,
+                    targets.map((r) => ({ filename: r.filename, marked: false })),
+                  );
+                } catch {
+                  /* swallow */
+                }
+              })();
+            },
+          },
+        },
+      );
+      setSelected(new Set());
+    } catch (err) {
+      toast.error('Mark as system failed', {
+        description: err instanceof Error ? err.message : 'Unexpected error.',
+      });
+    }
+  };
+
+  const onUnmarkSelected = async (): Promise<void> => {
+    const targets = unmarkableSelected;
+    if (targets.length === 0) return;
+    const changes = targets.map((r) => ({ filename: r.filename, marked: false }));
+    try {
+      await setSystemFileMarks(core.id, changes);
+      if (subPath !== '') await refetchRoms(core.id, subPath);
+      toast.success(
+        `Unmarked ${String(targets.length)} file${targets.length === 1 ? '' : 's'}`,
+        {
+          action: {
+            label: 'Undo',
+            onClick: () => {
+              void (async () => {
+                try {
+                  await setSystemFileMarks(
+                    core.id,
+                    targets.map((r) => ({ filename: r.filename, marked: true })),
+                  );
+                } catch {
+                  /* swallow */
+                }
+              })();
+            },
+          },
+        },
+      );
+      setSelected(new Set());
+    } catch (err) {
+      toast.error('Unmark failed', {
+        description: err instanceof Error ? err.message : 'Unexpected error.',
+      });
+    }
+  };
+
   const onUnmarkSystem = async (rom: Rom): Promise<void> => {
     try {
       await removeSystemFileMark(core.id, rom.filename);
+      if (subPath !== '') await refetchRoms(core.id, subPath);
       toast.success(`Unmarked ${rom.displayName}`, {
         action: {
           label: 'Undo',
@@ -264,50 +403,174 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     }
   };
 
+  const onSetClassification = async (
+    rom: Rom,
+    classification: 'container' | 'atomic' | null,
+  ): Promise<void> => {
+    // The override key is the visible (un-dotted) relative path —
+    // matches how `listRoms` builds the lookup so a hide/unhide later
+    // doesn't break the override.
+    const visibleRelPath =
+      (subPath === '' ? '' : `${subPath}/`) +
+      (rom.hidden ? rom.filename.slice(1) : rom.filename);
+    try {
+      await setFolderClassification(core.id, visibleRelPath, classification, {
+        coreId: core.id,
+        subPath,
+      });
+      toast.success(
+        classification === null
+          ? `Reset classification for ${rom.displayName}`
+          : `Treating ${rom.displayName} as ${classification}`,
+      );
+    } catch (err) {
+      toast.error('Could not update folder classification', {
+        description: err instanceof Error ? err.message : 'Unexpected error.',
+      });
+    }
+  };
+
   function buildMenuItems(rom: Rom): readonly RomRowMenuItem[] {
-    // Auto-detected files cannot be unmarked — the heuristic decides
-    // every connection. The disabled state surfaces this without
-    // hiding the option (user can still see it, learn the rule).
-    const auto = isAutoDetectedSystemFile({ filename: rom.filename, kind: rom.kind });
+    const items: RomRowMenuItem[] = [];
+
+    // Folder rows get classification overrides — the user can pin a
+    // specific folder to container/atomic against the auto-detector.
+    if (rom.kind !== 'file') {
+      const isContainer = rom.kind === 'folder-container';
+      items.push({
+        label: isContainer ? 'Treat as atomic (one game)' : 'Treat as container (drill in)',
+        onSelect: () =>
+          void onSetClassification(rom, isContainer ? 'atomic' : 'container'),
+        title:
+          'Override the auto-detector for this folder. Persists in the on-MiSTer marks file.',
+      });
+      items.push({
+        label: 'Reset to auto-detected',
+        onSelect: () => void onSetClassification(rom, null),
+        title:
+          'Drop the user override and let the heuristic classify this folder.',
+      });
+    }
+
+    // System-file mark items — auto-detected files cannot be unmarked
+    // (the heuristic decides every connection). The disabled item
+    // surfaces this without hiding the option.
+    const auto = isAutoDetectedSystemFile({
+      filename: rom.filename,
+      kind: romKindForSystemCheck(rom.kind),
+    });
     const marked = isUserMarked(core.id, rom.filename);
     if (auto) {
-      return [
-        {
-          label: 'Auto-detected — cannot unmark',
-          onSelect: () => undefined,
-          disabled: true,
-          title:
-            'This file matches a built-in system-file pattern (BIOS, config, palette).',
-        },
-      ];
-    }
-    if (marked) {
-      return [
-        {
-          label: 'Unmark as system file',
-          onSelect: () => void onUnmarkSystem(rom),
-          title:
-            'Treat this file as a regular ROM again. Removes it from the system-files list.',
-        },
-      ];
-    }
-    return [
-      {
+      items.push({
+        label: 'Auto-detected — cannot unmark',
+        onSelect: () => undefined,
+        disabled: true,
+        title:
+          'This file matches a built-in system-file pattern (BIOS, config, palette).',
+      });
+    } else if (marked) {
+      items.push({
+        label: 'Unmark as system file',
+        onSelect: () => void onUnmarkSystem(rom),
+        title:
+          'Treat this file as a regular ROM again. Removes it from the system-files list.',
+      });
+    } else {
+      items.push({
         label: 'Mark as system file',
         onSelect: () => void onMarkAsSystem(rom),
         title:
           'Hide this file from the ROM list and exclude it from bulk operations.',
-      },
-    ];
+      });
+    }
+
+    return items;
   }
+
+  /**
+   * Click handler for a row's main button. For container folders,
+   * this drills into the folder; for atomic folders and files, the
+   * row's normal selection behavior takes over (handled separately).
+   */
+  function onRowActivate(rom: Rom): void {
+    if (rom.kind === 'folder-container' && !rom.hidden) {
+      const visibleBase = rom.hidden ? rom.filename.slice(1) : rom.filename;
+      const next = subPath === '' ? visibleBase : `${subPath}/${visibleBase}`;
+      setSubPath(next);
+    }
+  }
+
+  function pathSegments(): readonly string[] {
+    if (subPath === '') return [];
+    return subPath.split('/');
+  }
+
+  function navigateToSegment(targetSegmentIndex: number): void {
+    if (targetSegmentIndex < 0) {
+      setSubPath('');
+      return;
+    }
+    const segs = pathSegments();
+    setSubPath(segs.slice(0, targetSegmentIndex + 1).join('/'));
+  }
+
+  const segs = pathSegments();
+  const isDrilledIn = segs.length > 0;
 
   return (
     <div className="flex h-full flex-col">
       <header className="border-b p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
+            {isDrilledIn ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="-ml-2 mb-1 h-7 text-xs"
+                onClick={() => navigateToSegment(segs.length - 2)}
+                title="Back to the previous folder"
+              >
+                <ChevronLeft className="h-3.5 w-3.5" />
+                Back
+              </Button>
+            ) : null}
             <h2 className="truncate text-lg font-semibold">{core.name}</h2>
-            <p className="text-xs text-muted-foreground">
+            {isDrilledIn ? (
+              <nav
+                aria-label="Folder breadcrumb"
+                className="mt-0.5 flex flex-wrap items-center gap-0.5 text-xs text-muted-foreground"
+              >
+                <button
+                  type="button"
+                  onClick={() => navigateToSegment(-1)}
+                  className="rounded px-1 py-0.5 hover:bg-accent hover:text-accent-foreground"
+                >
+                  {core.name}
+                </button>
+                {segs.map((s, i) => (
+                  <span
+                    key={`${String(i)}-${s}`}
+                    className="flex items-center gap-0.5"
+                  >
+                    <ChevronRight className="h-3 w-3 shrink-0" />
+                    {i === segs.length - 1 ? (
+                      <span className="px-1 py-0.5 font-medium text-foreground">
+                        {s}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => navigateToSegment(i)}
+                        className="rounded px-1 py-0.5 hover:bg-accent hover:text-accent-foreground"
+                      >
+                        {s}
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </nav>
+            ) : null}
+            <p className="mt-1 text-xs text-muted-foreground">
               {visibleNonSystem} ROMs · {hiddenNonSystem} hidden
               {systemCount > 0 ? <> · {systemCount} system</> : null}
             </p>
@@ -327,7 +590,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
               onClick={onShowAll}
               disabled={candidates.every((r) => !r.hidden)}
             >
-              Show all
+              Unhide all
             </Button>
             <Button
               variant="outline"
@@ -343,7 +606,25 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
               onClick={onShowSelected}
               disabled={hiddenSelectedCount === 0}
             >
-              Show selected ({hiddenSelectedCount})
+              Unhide selected ({hiddenSelectedCount})
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void onMarkSelectedAsSystem()}
+              disabled={markableSelected.length === 0}
+              title="Treat the selected files as system files (BIOS, palette, config). Hidden by default; visible when 'Show system files' is on."
+            >
+              Mark as system ({markableSelected.length})
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void onUnmarkSelected()}
+              disabled={unmarkableSelected.length === 0}
+              title="Remove the user-system mark from the selected files. Auto-detected system files are not affected."
+            >
+              Unmark system ({unmarkableSelected.length})
             </Button>
           </div>
         </div>
@@ -427,11 +708,45 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         aria-label={`Select ${rom.displayName}`}
                         checked={isSelected}
                         onChange={(e) => onToggleSelect(rom.filename, e.target.checked)}
-                        disabled={isSystem}
                       />
                     </TableCell>
-                    <TableCell className="truncate font-medium">
+                    <TableCell
+                      className={cn(
+                        'truncate font-medium',
+                        rom.kind === 'folder-container' &&
+                          !rom.hidden &&
+                          'cursor-pointer',
+                      )}
+                      onDoubleClick={() => onRowActivate(rom)}
+                      onClick={(e) => {
+                        // Single-click drilling on container folders
+                        // (the spec says "click to drill in"). Don't
+                        // intercept clicks on the action buttons in
+                        // adjacent cells — those bubble up via a
+                        // different path.
+                        if (rom.kind === 'folder-container' && !rom.hidden) {
+                          e.preventDefault();
+                          onRowActivate(rom);
+                        }
+                      }}
+                      title={
+                        rom.kind === 'folder-container' && !rom.hidden
+                          ? `Open ${rom.displayName}`
+                          : undefined
+                      }
+                    >
                       <span className="inline-flex items-center gap-1.5">
+                        {/* Badge order is fixed: SYSTEM left of HIDDEN
+                            left of name. Mirrors the cores list, where
+                            HIDDEN sits to the left of the core name. */}
+                        {isSystem ? (
+                          <span
+                            className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide not-italic text-muted-foreground"
+                            title="System file (BIOS, config, palette). MiSTerCurator never bulk-toggles these."
+                          >
+                            System
+                          </span>
+                        ) : null}
                         {rom.hidden ? (
                           <span
                             className="shrink-0 rounded bg-destructive px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide not-italic text-destructive-foreground"
@@ -445,21 +760,20 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                             className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
                             aria-label="system file"
                           />
-                        ) : rom.kind === 'folder' ? (
+                        ) : rom.kind === 'folder-container' ? (
+                          // Container folders are drillable — chevron
+                          // hint mirrors what clicking the row does.
+                          <FolderOpen
+                            className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                            aria-label="container folder"
+                          />
+                        ) : rom.kind === 'folder-atomic' ? (
                           <Folder
                             className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
                             aria-label="folder ROM"
                           />
                         ) : null}
                         <span className="truncate">{rom.displayName}</span>
-                        {isSystem ? (
-                          <span
-                            className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
-                            title="System file (BIOS, config, palette). MiSTerCurator never bulk-toggles these."
-                          >
-                            system
-                          </span>
-                        ) : null}
                       </span>
                     </TableCell>
                     <TableCell className="text-right text-xs text-muted-foreground">

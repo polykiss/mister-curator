@@ -2,11 +2,13 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 import { IPC_CHANNELS, isSerializedMisterConnectionError } from '@shared/preload-api';
 import type {
+  BulkCoreProgressEvent,
   ConnectResult,
   CoreVisibilityChangeWire,
   MisterApi,
   PickedKeyFile,
   RomVisibilityChangeWire,
+  SystemFileMarkChangeWire,
 } from '@shared/preload-api';
 import type {
   BulkCoreResult,
@@ -17,6 +19,7 @@ import { MisterConnectionError } from '@shared/types';
 import type {
   ConnectionStatus,
   CoreEntry,
+  FolderClassifications,
   MisterProfile,
   Rom,
   SystemFilesMarks,
@@ -44,18 +47,52 @@ const api: MisterApi = {
   getConnectionStatus: () => invoke<ConnectionStatus>(IPC_CHANNELS.getConnectionStatus),
   listAllCoresWithFiles: () =>
     invoke<CoreEntry[]>(IPC_CHANNELS.listAllCoresWithFiles),
-  listRoms: (coreId: string) => invoke<Rom[]>(IPC_CHANNELS.listRoms, coreId),
-  setRomVisibility: (coreId: string, filename: string, hidden: boolean) =>
-    invoke<void>(IPC_CHANNELS.setRomVisibility, coreId, filename, hidden),
+  listRoms: (coreId: string, subPath?: string) =>
+    invoke<Rom[]>(IPC_CHANNELS.listRoms, coreId, subPath),
+  setRomVisibility: (
+    coreId: string,
+    filename: string,
+    hidden: boolean,
+    subPath?: string,
+  ) =>
+    invoke<void>(
+      IPC_CHANNELS.setRomVisibility,
+      coreId,
+      filename,
+      hidden,
+      subPath,
+    ),
   setBulkRomVisibility: (
     coreId: string,
     changes: readonly RomVisibilityChangeWire[],
+    subPath?: string,
   ) =>
-    invoke<BulkRomResult>(IPC_CHANNELS.setBulkRomVisibility, coreId, changes),
+    invoke<BulkRomResult>(
+      IPC_CHANNELS.setBulkRomVisibility,
+      coreId,
+      changes,
+      subPath,
+    ),
   hideCore: (coreId: string) => invoke<void>(IPC_CHANNELS.hideCore, coreId),
   showCore: (coreId: string) => invoke<void>(IPC_CHANNELS.showCore, coreId),
-  setBulkCoreVisibility: (changes: readonly CoreVisibilityChangeWire[]) =>
-    invoke<BulkCoreResult>(IPC_CHANNELS.setBulkCoreVisibility, changes),
+  setBulkCoreVisibility: (
+    changes: readonly CoreVisibilityChangeWire[],
+    options?: { readonly operationId?: string },
+  ) =>
+    invoke<BulkCoreResult>(
+      IPC_CHANNELS.setBulkCoreVisibility,
+      changes,
+      options,
+    ),
+  onBulkCoreProgress: (handler: (event: BulkCoreProgressEvent) => void) => {
+    const listener = (_event: unknown, payload: BulkCoreProgressEvent): void => {
+      handler(payload);
+    };
+    ipcRenderer.on(IPC_CHANNELS.bulkCoreProgress, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.bulkCoreProgress, listener);
+    };
+  },
   pickKeyFile: () => invoke<PickedKeyFile | null>(IPC_CHANNELS.pickKeyFile),
   onConnectionStatusChanged: (handler: (status: ConnectionStatus) => void) => {
     const listener = (_event: unknown, status: ConnectionStatus): void => {
@@ -75,6 +112,24 @@ const api: MisterApi = {
       IPC_CHANNELS.removeSystemFileMark,
       coreId,
       filename,
+    ),
+  setSystemFileMarks: (
+    coreId: string,
+    changes: readonly SystemFileMarkChangeWire[],
+  ) =>
+    invoke<SystemFilesMarks>(IPC_CHANNELS.setSystemFileMarks, coreId, changes),
+  listFolderClassifications: () =>
+    invoke<FolderClassifications>(IPC_CHANNELS.listFolderClassifications),
+  setFolderClassification: (
+    coreId: string,
+    folderPath: string,
+    classification: 'container' | 'atomic' | null,
+  ) =>
+    invoke<FolderClassifications>(
+      IPC_CHANNELS.setFolderClassification,
+      coreId,
+      folderPath,
+      classification,
     ),
 };
 

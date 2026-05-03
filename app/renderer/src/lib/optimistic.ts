@@ -1,4 +1,5 @@
 import { MISTER_GAMES_DIR } from '@shared/constants';
+import { displayRomName } from '@shared/display';
 import type { CoreEntry, Rom } from '@shared/types';
 
 export interface VisibilityChange {
@@ -25,7 +26,11 @@ export function applyVisibilityChange(roms: readonly Rom[], change: VisibilityCh
     return {
       ...rom,
       filename: targetName,
-      displayName: visibleName,
+      // Match the clients' listRoms display logic: dot-strip then
+      // archive-extension-strip. Without this the row briefly shows
+      // "Castlevania.zip" after the optimistic flip, only to refresh
+      // back to "Castlevania" on the next server roundtrip.
+      displayName: displayRomName(visibleName),
       hidden: change.hidden,
       path: `${MISTER_GAMES_DIR}/${rom.coreId}/${targetName}`,
     };

@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   connect: vi.fn(),
   dispose: vi.fn(),
   execCommand: vi.fn(),
+  exec: vi.fn(),
   isConnected: vi.fn(),
 }));
 
@@ -16,6 +17,7 @@ vi.mock('node-ssh', () => ({
     connect: mocks.connect,
     dispose: mocks.dispose,
     execCommand: mocks.execCommand,
+    exec: mocks.exec,
     isConnected: mocks.isConnected,
   })),
 }));
@@ -49,6 +51,7 @@ describe('RealMisterClient', () => {
     mocks.connect.mockReset().mockResolvedValue(undefined);
     mocks.dispose.mockReset();
     mocks.execCommand.mockReset().mockResolvedValue(execOk());
+    mocks.exec.mockReset().mockResolvedValue('');
     mocks.isConnected.mockReset().mockReturnValue(true);
   });
 
@@ -333,23 +336,25 @@ describe('RealMisterClient', () => {
   });
 
   describe('listRoms', () => {
-    it('parses ROM filenames, hidden detection, displayName, and size', async () => {
+    it('parses files + folder classification flags into Rom entries', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
 
-      // The listRoms script emits `F\t<name>\t<size>` for files and
-      // `D\t<name>\t<size>` for folder ROMs. Mix both in the test to
-      // cover Saturn-style discs (folder ROMs) alongside NES-style
-      // cartridges in one core.
+      // listRoms now emits per-folder classification flags too:
+      //   F\t<name>\t<size>
+      //   D\t<name>\t<size>\t<has_disc>\t<has_track>\t<has_cart>\t<has_subdir>
+      // The Saturn-shape disc folder has hasDisc=1 → folder-atomic.
+      // The NEOGEO-shape `1 World A-Z` has hasCart=1 → folder-container.
       mocks.execCommand.mockResolvedValueOnce(
         execOk(
           [
             'F\t.Action 52 (USA) (Unl).nes\t131072',
             'F\tCastlevania (USA, Europe).nes\t131072',
-            'F\tSuper Mario Bros. (USA).nes\t40960',
-            'D\tPanzer Dragoon Saga (USA)\t1958295552',
-            'D\t.Hidden Disc Game\t125829120',
+            'F\tCastlevania.zip\t40960',
+            'D\tPanzer Dragoon Saga (USA)\t1958295552\t1\t0\t0\t0',
+            'D\t.Hidden Disc Game\t125829120\t1\t0\t0\t0',
+            'D\t1 World A-Z\t52428800\t0\t0\t1\t0',
             '',
           ].join('\n'),
         ),
@@ -357,7 +362,7 @@ describe('RealMisterClient', () => {
 
       const roms = await client.listRoms('NES');
 
-      expect(roms).toHaveLength(5);
+      expect(roms).toHaveLength(6);
 
       const hiddenFile = roms.find((r) => r.filename === '.Action 52 (USA) (Unl).nes');
       expect(hiddenFile?.kind).toBe('file');
@@ -369,23 +374,75 @@ describe('RealMisterClient', () => {
       expect(visibleFile?.kind).toBe('file');
       expect(visibleFile?.hidden).toBe(false);
 
-      const folderRom = roms.find((r) => r.filename === 'Panzer Dragoon Saga (USA)');
-      expect(folderRom).toBeDefined();
-      expect(folderRom?.kind).toBe('folder');
-      expect(folderRom?.hidden).toBe(false);
-      expect(folderRom?.sizeBytes).toBe(1958295552);
-      expect(folderRom?.path).toBe('/media/fat/games/NES/Panzer Dragoon Saga (USA)');
+      // Round 8: archive extension stripped at display time.
+      const archived = roms.find((r) => r.filename === 'Castlevania.zip');
+      expect(archived?.displayName).toBe('Castlevania');
+
+      const discFolder = roms.find((r) => r.filename === 'Panzer Dragoon Saga (USA)');
+      expect(discFolder?.kind).toBe('folder-atomic');
+      expect(discFolder?.hidden).toBe(false);
+      expect(discFolder?.sizeBytes).toBe(1958295552);
+      expect(discFolder?.path).toBe('/media/fat/games/NES/Panzer Dragoon Saga (USA)');
 
       const hiddenFolder = roms.find((r) => r.filename === '.Hidden Disc Game');
-      expect(hiddenFolder?.kind).toBe('folder');
+      expect(hiddenFolder?.kind).toBe('folder-atomic');
       expect(hiddenFolder?.hidden).toBe(true);
       expect(hiddenFolder?.displayName).toBe('Hidden Disc Game');
 
+      const containerFolder = roms.find((r) => r.filename === '1 World A-Z');
+      expect(containerFolder?.kind).toBe('folder-container');
+
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
       expect(script).toContain(`cd '/media/fat/games/NES'`);
-      // File branch (find -printf) and directory branch (du -sb).
-      expect(script).toContain('-type f -printf');
-      expect(script).toContain('-type d -exec du -sb');
+      // The new shell emits four classification flags per folder.
+      expect(script).toContain('has_disc');
+      expect(script).toContain('has_track');
+      expect(script).toContain('has_cart');
+      expect(script).toContain('has_subdir');
+    });
+
+    it('lists ROMs at a sub-path when drilled into a container', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'F\tmslug.zip\t1024',
+            'F\tkof97.zip\t2048',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('NEOGEO', '1 World A-Z');
+
+      expect(roms.map((r) => r.filename)).toEqual(['kof97.zip', 'mslug.zip']);
+      // Display names strip the archive extension.
+      expect(roms.find((r) => r.filename === 'mslug.zip')?.displayName).toBe('mslug');
+      expect(roms[0]?.relativePath).toBe('1 World A-Z/kof97.zip');
+      expect(roms[0]?.path).toBe('/media/fat/games/NEOGEO/1 World A-Z/kof97.zip');
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain(`cd '/media/fat/games/NEOGEO/1 World A-Z'`);
+    });
+
+    it('rejects subPaths that try to climb out of the core dir', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      await expect(client.listRoms('NEOGEO', '../etc')).rejects.toThrow(
+        /Invalid subPath/,
+      );
+      await expect(client.listRoms('NEOGEO', 'foo/..')).rejects.toThrow(
+        /Invalid subPath/,
+      );
+      await expect(client.listRoms('NEOGEO', '/abs')).rejects.toThrow(
+        /Invalid subPath/,
+      );
+      expect(mocks.execCommand).not.toHaveBeenCalled();
     });
 
     it('throws "Unknown core" when the core directory is missing', async () => {
@@ -739,16 +796,42 @@ describe('RealMisterClient', () => {
       };
     }
 
-    it('runs a 5-core batch in exactly one execCommand call', async () => {
+    /**
+     * Replays a stream of PROGRESS lines through the `onStdout` callback
+     * the client passes to `ssh.exec`. Mirrors how a real SSH channel
+     * delivers data: the test can split the stream into arbitrary chunk
+     * boundaries to exercise the line-buffering parser.
+     */
+    function makeStreamingExec(
+      chunks: readonly (Buffer | string)[],
+    ): (
+      command: string,
+      params: readonly string[],
+      options: {
+        onStdout?: (chunk: Buffer) => void;
+        stream?: 'stdout' | 'stderr' | 'both';
+      },
+    ) => Promise<string> {
+      return async (_command, _params, options) => {
+        for (const c of chunks) {
+          options.onStdout?.(typeof c === 'string' ? Buffer.from(c) : c);
+        }
+        return '';
+      };
+    }
+
+    it('runs a 5-core batch in exactly one ssh.exec call with a per-core subshell', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
-      mocks.execCommand.mockClear();
-      mocks.execCommand.mockResolvedValueOnce(
-        execOk(
+      mocks.exec.mockClear();
+      mocks.exec.mockImplementationOnce(
+        makeStreamingExec([
           ['NES', 'SNES', 'Genesis', 'Atari800', 'SMS']
-            .map((id) => `OK\t${id}`)
-            .join('\n'),
-        ),
+            .map(
+              (id, i) => `PROGRESS\t${String(i + 1)}\t5\t${id}\n`,
+            )
+            .join(''),
+        ]),
       );
 
       const cores = ['NES', 'SNES', 'Genesis', 'Atari800', 'SMS'].map((id) =>
@@ -763,32 +846,34 @@ describe('RealMisterClient', () => {
         cores.map((core) => ({ core, hidden: true })),
       );
 
-      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
-      expect(result.succeeded).toHaveLength(5);
+      expect(mocks.exec).toHaveBeenCalledTimes(1);
+      expect(result.succeeded).toEqual(['NES', 'SNES', 'Genesis', 'Atari800', 'SMS']);
       expect(result.failed).toEqual([]);
 
-      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      const script = mocks.exec.mock.calls[0]?.[0] as string;
       // 3 games dirs (NES, SNES, Genesis) + 5 rbfs = 8 mv commands woven
       // through five `(set -e ...)` per-core subshells.
       const mvCount = (script.match(/mv '/g) ?? []).length;
       expect(mvCount).toBe(8);
-      // Each core gets its own atomic subshell.
       const subshellCount = (script.match(/\(set -e/g) ?? []).length;
       expect(subshellCount).toBe(5);
+      // Each core line emits PROGRESS / PROGRESS_FAIL — never the old
+      // OK/FAIL shape.
+      expect(script).toMatch(/printf 'PROGRESS\\t/);
+      expect(script).toMatch(/printf 'PROGRESS_FAIL\\t/);
+      expect(script).not.toMatch(/printf 'OK\\t/);
     });
 
     it('returns a partial-success result when one core fails mid-batch', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
-      mocks.execCommand.mockClear();
-      mocks.execCommand.mockResolvedValueOnce(
-        execOk(
-          [
-            'OK\tNES',
-            'FAIL\tSNES\tmv: cannot stat SNES',
-            'OK\tGenesis',
-          ].join('\n'),
-        ),
+      mocks.exec.mockClear();
+      mocks.exec.mockImplementationOnce(
+        makeStreamingExec([
+          'PROGRESS\t1\t3\tNES\n',
+          'PROGRESS_FAIL\t2\t3\tSNES\tmv: cannot stat SNES\n',
+          'PROGRESS\t3\t3\tGenesis\n',
+        ]),
       );
 
       const result = await client.setBulkCoreVisibility(
@@ -802,16 +887,114 @@ describe('RealMisterClient', () => {
         })),
       );
 
-      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      expect(mocks.exec).toHaveBeenCalledTimes(1);
       expect(result.succeeded).toEqual(['NES', 'Genesis']);
       expect(result.failed).toEqual([
         { coreId: 'SNES', reason: 'mv: cannot stat SNES' },
       ]);
     });
 
+    it('emits a progress event per parseable line in stream order', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.exec.mockClear();
+      // Split chunk on a non-line boundary to exercise the line-buffer
+      // logic — partial line "PROGRESS\t1\t" + rest in next chunk.
+      mocks.exec.mockImplementationOnce(
+        makeStreamingExec([
+          'PROGRESS\t1\t',
+          '3\tNES\nPROGRESS_FAIL\t2\t3\tSNES\twoops\n',
+          'PROGRESS\t3\t3\tGenesis\n',
+        ]),
+      );
+
+      const events: { done: number; total: number; coreId: string; result: string }[] = [];
+      await client.setBulkCoreVisibility(
+        ['NES', 'SNES', 'Genesis'].map((id) => ({
+          core: makeCore({
+            id,
+            rbfPaths: [`/media/fat/_Console/${id}_20240115.rbf`],
+            gamesDirExists: true,
+          }),
+          hidden: true,
+        })),
+        {
+          onProgress: (e) =>
+            events.push({
+              done: e.done,
+              total: e.total,
+              coreId: e.coreId,
+              result: e.result,
+            }),
+        },
+      );
+
+      expect(events).toEqual([
+        { done: 1, total: 3, coreId: 'NES', result: 'ok' },
+        { done: 2, total: 3, coreId: 'SNES', result: 'fail' },
+        { done: 3, total: 3, coreId: 'Genesis', result: 'ok' },
+      ]);
+    });
+
+    it('flushes a trailing partial line that arrives without a newline', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.exec.mockClear();
+      mocks.exec.mockImplementationOnce(
+        // No trailing newline — defensive against shells that drop it.
+        makeStreamingExec(['PROGRESS\t1\t1\tNES']),
+      );
+
+      const result = await client.setBulkCoreVisibility([
+        {
+          core: makeCore({
+            id: 'NES',
+            rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
+            gamesDirExists: true,
+          }),
+          hidden: true,
+        },
+      ]);
+
+      expect(result.succeeded).toEqual(['NES']);
+    });
+
+    it('ignores malformed progress lines silently', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.exec.mockClear();
+      mocks.exec.mockImplementationOnce(
+        makeStreamingExec([
+          'something irrelevant\n',
+          'PROGRESS\tnotanumber\t1\tNES\n',
+          'PROGRESS_FAIL\t1\t1\n', // missing fields
+          'PROGRESS\t1\t1\tNES\n',
+        ]),
+      );
+
+      const events: unknown[] = [];
+      const result = await client.setBulkCoreVisibility(
+        [
+          {
+            core: makeCore({
+              id: 'NES',
+              rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
+              gamesDirExists: true,
+            }),
+            hidden: true,
+          },
+        ],
+        { onProgress: (e) => events.push(e) },
+      );
+
+      expect(result.succeeded).toEqual(['NES']);
+      expect(events).toHaveLength(1);
+    });
+
     it('issues zero SSH calls when every change is a no-op', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
+      mocks.exec.mockClear();
       mocks.execCommand.mockClear();
 
       await client.setBulkCoreVisibility([
@@ -826,13 +1009,14 @@ describe('RealMisterClient', () => {
         },
       ]);
 
+      expect(mocks.exec).not.toHaveBeenCalled();
       expect(mocks.execCommand).not.toHaveBeenCalled();
     });
 
     it('refuses if any change targets an arcade core', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
-      mocks.execCommand.mockClear();
+      mocks.exec.mockClear();
 
       await expect(
         client.setBulkCoreVisibility([
@@ -842,7 +1026,7 @@ describe('RealMisterClient', () => {
           },
         ]),
       ).rejects.toThrow(/Arcade/);
-      expect(mocks.execCommand).not.toHaveBeenCalled();
+      expect(mocks.exec).not.toHaveBeenCalled();
     });
   });
 

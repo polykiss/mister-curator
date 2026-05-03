@@ -66,12 +66,25 @@ export interface Rom {
   readonly hidden: boolean;
   readonly path: string;
   /**
-   * 'file' for a single-file ROM (typical NES/SNES/Genesis cartridge dump);
-   * 'folder' for a multi-file disc dump (Saturn, MegaCD, X68000 …) where
-   * the directory itself is the unit of hide/show. Folder ROMs are renamed
-   * with a leading dot just like file ROMs.
+   * 'file'             — single-file ROM (typical NES/SNES cartridge dump).
+   * 'folder-atomic'    — multi-file disc dump where the directory IS one
+   *                      game (Saturn / MegaCD / X68000). Hide/show
+   *                      operates on the directory itself.
+   * 'folder-container' — organisational subfolder that groups many
+   *                      playable games (NEOGEO's `1 World A-Z`,
+   *                      MegaDrive's `EUR`, etc). Drillable in the UI;
+   *                      hide/show on the container moves the whole tree.
+   * Folder ROMs of either flavour are renamed with a leading dot just
+   * like file ROMs when hidden.
    */
-  readonly kind: 'file' | 'folder';
+  readonly kind: 'file' | 'folder-atomic' | 'folder-container';
+  /**
+   * Path within the core's games dir. Empty for top-level entries
+   * (`/media/fat/games/<coreId>/<filename>`); slash-joined for nested
+   * entries when listing inside a container folder. The renderer uses
+   * this for breadcrumb display and to thread back into IPC calls.
+   */
+  readonly relativePath?: string;
 }
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -137,4 +150,26 @@ export interface SystemFileMark {
 export interface SystemFilesMarks {
   readonly schemaVersion: 1;
   readonly marked: readonly SystemFileMark[];
+}
+
+/**
+ * One user override of a folder ROM's auto-classification. The
+ * heuristic in `shared/folder-rom.ts` decides every connection from
+ * folder contents; this list lets the user pin a specific
+ * `(coreId, folderPath)` to `'container'` or `'atomic'`.
+ */
+export interface FolderClassificationOverride {
+  readonly coreId: string;
+  /**
+   * Slash-joined path relative to the core's games dir. A top-level
+   * folder is `'<name>'`; a nested folder is `'<parent>/<child>'`.
+   */
+  readonly folderPath: string;
+  readonly classification: 'container' | 'atomic';
+  readonly setAt: string;
+}
+
+export interface FolderClassifications {
+  readonly schemaVersion: 1;
+  readonly overrides: readonly FolderClassificationOverride[];
 }

@@ -1,4 +1,5 @@
 import type {
+  BulkCoreProgress,
   BulkCoreResult,
   BulkRomResult,
   MisterSecret,
@@ -7,6 +8,7 @@ import type {
   ConnectionErrorCode,
   ConnectionStatus,
   CoreEntry,
+  FolderClassifications,
   MisterProfile,
   Rom,
   SystemFilesMarks,
@@ -31,7 +33,25 @@ export const IPC_CHANNELS = {
   listSystemFileMarks: 'mister:listSystemFileMarks',
   addSystemFileMark: 'mister:addSystemFileMark',
   removeSystemFileMark: 'mister:removeSystemFileMark',
+  setSystemFileMarks: 'mister:setSystemFileMarks',
+  bulkCoreProgress: 'mister:bulkCoreProgress',
+  listFolderClassifications: 'mister:listFolderClassifications',
+  setFolderClassification: 'mister:setFolderClassification',
 } as const;
+
+/**
+ * Wire-side bulk progress event. The renderer uses `operationId` to
+ * scope events to the call it actually triggered — concurrent or stale
+ * bulk ops can't trample each other.
+ */
+export interface BulkCoreProgressEvent extends BulkCoreProgress {
+  readonly operationId: string;
+}
+
+export interface SystemFileMarkChangeWire {
+  readonly filename: string;
+  readonly marked: boolean;
+}
 
 export interface RomVisibilityChangeWire {
   readonly filename: string;
@@ -77,8 +97,18 @@ export interface MisterApi {
   disconnect(): Promise<void>;
   getConnectionStatus(): Promise<ConnectionStatus>;
   listAllCoresWithFiles(): Promise<CoreEntry[]>;
-  listRoms(coreId: string): Promise<Rom[]>;
-  setRomVisibility(coreId: string, filename: string, hidden: boolean): Promise<void>;
+  /**
+   * List ROMs at the optional subPath inside the core's games dir.
+   * Empty `subPath` returns top-level entries; a slash-joined path
+   * returns the contents of a (drilled-into) container folder.
+   */
+  listRoms(coreId: string, subPath?: string): Promise<Rom[]>;
+  setRomVisibility(
+    coreId: string,
+    filename: string,
+    hidden: boolean,
+    subPath?: string,
+  ): Promise<void>;
   /**
    * Bulk ROM visibility — does NOT abort on first failure. Returns a
    * structured per-rename result so the renderer can surface partial
@@ -87,6 +117,7 @@ export interface MisterApi {
   setBulkRomVisibility(
     coreId: string,
     changes: readonly RomVisibilityChangeWire[],
+    subPath?: string,
   ): Promise<BulkRomResult>;
   hideCore(coreId: string): Promise<void>;
   showCore(coreId: string): Promise<void>;
@@ -98,7 +129,17 @@ export interface MisterApi {
    */
   setBulkCoreVisibility(
     changes: readonly CoreVisibilityChangeWire[],
+    options?: { readonly operationId?: string },
   ): Promise<BulkCoreResult>;
+  /**
+   * Subscribe to per-core progress ticks for bulk core-visibility
+   * operations. Events arrive in real time as the SSH stream parses
+   * each core's outcome — the renderer matches `operationId` to the
+   * call it triggered and updates its progress bar.
+   */
+  onBulkCoreProgress(
+    handler: (event: BulkCoreProgressEvent) => void,
+  ): () => void;
   pickKeyFile(): Promise<PickedKeyFile | null>;
   onConnectionStatusChanged(handler: (status: ConnectionStatus) => void): () => void;
   /**
@@ -122,6 +163,29 @@ export interface MisterApi {
     coreId: string,
     filename: string,
   ): Promise<SystemFilesMarks>;
+  /**
+   * Apply a batch of mark/unmark changes to one core in a single SSH
+   * round-trip. Drives the multi-select "Mark selected as system" /
+   * "Unmark selected" actions. Returns the refreshed marks list.
+   */
+  setSystemFileMarks(
+    coreId: string,
+    changes: readonly SystemFileMarkChangeWire[],
+  ): Promise<SystemFilesMarks>;
+  /**
+   * Returns the cached per-folder classification overrides. Cache is
+   * primed on connect and refreshed after every set.
+   */
+  listFolderClassifications(): Promise<FolderClassifications>;
+  /**
+   * Sets or removes a per-folder classification override. Pass
+   * `classification: null` to remove. Returns the refreshed list.
+   */
+  setFolderClassification(
+    coreId: string,
+    folderPath: string,
+    classification: 'container' | 'atomic' | null,
+  ): Promise<FolderClassifications>;
 }
 
 const VALID_CONNECTION_ERROR_CODES: ReadonlySet<ConnectionErrorCode> = new Set([

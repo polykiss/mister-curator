@@ -5,6 +5,7 @@ import path from 'node:path';
 import {
   HIDEABLE_CATEGORIES,
   MISTER_CATEGORY_DIRS,
+  MISTER_FOLDER_CLASSIFICATIONS_PATH,
   MISTER_GAMES_DIR,
   MISTER_LEDGER_DIR,
   MISTER_LEDGER_PATH,
@@ -20,6 +21,18 @@ import {
 } from '@shared/core-matching';
 import { displayRomName } from '@shared/display';
 import {
+  classifyFolder,
+  resolveClassification,
+} from '@shared/folder-rom';
+import {
+  EMPTY_FOLDER_CLASSIFICATIONS,
+  getFolderOverride,
+  parseFolderClassifications,
+  serializeFolderClassifications,
+  withFolderOverride,
+  withoutFolderOverride,
+} from '@shared/folder-classifications';
+import {
   healLedger,
   ledgerEqual,
   parseLedger,
@@ -34,18 +47,22 @@ import {
 import { MisterConnectionError } from '@shared/types';
 import type {
   CoreEntry,
+  FolderClassificationOverride,
+  FolderClassifications,
   HideLedger,
   MisterProfile,
   Rom,
   SystemFilesMarks,
 } from '@shared/types';
 import type {
+  BulkCoreOptions,
   BulkCoreResult,
   BulkRomResult,
   CoreVisibilityChange,
   IMisterClient,
   MisterSecret,
   RomVisibilityChange,
+  SystemFileMarkChange,
 } from '@shared/mister-client';
 
 export interface FakeMisterClientOptions {
@@ -184,12 +201,22 @@ export class FakeMisterClient implements IMisterClient {
     });
   }
 
-  async listRoms(coreId: string): Promise<Rom[]> {
+  async listRoms(
+    coreId: string,
+    subPath = '',
+    folderClassifications: FolderClassifications = EMPTY_FOLDER_CLASSIFICATIONS,
+  ): Promise<Rom[]> {
     this.assertConnected();
     this.assertSafeCoreId(coreId);
+    this.assertSafeSubPath(subPath);
     await this.delay();
 
-    const localDir = this.toLocal(`${MISTER_GAMES_DIR}/${coreId}`);
+    const relPrefix = subPath === '' ? '' : `${subPath}/`;
+    const localDir = this.toLocal(
+      subPath === ''
+        ? `${MISTER_GAMES_DIR}/${coreId}`
+        : `${MISTER_GAMES_DIR}/${coreId}/${subPath}`,
+    );
 
     let entries: Dirent[];
     try {
@@ -205,8 +232,11 @@ export class FakeMisterClient implements IMisterClient {
     for (const entry of entries) {
       const filename = entry.name;
       const hidden = filename.startsWith('.');
-      const displayName = displayRomName(hidden ? filename.slice(1) : filename);
+      const visibleBase = hidden ? filename.slice(1) : filename;
+      const displayName = displayRomName(visibleBase);
       const fullPath = path.join(localDir, filename);
+      const relativePath = `${relPrefix}${filename}`;
+      const onDevicePath = `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`;
 
       if (entry.isFile()) {
         const stat = await fs.stat(fullPath);
@@ -216,22 +246,32 @@ export class FakeMisterClient implements IMisterClient {
           displayName,
           sizeBytes: stat.size,
           hidden,
-          path: `${MISTER_GAMES_DIR}/${coreId}/${filename}`,
+          path: onDevicePath,
           kind: 'file',
+          relativePath,
         });
       } else if (entry.isDirectory()) {
-        // Folder ROMs (Saturn, MegaCD, X68000 …) — the directory itself
-        // is the unit of hide/show. Size is the recursive byte total of
-        // everything inside.
+        // Folder ROMs — classify so the renderer knows whether to drill.
+        // The classification key uses the *visible* path so an override
+        // set while the folder was visible still applies after a hide.
+        const visibleRelPath = `${relPrefix}${visibleBase}`;
         const sizeBytes = await sumDirectoryBytes(fullPath);
+        const classification = await this.classifyLocalFolder(
+          fullPath,
+          coreId,
+          visibleRelPath,
+          folderClassifications,
+        );
         roms.push({
           coreId,
           filename,
           displayName,
           sizeBytes,
           hidden,
-          path: `${MISTER_GAMES_DIR}/${coreId}/${filename}`,
-          kind: 'folder',
+          path: onDevicePath,
+          kind:
+            classification === 'container' ? 'folder-container' : 'folder-atomic',
+          relativePath,
         });
       }
     }
@@ -240,20 +280,28 @@ export class FakeMisterClient implements IMisterClient {
     return roms;
   }
 
-  async setRomVisibility(coreId: string, filename: string, hidden: boolean): Promise<void> {
+  async setRomVisibility(
+    coreId: string,
+    filename: string,
+    hidden: boolean,
+    subPath = '',
+  ): Promise<void> {
     this.assertConnected();
     this.assertSafeCoreId(coreId);
     this.assertSafeFilename(filename);
+    this.assertSafeSubPath(subPath);
     await this.delay();
-    await this.applyRomRename(coreId, filename, hidden);
+    await this.applyRomRename(coreId, filename, hidden, subPath);
   }
 
   async setBulkRomVisibility(
     coreId: string,
     changes: readonly RomVisibilityChange[],
+    subPath = '',
   ): Promise<BulkRomResult> {
     this.assertConnected();
     this.assertSafeCoreId(coreId);
+    this.assertSafeSubPath(subPath);
     for (const change of changes) {
       this.assertSafeFilename(change.filename);
     }
@@ -263,7 +311,7 @@ export class FakeMisterClient implements IMisterClient {
     const failed: { filename: string; reason: string }[] = [];
     for (const change of changes) {
       try {
-        await this.applyRomRename(coreId, change.filename, change.hidden);
+        await this.applyRomRename(coreId, change.filename, change.hidden, subPath);
         succeeded.push(change.filename);
       } catch (err) {
         failed.push({
@@ -309,6 +357,7 @@ export class FakeMisterClient implements IMisterClient {
 
   async setBulkCoreVisibility(
     changes: readonly CoreVisibilityChange[],
+    options: BulkCoreOptions = {},
   ): Promise<BulkCoreResult> {
     this.assertConnected();
 
@@ -335,17 +384,39 @@ export class FakeMisterClient implements IMisterClient {
     await this.delay();
     const succeeded: string[] = [];
     const failed: { coreId: string; reason: string }[] = [];
-    for (const plan of plans) {
+    const total = plans.length;
+    for (let i = 0; i < plans.length; i += 1) {
+      const plan = plans[i]!;
+      const done = i + 1;
       try {
         // Per-core atomic: each rename runs sequentially; if any throws,
         // we record the core as failed and move on to the next core.
         for (const r of plan.renames) await this.renamePath(r);
         succeeded.push(plan.coreId);
+        try {
+          options.onProgress?.({
+            done,
+            total,
+            coreId: plan.coreId,
+            result: 'ok',
+          });
+        } catch {
+          /* swallow */
+        }
       } catch (err) {
-        failed.push({
-          coreId: plan.coreId,
-          reason: err instanceof Error ? err.message : String(err),
-        });
+        const reason = err instanceof Error ? err.message : String(err);
+        failed.push({ coreId: plan.coreId, reason });
+        try {
+          options.onProgress?.({
+            done,
+            total,
+            coreId: plan.coreId,
+            result: 'fail',
+            reason,
+          });
+        } catch {
+          /* swallow */
+        }
       }
     }
     return { succeeded, failed };
@@ -431,6 +502,78 @@ export class FakeMisterClient implements IMisterClient {
     await this.writeSystemFilesMarks(next);
   }
 
+  async setSystemFileMarks(
+    coreId: string,
+    changes: readonly SystemFileMarkChange[],
+  ): Promise<void> {
+    this.assertConnected();
+    this.assertSafeCoreId(coreId);
+    for (const c of changes) this.assertSafeFilename(c.filename);
+    if (changes.length === 0) return;
+
+    const current = await this.readSystemFilesMarks();
+    const markedAt = new Date().toISOString();
+    let next = current;
+    for (const change of changes) {
+      next = change.marked
+        ? withMark(next, { coreId, filename: change.filename, markedAt })
+        : withoutMark(next, coreId, change.filename);
+    }
+    if (next === current) return;
+    await this.writeSystemFilesMarks(next);
+  }
+
+  async readFolderClassifications(): Promise<FolderClassifications> {
+    this.assertConnected();
+    await this.delay();
+    const localPath = this.toLocal(MISTER_FOLDER_CLASSIFICATIONS_PATH);
+    try {
+      const text = await fs.readFile(localPath, 'utf-8');
+      return parseFolderClassifications(text);
+    } catch (err) {
+      if (isNodeError(err) && err.code === 'ENOENT') {
+        return parseFolderClassifications('');
+      }
+      throw err;
+    }
+  }
+
+  async setFolderClassification(
+    override:
+      | FolderClassificationOverride
+      | { coreId: string; folderPath: string; classification: undefined },
+  ): Promise<void> {
+    this.assertConnected();
+    this.assertSafeCoreId(override.coreId);
+    this.assertSafeSubPath(override.folderPath);
+    const current = await this.readFolderClassifications();
+    let next: FolderClassifications;
+    if (override.classification === undefined) {
+      next = withoutFolderOverride(current, override.coreId, override.folderPath);
+    } else {
+      next = withFolderOverride(current, {
+        coreId: override.coreId,
+        folderPath: override.folderPath,
+        classification: override.classification,
+        setAt: new Date().toISOString(),
+      });
+    }
+    await this.writeFolderClassifications(next);
+  }
+
+  private async writeFolderClassifications(
+    marks: FolderClassifications,
+  ): Promise<void> {
+    await this.delay();
+    const localDir = this.toLocal(MISTER_LEDGER_DIR);
+    const localPath = this.toLocal(MISTER_FOLDER_CLASSIFICATIONS_PATH);
+    await fs.mkdir(localDir, { recursive: true });
+    const json = serializeFolderClassifications(marks);
+    const tmp = `${localPath}.tmp`;
+    await fs.writeFile(tmp, json, 'utf-8');
+    await fs.rename(tmp, localPath);
+  }
+
   private async writeSystemFilesMarks(marks: SystemFilesMarks): Promise<void> {
     await this.delay();
     const localDir = this.toLocal(MISTER_LEDGER_DIR);
@@ -510,27 +653,67 @@ export class FakeMisterClient implements IMisterClient {
     coreId: string,
     filename: string,
     hidden: boolean,
+    subPath: string,
   ): Promise<void> {
-    const coreDir = this.toLocal(`${MISTER_GAMES_DIR}/${coreId}`);
+    const coreDir = this.toLocal(
+      subPath === ''
+        ? `${MISTER_GAMES_DIR}/${coreId}`
+        : `${MISTER_GAMES_DIR}/${coreId}/${subPath}`,
+    );
     const visibleName = filename.startsWith('.') ? filename.slice(1) : filename;
     const targetName = hidden ? `.${visibleName}` : visibleName;
+    const relLabel = subPath === '' ? coreId : `${coreId}/${subPath}`;
 
     if (filename === targetName) {
       try {
         await fs.access(path.join(coreDir, filename));
         return;
       } catch {
-        throw new Error(`ROM not found: ${coreId}/${filename}`);
+        throw new Error(`ROM not found: ${relLabel}/${filename}`);
       }
     }
     try {
       await fs.rename(path.join(coreDir, filename), path.join(coreDir, targetName));
     } catch (err) {
       if (isNodeError(err) && err.code === 'ENOENT') {
-        throw new Error(`ROM not found: ${coreId}/${filename}`);
+        throw new Error(`ROM not found: ${relLabel}/${filename}`);
       }
       throw err;
     }
+  }
+
+  /**
+   * Reads one level deep into `localDir`, applies the heuristic, then
+   * layers any user override for `(coreId, visibleRelPath)` on top.
+   * Resolves to a definite call (`'container'` or `'atomic'`) — the
+   * `'unknown'` case falls back to `'atomic'` per `resolveClassification`.
+   */
+  private async classifyLocalFolder(
+    localDir: string,
+    coreId: string,
+    visibleRelPath: string,
+    overrides: FolderClassifications,
+  ): Promise<'container' | 'atomic'> {
+    let inner: Dirent[];
+    try {
+      inner = await fs.readdir(localDir, { withFileTypes: true });
+    } catch {
+      // Unreadable folder is treated as atomic — never offer a drill on it.
+      return resolveClassification(
+        'unknown',
+        getFolderOverride(overrides, coreId, visibleRelPath),
+      );
+    }
+    const files: string[] = [];
+    const dirs: string[] = [];
+    for (const e of inner) {
+      if (e.isFile()) files.push(e.name);
+      else if (e.isDirectory()) dirs.push(e.name);
+    }
+    return resolveClassification(
+      classifyFolder({ files, dirs }),
+      getFolderOverride(overrides, coreId, visibleRelPath),
+    );
   }
 
   private assertConnected(): void {
@@ -548,6 +731,18 @@ export class FakeMisterClient implements IMisterClient {
   private assertSafeFilename(filename: string): void {
     if (filename.includes('/') || filename.includes('..') || filename === '') {
       throw new Error(`Invalid filename: ${filename}`);
+    }
+  }
+
+  private assertSafeSubPath(subPath: string): void {
+    if (subPath === '') return;
+    if (subPath.startsWith('/') || subPath.endsWith('/')) {
+      throw new Error(`Invalid subPath: ${subPath}`);
+    }
+    for (const segment of subPath.split('/')) {
+      if (segment === '' || segment === '..' || segment === '.') {
+        throw new Error(`Invalid subPath: ${subPath}`);
+      }
     }
   }
 

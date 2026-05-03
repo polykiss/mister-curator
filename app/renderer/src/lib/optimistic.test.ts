@@ -68,6 +68,45 @@ describe('applyVisibilityChange', () => {
 
     expect(next).toEqual(roms);
   });
+
+  it('strips the trailing archive extension from displayName when hiding', () => {
+    // Round 8 fix: optimistic update was setting displayName to the
+    // raw visible name, leaving "Castlevania.zip" in the row until the
+    // next server roundtrip overwrote it with the proper "Castlevania".
+    const rom: Rom = {
+      coreId: 'GBA',
+      filename: 'Castlevania (USA).zip',
+      displayName: 'Castlevania (USA)',
+      sizeBytes: 4096,
+      hidden: false,
+      path: '/media/fat/games/GBA/Castlevania (USA).zip',
+      kind: 'file',
+    };
+    const next = applyVisibilityChange([rom], {
+      filename: 'Castlevania (USA).zip',
+      hidden: true,
+    });
+    expect(next[0]?.filename).toBe('.Castlevania (USA).zip');
+    expect(next[0]?.displayName).toBe('Castlevania (USA)');
+  });
+
+  it('strips the trailing archive extension when un-hiding', () => {
+    const rom: Rom = {
+      coreId: 'GBA',
+      filename: '.Castlevania (USA).zip',
+      displayName: 'Castlevania (USA)',
+      sizeBytes: 4096,
+      hidden: true,
+      path: '/media/fat/games/GBA/.Castlevania (USA).zip',
+      kind: 'file',
+    };
+    const next = applyVisibilityChange([rom], {
+      filename: '.Castlevania (USA).zip',
+      hidden: false,
+    });
+    expect(next[0]?.filename).toBe('Castlevania (USA).zip');
+    expect(next[0]?.displayName).toBe('Castlevania (USA)');
+  });
 });
 
 describe('applyBulkVisibilityChange', () => {

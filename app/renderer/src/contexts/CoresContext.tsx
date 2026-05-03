@@ -9,7 +9,11 @@ import {
 } from 'react';
 import type { JSX, ReactNode } from 'react';
 
-import type { BulkCoreResult, BulkRomResult } from '@shared/mister-client';
+import type {
+  BulkCoreResult,
+  BulkRomResult,
+  SystemFileMarkChange,
+} from '@shared/mister-client';
 import { EMPTY_SYSTEM_FILES_MARKS, isMarked } from '@shared/system-files-marks';
 import type { CoreEntry, Rom, SystemFilesMarks } from '@shared/types';
 
@@ -25,6 +29,17 @@ import {
 type RomsByCore = Readonly<Record<string, readonly Rom[]>>;
 type LoadingByCore = Readonly<Record<string, boolean>>;
 
+/**
+ * Composite key for the ROM cache. Top-level entries are keyed by
+ * `coreId`; drilled-into container folders by `coreId::subPath`.
+ * Keeping it a single map (rather than a nested record) means every
+ * existing optimistic-update / refetch helper still works with one
+ * lookup.
+ */
+export function romsKey(coreId: string, subPath = ''): string {
+  return subPath === '' ? coreId : `${coreId}::${subPath}`;
+}
+
 interface CoresContextValue {
   readonly cores: readonly CoreEntry[] | null;
   readonly coresLoading: boolean;
@@ -35,15 +50,18 @@ interface CoresContextValue {
   readonly romsLoading: LoadingByCore;
   readonly selectCore: (coreId: string | null) => void;
   readonly refresh: () => Promise<void>;
-  readonly ensureRoms: (coreId: string) => Promise<void>;
+  readonly ensureRoms: (coreId: string, subPath?: string) => Promise<void>;
+  readonly refetchRoms: (coreId: string, subPath?: string) => Promise<void>;
   readonly setRomVisibility: (
     coreId: string,
     filename: string,
     hidden: boolean,
+    subPath?: string,
   ) => Promise<void>;
   readonly setBulkRomVisibility: (
     coreId: string,
     changes: readonly VisibilityChange[],
+    subPath?: string,
   ) => Promise<BulkRomResult>;
   readonly hideCore: (coreId: string) => Promise<void>;
   readonly showCore: (coreId: string) => Promise<void>;
@@ -67,13 +85,34 @@ interface CoresContextValue {
    */
   readonly addSystemFileMark: (coreId: string, filename: string) => Promise<void>;
   readonly removeSystemFileMark: (coreId: string, filename: string) => Promise<void>;
+  /**
+   * Apply a batch of mark/unmark changes for one core in a single SSH
+   * round-trip. Used by the multi-select toolbar actions.
+   */
+  readonly setSystemFileMarks: (
+    coreId: string,
+    changes: readonly SystemFileMarkChange[],
+  ) => Promise<void>;
+  /**
+   * Override (or remove an override of) a folder ROM's classification.
+   * `'container'` makes it drillable, `'atomic'` makes it a leaf,
+   * `null` clears any user override and lets the auto-detector decide.
+   * After the call the affected ROM list is refetched so the UI picks
+   * up the new `kind`.
+   */
+  readonly setFolderClassification: (
+    coreId: string,
+    folderPath: string,
+    classification: 'container' | 'atomic' | null,
+    refreshAt?: { coreId: string; subPath: string },
+  ) => Promise<void>;
 }
 
 const CoresContext = createContext<CoresContextValue | null>(null);
 
 export function CoresProvider({ children }: { children: ReactNode }): JSX.Element {
   const { status } = useConnection();
-  const { run: runWithStatus } = useOperationStatus();
+  const { run: runWithStatus, runWithProgress } = useOperationStatus();
   const [cores, setCores] = useState<readonly CoreEntry[] | null>(null);
   const [coresLoading, setCoresLoading] = useState(false);
   const [coresError, setCoresError] = useState<string | null>(null);
@@ -101,19 +140,43 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   const refetchSelectedRoms = useCallback(async (): Promise<void> => {
     const sel = selectedCoreIdRef.current;
     if (!sel) return;
-    setRomsLoading((prev) => ({ ...prev, [sel]: true }));
+    const key = romsKey(sel);
+    setRomsLoading((prev) => ({ ...prev, [key]: true }));
     try {
       const fresh = await runWithStatus(`Loading ROMs in ${sel}…`, () =>
         window.mister.listRoms(sel),
       );
-      setRomsByCore((prev) => ({ ...prev, [sel]: fresh }));
+      setRomsByCore((prev) => ({ ...prev, [key]: fresh }));
     } catch {
       // Best-effort — leave the cache empty and let the next render
       // trigger ensureRoms via the normal effect path.
     } finally {
-      setRomsLoading((prev) => ({ ...prev, [sel]: false }));
+      setRomsLoading((prev) => ({ ...prev, [key]: false }));
     }
   }, [runWithStatus]);
+
+  /**
+   * Public refetch — used by the RomsPane drill UI when the user
+   * navigates into a sub-path. Distinct from `refetchSelectedRoms`
+   * because this one targets a specific (coreId, subPath) and doesn't
+   * read from the selected-core ref.
+   */
+  const refetchRoms = useCallback(
+    async (coreId: string, subPath = ''): Promise<void> => {
+      const key = romsKey(coreId, subPath);
+      setRomsLoading((prev) => ({ ...prev, [key]: true }));
+      try {
+        const label = subPath === '' ? coreId : `${coreId}/${subPath}`;
+        const fresh = await runWithStatus(`Loading ROMs in ${label}…`, () =>
+          window.mister.listRoms(coreId, subPath),
+        );
+        setRomsByCore((prev) => ({ ...prev, [key]: fresh }));
+      } finally {
+        setRomsLoading((prev) => ({ ...prev, [key]: false }));
+      }
+    },
+    [runWithStatus],
+  );
 
   const refresh = useCallback(async () => {
     setCoresLoading(true);
@@ -137,16 +200,18 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   }, [runWithStatus]);
 
   const ensureRoms = useCallback(
-    async (coreId: string) => {
-      if (romsByCoreRef.current[coreId]) return;
-      setRomsLoading((prev) => ({ ...prev, [coreId]: true }));
+    async (coreId: string, subPath = '') => {
+      const key = romsKey(coreId, subPath);
+      if (romsByCoreRef.current[key]) return;
+      setRomsLoading((prev) => ({ ...prev, [key]: true }));
       try {
-        const roms = await runWithStatus(`Loading ROMs in ${coreId}…`, () =>
-          window.mister.listRoms(coreId),
+        const label = subPath === '' ? coreId : `${coreId}/${subPath}`;
+        const roms = await runWithStatus(`Loading ROMs in ${label}…`, () =>
+          window.mister.listRoms(coreId, subPath),
         );
-        setRomsByCore((prev) => ({ ...prev, [coreId]: roms }));
+        setRomsByCore((prev) => ({ ...prev, [key]: roms }));
       } finally {
-        setRomsLoading((prev) => ({ ...prev, [coreId]: false }));
+        setRomsLoading((prev) => ({ ...prev, [key]: false }));
       }
     },
     [runWithStatus],
@@ -160,24 +225,31 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   }, []);
 
   const setRomVisibility = useCallback(
-    async (coreId: string, filename: string, hidden: boolean) => {
-      const previousRoms = romsByCoreRef.current[coreId];
+    async (
+      coreId: string,
+      filename: string,
+      hidden: boolean,
+      subPath = '',
+    ) => {
+      const key = romsKey(coreId, subPath);
+      const previousRoms = romsByCoreRef.current[key];
       const previousCores = coresRef.current;
       if (!previousRoms) {
-        // Nothing cached yet; just send through.
-        await window.mister.setRomVisibility(coreId, filename, hidden);
+        await window.mister.setRomVisibility(coreId, filename, hidden, subPath);
         return;
       }
 
       const optimistic = applyVisibilityChange(previousRoms, { filename, hidden });
-      setRomsByCore((prev) => ({ ...prev, [coreId]: optimistic }));
-      updateCoreCounts(coreId, optimistic);
+      setRomsByCore((prev) => ({ ...prev, [key]: optimistic }));
+      // The cores-list romCount/hiddenCount only reflects top-level
+      // entries — nested hides don't change the parent count.
+      if (subPath === '') updateCoreCounts(coreId, optimistic);
 
       try {
-        await window.mister.setRomVisibility(coreId, filename, hidden);
+        await window.mister.setRomVisibility(coreId, filename, hidden, subPath);
       } catch (err) {
-        setRomsByCore((prev) => ({ ...prev, [coreId]: previousRoms }));
-        if (previousCores) setCores(previousCores);
+        setRomsByCore((prev) => ({ ...prev, [key]: previousRoms }));
+        if (previousCores && subPath === '') setCores(previousCores);
         throw err;
       }
     },
@@ -188,44 +260,42 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     async (
       coreId: string,
       changes: readonly VisibilityChange[],
+      subPath = '',
     ): Promise<BulkRomResult> => {
-      const previousRoms = romsByCoreRef.current[coreId];
+      const key = romsKey(coreId, subPath);
+      const previousRoms = romsByCoreRef.current[key];
       const previousCores = coresRef.current;
 
-      // Optimistic apply when we have the rom list cached. On any error
-      // (network, throw), roll the cache back. On a partial success we
-      // re-fetch from the server to reconcile.
       if (previousRoms) {
         const optimistic = applyBulkVisibilityChange(previousRoms, changes);
-        setRomsByCore((prev) => ({ ...prev, [coreId]: optimistic }));
-        updateCoreCounts(coreId, optimistic);
+        setRomsByCore((prev) => ({ ...prev, [key]: optimistic }));
+        if (subPath === '') updateCoreCounts(coreId, optimistic);
       }
 
       let result: BulkRomResult;
       const hidingCount = changes.filter((c) => c.hidden).length;
       const verb = hidingCount > 0 ? 'Hiding' : 'Restoring';
-      const statusMessage = `${verb} ${String(changes.length)} ROMs in ${coreId}…`;
+      const label = subPath === '' ? coreId : `${coreId}/${subPath}`;
+      const statusMessage = `${verb} ${String(changes.length)} ROMs in ${label}…`;
       try {
         result = await runWithStatus(statusMessage, () =>
-          window.mister.setBulkRomVisibility(coreId, [...changes]),
+          window.mister.setBulkRomVisibility(coreId, [...changes], subPath),
         );
       } catch (err) {
         if (previousRoms) {
-          setRomsByCore((prev) => ({ ...prev, [coreId]: previousRoms }));
-          if (previousCores) setCores(previousCores);
+          setRomsByCore((prev) => ({ ...prev, [key]: previousRoms }));
+          if (previousCores && subPath === '') setCores(previousCores);
         }
         throw err;
       }
 
       if (result.failed.length > 0 && previousRoms) {
-        // Partial failure — refetch from the server so the UI reflects
-        // truth, not the optimistic application.
         try {
-          const fresh = await window.mister.listRoms(coreId);
-          setRomsByCore((prev) => ({ ...prev, [coreId]: fresh }));
-          updateCoreCounts(coreId, fresh);
+          const fresh = await window.mister.listRoms(coreId, subPath);
+          setRomsByCore((prev) => ({ ...prev, [key]: fresh }));
+          if (subPath === '') updateCoreCounts(coreId, fresh);
         } catch {
-          // Best-effort reconciliation; leave optimistic state if refetch fails.
+          /* best-effort */
         }
       }
 
@@ -284,10 +354,17 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     ): Promise<BulkCoreResult> => {
       if (changes.length === 0) return { succeeded: [], failed: [] };
       const hidingCount = changes.filter((c) => c.hidden).length;
-      const verb = hidingCount > 0 ? 'Hiding' : 'Restoring';
+      const verb = hidingCount > 0 ? 'Hiding' : 'Unhiding';
       const message = `${verb} ${String(changes.length)} cores…`;
-      const result = await runWithStatus(message, () =>
-        window.mister.setBulkCoreVisibility(changes),
+      // Generate the operationId here so the progress wire can match it
+      // on the events forwarded by the main process. The main process
+      // also generates one if we don't supply, but we need the renderer-
+      // side progress entry to know about it BEFORE the first event.
+      const operationId = `bulk-${Date.now().toString(36)}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+      const result = await runWithProgress(message, operationId, () =>
+        window.mister.setBulkCoreVisibility(changes, { operationId }),
       );
       // Always refetch after a bulk core op — partial failures mean the
       // optimistic mental model isn't reliable.
@@ -300,7 +377,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       await refetchSelectedRoms();
       return result;
     },
-    [refetchSelectedRoms, runWithStatus],
+    [refetchSelectedRoms, runWithProgress],
   );
 
   const isUserMarked = useCallback(
@@ -379,6 +456,92 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     [systemFilesMarks],
   );
 
+  const setFolderClassification = useCallback(
+    async (
+      coreId: string,
+      folderPath: string,
+      classification: 'container' | 'atomic' | null,
+      refreshAt?: { coreId: string; subPath: string },
+    ): Promise<void> => {
+      try {
+        await window.mister.setFolderClassification(
+          coreId,
+          folderPath,
+          classification,
+        );
+      } catch (err) {
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+      // Refetch the affected ROM list so the user sees the new kind.
+      // Default: refresh top-level of `coreId` (which contains the
+      // folder whose classification just changed).
+      const target = refreshAt ?? { coreId, subPath: '' };
+      try {
+        const fresh = await window.mister.listRoms(target.coreId, target.subPath);
+        const key = romsKey(target.coreId, target.subPath);
+        setRomsByCore((prev) => ({ ...prev, [key]: fresh }));
+      } catch {
+        /* best-effort */
+      }
+    },
+    [],
+  );
+
+  const setSystemFileMarks = useCallback(
+    async (
+      coreId: string,
+      changes: readonly SystemFileMarkChange[],
+    ): Promise<void> => {
+      if (changes.length === 0) return;
+      const previous = systemFilesMarks;
+      // Optimistic: synthesise the post-batch marks list. The truth-
+      // from-server replaces it after the IPC call completes.
+      const markedAt = new Date().toISOString();
+      let optimistic = previous;
+      for (const c of changes) {
+        if (c.marked) {
+          if (!isMarked(optimistic, coreId, c.filename)) {
+            optimistic = {
+              ...optimistic,
+              marked: [...optimistic.marked, { coreId, filename: c.filename, markedAt }],
+            };
+          }
+        } else {
+          const lower = coreId.toLowerCase();
+          optimistic = {
+            ...optimistic,
+            marked: optimistic.marked.filter(
+              (m) =>
+                !(m.coreId.toLowerCase() === lower && m.filename === c.filename),
+            ),
+          };
+        }
+      }
+      setSystemFilesMarks(optimistic);
+      try {
+        const refreshed = await runWithStatus(
+          `${changes[0]?.marked ? 'Marking' : 'Unmarking'} ${String(changes.length)} files…`,
+          () => window.mister.setSystemFileMarks(coreId, [...changes]),
+        );
+        setSystemFilesMarks(refreshed);
+      } catch (err) {
+        setSystemFilesMarks(previous);
+        throw err;
+      }
+      try {
+        const [freshRoms, freshCores] = await Promise.all([
+          window.mister.listRoms(coreId),
+          window.mister.listAllCoresWithFiles(),
+        ]);
+        setRomsByCore((prev) => ({ ...prev, [coreId]: freshRoms }));
+        setCores(freshCores);
+      } catch {
+        // Best-effort reconciliation.
+      }
+    },
+    [systemFilesMarks, runWithStatus],
+  );
+
   // Reset whenever we leave the connected state.
   useEffect(() => {
     if (status !== 'connected') {
@@ -420,6 +583,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       selectCore,
       refresh,
       ensureRoms,
+      refetchRoms,
       setRomVisibility,
       setBulkRomVisibility,
       hideCore,
@@ -429,6 +593,8 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       isUserMarked,
       addSystemFileMark,
       removeSystemFileMark,
+      setSystemFileMarks,
+      setFolderClassification,
     }),
     [
       cores,
@@ -441,6 +607,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       selectCore,
       refresh,
       ensureRoms,
+      refetchRoms,
       setRomVisibility,
       setBulkRomVisibility,
       hideCore,
@@ -450,6 +617,8 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       isUserMarked,
       addSystemFileMark,
       removeSystemFileMark,
+      setSystemFileMarks,
+      setFolderClassification,
     ],
   );
 

@@ -1,5 +1,7 @@
 import type {
   CoreEntry,
+  FolderClassifications,
+  FolderClassificationOverride,
   HideLedger,
   MisterProfile,
   Rom,
@@ -48,6 +50,35 @@ export interface BulkCoreResult {
   readonly failed: readonly { readonly coreId: string; readonly reason: string }[];
 }
 
+/**
+ * One progress tick during a bulk core-visibility operation. The real
+ * client emits these from the SSH stream as each per-core subshell
+ * completes; the fake client synthesises them per plan. Renderer-side
+ * the events drive the StatusBar progress bar.
+ *
+ * `done` is 1-based and includes the just-completed core. `total` is
+ * the number of plans the client actually attempted (no-ops are
+ * filtered upstream).
+ */
+export interface BulkCoreProgress {
+  readonly done: number;
+  readonly total: number;
+  readonly coreId: string;
+  readonly result: 'ok' | 'fail';
+  /** Single-line failure reason — present iff `result === 'fail'`. */
+  readonly reason?: string;
+}
+
+export interface BulkCoreOptions {
+  /**
+   * Per-core progress callback. Invoked from inside the client as soon
+   * as a line is parsed from the SSH stream — there's no buffering, so
+   * the renderer sees ticks roughly in real time. Throws are swallowed
+   * (the bulk op continues regardless of UI state).
+   */
+  readonly onProgress?: (event: BulkCoreProgress) => void;
+}
+
 export interface IMisterClient {
   connect(profile: MisterProfile, secret: MisterSecret): Promise<void>;
   disconnect(): Promise<void>;
@@ -69,9 +100,31 @@ export interface IMisterClient {
     systemFilesMarks?: SystemFilesMarks,
   ): Promise<CoreEntry[]>;
 
-  listRoms(coreId: string): Promise<Rom[]>;
+  /**
+   * List the ROM-shaped entries at `<coreDir>/<subPath>`. With no
+   * `subPath` (or `''`) returns top-level entries. With a subPath like
+   * `'1 World A-Z'` returns the contents of that container folder.
+   * Folder entries get classified via the auto-detector heuristic +
+   * the user-supplied overrides; the resulting `kind` field tells the
+   * renderer whether it's drillable.
+   */
+  listRoms(
+    coreId: string,
+    subPath?: string,
+    folderClassifications?: FolderClassifications,
+  ): Promise<Rom[]>;
 
-  setRomVisibility(coreId: string, filename: string, hidden: boolean): Promise<void>;
+  /**
+   * Toggle the visibility of one ROM at `<coreDir>/<subPath>/<filename>`.
+   * `subPath` defaults to the empty string (top-level); pass it when
+   * the user is operating inside a drilled-in container.
+   */
+  setRomVisibility(
+    coreId: string,
+    filename: string,
+    hidden: boolean,
+    subPath?: string,
+  ): Promise<void>;
 
   /**
    * Apply many ROM visibility changes in a single batched SSH call.
@@ -82,6 +135,7 @@ export interface IMisterClient {
   setBulkRomVisibility(
     coreId: string,
     changes: readonly RomVisibilityChange[],
+    subPath?: string,
   ): Promise<BulkRomResult>;
 
   /**
@@ -105,6 +159,7 @@ export interface IMisterClient {
    */
   setBulkCoreVisibility(
     changes: readonly CoreVisibilityChange[],
+    options?: BulkCoreOptions,
   ): Promise<BulkCoreResult>;
 
   /**
@@ -143,4 +198,46 @@ export interface IMisterClient {
    * are not affected (they're heuristic, not stored).
    */
   removeSystemFileMark(coreId: string, filename: string): Promise<void>;
+
+  /**
+   * Apply many mark / unmark changes to one core in a single
+   * read-modify-write of the marks file. Used by the multi-select
+   * "Mark selected as system" / "Unmark selected" actions so a 50-row
+   * batch is one SSH round-trip, not 50.
+   *
+   * Idempotent per change — already-marked / already-unmarked entries
+   * pass through with no further work. If every change is a no-op the
+   * implementation may skip the write entirely.
+   */
+  setSystemFileMarks(
+    coreId: string,
+    changes: readonly SystemFileMarkChange[],
+  ): Promise<void>;
+
+  /**
+   * Read and parse the on-MiSTer folder-classifications file
+   * (`/media/fat/.mistercurator/folder-classifications.json`). Returns
+   * the empty marks object if the file is missing or empty. Used by
+   * `listRoms` to apply user overrides on top of the auto-detector.
+   */
+  readFolderClassifications(): Promise<FolderClassifications>;
+
+  /**
+   * Set or remove a per-folder classification override. `classification`
+   * of `undefined` removes any existing override. Idempotent at the
+   * persistence layer.
+   */
+  setFolderClassification(
+    override: FolderClassificationOverride | { coreId: string; folderPath: string; classification: undefined },
+  ): Promise<void>;
+}
+
+/**
+ * One element of a bulk mark/unmark batch. `marked: true` adds the
+ * mark; `false` removes it. Filenames are matched against the marks
+ * file exactly (the filesystem is case-sensitive).
+ */
+export interface SystemFileMarkChange {
+  readonly filename: string;
+  readonly marked: boolean;
 }

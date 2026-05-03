@@ -10,17 +10,22 @@ import {
   withCoreShown,
 } from '@shared/ledger';
 import type {
+  BulkCoreProgress,
   BulkCoreResult,
   BulkRomResult,
   CoreVisibilityChange,
   IMisterClient,
   MisterSecret,
   RomVisibilityChange,
+  SystemFileMarkChange,
 } from '@shared/mister-client';
+import { EMPTY_FOLDER_CLASSIFICATIONS } from '@shared/folder-classifications';
 import { EMPTY_SYSTEM_FILES_MARKS } from '@shared/system-files-marks';
 import type {
   ConnectionStatus,
   CoreEntry,
+  FolderClassificationOverride,
+  FolderClassifications,
   HiddenCoreEntry,
   HideLedger,
   Rom,
@@ -30,6 +35,18 @@ import type {
 import type { ProfileStore } from '@app/main/storage/profile-store';
 
 type StatusListener = (status: ConnectionStatus) => void;
+type BulkProgressListener = (event: BulkCoreProgressBroadcast) => void;
+
+/**
+ * Bulk core-visibility progress broadcast to listeners (typically the
+ * window webContents adapter). Wraps the client-level event with an
+ * `operationId` the renderer uses to scope progress to the call it
+ * actually triggered — concurrent or stale ops can't trample each
+ * other's progress bar.
+ */
+export interface BulkCoreProgressBroadcast extends BulkCoreProgress {
+  readonly operationId: string;
+}
 
 export interface ConnectResult {
   /** Number of cores re-hidden by the auto-reapply step (0 when disabled). */
@@ -62,6 +79,8 @@ export class ConnectionManager {
   private status: ConnectionStatus = 'disconnected';
   private currentProfileId: string | null = null;
   private readonly listeners = new Set<StatusListener>();
+  private readonly bulkProgressListeners = new Set<BulkProgressListener>();
+  private nextOperationId = 1;
   private coresCache: CoreEntry[] = [];
   /**
    * In-memory copy of the on-MiSTer ledger. Populated by `readLedgerFresh`
@@ -76,6 +95,13 @@ export class ConnectionManager {
    * marks the user has placed.
    */
   private systemFilesMarksCache: SystemFilesMarks = EMPTY_SYSTEM_FILES_MARKS;
+  /**
+   * In-memory copy of the per-folder classification overrides. Populated
+   * on connect, refreshed on every set. Threaded through `listRoms` so
+   * folder-ROM `kind` reflects user overrides.
+   */
+  private folderClassificationsCache: FolderClassifications =
+    EMPTY_FOLDER_CLASSIFICATIONS;
 
   constructor(
     private readonly client: IMisterClient,
@@ -97,6 +123,13 @@ export class ConnectionManager {
     };
   }
 
+  onBulkProgress(listener: BulkProgressListener): () => void {
+    this.bulkProgressListeners.add(listener);
+    return () => {
+      this.bulkProgressListeners.delete(listener);
+    };
+  }
+
   async connect(profileId: string): Promise<ConnectResult> {
     if (this.status === 'connected') {
       try {
@@ -110,6 +143,7 @@ export class ConnectionManager {
     this.coresCache = [];
     this.ledgerCache = EMPTY_LEDGER;
     this.systemFilesMarksCache = EMPTY_SYSTEM_FILES_MARKS;
+    this.folderClassificationsCache = EMPTY_FOLDER_CLASSIFICATIONS;
 
     try {
       const profile = await this.store.get(profileId);
@@ -126,6 +160,8 @@ export class ConnectionManager {
       // Prime the system-files marks cache. Cheap (small JSON file) and
       // we want the cores list to reflect marks immediately.
       this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
+      this.folderClassificationsCache =
+        await this.client.readFolderClassifications();
 
       let reappliedCount = 0;
       if (profile.autoReapplyHides === true) {
@@ -149,6 +185,7 @@ export class ConnectionManager {
       this.coresCache = [];
       this.ledgerCache = EMPTY_LEDGER;
       this.systemFilesMarksCache = EMPTY_SYSTEM_FILES_MARKS;
+      this.folderClassificationsCache = EMPTY_FOLDER_CLASSIFICATIONS;
       this.setStatus('disconnected');
     }
   }
@@ -191,26 +228,73 @@ export class ConnectionManager {
     return this.systemFilesMarksCache;
   }
 
-  async listRoms(coreId: string): Promise<Rom[]> {
+  async setSystemFileMarks(
+    coreId: string,
+    changes: readonly SystemFileMarkChange[],
+  ): Promise<SystemFilesMarks> {
     this.assertConnected();
-    return this.client.listRoms(coreId);
+    await this.client.setSystemFileMarks(coreId, changes);
+    this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
+    return this.systemFilesMarksCache;
+  }
+
+  async listRoms(coreId: string, subPath = ''): Promise<Rom[]> {
+    this.assertConnected();
+    return this.client.listRoms(
+      coreId,
+      subPath,
+      this.folderClassificationsCache,
+    );
   }
 
   async setRomVisibility(
     coreId: string,
     filename: string,
     hidden: boolean,
+    subPath = '',
   ): Promise<void> {
     this.assertConnected();
-    await this.client.setRomVisibility(coreId, filename, hidden);
+    await this.client.setRomVisibility(coreId, filename, hidden, subPath);
   }
 
   async setBulkRomVisibility(
     coreId: string,
     changes: readonly RomVisibilityChange[],
+    subPath = '',
   ): Promise<BulkRomResult> {
     this.assertConnected();
-    return this.client.setBulkRomVisibility(coreId, changes);
+    return this.client.setBulkRomVisibility(coreId, changes, subPath);
+  }
+
+  async listFolderClassifications(): Promise<FolderClassifications> {
+    this.assertConnected();
+    return this.folderClassificationsCache;
+  }
+
+  async setFolderClassification(
+    coreId: string,
+    folderPath: string,
+    classification: 'container' | 'atomic' | undefined,
+  ): Promise<FolderClassifications> {
+    this.assertConnected();
+    if (classification === undefined) {
+      await this.client.setFolderClassification({
+        coreId,
+        folderPath,
+        classification: undefined,
+      });
+    } else {
+      const override: FolderClassificationOverride = {
+        coreId,
+        folderPath,
+        classification,
+        setAt: new Date().toISOString(),
+      };
+      await this.client.setFolderClassification(override);
+    }
+    this.folderClassificationsCache =
+      await this.client.readFolderClassifications();
+    return this.folderClassificationsCache;
   }
 
   async hideCore(coreId: string): Promise<void> {
@@ -240,6 +324,7 @@ export class ConnectionManager {
 
   async setBulkCoreVisibility(
     changes: readonly { readonly coreId: string; readonly hidden: boolean }[],
+    options: { readonly operationId?: string } = {},
   ): Promise<BulkCoreResult> {
     this.assertConnected();
     if (changes.length === 0) return { succeeded: [], failed: [] };
@@ -282,7 +367,19 @@ export class ConnectionManager {
       return { succeeded: [], failed: upfrontFailed };
     }
 
-    const result = await this.client.setBulkCoreVisibility(resolved);
+    const operationId = options.operationId ?? `op-${String(this.nextOperationId++)}`;
+    const result = await this.client.setBulkCoreVisibility(resolved, {
+      onProgress: (event) => {
+        const broadcast: BulkCoreProgressBroadcast = { operationId, ...event };
+        for (const listener of this.bulkProgressListeners) {
+          try {
+            listener(broadcast);
+          } catch {
+            /* swallow — never let UI errors break a bulk op */
+          }
+        }
+      },
+    });
     const failed = [...upfrontFailed, ...result.failed];
 
     // Ledger update: only for cores whose renames fully succeeded.
