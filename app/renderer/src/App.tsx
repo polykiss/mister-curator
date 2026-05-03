@@ -1,4 +1,4 @@
-import type { JSX } from 'react';
+import type { CSSProperties, JSX } from 'react';
 import { Toaster } from 'sonner';
 
 import { AppErrorBoundary } from '@app/renderer/src/components/AppErrorBoundary';
@@ -19,6 +19,17 @@ function Routes(): JSX.Element {
   return <ConnectionScreen />;
 }
 
+// Sonner exposes its surface via CSS custom properties — we map them
+// onto the design tokens so toasts inherit the system. The `richColors`
+// flag still drives per-status accents (success / error / warning),
+// which Sonner pulls from its own internal palette; the base surface
+// underneath stays consistent with the rest of the app.
+const TOAST_TOKENS = {
+  '--normal-bg': 'hsl(var(--bg-overlay))',
+  '--normal-border': 'hsl(var(--border-default))',
+  '--normal-text': 'hsl(var(--fg-primary))',
+} as CSSProperties;
+
 export function App(): JSX.Element {
   // OperationStatusProvider has to wrap ConnectionProvider + CoresProvider
   // so those contexts can call useOperationStatus() to publish their
@@ -32,7 +43,13 @@ export function App(): JSX.Element {
         <ConnectionProvider>
           <CoresProvider>
             <Routes />
-            <Toaster position="bottom-right" richColors closeButton />
+            <Toaster
+              position="bottom-right"
+              theme="dark"
+              richColors
+              closeButton
+              toastOptions={{ style: TOAST_TOKENS, className: 'font-sans' }}
+            />
           </CoresProvider>
         </ConnectionProvider>
       </OperationStatusProvider>

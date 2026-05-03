@@ -8,7 +8,7 @@ export function Skeleton({
 }: HTMLAttributes<HTMLDivElement>): JSX.Element {
   return (
     <div
-      className={cn('animate-pulse rounded-md bg-muted', className)}
+      className={cn('animate-pulse rounded bg-elevated', className)}
       {...props}
     />
   );

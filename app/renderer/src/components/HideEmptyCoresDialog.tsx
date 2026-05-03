@@ -96,17 +96,17 @@ export function HideEmptyCoresDialog({
         </DialogHeader>
 
         {candidates.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No empty cores to hide.</p>
+          <p className="text-body-sm text-fg-muted">No empty cores to hide.</p>
         ) : (
-          <div className="max-h-72 overflow-auto rounded-md border">
-            <ul className="divide-y text-sm">
+          <div className="max-h-72 overflow-auto rounded border border-default bg-surface">
+            <ul className="divide-y divide-subtle text-body">
               {candidates.map((c) => (
                 <li
                   key={c.id}
-                  className="flex items-center justify-between gap-3 px-3 py-2"
+                  className="flex h-10 items-center justify-between gap-3 px-4"
                 >
-                  <span className="truncate font-medium">{c.name}</span>
-                  <span className="shrink-0 text-xs text-muted-foreground">
+                  <span className="truncate text-fg">{c.name}</span>
+                  <span className="shrink-0 font-mono text-body-sm text-fg-muted">
                     {c.category}
                   </span>
                 </li>
@@ -115,7 +115,7 @@ export function HideEmptyCoresDialog({
           </div>
         )}
 
-        <p className="text-xs text-muted-foreground">
+        <p className="text-body-sm text-fg-muted">
           Arcade cores excluded — coming in a later release.
         </p>
 

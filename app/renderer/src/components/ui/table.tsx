@@ -7,13 +7,18 @@ import type {
 
 import { cn } from '@app/renderer/src/lib/cn';
 
+// The Table primitive is consumed by the ROMs pane only. Densities
+// here intentionally match SYSTEM.md §4: 40px rows, 16px horizontal
+// padding, no default backgrounds — separation comes from a 1px
+// border-subtle on each row.
+
 export const Table = forwardRef<HTMLTableElement, HTMLAttributes<HTMLTableElement>>(
   function Table({ className, ...props }, ref) {
     return (
       <div className="relative w-full overflow-auto">
         <table
           ref={ref}
-          className={cn('w-full caption-bottom text-sm', className)}
+          className={cn('w-full text-body text-fg', className)}
           {...props}
         />
       </div>
@@ -25,7 +30,16 @@ export const TableHeader = forwardRef<
   HTMLTableSectionElement,
   HTMLAttributes<HTMLTableSectionElement>
 >(function TableHeader({ className, ...props }, ref) {
-  return <thead ref={ref} className={cn('[&_tr]:border-b', className)} {...props} />;
+  return (
+    <thead
+      ref={ref}
+      className={cn(
+        'sticky top-0 z-[1] bg-surface [&_tr]:border-b [&_tr]:border-subtle',
+        className,
+      )}
+      {...props}
+    />
+  );
 });
 
 export const TableBody = forwardRef<
@@ -49,7 +63,7 @@ export const TableRow = forwardRef<
     <tr
       ref={ref}
       className={cn(
-        'border-b transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted',
+        'group/row h-10 border-b border-subtle transition-colors hover:bg-elevated data-[state=selected]:bg-overlay',
         className,
       )}
       {...props}
@@ -65,7 +79,7 @@ export const TableHead = forwardRef<
     <th
       ref={ref}
       className={cn(
-        'h-10 px-3 text-left align-middle font-medium text-muted-foreground [&:has([role=checkbox])]:pr-0',
+        'h-9 px-3 text-left align-middle font-medium uppercase tracking-[0.08em] text-caption text-fg-muted [&:has([role=checkbox])]:pr-0',
         className,
       )}
       {...props}
@@ -80,7 +94,7 @@ export const TableCell = forwardRef<
   return (
     <td
       ref={ref}
-      className={cn('p-3 align-middle [&:has([role=checkbox])]:pr-0', className)}
+      className={cn('px-3 py-2 align-middle [&:has([role=checkbox])]:pr-0', className)}
       {...props}
     />
   );

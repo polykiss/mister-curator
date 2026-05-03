@@ -200,13 +200,16 @@ export function ProfileDialog({
             </div>
 
             <fieldset className="grid gap-2">
-              <legend className="text-sm font-medium leading-none">Authentication</legend>
-              <div className="flex gap-4 text-sm">
+              <legend className="text-body-sm font-medium leading-none text-fg">
+                Authentication
+              </legend>
+              <div className="flex gap-4 text-body-sm text-fg-body">
                 <label className="flex items-center gap-2">
                   <input
                     type="radio"
                     name="authMethod"
                     value="password"
+                    className="accent-accent"
                     checked={form.authMethod === 'password'}
                     onChange={() => update('authMethod', 'password')}
                   />
@@ -217,6 +220,7 @@ export function ProfileDialog({
                     type="radio"
                     name="authMethod"
                     value="key"
+                    className="accent-accent"
                     checked={form.authMethod === 'key'}
                     onChange={() => update('authMethod', 'key')}
                   />
@@ -238,12 +242,13 @@ export function ProfileDialog({
               </div>
             ) : (
               <div className="grid gap-2">
-                <div className="flex gap-4 text-sm">
+                <div className="flex gap-4 text-body-sm text-fg-body">
                   <label className="flex items-center gap-2">
                     <input
                       type="radio"
                       name="keySource"
                       value="paste"
+                      className="accent-accent"
                       checked={form.keySource === 'paste'}
                       onChange={() => update('keySource', 'paste')}
                     />
@@ -254,6 +259,7 @@ export function ProfileDialog({
                       type="radio"
                       name="keySource"
                       value="file"
+                      className="accent-accent"
                       checked={form.keySource === 'file'}
                       onChange={() => update('keySource', 'file')}
                     />
@@ -263,7 +269,7 @@ export function ProfileDialog({
 
                 {form.keySource === 'paste' ? (
                   <textarea
-                    className="flex min-h-[120px] w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    className="flex min-h-[120px] w-full rounded border border-default bg-chrome px-3 py-2 font-mono text-body-sm text-fg placeholder:text-fg-disabled focus-visible:border-emphasis focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
                     placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
                     value={form.keyContent}
                     onChange={(e) => update('keyContent', e.target.value)}
@@ -278,13 +284,13 @@ export function ProfileDialog({
                       disabled={pickingKey}
                     >
                       {pickingKey ? (
-                        <Loader2 className="animate-spin" />
+                        <Loader2 className="animate-spin" strokeWidth={1.5} />
                       ) : (
-                        <Upload />
+                        <Upload strokeWidth={1.5} />
                       )}
                       Browse…
                     </Button>
-                    <span className="truncate text-xs text-muted-foreground">
+                    <span className="truncate font-mono text-body-sm text-fg-muted">
                       {form.keyPath ?? 'No file selected.'}
                     </span>
                   </div>
@@ -292,18 +298,18 @@ export function ProfileDialog({
               </div>
             )}
 
-            <label className="mt-2 flex items-start gap-2 text-sm">
+            <label className="mt-2 flex items-start gap-2 text-body-sm text-fg-body">
               <input
                 type="checkbox"
-                className="mt-0.5"
+                className="mt-0.5 accent-accent"
                 checked={form.autoReapplyHides}
                 onChange={(e) => update('autoReapplyHides', e.target.checked)}
               />
               <span>
-                <span className="font-medium">
+                <span className="font-medium text-fg">
                   Automatically re-hide cores that come back after MiSTer updates
                 </span>
-                <span className="block text-xs text-muted-foreground">
+                <span className="mt-0.5 block text-body-sm text-fg-muted">
                   On each connect, compare the on-MiSTer hide ledger to the live state
                   and re-apply any hides that have drifted. Off by default.
                 </span>
@@ -321,7 +327,7 @@ export function ProfileDialog({
               Cancel
             </Button>
             <Button type="submit" variant="primary" disabled={!canSubmit || submitting}>
-              {submitting ? <Loader2 className="animate-spin" /> : null}
+              {submitting ? <Loader2 className="animate-spin" strokeWidth={1.5} /> : null}
               {isEdit ? 'Save changes' : 'Add profile'}
             </Button>
           </DialogFooter>

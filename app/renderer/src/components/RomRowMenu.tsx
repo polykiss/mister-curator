@@ -55,7 +55,7 @@ export function RomRowMenu(props: RomRowMenuProps): JSX.Element {
     <div
       ref={ref}
       role="menu"
-      className="fixed z-50 min-w-[16rem] overflow-hidden rounded-md border bg-popover py-1 text-popover-foreground shadow-lg"
+      className="fixed z-50 min-w-[16rem] overflow-hidden rounded border border-default bg-overlay py-1 text-body text-fg shadow-popover"
       style={{ left, top }}
     >
       {props.items.map((item, i) => (
@@ -71,12 +71,12 @@ export function RomRowMenu(props: RomRowMenuProps): JSX.Element {
           }}
           title={item.title}
           className={
-            'flex w-full items-center px-3 py-1.5 text-left text-sm ' +
+            'flex w-full items-center px-3 py-2 text-left transition-colors ' +
             (item.disabled
-              ? 'cursor-not-allowed text-muted-foreground'
+              ? 'cursor-not-allowed text-fg-disabled'
               : item.destructive
-                ? 'hover:bg-destructive hover:text-destructive-foreground'
-                : 'hover:bg-accent hover:text-accent-foreground')
+                ? 'text-destructive hover:bg-destructive/10'
+                : 'text-fg-body hover:bg-elevated hover:text-fg')
           }
         >
           {item.label}
