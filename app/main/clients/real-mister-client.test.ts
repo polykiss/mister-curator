@@ -368,7 +368,8 @@ describe('RealMisterClient', () => {
       const hiddenFile = roms.find((r) => r.filename === '.Action 52 (USA) (Unl).nes');
       expect(hiddenFile?.kind).toBe('file');
       expect(hiddenFile?.hidden).toBe(true);
-      expect(hiddenFile?.displayName).toBe('Action 52 (USA) (Unl).nes');
+      // Round 11: `.nes` is now stripped at display time.
+      expect(hiddenFile?.displayName).toBe('Action 52 (USA) (Unl)');
       expect(hiddenFile?.sizeBytes).toBe(131072);
 
       const visibleFile = roms.find((r) => r.filename === 'Castlevania (USA, Europe).nes');

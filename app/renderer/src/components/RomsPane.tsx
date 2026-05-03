@@ -518,14 +518,25 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
           <div className="min-w-0">
             <nav
               aria-label="Folder breadcrumb"
-              className="flex min-w-0 flex-wrap items-center gap-1 text-lg font-semibold"
+              // Single horizontal line. `min-w-0` lets each segment
+              // shrink so they truncate gracefully under squeeze
+              // instead of pushing the toolbar offscreen. `flex-wrap`
+              // is intentionally absent — we never want the breadcrumb
+              // to break to a second line and look like a title +
+              // subtitle stack.
+              className="flex min-w-0 items-center gap-1 text-lg"
             >
               {breadcrumb.map((seg, i) => (
-                <span key={`${String(seg.depth)}-${seg.label}`} className="flex items-center gap-1 min-w-0">
+                <span
+                  key={`${String(seg.depth)}-${seg.label}`}
+                  className="flex min-w-0 items-center gap-1"
+                >
                   {i > 0 ? (
                     <span
                       aria-hidden
-                      className="shrink-0 select-none text-muted-foreground/60"
+                      // Smaller and lower-contrast than the segments
+                      // so the eye reads the names, not the chevrons.
+                      className="shrink-0 select-none text-base text-muted-foreground/50"
                     >
                       ›
                     </span>
@@ -533,7 +544,10 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                   {seg.current ? (
                     <span
                       aria-current="page"
-                      className="truncate"
+                      // Slight emphasis on the current location:
+                      // semibold + foreground colour. All segments
+                      // share the same size (text-lg from the parent).
+                      className="truncate font-semibold text-foreground"
                       title={seg.label}
                     >
                       {seg.label}
@@ -542,7 +556,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                     <button
                       type="button"
                       onClick={() => navigateToDepth(seg.depth)}
-                      className="truncate rounded px-1 -mx-1 text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+                      className="truncate rounded -mx-1 px-1 text-muted-foreground hover:text-foreground focus-visible:text-foreground hover:underline focus-visible:underline focus-visible:outline-none"
                       title={`Go to ${seg.label}`}
                     >
                       {seg.label}

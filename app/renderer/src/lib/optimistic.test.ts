@@ -26,10 +26,12 @@ describe('applyVisibilityChange', () => {
     const roms = [makeRom('foo.nes', false), makeRom('bar.nes', false)];
     const next = applyVisibilityChange(roms, { filename: 'foo.nes', hidden: true });
 
+    // displayName matches the same `displayRomName` pipeline the
+    // clients use on listRoms — `.nes` is now stripped at display.
     expect(next[0]).toEqual({
       coreId: 'NES',
       filename: '.foo.nes',
-      displayName: 'foo.nes',
+      displayName: 'foo',
       sizeBytes: 1024,
       hidden: true,
       path: '/media/fat/games/NES/.foo.nes',
@@ -121,9 +123,12 @@ describe('applyBulkVisibilityChange', () => {
       { filename: '.b.nes', hidden: false },
     ]);
 
-    expect(next.find((r) => r.displayName === 'a.nes')?.hidden).toBe(true);
-    expect(next.find((r) => r.displayName === 'b.nes')?.hidden).toBe(false);
-    expect(next.find((r) => r.displayName === 'c.nes')?.hidden).toBe(false);
+    // After the bulk apply, lookups by filename are stable across
+    // hide / unhide. (Looking up by displayName would be flaky now
+    // that `displayRomName` strips `.nes`.)
+    expect(next.find((r) => r.filename === '.a.nes')?.hidden).toBe(true);
+    expect(next.find((r) => r.filename === 'b.nes')?.hidden).toBe(false);
+    expect(next.find((r) => r.filename === 'c.nes')?.hidden).toBe(false);
   });
 
   it('handles an empty change set as identity', () => {
