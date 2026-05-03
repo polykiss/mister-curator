@@ -6,7 +6,6 @@ import { toast } from 'sonner';
 import { isArcadePlaceholder, isCoreHidden } from '@shared/core-matching';
 import type { CoreEntry } from '@shared/types';
 
-import { Badge } from '@app/renderer/src/components/ui/badge';
 import { Button } from '@app/renderer/src/components/ui/button';
 import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
 import { HideEmptyCoresDialog } from '@app/renderer/src/components/HideEmptyCoresDialog';
@@ -341,14 +340,16 @@ function renderCoreList(args: RenderArgs): JSX.Element {
           <li
             key={core.id}
             className={cn(
-              'group/row relative flex h-10 items-center gap-2 border-b border-subtle pl-4 pr-2 text-body transition-colors',
+              'group/row relative flex h-10 items-center gap-2 border-b border-subtle pl-4 text-body transition-colors',
               !isSelected && 'hover:bg-elevated',
               isSelected && 'bg-overlay',
-              // Hidden cores keep the row clickable but visually
-              // recede via foreground color only — no opacity, no
-              // italic, no fill. The HIDDEN badge does the signalling.
-              isHiddenCore && 'text-fg-muted',
-              isPlaceholder && 'text-fg-disabled',
+              // Hidden + arcade-placeholder rows lean entirely on
+              // dimming: opacity + italic + a darker text color.
+              // The HIDDEN/SYSTEM badges that used to sit on the
+              // left were removed in Round 2 — the dimming is the
+              // whole signal.
+              isHiddenCore && 'opacity-50 italic text-fg-disabled',
+              isPlaceholder && 'italic text-fg-disabled',
             )}
           >
             {/* Active row: 2px accent edge per SYSTEM.md §5. Renders
@@ -368,18 +369,10 @@ function renderCoreList(args: RenderArgs): JSX.Element {
               className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left focus-visible:outline-none"
             >
               <span className="flex min-w-0 items-center gap-2">
-                {isHiddenCore ? (
-                  <Badge
-                    variant="muted"
-                    title="This core is hidden from the MiSTer menu."
-                  >
-                    Hidden
-                  </Badge>
-                ) : null}
                 <span
                   className={cn(
                     'truncate',
-                    isSelected ? 'font-medium text-fg' : '',
+                    isSelected && !isHiddenCore && 'font-medium text-fg',
                   )}
                 >
                   {core.name}
@@ -398,11 +391,6 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                   </span>
                 ) : (
                   <>
-                    <DensityBar
-                      value={core.romCount}
-                      max={maxRomCount}
-                      ariaLabel={`${String(core.romCount)} of ${String(maxRomCount)} ROMs (peer max)`}
-                    />
                     <span className="min-w-[2.5rem] text-right">
                       {core.romCount}
                     </span>
@@ -415,6 +403,19 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                 )}
               </span>
             </button>
+
+            {/* Density rectangle — full row height, ~20px wide,
+                color-mixed in OKLCH between bg-surface and accent.
+                Sits immediately before any trailing action. Skipped
+                for the arcade placeholder, which carries no count. */}
+            {!isPlaceholder ? (
+              <DensityBar
+                floor="bg-surface"
+                value={core.romCount}
+                max={maxRomCount}
+                ariaLabel={`${String(core.romCount)} ROMs of peer max ${String(maxRomCount)}`}
+              />
+            ) : null}
 
             {askingHide ? (
               // Two icon-sized buttons replace the eye button — same width

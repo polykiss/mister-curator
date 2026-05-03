@@ -8,9 +8,11 @@ import type {
 import { cn } from '@app/renderer/src/lib/cn';
 
 // The Table primitive is consumed by the ROMs pane only. Densities
-// here intentionally match SYSTEM.md §4: 40px rows, 16px horizontal
-// padding, no default backgrounds — separation comes from a 1px
-// border-subtle on each row.
+// match SYSTEM.md §4: 40px rows, 16px horizontal padding, no default
+// row fill — separation comes from a 1px border-subtle on each row.
+// Round 2: the ROMs pane sits on `bg-elevated` (one step up from the
+// cores pane's `bg-surface`), so hover bumps one tier further up to
+// `bg-overlay` to stay visible against the pane surface.
 
 export const Table = forwardRef<HTMLTableElement, HTMLAttributes<HTMLTableElement>>(
   function Table({ className, ...props }, ref) {
@@ -33,8 +35,11 @@ export const TableHeader = forwardRef<
   return (
     <thead
       ref={ref}
+      // Header sits on `bg-elevated` to match the ROMs pane surface
+      // (the only consumer of this Table primitive) so it doesn't
+      // create a seam at the sticky edge.
       className={cn(
-        'sticky top-0 z-[1] bg-surface [&_tr]:border-b [&_tr]:border-subtle',
+        'sticky top-0 z-[1] bg-elevated [&_tr]:border-b [&_tr]:border-subtle',
         className,
       )}
       {...props}
@@ -63,7 +68,7 @@ export const TableRow = forwardRef<
     <tr
       ref={ref}
       className={cn(
-        'group/row h-10 border-b border-subtle transition-colors hover:bg-elevated data-[state=selected]:bg-overlay',
+        'group/row h-10 border-b border-subtle transition-colors hover:bg-overlay data-[state=selected]:bg-overlay',
         className,
       )}
       {...props}

@@ -124,7 +124,7 @@ export function BrowserScreen(): JSX.Element {
               to grab without making the visible bar fat. */}
           <span className="absolute inset-y-0 -left-1.5 -right-1.5" />
         </div>
-        <main className="min-w-0 flex-1 bg-surface">
+        <main className="min-w-0 flex-1 bg-elevated">
           {selectedCore ? (
             isArcadePlaceholder(selectedCore) ? (
               <div className="flex h-full flex-col items-center justify-center gap-3 p-12 text-center">
@@ -139,7 +139,7 @@ export function BrowserScreen(): JSX.Element {
                 <h2 className="text-heading text-fg">{selectedCore.name}</h2>
                 <p className="max-w-md text-body-lg text-fg-muted">
                   This core has no games directory. ROMs go in{' '}
-                  <code className="rounded border border-default bg-elevated px-1.5 py-0.5 font-mono text-body-sm text-fg-body">
+                  <code className="rounded border border-default bg-overlay px-1.5 py-0.5 font-mono text-body-sm text-fg-body">
                     /media/fat/games/{selectedCore.id}/
                   </code>
                   .

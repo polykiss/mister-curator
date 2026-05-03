@@ -5,7 +5,7 @@ import {
   Folder,
   FolderOpen,
   MoreHorizontal,
-  Wrench,
+  Settings,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { JSX } from 'react';
@@ -28,7 +28,6 @@ import {
   RomRowMenu,
   type RomRowMenuItem,
 } from '@app/renderer/src/components/RomRowMenu';
-import { Badge } from '@app/renderer/src/components/ui/badge';
 import { Button } from '@app/renderer/src/components/ui/button';
 import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
@@ -568,7 +567,11 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   const backRow = computeBackRow(core.name, subPath);
 
   return (
-    <div className="flex h-full flex-col bg-surface">
+    // ROMs pane sits one elevation step up from the cores pane (Round 2
+    // / SYSTEM.md §4 — pane elevation). The right side of the split
+    // reads as "closer" to the viewer; the divider already separates
+    // them, this just gives it a different surface tone.
+    <div className="flex h-full flex-col bg-elevated">
       {/* Header is a vertical stack — path on its own row so a long
           path can scroll horizontally without crowding the toolbar;
           counts; tools; filters. Each row owns its full horizontal
@@ -735,15 +738,21 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                   />
                 </TableHead>
                 <TableHead>Name</TableHead>
-                <TableHead className="w-44 text-right">Size</TableHead>
+                <TableHead className="w-32 text-right">Size</TableHead>
                 <TableHead className="w-28 text-right">Visibility</TableHead>
+                {/* Density indicator column — `w-5` for the 20px
+                    rectangle, `p-0` so the rectangle bleeds the full
+                    cell height. The header is empty by intent (no
+                    text); the indicator's `aria-label` carries the
+                    semantics per row. */}
+                <TableHead className="w-5 p-0" aria-label="Intensity" />
                 <TableHead className="w-10 pr-2" aria-label="Actions" />
               </TableRow>
             </TableHeader>
             <TableBody>
               {backRow ? (
                 <TableRow
-                  className="cursor-pointer bg-elevated/50 hover:bg-elevated"
+                  className="cursor-pointer bg-overlay/40 hover:bg-overlay"
                   onClick={() => setSubPath(backRow.targetSubPath)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
@@ -756,7 +765,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                   aria-label={`Back to ${backRow.parentLabel}`}
                   title={`Back to ${backRow.parentLabel}`}
                 >
-                  <TableCell colSpan={5} className="pl-4">
+                  <TableCell colSpan={6} className="pl-4">
                     <span className="inline-flex items-center gap-2 font-mono text-body-sm text-fg-muted">
                       <ArrowLeft className="size-3.5 shrink-0" strokeWidth={1.5} aria-hidden />
                       <span className="truncate">
@@ -769,6 +778,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
               {presentableRoms.map((rom) => {
                 const isSelected = selected.has(rom.filename);
                 const isSystem = systemFlags.get(rom.filename) === true;
+                const isDimmed = rom.hidden || isSystem;
                 return (
                   <TableRow
                     key={rom.filename}
@@ -778,10 +788,13 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                       setMenuFor({ rom, x: e.clientX, y: e.clientY });
                     }}
                     className={cn(
-                      // Hidden ROMs recede via foreground only — no
-                      // opacity, no italic, no fill. The HIDDEN badge
-                      // does the signalling.
-                      rom.hidden && 'text-fg-muted',
+                      // Hidden + system rows lean entirely on dimming
+                      // (Round 2 design pass): opacity + italic + a
+                      // darker text color. The HIDDEN/SYSTEM badges
+                      // that used to sit before the name were removed;
+                      // the gear icon below is the only chrome a
+                      // system row carries.
+                      isDimmed && 'opacity-50 italic text-fg-disabled',
                     )}
                   >
                     <TableCell className="pl-4">
@@ -814,28 +827,14 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                       }
                     >
                       <span className="inline-flex items-center gap-2">
-                        {/* Badge order: SYSTEM left of HIDDEN left of
-                            kind icon left of name. Mirrors the cores
-                            pane (HIDDEN to the left of the core name). */}
+                        {/* System rows carry a 14px gear icon on the
+                            left of the name. It inherits the row's
+                            current text color, so it dims along with
+                            the rest of the row. The SYSTEM/HIDDEN
+                            pill badges from PR #7 are gone. */}
                         {isSystem ? (
-                          <Badge
-                            variant="info"
-                            title="System file (BIOS, config, palette). MiSTerCurator never bulk-toggles these."
-                          >
-                            System
-                          </Badge>
-                        ) : null}
-                        {rom.hidden ? (
-                          <Badge
-                            variant="muted"
-                            title="This ROM is hidden from the MiSTer menu."
-                          >
-                            Hidden
-                          </Badge>
-                        ) : null}
-                        {isSystem ? (
-                          <Wrench
-                            className="size-3.5 shrink-0 text-fg-muted"
+                          <Settings
+                            className="size-3.5 shrink-0"
                             strokeWidth={1.5}
                             aria-label="system file"
                           />
@@ -855,7 +854,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         <span
                           className={cn(
                             'truncate',
-                            !rom.hidden && !isSystem && 'text-fg',
+                            !isDimmed && 'text-fg',
                           )}
                         >
                           {rom.displayName}
@@ -863,13 +862,8 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                       </span>
                     </TableCell>
                     <TableCell className="text-right">
-                      <span className="inline-flex items-center justify-end gap-2 font-mono text-body-sm text-fg-muted tabular">
-                        <DensityBar
-                          value={rom.sizeBytes}
-                          max={maxSizeBytes}
-                          ariaLabel={`${formatBytes(rom.sizeBytes)} of ${formatBytes(maxSizeBytes)} (peer max)`}
-                        />
-                        <span className="min-w-[3.5rem]">{formatBytes(rom.sizeBytes)}</span>
+                      <span className="font-mono text-body-sm text-fg-muted tabular">
+                        {formatBytes(rom.sizeBytes)}
                       </span>
                     </TableCell>
                     <TableCell className="text-right">
@@ -912,6 +906,21 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                           )}
                         </Button>
                       )}
+                    </TableCell>
+                    {/* Density rectangle — full-cell-height, 20px
+                        wide, OKLCH-mixed between bg-elevated (the
+                        ROMs pane surface) and accent. System rows
+                        get no rectangle; the row already screams
+                        "system" via the gear icon and dimming. */}
+                    <TableCell className="w-5 p-0">
+                      {!isSystem ? (
+                        <DensityBar
+                          floor="bg-elevated"
+                          value={rom.sizeBytes}
+                          max={maxSizeBytes}
+                          ariaLabel={`${formatBytes(rom.sizeBytes)} of peer max ${formatBytes(maxSizeBytes)}`}
+                        />
+                      ) : null}
                     </TableCell>
                     <TableCell className="pr-2 text-right">
                       <Button
