@@ -1,7 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 import type { ConnectionEvent } from '@shared/connection';
-import { IPC_CHANNELS, isSerializedMisterConnectionError } from '@shared/preload-api';
+import {
+  decodeIpcError,
+  IPC_CHANNELS,
+  setMisterConnectionErrorFactory,
+} from '@shared/preload-api';
 import type {
   BulkCoreProgressEvent,
   ConnectResult,
@@ -26,14 +30,21 @@ import type {
   SystemFilesMarks,
 } from '@shared/types';
 
+// Wire up the error reconstructor before any IPC call goes out so
+// that `decodeIpcError` can hand back proper `MisterConnectionError`
+// instances. The renderer relies on `instanceof` checks (and on
+// `error.code`) to render the friendly per-code failure copy.
+setMisterConnectionErrorFactory((code, message) => new MisterConnectionError(code, message));
+
 async function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
   try {
     return (await ipcRenderer.invoke(channel, ...args)) as T;
   } catch (err) {
-    if (isSerializedMisterConnectionError(err)) {
-      throw new MisterConnectionError(err.code, err.message);
-    }
-    throw err;
+    // Electron wraps the original `error.message` with
+    // "Error invoking remote method '<channel>': …", so the structured
+    // payload main encoded survives at the tail of the message.
+    // `decodeIpcError` finds the marker and rebuilds a typed error.
+    throw decodeIpcError(err);
   }
 }
 

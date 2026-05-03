@@ -67,6 +67,41 @@ import type {
 
 const CONNECT_TIMEOUT_MS = 8000;
 
+/**
+ * Per-operation SSH timeout. Live testing showed that pulling the
+ * MiSTer's network cable mid-session left ROM-list calls hanging for
+ * 30+ seconds before the OS-level TCP timeout fired. 10 s is generous
+ * enough not to false-positive against a slow MiSTer (the
+ * `listAllCoresWithFiles` benchmark on a real device is ~7 s) but
+ * tight enough that "unplug, click, see frozen UI" never lasts a
+ * full 30 s.
+ */
+const SSH_OP_TIMEOUT_MS = 10_000;
+
+/**
+ * SSH-level keepalive cadence. ssh2 sends an empty keepalive packet
+ * every `keepaliveInterval` ms; after `keepaliveCountMax` missed
+ * responses the socket fires its own `'close'` / `'error'` event and
+ * `RealMisterClient.handleUnexpectedDisconnect` kicks in. With
+ * 10s × 2, an idle but dead connection is detected within ~30 s
+ * even if no user action is happening — complementing the per-op
+ * timeout above for the active-call case.
+ */
+const SSH_KEEPALIVE_INTERVAL_MS = 10_000;
+const SSH_KEEPALIVE_COUNT_MAX = 2;
+
+/**
+ * Marker error thrown by the per-op timeout race. Internal-only —
+ * caught by `runSshOp` and converted to a typed
+ * `MisterConnectionError` before it leaves the client.
+ */
+class SshOpTimeoutError extends Error {
+  constructor() {
+    super(`SSH operation timed out after ${String(SSH_OP_TIMEOUT_MS)}ms`);
+    this.name = 'SshOpTimeoutError';
+  }
+}
+
 export class RealMisterClient implements IMisterClient {
   private readonly ssh: NodeSSH;
   /**
@@ -96,6 +131,12 @@ export class RealMisterClient implements IMisterClient {
       port: profile.port,
       username: profile.username,
       readyTimeout: CONNECT_TIMEOUT_MS,
+      // SSH-level keepalive lets ssh2 detect a dead transport within
+      // ~30 s even when nothing is being sent on the wire. Without
+      // these the socket can sit silently for tens of seconds before
+      // TCP RST surfaces.
+      keepaliveInterval: SSH_KEEPALIVE_INTERVAL_MS,
+      keepaliveCountMax: SSH_KEEPALIVE_COUNT_MAX,
     };
     const config =
       secret.type === 'password'
@@ -123,9 +164,9 @@ export class RealMisterClient implements IMisterClient {
       if (timer) clearTimeout(timer);
     }
 
-    const dirCheck = await this.ssh.execCommand(
+    const dirCheck = await this.runSshOp(() => this.ssh.execCommand(
       `[ -d ${shellQuote(MISTER_GAMES_DIR)} ]`,
-    );
+    ));
     if (dirCheck.code !== 0) {
       this.safelyDispose();
       throw new MisterConnectionError(
@@ -197,7 +238,7 @@ export class RealMisterClient implements IMisterClient {
     // The JS side joins them via matchRbfsToGamesDirs, which applies the
     // `isSystemFile` heuristic to derive romCount/hiddenCount.
     const script = buildListAllCoresScript();
-    const result = await this.ssh.execCommand(script);
+    const result = await this.runSshOp(() => this.ssh.execCommand(script));
     if (result.code !== 0) {
       throw new Error(
         `Failed to list cores: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
@@ -352,7 +393,7 @@ export class RealMisterClient implements IMisterClient {
       'done',
     ].join('\n');
 
-    const result = await this.ssh.execCommand(script);
+    const result = await this.runSshOp(() => this.ssh.execCommand(script));
     if (result.code !== 0 || result.stdout.includes('MISSING_DIR')) {
       throw new Error(`Unknown core: ${coreId}`);
     }
@@ -444,7 +485,7 @@ export class RealMisterClient implements IMisterClient {
     const dst = `${dirPart}/${targetName}`;
     const command = `mv ${shellQuote(src)} ${shellQuote(dst)}`;
 
-    const result = await this.ssh.execCommand(command);
+    const result = await this.runSshOp(() => this.ssh.execCommand(command));
     if (result.code !== 0) {
       throw new Error(
         `Failed to rename ${filename}: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
@@ -501,7 +542,7 @@ export class RealMisterClient implements IMisterClient {
     }
 
     const script = lines.join('\n');
-    const result = await this.ssh.execCommand(script);
+    const result = await this.runSshOp(() => this.ssh.execCommand(script));
     return parseBulkResult<BulkRomResult>(result.stdout, 'filename');
   }
 
@@ -634,19 +675,27 @@ export class RealMisterClient implements IMisterClient {
       // against shell preamble/echoes that some hosts inject.
     };
 
-    await this.ssh.exec(script, [], {
-      stream: 'stdout',
-      onStdout: (chunk: Buffer) => {
-        buffer += chunk.toString('utf-8');
-        for (;;) {
-          const i = buffer.indexOf('\n');
-          if (i < 0) break;
-          const line = buffer.slice(0, i);
-          buffer = buffer.slice(i + 1);
-          handleLine(line);
-        }
-      },
-    });
+    // Streaming exec uses an idle-style timeout — we reset the
+    // 10s deadline on every chunk so a long bulk-rename batch with
+    // healthy progress doesn't false-fire. If the device goes silent
+    // mid-stream for 10s we treat it as dead, same as the per-op
+    // path.
+    await this.runSshStreamOp(({ touch }) =>
+      this.ssh.exec(script, [], {
+        stream: 'stdout',
+        onStdout: (chunk: Buffer) => {
+          touch();
+          buffer += chunk.toString('utf-8');
+          for (;;) {
+            const i = buffer.indexOf('\n');
+            if (i < 0) break;
+            const line = buffer.slice(0, i);
+            buffer = buffer.slice(i + 1);
+            handleLine(line);
+          }
+        },
+      }),
+    );
     // Flush any trailing partial line (no terminating newline).
     if (buffer !== '') handleLine(buffer);
 
@@ -658,9 +707,9 @@ export class RealMisterClient implements IMisterClient {
     // `cat` returns non-zero when the file is missing; we want that to be a
     // soft "empty ledger" outcome, so we tolerate it inline and rely on the
     // parser to handle the empty string.
-    const result = await this.ssh.execCommand(
+    const result = await this.runSshOp(() => this.ssh.execCommand(
       `cat ${shellQuote(MISTER_LEDGER_PATH)} 2>/dev/null || true`,
-    );
+    ));
     const raw = parseLedger(result.stdout);
 
     // Self-heal: drop entries that no longer correspond to a real core
@@ -694,7 +743,7 @@ export class RealMisterClient implements IMisterClient {
       `${LEDGER_HEREDOC_DELIMITER}\n` +
       `mv ${shellQuote(tmpPath)} ${shellQuote(MISTER_LEDGER_PATH)}\n`;
 
-    const result = await this.ssh.execCommand(script);
+    const result = await this.runSshOp(() => this.ssh.execCommand(script));
     if (result.code !== 0) {
       throw new Error(
         `Failed to write hide ledger: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
@@ -704,9 +753,9 @@ export class RealMisterClient implements IMisterClient {
 
   async readSystemFilesMarks(): Promise<SystemFilesMarks> {
     this.assertConnected();
-    const result = await this.ssh.execCommand(
+    const result = await this.runSshOp(() => this.ssh.execCommand(
       `cat ${shellQuote(MISTER_SYSTEM_FILES_PATH)} 2>/dev/null || true`,
-    );
+    ));
     return parseSystemFilesMarks(result.stdout);
   }
 
@@ -773,7 +822,7 @@ export class RealMisterClient implements IMisterClient {
       `${SYSTEM_FILES_HEREDOC_DELIMITER}\n` +
       `mv ${shellQuote(tmpPath)} ${shellQuote(MISTER_SYSTEM_FILES_PATH)}\n`;
 
-    const result = await this.ssh.execCommand(script);
+    const result = await this.runSshOp(() => this.ssh.execCommand(script));
     if (result.code !== 0) {
       throw new Error(
         `Failed to write system-files marks: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
@@ -783,9 +832,9 @@ export class RealMisterClient implements IMisterClient {
 
   async readFolderClassifications(): Promise<FolderClassifications> {
     this.assertConnected();
-    const result = await this.ssh.execCommand(
+    const result = await this.runSshOp(() => this.ssh.execCommand(
       `cat ${shellQuote(MISTER_FOLDER_CLASSIFICATIONS_PATH)} 2>/dev/null || true`,
-    );
+    ));
     return parseFolderClassifications(result.stdout);
   }
 
@@ -825,7 +874,7 @@ export class RealMisterClient implements IMisterClient {
       `${FOLDER_CLASSIFICATIONS_HEREDOC_DELIMITER}\n` +
       `mv ${shellQuote(tmpPath)} ${shellQuote(MISTER_FOLDER_CLASSIFICATIONS_PATH)}\n`;
 
-    const result = await this.ssh.execCommand(script);
+    const result = await this.runSshOp(() => this.ssh.execCommand(script));
     if (result.code !== 0) {
       throw new Error(
         `Failed to write folder classifications: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
@@ -838,7 +887,7 @@ export class RealMisterClient implements IMisterClient {
     for (const r of renames) {
       lines.push(`mv ${shellQuote(r.from)} ${shellQuote(r.to)}`);
     }
-    const result = await this.ssh.execCommand(lines.join('\n'));
+    const result = await this.runSshOp(() => this.ssh.execCommand(lines.join('\n')));
     if (result.code !== 0) {
       throw new Error(
         `Failed to ${label}: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
@@ -857,6 +906,110 @@ export class RealMisterClient implements IMisterClient {
       this.ssh.dispose();
     } catch {
       // Ignore — dispose is best-effort cleanup.
+    }
+  }
+
+  /**
+   * Wraps an SSH operation in a 10-second total-time race. If the
+   * operation doesn't finish in time we treat the transport as dead:
+   * tear down the socket, fire `handleUnexpectedDisconnect` (so the
+   * manager kicks off auto-retry + the renderer paints the banner),
+   * and surface a typed `MisterConnectionError` to the caller. Other
+   * errors propagate untouched — we only own the timeout case.
+   */
+  private async runSshOp<T>(fn: () => Promise<T>): Promise<T> {
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        fn(),
+        new Promise<never>((_, reject) => {
+          timeoutHandle = setTimeout(() => {
+            reject(new SshOpTimeoutError());
+          }, SSH_OP_TIMEOUT_MS);
+        }),
+      ]);
+    } catch (err) {
+      if (err instanceof SshOpTimeoutError) {
+        this.handleUnexpectedDisconnect();
+        this.safelyDispose();
+        throw new MisterConnectionError(
+          'unknown',
+          'The MiSTer stopped responding (no reply within 10s). Reconnecting…',
+        );
+      }
+      throw err;
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+    }
+  }
+
+  /**
+   * Idle-style wrapper for the streaming bulk exec. Resets the
+   * deadline whenever the caller reports activity (via `touch()`),
+   * so a slow but progressing bulk-rename batch doesn't false-fire
+   * the timeout. Catches the same SshOpTimeoutError as `runSshOp`
+   * and converts to the same typed error.
+   */
+  private async runSshStreamOp<T>(
+    fn: (api: { readonly touch: () => void }) => Promise<T>,
+  ): Promise<T> {
+    let lastActivity = Date.now();
+    let cancelled = false;
+    const aborter: { reject: ((err: Error) => void) | null } = { reject: null };
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
+    const arm = (): void => {
+      if (cancelled) return;
+      const sinceLast = Date.now() - lastActivity;
+      const remaining = SSH_OP_TIMEOUT_MS - sinceLast;
+      if (remaining <= 0) {
+        aborter.reject?.(new SshOpTimeoutError());
+        return;
+      }
+      timeoutHandle = setTimeout(() => {
+        if (Date.now() - lastActivity >= SSH_OP_TIMEOUT_MS) {
+          aborter.reject?.(new SshOpTimeoutError());
+        } else {
+          arm();
+        }
+      }, remaining);
+    };
+
+    const touch = (): void => {
+      lastActivity = Date.now();
+    };
+
+    try {
+      return await new Promise<T>((resolve, reject) => {
+        aborter.reject = (err) => {
+          if (cancelled) return;
+          cancelled = true;
+          reject(err);
+        };
+        arm();
+        fn({ touch }).then(
+          (value) => {
+            cancelled = true;
+            resolve(value);
+          },
+          (err: unknown) => {
+            cancelled = true;
+            reject(err instanceof Error ? err : new Error(String(err)));
+          },
+        );
+      });
+    } catch (err) {
+      if (err instanceof SshOpTimeoutError) {
+        this.handleUnexpectedDisconnect();
+        this.safelyDispose();
+        throw new MisterConnectionError(
+          'unknown',
+          'The MiSTer stopped responding (no progress for 10s). Reconnecting…',
+        );
+      }
+      throw err;
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
     }
   }
 }
