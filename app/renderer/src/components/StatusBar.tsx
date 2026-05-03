@@ -45,22 +45,28 @@ export function StatusBar(): JSX.Element {
       : baseMessage;
 
   return (
-    <footer className="flex shrink-0 items-center justify-between gap-3 border-t bg-muted/40 px-4 py-1.5 text-xs">
-      <div className="flex min-w-0 flex-1 items-center gap-2 text-muted-foreground">
+    <footer className="flex h-8 shrink-0 items-center justify-between gap-3 border-t border-subtle bg-chrome px-4 text-caption uppercase tracking-[0.08em] text-fg-muted">
+      <div className="flex min-w-0 flex-1 items-center gap-2">
         {isBusy && !hasProgress ? (
-          <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden />
+          <Loader2
+            className="size-3 shrink-0 animate-spin text-fg-body"
+            strokeWidth={1.5}
+            aria-hidden
+          />
         ) : null}
-        <span className="truncate">{message}</span>
+        <span className="truncate normal-case tracking-normal text-body-sm text-fg-body">
+          {message}
+        </span>
         {isBusy && hasProgress ? (
           <div
             role="progressbar"
             aria-valuemin={0}
             aria-valuemax={currentProgress.total}
             aria-valuenow={currentProgress.done}
-            className="ml-1 h-1.5 w-32 shrink-0 overflow-hidden rounded-full bg-muted"
+            className="ml-1 h-1 w-32 shrink-0 overflow-hidden rounded-full bg-elevated"
           >
             <div
-              className="h-full bg-primary transition-[width] duration-150 ease-out"
+              className="h-full bg-accent transition-[width] duration-150 ease-out"
               style={{ width: `${String(percent)}%` }}
             />
           </div>
@@ -68,14 +74,13 @@ export function StatusBar(): JSX.Element {
       </div>
       <div className="flex shrink-0 items-center gap-2">
         <span
-          aria-label={`Connection status: ${status}`}
-          title={`Connection status: ${status}`}
+          aria-hidden
           className={cn(
-            'inline-block h-2 w-2 rounded-full',
+            'inline-block size-1.5 shrink-0 rounded-full',
             statusDotClass(status),
           )}
         />
-        <span className="text-muted-foreground">{status}</span>
+        <span aria-label={`Connection status: ${status}`}>{status}</span>
       </div>
     </footer>
   );
@@ -97,12 +102,12 @@ function idleMessageFor(status: ConnectionStatus, host: string | undefined): str
 function statusDotClass(status: ConnectionStatus): string {
   switch (status) {
     case 'connected':
-      return 'bg-emerald-500';
+      return 'bg-success';
     case 'connecting':
-      return 'bg-amber-500 animate-pulse';
+      return 'bg-warning animate-status-pulse';
     case 'error':
-      return 'bg-red-500';
+      return 'bg-destructive';
     case 'disconnected':
-      return 'bg-muted-foreground/40';
+      return 'bg-fg-disabled';
   }
 }
