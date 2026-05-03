@@ -40,11 +40,19 @@ const DISC_EXTENSIONS: ReadonlySet<string> = new Set([
 const TRACK_PATTERN = /\btrack\s*\d+/i;
 
 /**
- * Cartridge / archive extensions. Used as a *fallback* signal — if the
- * folder has no disc-shape evidence, but it does have files with
- * recognisable single-cartridge names, we infer container.
+ * Cartridge / archive / single-medium extensions. Used as a *fallback*
+ * signal — if the folder has no disc-shape evidence but does have
+ * files with recognisable single-cartridge names, we infer container.
+ *
+ * The list is broad on purpose: false positives (a folder of `.zip`s
+ * mistakenly classified container) are recoverable via right-click
+ * "Treat as atomic"; false negatives (a folder of `.neo` files that
+ * we refuse to drill into) leave the user stuck with no way down. The
+ * "many similar files" rule below is the catch-all for extensions we
+ * haven't enumerated yet.
  */
 const CART_EXTENSIONS: ReadonlySet<string> = new Set([
+  // Cartridge ROMs (originally enumerated)
   '.zip',
   '.7z',
   '.rar',
@@ -64,20 +72,71 @@ const CART_EXTENSIONS: ReadonlySet<string> = new Set([
   '.a78',
   '.a26',
   '.bin',
+  // Round 9 additions — formats we observed misclassified on real
+  // MiSTers (e.g. NEOGEO/.neo, Atari Jaguar/.j64).
+  '.neo', // NeoGeo native cartridge
+  '.j64', // Atari Jaguar
+  '.jag', // Atari Jaguar
+  '.32x', // Sega 32X
+  '.int', // Intellivision
+  '.vec', // Vectrex
+  '.ws',  // WonderSwan
+  '.wsc', // WonderSwan Color
+  // Computer-format media — same role: one file per game.
+  '.tap', // Multiple computer formats (cassette)
+  '.tzx', // ZX Spectrum
+  '.dsk', // Multiple computer disk format
+  '.cdt', // Amstrad CPC
+  '.cas', // Multiple computer cassette
+  '.cdi', // Sega Dreamcast / multiple
+  '.adf', // Amiga disk format
+  '.adz', // Compressed Amiga disk format
+  '.hdf', // Amiga hard disk
+  '.st',  // Atari ST disk
+  '.msa', // Atari ST magic shadow archive
+  '.uef', // BBC Micro / Acorn cassette
+  '.cdx', // Multiple
+  '.bbc', // BBC
 ]);
 
 /**
+ * Threshold for the "many similar files" rule. Folders with this many
+ * non-disc files sharing a single extension are treated as container —
+ * the extension list above is non-exhaustive, and this catches the
+ * long tail (`.neo`, `.<future-format>`, …) without playing whack-a-
+ * mole every time a new core ships.
+ *
+ * Five chosen because:
+ *   - Disc atomic folders are typically `.cue` + many `.bin` (caught
+ *     by the earlier disc-marker rule, never reaches here).
+ *   - Single-game folders rarely have 5+ files of the same extension.
+ *   - Container folders (organisational ROM groupings) almost always
+ *     do.
+ */
+const SAME_EXTENSION_THRESHOLD = 5;
+
+/**
  * Content-based classifier. Pure: feed it the files / dirs listing for
- * a folder, get back the call. The ordering of the rules is the spec —
- * disc markers win first because a `.bin` file inside a disc folder
- * would otherwise drag the call into "container" via the cart-ext
- * branch.
+ * a folder, get back the call. Rule order matters:
+ *
+ *   1. Disc markers / track patterns → atomic (a `.cue` folder full of
+ *      `.bin`s is the Saturn shape; the disc rule wins so the `.bin`s
+ *      don't drag us into the cart-ext branch).
+ *   2. Known cart / archive extension → container.
+ *   3. Many files share a single extension → container. Catches the
+ *      long tail of formats we haven't enumerated (`.neo` was the
+ *      regression that motivated this rule).
+ *   4. Has subdirectories → container (likely an organisational tree).
+ *   5. Otherwise → unknown (resolves to atomic for safety).
  */
 export function classifyFolder(contents: FolderContents): FolderClassification {
   if (hasDiscMarker(contents.files) || hasTrackPattern(contents.files)) {
     return 'atomic';
   }
   if (hasCartExtension(contents.files)) {
+    return 'container';
+  }
+  if (hasManySameExtension(contents.files)) {
     return 'container';
   }
   if (contents.dirs.length > 0) {
@@ -97,12 +156,21 @@ export interface FolderFlags {
   readonly hasDisc: boolean;
   readonly hasTrack: boolean;
   readonly hasCart: boolean;
+  /**
+   * True iff the device-side scan saw at least
+   * `SAME_EXTENSION_THRESHOLD` files sharing a single (case-insensitive)
+   * extension. The shell computes the max-same-extension count once
+   * per folder and emits this boolean so the JS classifier mirrors
+   * `classifyFolder`'s long-tail rule.
+   */
+  readonly hasManySameExt: boolean;
   readonly hasSubdir: boolean;
 }
 
 export function classifyFromFlags(flags: FolderFlags): FolderClassification {
   if (flags.hasDisc || flags.hasTrack) return 'atomic';
   if (flags.hasCart) return 'container';
+  if (flags.hasManySameExt) return 'container';
   if (flags.hasSubdir) return 'container';
   return 'unknown';
 }
@@ -141,6 +209,25 @@ function hasCartExtension(files: readonly string[]): boolean {
   for (const f of files) {
     const ext = extensionOf(f);
     if (ext !== '' && CART_EXTENSIONS.has(ext)) return true;
+  }
+  return false;
+}
+
+/**
+ * True iff at least `SAME_EXTENSION_THRESHOLD` files share a single
+ * (case-insensitive) extension. Files without an extension don't
+ * count; case is normalised inside `extensionOf`. Short-circuits as
+ * soon as any extension hits the threshold, so a 10000-file folder
+ * stops counting after the fifth match.
+ */
+function hasManySameExtension(files: readonly string[]): boolean {
+  const counts = new Map<string, number>();
+  for (const f of files) {
+    const ext = extensionOf(f);
+    if (ext === '') continue;
+    const next = (counts.get(ext) ?? 0) + 1;
+    if (next >= SAME_EXTENSION_THRESHOLD) return true;
+    counts.set(ext, next);
   }
   return false;
 }

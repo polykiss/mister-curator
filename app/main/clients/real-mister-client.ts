@@ -256,12 +256,18 @@ export class RealMisterClient implements IMisterClient {
     //
     // Lines:
     //   F\t<filename>\t<size>
-    //   D\t<dirname>\t<size>\t<has_disc>\t<has_track>\t<has_cart>\t<has_subdir>
+    //   D\t<dirname>\t<size>\t<has_disc>\t<has_track>\t<has_cart>\t<has_many_same_ext>\t<has_subdir>
+    //
+    // The cart extension list intentionally tracks the JS one — see
+    // CART_EXTENSIONS in shared/folder-rom.ts for the source of truth.
+    // The `has_many_same_ext` flag fires when at least 5 files in the
+    // folder share the same (case-insensitive) extension; it catches
+    // the long tail of formats we haven't enumerated yet.
     const script = [
       `cd ${shellQuote(targetDir)} 2>/dev/null || { echo MISSING_DIR; exit 1; }`,
       `find . -mindepth 1 -maxdepth 1 -type f -printf 'F\\t%f\\t%s\\n' 2>/dev/null || true`,
       // For each immediate dir: collect a recursive byte total (du -sb)
-      // AND a quick four-flag scan of its top level.
+      // AND a flag scan of its top level.
       'for d in */ .[!.]*/; do',
       '  [ -d "$d" ] || continue',
       '  d="${d%/}"',
@@ -279,10 +285,25 @@ export class RealMisterClient implements IMisterClient {
       '      *Track\\ *|*track\\ *|*Track[0-9]*|*track[0-9]*) has_track=1 ;;',
       '    esac',
       '    case "$base" in',
-      '      *.zip|*.ZIP|*.7z|*.7Z|*.rar|*.RAR|*.sfc|*.SFC|*.smc|*.SMC|*.nes|*.NES|*.gba|*.GBA|*.gb|*.GB|*.gbc|*.GBC|*.md|*.MD|*.gen|*.GEN|*.pce|*.PCE|*.lnx|*.LNX|*.col|*.COL|*.gg|*.GG|*.sms|*.SMS|*.a78|*.A78|*.a26|*.A26|*.bin|*.BIN) has_cart=1 ;;',
+      '      *.zip|*.ZIP|*.7z|*.7Z|*.rar|*.RAR|*.sfc|*.SFC|*.smc|*.SMC|*.nes|*.NES|*.gba|*.GBA|*.gb|*.GB|*.gbc|*.GBC|*.md|*.MD|*.gen|*.GEN|*.pce|*.PCE|*.lnx|*.LNX|*.col|*.COL|*.gg|*.GG|*.sms|*.SMS|*.a78|*.A78|*.a26|*.A26|*.bin|*.BIN|*.neo|*.NEO|*.j64|*.J64|*.jag|*.JAG|*.32x|*.32X|*.int|*.INT|*.vec|*.VEC|*.ws|*.WS|*.wsc|*.WSC|*.tap|*.TAP|*.tzx|*.TZX|*.dsk|*.DSK|*.cdt|*.CDT|*.cas|*.CAS|*.cdi|*.CDI|*.adf|*.ADF|*.adz|*.ADZ|*.hdf|*.HDF|*.st|*.ST|*.msa|*.MSA|*.uef|*.UEF|*.cdx|*.CDX|*.bbc|*.BBC) has_cart=1 ;;',
       '    esac',
       '  done',
-      '  printf "D\\t%s\\t%s\\t%d\\t%d\\t%d\\t%d\\n" "$d" "$size" "$has_disc" "$has_track" "$has_cart" "$has_subdir"',
+      // Many-similar-files flag. Two passes over the children would be
+      // wasteful for a 10000-file mame folder, so we let the awk
+      // pipeline short-circuit at the threshold: print '1' as soon as
+      // any ext crosses the line, then exit.
+      '  has_many_same_ext=$(',
+      '    for child in "$d"/* "$d"/.[!.]*; do',
+      '      [ -e "$child" ] || continue',
+      '      [ -d "$child" ] && continue',
+      '      base="${child##*/}"',
+      '      case "$base" in',
+      '        *.*) printf \'%s\\n\' "${base##*.}" ;;',
+      '      esac',
+      `    done | tr 'A-Z' 'a-z' | sort | uniq -c | awk 'BEGIN{m=0} { if ($1>m) { m=$1; if (m>=5) { print 1; exit } } } END { if (m<5) print 0 }'`,
+      '  )',
+      '  [ -z "$has_many_same_ext" ] && has_many_same_ext=0',
+      '  printf "D\\t%s\\t%s\\t%d\\t%d\\t%d\\t%d\\t%d\\n" "$d" "$size" "$has_disc" "$has_track" "$has_cart" "$has_many_same_ext" "$has_subdir"',
       'done',
     ].join('\n');
 
@@ -313,7 +334,7 @@ export class RealMisterClient implements IMisterClient {
           kind: 'file',
           relativePath,
         });
-      } else if (tag === 'D' && parts.length >= 7) {
+      } else if (tag === 'D' && parts.length >= 8) {
         const filename = parts[1] ?? '';
         const sizeBytes = Number.parseInt(parts[2] ?? '0', 10);
         if (filename === '' || Number.isNaN(sizeBytes)) continue;
@@ -323,7 +344,8 @@ export class RealMisterClient implements IMisterClient {
           hasDisc: parts[3] === '1',
           hasTrack: parts[4] === '1',
           hasCart: parts[5] === '1',
-          hasSubdir: parts[6] === '1',
+          hasManySameExt: parts[6] === '1',
+          hasSubdir: parts[7] === '1',
         };
         const relativePath = `${relPrefix}${filename}`;
         const visibleRelPath = `${relPrefix}${visibleBase}`;

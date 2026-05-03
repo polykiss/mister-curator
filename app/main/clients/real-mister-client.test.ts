@@ -341,9 +341,10 @@ describe('RealMisterClient', () => {
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
 
-      // listRoms now emits per-folder classification flags too:
+      // listRoms emits per-folder classification flags. Round 9 added
+      // a fifth flag (hasManySameExt) between hasCart and hasSubdir:
       //   F\t<name>\t<size>
-      //   D\t<name>\t<size>\t<has_disc>\t<has_track>\t<has_cart>\t<has_subdir>
+      //   D\t<name>\t<size>\t<has_disc>\t<has_track>\t<has_cart>\t<has_many_same_ext>\t<has_subdir>
       // The Saturn-shape disc folder has hasDisc=1 → folder-atomic.
       // The NEOGEO-shape `1 World A-Z` has hasCart=1 → folder-container.
       mocks.execCommand.mockResolvedValueOnce(
@@ -352,9 +353,9 @@ describe('RealMisterClient', () => {
             'F\t.Action 52 (USA) (Unl).nes\t131072',
             'F\tCastlevania (USA, Europe).nes\t131072',
             'F\tCastlevania.zip\t40960',
-            'D\tPanzer Dragoon Saga (USA)\t1958295552\t1\t0\t0\t0',
-            'D\t.Hidden Disc Game\t125829120\t1\t0\t0\t0',
-            'D\t1 World A-Z\t52428800\t0\t0\t1\t0',
+            'D\tPanzer Dragoon Saga (USA)\t1958295552\t1\t0\t0\t1\t0',
+            'D\t.Hidden Disc Game\t125829120\t1\t0\t0\t1\t0',
+            'D\t1 World A-Z\t52428800\t0\t0\t1\t0\t0',
             '',
           ].join('\n'),
         ),
@@ -398,7 +399,31 @@ describe('RealMisterClient', () => {
       expect(script).toContain('has_disc');
       expect(script).toContain('has_track');
       expect(script).toContain('has_cart');
+      expect(script).toContain('has_many_same_ext');
       expect(script).toContain('has_subdir');
+      // Round 9 expansion: .neo and friends now match the cart case.
+      expect(script).toContain('*.neo');
+    });
+
+    it('classifies a folder with hasManySameExt=1 as folder-container', async () => {
+      // Round 9 long-tail rule: even when the cart-extension case
+      // doesn't match, the device-side scan flips hasManySameExt and
+      // we treat the folder as drillable.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            // disc=0, track=0, cart=0, manySameExt=1, subdir=0
+            'D\tFutureFormat Collection\t10240\t0\t0\t0\t1\t0',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('FuturePastel');
+      expect(roms[0]?.kind).toBe('folder-container');
     });
 
     it('lists ROMs at a sub-path when drilled into a container', async () => {
