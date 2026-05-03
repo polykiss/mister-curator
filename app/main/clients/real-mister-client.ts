@@ -83,11 +83,12 @@ const SSH_OP_TIMEOUT_MS = 10_000;
  * every `keepaliveInterval` ms; after `keepaliveCountMax` missed
  * responses the socket fires its own `'close'` / `'error'` event and
  * `RealMisterClient.handleUnexpectedDisconnect` kicks in. With
- * 10s × 2, an idle but dead connection is detected within ~30 s
+ * 5s × 2, an idle but dead connection is detected within ~10–15 s
  * even if no user action is happening — complementing the per-op
- * timeout above for the active-call case.
+ * timeout above for the active-call case. Round 2 used 10s × 2
+ * (~30s); live testing pushed for tighter detection.
  */
-const SSH_KEEPALIVE_INTERVAL_MS = 10_000;
+const SSH_KEEPALIVE_INTERVAL_MS = 5_000;
 const SSH_KEEPALIVE_COUNT_MAX = 2;
 
 /**

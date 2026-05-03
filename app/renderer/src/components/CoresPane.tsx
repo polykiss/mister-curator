@@ -13,6 +13,7 @@ import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
 import { summarizeBulkResult } from '@app/renderer/src/lib/format';
+import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
 
 const ARCADE_TOOLTIP = "Arcade cores aren't supported yet — coming in a later release.";
 const DISCONNECTED_TOOLTIP = 'Reconnect to make changes.';
@@ -31,7 +32,12 @@ export function CoresPane(): JSX.Element {
   const { status } = useConnection();
   const canMutate = status === 'connected';
 
-  const [showHidden, setShowHidden] = useState(false);
+  // Hidden cores are intentionally permanent decisions — keep them
+  // off the default cores list. The user's last choice persists.
+  const [showHidden, setShowHidden] = usePersistedBool(
+    'mistercurator.showHiddenCores',
+    false,
+  );
   const [confirmHideId, setConfirmHideId] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -407,12 +413,16 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                   read-only
                 </span>
               ) : isHiddenCore ? (
-                // State icon: crossed-out eye = currently hidden. Click to show.
+                // Round 3: filled prominence — Show is the primary
+                // action when looking at a hidden core. Same slate /
+                // primary scheme as the per-ROM buttons keeps the
+                // visual language consistent across the two panes.
                 <Button
-                  variant="ghost"
-                  size="icon"
+                  variant="default"
+                  size="sm"
                   onClick={() => void args.onShow(core)}
                   disabled={isPending || !args.canMutate}
+                  className="min-w-[5.5rem] not-italic"
                   title={
                     args.canMutate
                       ? `Show ${core.name}`
@@ -421,14 +431,17 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                   aria-label={`Show ${core.name}`}
                 >
                   <EyeOff />
+                  Show
                 </Button>
               ) : (
-                // State icon: open eye = currently visible. Click to hide.
+                // Filled slate Hide button. Triggers the confirm
+                // step (askHide) — same flow, more visible affordance.
                 <Button
-                  variant="ghost"
-                  size="icon"
+                  variant="default"
+                  size="sm"
                   onClick={() => args.onAskHide(core.id)}
                   disabled={isPending || !args.canMutate}
+                  className="min-w-[5.5rem] bg-slate-700 text-slate-50 hover:bg-slate-600 dark:bg-slate-600 dark:hover:bg-slate-500"
                   title={
                     args.canMutate
                       ? `Hide ${core.name}`
@@ -437,6 +450,7 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                   aria-label={`Hide ${core.name}`}
                 >
                   <Eye />
+                  Hide
                 </Button>
               )}
             </div>

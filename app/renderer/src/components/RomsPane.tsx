@@ -48,6 +48,7 @@ import {
 import { cn } from '@app/renderer/src/lib/cn';
 import { formatBytes, summarizeBulkResult } from '@app/renderer/src/lib/format';
 import type { VisibilityChange } from '@app/renderer/src/lib/optimistic';
+import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
 
 /**
  * Tooltip for buttons disabled because the SSH session is in a
@@ -85,8 +86,19 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   // pane and counts always reflect the top-level view.
   const [subPath, setSubPath] = useState<string>('');
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
-  const [showHidden, setShowHidden] = useState(false);
-  const [showSystem, setShowSystem] = useState(false);
+  // Round 3 default: show hidden ROMs by default — they're typically
+  // the user's recent work and they want to see what they did. The
+  // user's last choice persists across sessions via localStorage.
+  const [showHidden, setShowHidden] = usePersistedBool(
+    'mistercurator.showHiddenRoms',
+    true,
+  );
+  // System files stay off by default — they're noise (BIOSes, palettes,
+  // configs) and the system-files-marks UI is the place to manage them.
+  const [showSystem, setShowSystem] = usePersistedBool(
+    'mistercurator.showSystemFiles',
+    false,
+  );
   const [menuFor, setMenuFor] = useState<{
     readonly rom: Rom;
     readonly x: number;
@@ -850,11 +862,24 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                           read-only
                         </span>
                       ) : (
+                        // Round 3: filled prominence. Hide gets a slate
+                        // fill (visible but not aggressive); Show gets
+                        // the primary fill (emphatic positive). Same
+                        // dimensions both ways so layout stays steady
+                        // when a row flips state.
                         <Button
-                          variant="ghost"
+                          variant="default"
                           size="sm"
                           onClick={() => void onSingleToggle(rom)}
                           disabled={!canMutate}
+                          className={cn(
+                            'min-w-[5.5rem] not-italic',
+                            rom.hidden
+                              ? // Show: primary fill
+                                undefined
+                              : // Hide: slate fill (works in both themes)
+                                'bg-slate-700 text-slate-50 hover:bg-slate-600 dark:bg-slate-600 dark:hover:bg-slate-500',
+                          )}
                           title={
                             canMutate
                               ? rom.hidden

@@ -97,11 +97,11 @@ describe('RealMisterClient', () => {
       await client.connect(profile, secret);
 
       const args = mocks.connect.mock.calls[0]?.[0] as Record<string, unknown>;
-      // Round 2 of PR #8: a dead transport must surface within ~30 s
-      // even when the user is idle. ssh2 sends a packet every
+      // Round 3 of PR #8: tightened from 10s × 2 (~30s detection)
+      // to 5s × 2 (~10–15s detection). ssh2 sends a packet every
       // `keepaliveInterval`; after `keepaliveCountMax` missed replies
       // it fires `'close'` / `'error'`.
-      expect(args.keepaliveInterval).toBe(10_000);
+      expect(args.keepaliveInterval).toBe(5_000);
       expect(args.keepaliveCountMax).toBe(2);
     });
 
