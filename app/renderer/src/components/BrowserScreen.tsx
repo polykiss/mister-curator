@@ -76,7 +76,7 @@ export function BrowserScreen(): JSX.Element {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <Button
-            variant="outline"
+            variant="secondary"
             size="sm"
             onClick={() => void onRefresh()}
             disabled={coresLoading}
@@ -84,7 +84,7 @@ export function BrowserScreen(): JSX.Element {
             <RefreshCw className={coresLoading ? 'animate-spin' : undefined} />
             Refresh
           </Button>
-          <Button variant="outline" size="sm" onClick={() => void onDisconnect()}>
+          <Button variant="secondary" size="sm" onClick={() => void onDisconnect()}>
             <LogOut />
             Disconnect
           </Button>

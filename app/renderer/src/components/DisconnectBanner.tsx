@@ -46,7 +46,7 @@ export function DisconnectBanner(): JSX.Element | null {
       </div>
       <div className="flex shrink-0 items-center gap-2">
         <Button
-          variant="default"
+          variant="primary"
           size="sm"
           onClick={() => void reconnect()}
           disabled={autoRetry !== null && !autoRetryFailed}
@@ -55,7 +55,7 @@ export function DisconnectBanner(): JSX.Element | null {
           Reconnect
         </Button>
         <Button
-          variant="outline"
+          variant="secondary"
           size="sm"
           onClick={() => void disconnect()}
         >

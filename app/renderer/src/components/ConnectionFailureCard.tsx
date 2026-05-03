@@ -48,7 +48,7 @@ export function ConnectionFailureCard({
           <p className="text-destructive">{message}</p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <Button
-              variant="default"
+              variant="primary"
               size="sm"
               onClick={onRetry}
               disabled={retrying}
@@ -56,7 +56,7 @@ export function ConnectionFailureCard({
               <RotateCcw />
               {retrying ? 'Retrying…' : 'Retry'}
             </Button>
-            <Button variant="outline" size="sm" onClick={onEdit}>
+            <Button variant="secondary" size="sm" onClick={onEdit}>
               <Pencil />
               Edit profile
             </Button>

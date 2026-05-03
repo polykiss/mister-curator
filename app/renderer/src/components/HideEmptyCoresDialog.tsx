@@ -122,7 +122,7 @@ export function HideEmptyCoresDialog({
         <DialogFooter>
           <Button
             type="button"
-            variant="ghost"
+            variant="subtle"
             onClick={() => onOpenChange(false)}
             disabled={submitting}
           >

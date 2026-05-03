@@ -610,7 +610,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <Button
-            variant="outline"
+            variant="secondary"
             size="sm"
             onClick={onHideAll}
             disabled={!canMutate || candidates.every((r) => r.hidden)}
@@ -619,7 +619,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             Hide all
           </Button>
           <Button
-            variant="outline"
+            variant="secondary"
             size="sm"
             onClick={onShowAll}
             disabled={!canMutate || candidates.every((r) => !r.hidden)}
@@ -628,7 +628,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             Unhide all
           </Button>
           <Button
-            variant="outline"
+            variant="secondary"
             size="sm"
             onClick={onHideSelected}
             disabled={!canMutate || visibleSelectedCount === 0}
@@ -637,7 +637,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             Hide selected ({visibleSelectedCount})
           </Button>
           <Button
-            variant="outline"
+            variant="secondary"
             size="sm"
             onClick={onShowSelected}
             disabled={!canMutate || hiddenSelectedCount === 0}
@@ -646,7 +646,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             Unhide selected ({hiddenSelectedCount})
           </Button>
           <Button
-            variant="outline"
+            variant="secondary"
             size="sm"
             onClick={() => void onMarkSelectedAsSystem()}
             disabled={!canMutate || markableSelected.length === 0}
@@ -659,7 +659,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             Mark as system ({markableSelected.length})
           </Button>
           <Button
-            variant="outline"
+            variant="secondary"
             size="sm"
             onClick={() => void onUnmarkSelected()}
             disabled={!canMutate || unmarkableSelected.length === 0}
@@ -870,7 +870,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         // `min-w-[5.5rem]` retained so a row's button
                         // cell doesn't reflow when its state flips.
                         <Button
-                          variant="outline"
+                          variant="secondary"
                           size="sm"
                           onClick={() => void onSingleToggle(rom)}
                           disabled={!canMutate}

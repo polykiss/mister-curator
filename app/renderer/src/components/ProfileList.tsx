@@ -138,7 +138,7 @@ export function ProfileList({ onEdit }: ProfileListProps): JSX.Element {
                 ) : (
                   <>
                     <Button
-                      variant="default"
+                      variant="primary"
                       size="sm"
                       disabled={isConnecting}
                       onClick={() => void onConnect(profile)}

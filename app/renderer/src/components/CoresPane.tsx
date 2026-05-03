@@ -201,7 +201,7 @@ export function CoresPane(): JSX.Element {
       <header className="flex flex-wrap items-center justify-between gap-2 border-b p-3 text-xs">
         <div className="flex flex-wrap items-center gap-2">
           <Button
-            variant="outline"
+            variant="secondary"
             size="sm"
             onClick={() => setBulkOpen(true)}
             disabled={!canMutate || emptyHideableCores.length === 0}
@@ -211,7 +211,7 @@ export function CoresPane(): JSX.Element {
             Hide empty ({emptyHideableCores.length})
           </Button>
           <Button
-            variant="outline"
+            variant="secondary"
             size="sm"
             onClick={() => void onShowAllHidden()}
             disabled={!canMutate || appHiddenCores.length === 0}
@@ -417,7 +417,7 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                 // Outlined variants keep the slate-vs-primary
                 // colour cue without 9 stacked rows shouting.
                 <Button
-                  variant="outline"
+                  variant="secondary"
                   size="sm"
                   onClick={() => void args.onShow(core)}
                   disabled={isPending || !args.canMutate}
@@ -436,7 +436,7 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                 // Slate-outlined Hide. Triggers the confirm step
                 // (askHide) — same flow, restrained affordance.
                 <Button
-                  variant="outline"
+                  variant="secondary"
                   size="sm"
                   onClick={() => args.onAskHide(core.id)}
                   disabled={isPending || !args.canMutate}

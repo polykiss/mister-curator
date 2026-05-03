@@ -272,7 +272,7 @@ export function ProfileDialog({
                   <div className="flex items-center gap-2">
                     <Button
                       type="button"
-                      variant="outline"
+                      variant="secondary"
                       size="sm"
                       onClick={() => void onPickKey()}
                       disabled={pickingKey}
@@ -314,13 +314,13 @@ export function ProfileDialog({
           <DialogFooter>
             <Button
               type="button"
-              variant="ghost"
+              variant="subtle"
               onClick={() => onOpenChange(false)}
               disabled={submitting}
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={!canSubmit || submitting}>
+            <Button type="submit" variant="primary" disabled={!canSubmit || submitting}>
               {submitting ? <Loader2 className="animate-spin" /> : null}
               {isEdit ? 'Save changes' : 'Add profile'}
             </Button>

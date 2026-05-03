@@ -32,7 +32,7 @@ export function ConnectionScreen(): JSX.Element {
             Pick a profile to connect, or add one to get started.
           </p>
         </div>
-        <Button onClick={openAdd}>
+        <Button variant="primary" onClick={openAdd}>
           <Plus />
           Add profile
         </Button>
