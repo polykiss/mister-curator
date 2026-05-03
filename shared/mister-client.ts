@@ -85,6 +85,15 @@ export interface IMisterClient {
   isConnected(): boolean;
 
   /**
+   * Subscribe to mid-session "unexpected disconnect" events. Fires when
+   * the underlying SSH transport drops on its own — host rebooted,
+   * network blip, etc. — *not* during initial connect, and *not*
+   * during a clean `disconnect()`. The listener fires at most once per
+   * `connect()` call. Returns an unsubscribe function.
+   */
+  onUnexpectedDisconnect(listener: () => void): () => void;
+
+  /**
    * Lists every core the device knows about — joined across `_Console`,
    * `_Computer`, `_Other`, `_Utility`, `_Arcade` and `games/`. Replaces
    * the older `listCores()` which only saw `games/` subdirectories.

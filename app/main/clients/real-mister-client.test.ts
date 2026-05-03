@@ -4,13 +4,28 @@ import { MisterConnectionError } from '@shared/types';
 import type { CoreEntry, MisterProfile } from '@shared/types';
 import type { MisterSecret } from '@shared/mister-client';
 
-const mocks = vi.hoisted(() => ({
-  connect: vi.fn(),
-  dispose: vi.fn(),
-  execCommand: vi.fn(),
-  exec: vi.fn(),
-  isConnected: vi.fn(),
-}));
+/**
+ * The connection mock simulates the underlying ssh2 Client. Tests can
+ * call `connectionListeners.get('close')?.()` to fake an unexpected
+ * disconnect — that's what the real ssh2 transport does on close/
+ * error.
+ */
+const mocks = vi.hoisted(() => {
+  const connectionListeners = new Map<string, () => void>();
+  return {
+    connect: vi.fn(),
+    dispose: vi.fn(),
+    execCommand: vi.fn(),
+    exec: vi.fn(),
+    isConnected: vi.fn(),
+    connectionListeners,
+    connection: {
+      once: vi.fn((event: string, handler: () => void) => {
+        connectionListeners.set(event, handler);
+      }),
+    },
+  };
+});
 
 vi.mock('node-ssh', () => ({
   NodeSSH: vi.fn().mockImplementation(() => ({
@@ -19,6 +34,7 @@ vi.mock('node-ssh', () => ({
     execCommand: mocks.execCommand,
     exec: mocks.exec,
     isConnected: mocks.isConnected,
+    connection: mocks.connection,
   })),
 }));
 
@@ -53,6 +69,8 @@ describe('RealMisterClient', () => {
     mocks.execCommand.mockReset().mockResolvedValue(execOk());
     mocks.exec.mockReset().mockResolvedValue('');
     mocks.isConnected.mockReset().mockReturnValue(true);
+    mocks.connection.once.mockClear();
+    mocks.connectionListeners.clear();
   });
 
   describe('connect', () => {
@@ -169,6 +187,95 @@ describe('RealMisterClient', () => {
 
       await client.disconnect();
       expect(mocks.dispose).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('onUnexpectedDisconnect', () => {
+    it('attaches close + error listeners after a successful connect', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+
+      // The real client subscribes once each on the underlying ssh2
+      // Client. Both events flow into the same handler so the manager
+      // sees a single "unexpected disconnect" regardless of which one
+      // ssh2 fired first.
+      expect(mocks.connection.once).toHaveBeenCalledWith(
+        'close',
+        expect.any(Function),
+      );
+      expect(mocks.connection.once).toHaveBeenCalledWith(
+        'error',
+        expect.any(Function),
+      );
+    });
+
+    it('fires registered listeners when the transport closes mid-session', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      const listener = vi.fn();
+      client.onUnexpectedDisconnect(listener);
+
+      mocks.connectionListeners.get('close')?.();
+
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it('fires once even when both close and error fire (ssh2 dedup)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      const listener = vi.fn();
+      client.onUnexpectedDisconnect(listener);
+
+      mocks.connectionListeners.get('error')?.();
+      mocks.connectionListeners.get('close')?.();
+
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it('suppresses the unexpected path during a clean disconnect()', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      const listener = vi.fn();
+      client.onUnexpectedDisconnect(listener);
+
+      mocks.isConnected.mockReturnValue(true);
+      await client.disconnect();
+
+      // ssh2 will still fire 'close' as part of dispose. The flag set
+      // inside disconnect() must squelch the listener.
+      mocks.connectionListeners.get('close')?.();
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('returns an unsubscribe function that removes the listener', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      const listener = vi.fn();
+      const unsubscribe = client.onUnexpectedDisconnect(listener);
+      unsubscribe();
+
+      mocks.connectionListeners.get('close')?.();
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('rearms after a fresh connect() — listeners can fire again on the next session', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      const listener = vi.fn();
+      client.onUnexpectedDisconnect(listener);
+      mocks.connectionListeners.get('close')?.();
+      expect(listener).toHaveBeenCalledTimes(1);
+
+      // Reconnect — ssh2 attaches new listeners; the unexpectedFired
+      // dedup flag resets.
+      mocks.connection.once.mockClear();
+      mocks.connectionListeners.clear();
+      await client.connect(profile, secret);
+      mocks.connectionListeners.get('close')?.();
+
+      expect(listener).toHaveBeenCalledTimes(2);
     });
   });
 

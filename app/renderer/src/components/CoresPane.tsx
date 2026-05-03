@@ -9,11 +9,13 @@ import type { CoreEntry } from '@shared/types';
 import { Button } from '@app/renderer/src/components/ui/button';
 import { HideEmptyCoresDialog } from '@app/renderer/src/components/HideEmptyCoresDialog';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
+import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
 import { summarizeBulkResult } from '@app/renderer/src/lib/format';
 
 const ARCADE_TOOLTIP = "Arcade cores aren't supported yet — coming in a later release.";
+const DISCONNECTED_TOOLTIP = 'Reconnect to make changes.';
 
 export function CoresPane(): JSX.Element {
   const {
@@ -26,6 +28,8 @@ export function CoresPane(): JSX.Element {
     showCore,
     setBulkCoreVisibility,
   } = useCores();
+  const { status } = useConnection();
+  const canMutate = status === 'connected';
 
   const [showHidden, setShowHidden] = useState(false);
   const [confirmHideId, setConfirmHideId] = useState<string | null>(null);
@@ -194,7 +198,8 @@ export function CoresPane(): JSX.Element {
             variant="outline"
             size="sm"
             onClick={() => setBulkOpen(true)}
-            disabled={emptyHideableCores.length === 0}
+            disabled={!canMutate || emptyHideableCores.length === 0}
+            title={canMutate ? undefined : DISCONNECTED_TOOLTIP}
           >
             <Sparkles />
             Hide empty ({emptyHideableCores.length})
@@ -203,8 +208,12 @@ export function CoresPane(): JSX.Element {
             variant="outline"
             size="sm"
             onClick={() => void onShowAllHidden()}
-            disabled={appHiddenCores.length === 0}
-            title="Restore visibility for every core MiSTerCurator hid"
+            disabled={!canMutate || appHiddenCores.length === 0}
+            title={
+              canMutate
+                ? 'Restore visibility for every core MiSTerCurator hid'
+                : DISCONNECTED_TOOLTIP
+            }
           >
             <Undo2 />
             Unhide all ({appHiddenCores.length})
@@ -237,6 +246,7 @@ export function CoresPane(): JSX.Element {
         selectedCoreId,
         confirmHideId,
         pendingId,
+        canMutate,
         onSelect: selectCore,
         onAskHide: setConfirmHideId,
         onConfirmHide: onHide,
@@ -261,6 +271,8 @@ interface RenderArgs {
   readonly selectedCoreId: string | null;
   readonly confirmHideId: string | null;
   readonly pendingId: string | null;
+  /** Disables every per-row hide/show button when not connected. */
+  readonly canMutate: boolean;
   readonly onSelect: (id: string | null) => void;
   readonly onAskHide: (id: string) => void;
   readonly onConfirmHide: (core: CoreEntry) => Promise<void>;
@@ -400,8 +412,12 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                   variant="ghost"
                   size="icon"
                   onClick={() => void args.onShow(core)}
-                  disabled={isPending}
-                  title={`Show ${core.name}`}
+                  disabled={isPending || !args.canMutate}
+                  title={
+                    args.canMutate
+                      ? `Show ${core.name}`
+                      : 'Reconnect to make changes.'
+                  }
                   aria-label={`Show ${core.name}`}
                 >
                   <EyeOff />
@@ -412,8 +428,12 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                   variant="ghost"
                   size="icon"
                   onClick={() => args.onAskHide(core.id)}
-                  disabled={isPending}
-                  title={`Hide ${core.name}`}
+                  disabled={isPending || !args.canMutate}
+                  title={
+                    args.canMutate
+                      ? `Hide ${core.name}`
+                      : 'Reconnect to make changes.'
+                  }
                   aria-label={`Hide ${core.name}`}
                 >
                   <Eye />

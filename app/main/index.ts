@@ -70,6 +70,11 @@ void app.whenReady().then(() => {
       window.webContents.send(IPC_CHANNELS.bulkCoreProgress, event);
     }
   });
+  manager.onConnectionEvent((event) => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.connectionEvent, event);
+    }
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -82,6 +87,11 @@ void app.whenReady().then(() => {
       manager.onBulkProgress((event) => {
         if (!newWindow.isDestroyed()) {
           newWindow.webContents.send(IPC_CHANNELS.bulkCoreProgress, event);
+        }
+      });
+      manager.onConnectionEvent((event) => {
+        if (!newWindow.isDestroyed()) {
+          newWindow.webContents.send(IPC_CHANNELS.connectionEvent, event);
         }
       });
     }

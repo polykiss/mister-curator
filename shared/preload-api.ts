@@ -1,3 +1,4 @@
+import type { ConnectionEvent } from '@shared/connection';
 import type {
   BulkCoreProgress,
   BulkCoreResult,
@@ -37,6 +38,7 @@ export const IPC_CHANNELS = {
   bulkCoreProgress: 'mister:bulkCoreProgress',
   listFolderClassifications: 'mister:listFolderClassifications',
   setFolderClassification: 'mister:setFolderClassification',
+  connectionEvent: 'mister:connectionEvent',
 } as const;
 
 /**
@@ -142,6 +144,17 @@ export interface MisterApi {
   ): () => void;
   pickKeyFile(): Promise<PickedKeyFile | null>;
   onConnectionStatusChanged(handler: (status: ConnectionStatus) => void): () => void;
+  /**
+   * Subscribe to lifecycle events outside the four-state status
+   * machine — connecting-elapsed ticks, auto-retry attempts, the
+   * unexpected-disconnect signal, the "we got back in" signal. The
+   * renderer uses these to drive the per-profile connecting indicator
+   * (round 11 spec: hide for 3s, soften at 8s) and the disconnect
+   * banner (round 11 spec: persistent until user dismisses).
+   */
+  onConnectionEvent(
+    handler: (event: ConnectionEvent) => void,
+  ): () => void;
   /**
    * Returns the cached user-marks list. Cache is primed on connect and
    * refreshed after every add/remove, so the renderer can call this

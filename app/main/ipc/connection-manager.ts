@@ -1,4 +1,9 @@
 import {
+  backoffDelayMs,
+  RECONNECT_BACKOFF_MS,
+  type ConnectionEvent,
+} from '@shared/connection';
+import {
   computeAutoReapplyChanges,
   isCoreHidden,
   isRealCore,
@@ -28,6 +33,7 @@ import type {
   FolderClassifications,
   HiddenCoreEntry,
   HideLedger,
+  MisterProfile,
   Rom,
   SystemFilesMarks,
 } from '@shared/types';
@@ -36,6 +42,7 @@ import type { ProfileStore } from '@app/main/storage/profile-store';
 
 type StatusListener = (status: ConnectionStatus) => void;
 type BulkProgressListener = (event: BulkCoreProgressBroadcast) => void;
+type ConnectionEventListener = (event: ConnectionEvent) => void;
 
 /**
  * Bulk core-visibility progress broadcast to listeners (typically the
@@ -80,7 +87,16 @@ export class ConnectionManager {
   private currentProfileId: string | null = null;
   private readonly listeners = new Set<StatusListener>();
   private readonly bulkProgressListeners = new Set<BulkProgressListener>();
+  private readonly connectionEventListeners = new Set<ConnectionEventListener>();
   private nextOperationId = 1;
+  /**
+   * Monotonic token for the active auto-retry cycle. Incrementing it
+   * cancels any in-flight retry loop — needed when the user clicks
+   * "Disconnect" or starts a manual reconnect mid-cycle.
+   */
+  private autoRetryToken = 0;
+  /** Cleanup for the unexpected-disconnect subscription (set on connect). */
+  private unsubscribeUnexpectedDisconnect: (() => void) | null = null;
   private coresCache: CoreEntry[] = [];
   /**
    * In-memory copy of the on-MiSTer ledger. Populated by `readLedgerFresh`
@@ -130,7 +146,18 @@ export class ConnectionManager {
     };
   }
 
+  onConnectionEvent(listener: ConnectionEventListener): () => void {
+    this.connectionEventListeners.add(listener);
+    return () => {
+      this.connectionEventListeners.delete(listener);
+    };
+  }
+
   async connect(profileId: string): Promise<ConnectResult> {
+    // A manual connect (or reconnect) cancels any in-flight auto-retry
+    // cycle so the two don't race each other.
+    this.autoRetryToken += 1;
+
     if (this.status === 'connected') {
       try {
         await this.client.disconnect();
@@ -145,6 +172,21 @@ export class ConnectionManager {
     this.systemFilesMarksCache = EMPTY_SYSTEM_FILES_MARKS;
     this.folderClassificationsCache = EMPTY_FOLDER_CLASSIFICATIONS;
 
+    // Connecting-elapsed ticker. Fires every second while the connect
+    // is in flight; the renderer uses these to drive the delayed-
+    // reveal "Connecting…" indicator (no flicker on fast connects,
+    // soft-escalation if the box is slow). The shared
+    // `formatConnectingMessage` reads `elapsedMs` and decides what to
+    // show — keeping the policy in one place.
+    const startedAt = Date.now();
+    const ticker = setInterval(() => {
+      this.emitConnectionEvent({
+        type: 'connecting-elapsed',
+        profileId,
+        elapsedMs: Date.now() - startedAt,
+      });
+    }, 1000);
+
     try {
       const profile = await this.store.get(profileId);
       if (!profile) {
@@ -153,6 +195,18 @@ export class ConnectionManager {
       const secret: MisterSecret = await this.store.getSecret(profileId);
       await this.client.connect(profile, secret);
       this.currentProfileId = profileId;
+
+      // Hook the unexpected-disconnect channel from the freshly-
+      // connected client. Stale subscriptions from a previous
+      // connection (if any) get cleaned up first.
+      if (this.unsubscribeUnexpectedDisconnect) {
+        this.unsubscribeUnexpectedDisconnect();
+      }
+      this.unsubscribeUnexpectedDisconnect = this.client.onUnexpectedDisconnect(
+        () => {
+          this.handleUnexpectedDisconnect();
+        },
+      );
 
       // Prime the ledger cache. readHideLedger self-heals as a side
       // effect — drops stale `_hidden` etc. entries and rewrites.
@@ -174,10 +228,19 @@ export class ConnectionManager {
       this.currentProfileId = null;
       this.setStatus('error');
       throw err;
+    } finally {
+      clearInterval(ticker);
     }
   }
 
   async disconnect(): Promise<void> {
+    // Clean disconnect — cancel any in-flight auto-retry first so a
+    // pending reconnect doesn't race the user's intent.
+    this.autoRetryToken += 1;
+    if (this.unsubscribeUnexpectedDisconnect) {
+      this.unsubscribeUnexpectedDisconnect();
+      this.unsubscribeUnexpectedDisconnect = null;
+    }
     try {
       await this.client.disconnect();
     } finally {
@@ -496,6 +559,125 @@ export class ConnectionManager {
     for (const listener of this.listeners) {
       listener(next);
     }
+  }
+
+  private emitConnectionEvent(event: ConnectionEvent): void {
+    for (const listener of this.connectionEventListeners) {
+      try {
+        listener(event);
+      } catch {
+        /* never let a UI throw kill the connection lifecycle */
+      }
+    }
+  }
+
+  /**
+   * Invoked when the underlying client tells us the SSH transport
+   * dropped on its own. Marks the manager as 'disconnected' (writes
+   * fail loudly), broadcasts the event so the renderer can show a
+   * stale-state banner, and kicks off the auto-retry loop. Idempotent
+   * w.r.t. close+error firing in quick succession (the client already
+   * dedups).
+   */
+  private handleUnexpectedDisconnect(): void {
+    const profileId = this.currentProfileId;
+    if (profileId === null) return;
+    this.setStatus('disconnected');
+    this.emitConnectionEvent({ type: 'disconnected-unexpected', profileId });
+    void this.runAutoRetry(profileId);
+  }
+
+  /**
+   * Auto-reconnect loop on the documented backoff schedule. Each
+   * attempt runs the same `connect()` path the user would (but
+   * without rewinding `currentProfileId`, since we know which profile
+   * we're targeting). The token guards against overlapping cycles
+   * when the user manually reconnects or disconnects mid-loop.
+   */
+  private async runAutoRetry(profileId: string): Promise<void> {
+    const token = ++this.autoRetryToken;
+    let profile: MisterProfile | null;
+    try {
+      profile = (await this.store.get(profileId)) ?? null;
+    } catch {
+      profile = null;
+    }
+    if (profile === null || token !== this.autoRetryToken) return;
+    let secret: MisterSecret;
+    try {
+      secret = await this.store.getSecret(profileId);
+    } catch {
+      // Secrets gone (profile deleted mid-cycle, etc.) — surface as
+      // exhausted-retries so the renderer falls into banner state.
+      this.emitConnectionEvent({
+        type: 'auto-retry-failed',
+        profileId,
+        underlyingMessage: 'Stored credentials no longer available.',
+      });
+      return;
+    }
+
+    let lastError = 'Connection lost.';
+    for (let attempt = 0; attempt < RECONNECT_BACKOFF_MS.length; attempt += 1) {
+      const delay = backoffDelayMs(attempt);
+      if (delay === undefined) break;
+      if (token !== this.autoRetryToken) return;
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, delay);
+      });
+      if (token !== this.autoRetryToken) return;
+      this.emitConnectionEvent({
+        type: 'auto-retry-attempt',
+        profileId,
+        attempt: attempt + 1,
+        totalAttempts: RECONNECT_BACKOFF_MS.length,
+      });
+      try {
+        await this.client.connect(profile, secret);
+        if (token !== this.autoRetryToken) {
+          // Got cancelled while we were connecting; tear down so the
+          // canonical session isn't leaked.
+          try {
+            await this.client.disconnect();
+          } catch {
+            /* swallow */
+          }
+          return;
+        }
+        // Re-hook the unexpected-disconnect listener for the new
+        // session and re-prime caches so the renderer sees fresh data.
+        if (this.unsubscribeUnexpectedDisconnect) {
+          this.unsubscribeUnexpectedDisconnect();
+        }
+        this.unsubscribeUnexpectedDisconnect = this.client.onUnexpectedDisconnect(
+          () => {
+            this.handleUnexpectedDisconnect();
+          },
+        );
+        this.currentProfileId = profileId;
+        try {
+          this.ledgerCache = await this.client.readHideLedger();
+          this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
+          this.folderClassificationsCache =
+            await this.client.readFolderClassifications();
+        } catch {
+          // Cache priming is best-effort during reconnect; the next
+          // explicit refresh will catch anything we missed.
+        }
+        this.setStatus('connected');
+        this.emitConnectionEvent({ type: 'reconnected', profileId });
+        return;
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    if (token !== this.autoRetryToken) return;
+    this.emitConnectionEvent({
+      type: 'auto-retry-failed',
+      profileId,
+      underlyingMessage: lastError,
+    });
   }
 }
 

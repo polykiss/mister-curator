@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+import type { ConnectionEvent } from '@shared/connection';
 import { IPC_CHANNELS, isSerializedMisterConnectionError } from '@shared/preload-api';
 import type {
   BulkCoreProgressEvent,
@@ -101,6 +102,15 @@ const api: MisterApi = {
     ipcRenderer.on(IPC_CHANNELS.connectionStatusChanged, listener);
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.connectionStatusChanged, listener);
+    };
+  },
+  onConnectionEvent: (handler: (event: ConnectionEvent) => void) => {
+    const listener = (_event: unknown, payload: ConnectionEvent): void => {
+      handler(payload);
+    };
+    ipcRenderer.on(IPC_CHANNELS.connectionEvent, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.connectionEvent, listener);
     };
   },
   listSystemFileMarks: () =>

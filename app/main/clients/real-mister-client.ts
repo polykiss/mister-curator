@@ -69,6 +69,15 @@ const CONNECT_TIMEOUT_MS = 8000;
 
 export class RealMisterClient implements IMisterClient {
   private readonly ssh: NodeSSH;
+  /**
+   * Listeners registered via `onUnexpectedDisconnect`. Fired at most
+   * once per `connect()` call when the underlying SSH transport drops.
+   */
+  private readonly unexpectedDisconnectListeners = new Set<() => void>();
+  /** Set inside `disconnect()` to suppress the "unexpected" path. */
+  private isCleanShutdown = false;
+  /** Reset on `connect()`. Prevents double-firing from close+error. */
+  private unexpectedFired = false;
 
   constructor() {
     this.ssh = new NodeSSH();
@@ -124,9 +133,24 @@ export class RealMisterClient implements IMisterClient {
         `Could not find ${MISTER_GAMES_DIR} on this host — is it a MiSTer?`,
       );
     }
+
+    // Connect succeeded. Reset the unexpected-disconnect bookkeeping
+    // and attach listeners to the underlying ssh2 Client. We don't
+    // attach earlier (during the connect race) because the timeout
+    // path may dispose without ever opening the socket — listening
+    // there just creates dead handlers.
+    this.isCleanShutdown = false;
+    this.unexpectedFired = false;
+    const conn = this.ssh.connection;
+    if (conn) {
+      const handler = (): void => this.handleUnexpectedDisconnect();
+      conn.once('close', handler);
+      conn.once('error', handler);
+    }
   }
 
   async disconnect(): Promise<void> {
+    this.isCleanShutdown = true;
     if (!this.ssh.isConnected()) {
       return;
     }
@@ -136,6 +160,27 @@ export class RealMisterClient implements IMisterClient {
 
   isConnected(): boolean {
     return this.ssh.isConnected();
+  }
+
+  onUnexpectedDisconnect(listener: () => void): () => void {
+    this.unexpectedDisconnectListeners.add(listener);
+    return () => {
+      this.unexpectedDisconnectListeners.delete(listener);
+    };
+  }
+
+  private handleUnexpectedDisconnect(): void {
+    // Suppress when the renderer asked us to disconnect. Also dedup
+    // close-vs-error: ssh2 can fire both for the same drop.
+    if (this.isCleanShutdown || this.unexpectedFired) return;
+    this.unexpectedFired = true;
+    for (const listener of this.unexpectedDisconnectListeners) {
+      try {
+        listener();
+      } catch {
+        /* never let a UI throw kill the disconnect path */
+      }
+    }
   }
 
   async listAllCoresWithFiles(

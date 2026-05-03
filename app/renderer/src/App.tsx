@@ -8,8 +8,11 @@ import { CoresProvider } from '@app/renderer/src/contexts/CoresContext';
 import { OperationStatusProvider } from '@app/renderer/src/contexts/OperationStatusContext';
 
 function Routes(): JSX.Element {
-  const { status } = useConnection();
-  if (status === 'connected') {
+  const { status, lostConnection } = useConnection();
+  // Stay on the browser screen while a session was just lost — the
+  // user can still browse cached cores in read-only mode and act on
+  // the disconnect banner to either Reconnect or bail out.
+  if (status === 'connected' || lostConnection) {
     return <BrowserScreen />;
   }
   return <ConnectionScreen />;
