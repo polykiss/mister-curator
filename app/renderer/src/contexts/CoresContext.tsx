@@ -127,6 +127,18 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   const coresRef = useRef(cores);
   const romsByCoreRef = useRef(romsByCore);
   const selectedCoreIdRef = useRef(selectedCoreId);
+  // In-flight ROM fetches keyed by (coreId::subPath). Lets concurrent
+  // `ensureRoms` calls for the same key share a single promise instead
+  // of firing duplicate IPC round-trips. Two reasons we see duplicates:
+  //   1. React 18 StrictMode double-invokes mount effects in dev.
+  //   2. RomsPane's effect re-fires every time `core.id` or `subPath`
+  //      flips, and a refresh-then-still-on-page sequence wipes the
+  //      cache out from under the resolved promise.
+  // Without dedup, both fires hit IPC; the second can race a state
+  // change and surface as "Unknown core: <coreId>" in the main log.
+  const pendingRomsRef = useRef<Map<string, Promise<readonly Rom[]>>>(
+    new Map(),
+  );
   coresRef.current = cores;
   romsByCoreRef.current = romsByCore;
   selectedCoreIdRef.current = selectedCoreId;
@@ -202,15 +214,41 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   const ensureRoms = useCallback(
     async (coreId: string, subPath = '') => {
       const key = romsKey(coreId, subPath);
+      // Already cached? Nothing to do.
       if (romsByCoreRef.current[key]) return;
+      // Already in flight from a prior call? Wait on the same promise
+      // instead of firing a second IPC round-trip. Errors from the
+      // shared promise are swallowed here — the original initiator
+      // already logged the failure.
+      const inflight = pendingRomsRef.current.get(key);
+      if (inflight) {
+        try {
+          await inflight;
+        } catch {
+          /* original caller handled / logged */
+        }
+        return;
+      }
+
       setRomsLoading((prev) => ({ ...prev, [key]: true }));
+      const label = subPath === '' ? coreId : `${coreId}/${subPath}`;
+      const fetchPromise = runWithStatus(`Loading ROMs in ${label}…`, () =>
+        window.mister.listRoms(coreId, subPath),
+      );
+      pendingRomsRef.current.set(key, fetchPromise);
       try {
-        const label = subPath === '' ? coreId : `${coreId}/${subPath}`;
-        const roms = await runWithStatus(`Loading ROMs in ${label}…`, () =>
-          window.mister.listRoms(coreId, subPath),
-        );
+        const roms = await fetchPromise;
         setRomsByCore((prev) => ({ ...prev, [key]: roms }));
+      } catch (err) {
+        // The IPC layer already logs main-side; on the renderer we
+        // surface a one-line warning so the user can spot it without
+        // turning a transient failure into an unhandled rejection.
+        console.warn(
+          `Failed to load ROMs for ${label}:`,
+          err instanceof Error ? err.message : err,
+        );
       } finally {
+        pendingRomsRef.current.delete(key);
         setRomsLoading((prev) => ({ ...prev, [key]: false }));
       }
     },

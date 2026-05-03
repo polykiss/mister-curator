@@ -72,9 +72,6 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   // `'parent/child'`). Used for every ROM-level operation; the cores
   // pane and counts always reflect the top-level view.
   const [subPath, setSubPath] = useState<string>('');
-  const cacheKey = romsKey(core.id, subPath);
-  const roms = romsByCore[cacheKey];
-  const loading = romsLoading[cacheKey] ?? false;
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
   const [showHidden, setShowHidden] = useState(false);
   const [showSystem, setShowSystem] = useState(false);
@@ -84,12 +81,23 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     readonly y: number;
   } | null>(null);
 
-  // Reset selection AND drilled path when the visible core changes —
-  // we don't carry "I was 2 levels deep in NEOGEO" into Saturn.
-  useEffect(() => {
-    setSelected(new Set());
+  // Reset drill state SYNCHRONOUSLY when the visible core changes so
+  // the `ensureRoms` effect below never sees a stale subPath against a
+  // new core. Without this, switching from `NEOGEO/1 World A-Z` to
+  // Saturn would fire `listRoms('Saturn', '1 World A-Z')` once before
+  // the [core.id] reset effect committed — that call fails with
+  // "Unknown core: Saturn" in the main-process log.
+  // Pattern reference: https://react.dev/reference/react/useState#storing-information-from-previous-renders
+  const [trackedCoreId, setTrackedCoreId] = useState(core.id);
+  if (trackedCoreId !== core.id) {
+    setTrackedCoreId(core.id);
     setSubPath('');
-  }, [core.id]);
+    setSelected(new Set());
+  }
+
+  const cacheKey = romsKey(core.id, subPath);
+  const roms = romsByCore[cacheKey];
+  const loading = romsLoading[cacheKey] ?? false;
 
   // Reset selection on every drill in/out so a ghost selection from
   // the previous level never leaks into a different list.
@@ -98,7 +106,8 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   }, [subPath]);
 
   // Lazy-fetch ROMs at the current (core, subPath) — including after
-  // a drill into a container.
+  // a drill into a container. The render-time reset above guarantees
+  // that when this effect fires for a new core, subPath is already ''.
   useEffect(() => {
     void ensureRoms(core.id, subPath);
   }, [core.id, subPath, ensureRoms]);
@@ -513,117 +522,111 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="border-b p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <nav
-              aria-label="Folder breadcrumb"
-              // Single horizontal line. `min-w-0` lets each segment
-              // shrink so they truncate gracefully under squeeze
-              // instead of pushing the toolbar offscreen. `flex-wrap`
-              // is intentionally absent — we never want the breadcrumb
-              // to break to a second line and look like a title +
-              // subtitle stack.
-              className="flex min-w-0 items-center gap-1 text-lg"
+      {/* Header is a vertical stack — breadcrumb on its own row so a
+          long path can scroll horizontally without crowding the
+          toolbar; subtitle on its own row; action buttons on their
+          own row (wrapping only when the window is unusually narrow);
+          filter checkboxes on the bottom row. Each row owns its full
+          horizontal width. */}
+      <header className="space-y-2 border-b p-4">
+        <nav
+          aria-label="Folder breadcrumb"
+          // Owns the full width of the header. Allows horizontal
+          // scrolling when the path gets too long instead of clipping
+          // or wrapping to two lines.
+          className="flex items-center gap-1 overflow-x-auto whitespace-nowrap text-lg"
+        >
+          {breadcrumb.map((seg, i) => (
+            <span
+              key={`${String(seg.depth)}-${seg.label}`}
+              className="flex shrink-0 items-center gap-1"
             >
-              {breadcrumb.map((seg, i) => (
+              {i > 0 ? (
                 <span
-                  key={`${String(seg.depth)}-${seg.label}`}
-                  className="flex min-w-0 items-center gap-1"
+                  aria-hidden
+                  className="shrink-0 select-none text-base text-muted-foreground/50"
                 >
-                  {i > 0 ? (
-                    <span
-                      aria-hidden
-                      // Smaller and lower-contrast than the segments
-                      // so the eye reads the names, not the chevrons.
-                      className="shrink-0 select-none text-base text-muted-foreground/50"
-                    >
-                      ›
-                    </span>
-                  ) : null}
-                  {seg.current ? (
-                    <span
-                      aria-current="page"
-                      // Slight emphasis on the current location:
-                      // semibold + foreground colour. All segments
-                      // share the same size (text-lg from the parent).
-                      className="truncate font-semibold text-foreground"
-                      title={seg.label}
-                    >
-                      {seg.label}
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => navigateToDepth(seg.depth)}
-                      className="truncate rounded -mx-1 px-1 text-muted-foreground hover:text-foreground focus-visible:text-foreground hover:underline focus-visible:underline focus-visible:outline-none"
-                      title={`Go to ${seg.label}`}
-                    >
-                      {seg.label}
-                    </button>
-                  )}
+                  ›
                 </span>
-              ))}
-            </nav>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {visibleNonSystem} ROMs · {hiddenNonSystem} hidden
-              {systemCount > 0 ? <> · {systemCount} system</> : null}
-            </p>
-          </div>
-          <div className="flex flex-wrap justify-end gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onHideAll}
-              disabled={candidates.every((r) => r.hidden)}
-            >
-              Hide all
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onShowAll}
-              disabled={candidates.every((r) => !r.hidden)}
-            >
-              Unhide all
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onHideSelected}
-              disabled={visibleSelectedCount === 0}
-            >
-              Hide selected ({visibleSelectedCount})
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onShowSelected}
-              disabled={hiddenSelectedCount === 0}
-            >
-              Unhide selected ({hiddenSelectedCount})
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void onMarkSelectedAsSystem()}
-              disabled={markableSelected.length === 0}
-              title="Treat the selected files as system files (BIOS, palette, config). Hidden by default; visible when 'Show system files' is on."
-            >
-              Mark as system ({markableSelected.length})
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void onUnmarkSelected()}
-              disabled={unmarkableSelected.length === 0}
-              title="Remove the user-system mark from the selected files. Auto-detected system files are not affected."
-            >
-              Unmark system ({unmarkableSelected.length})
-            </Button>
-          </div>
+              ) : null}
+              {seg.current ? (
+                <span
+                  aria-current="page"
+                  className="font-semibold text-foreground"
+                  title={seg.label}
+                >
+                  {seg.label}
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => navigateToDepth(seg.depth)}
+                  className="rounded -mx-1 px-1 text-muted-foreground hover:text-foreground focus-visible:text-foreground hover:underline focus-visible:underline focus-visible:outline-none"
+                  title={`Go to ${seg.label}`}
+                >
+                  {seg.label}
+                </button>
+              )}
+            </span>
+          ))}
+        </nav>
+        <p className="text-xs text-muted-foreground">
+          {visibleNonSystem} ROMs · {hiddenNonSystem} hidden
+          {systemCount > 0 ? <> · {systemCount} system</> : null}
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onHideAll}
+            disabled={candidates.every((r) => r.hidden)}
+          >
+            Hide all
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onShowAll}
+            disabled={candidates.every((r) => !r.hidden)}
+          >
+            Unhide all
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onHideSelected}
+            disabled={visibleSelectedCount === 0}
+          >
+            Hide selected ({visibleSelectedCount})
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onShowSelected}
+            disabled={hiddenSelectedCount === 0}
+          >
+            Unhide selected ({hiddenSelectedCount})
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void onMarkSelectedAsSystem()}
+            disabled={markableSelected.length === 0}
+            title="Treat the selected files as system files (BIOS, palette, config). Hidden by default; visible when 'Show system files' is on."
+          >
+            Mark as system ({markableSelected.length})
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void onUnmarkSelected()}
+            disabled={unmarkableSelected.length === 0}
+            title="Remove the user-system mark from the selected files. Auto-detected system files are not affected."
+          >
+            Unmark system ({unmarkableSelected.length})
+          </Button>
         </div>
-        <div className="mt-3 flex flex-wrap gap-4 text-xs">
+        <div className="flex flex-wrap gap-4 text-xs">
           <label className="flex items-center gap-1.5">
             <input
               type="checkbox"

@@ -142,6 +142,15 @@ describe('FakeMisterClient', () => {
     await expect(client.listRoms('TurboGrafx')).rejects.toThrow(/Unknown core/);
   });
 
+  it('throws "Unknown core" when listing a subPath that does not exist on a real core', async () => {
+    // Round 12 regression case — the renderer-side bug was firing
+    // `listRoms('NES', '<stale-subpath-from-previous-core>')` after
+    // switching cores while drilled in. The data layer correctly
+    // rejects the call; the renderer's job is to never make it.
+    await expect(client.listRoms('NES', 'Some Container That Does Not Exist'))
+      .rejects.toThrow(/Unknown core/);
+  });
+
   it('hides a visible ROM by renaming it on disk', async () => {
     const before = await client.listRoms('NES');
     const visible = before.find((r) => !r.hidden);
