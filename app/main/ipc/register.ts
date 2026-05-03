@@ -4,9 +4,23 @@ import { BrowserWindow, dialog, ipcMain } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
 
 import { IPC_CHANNELS } from '@shared/preload-api';
-import type { PickedKeyFile, RomVisibilityChangeWire } from '@shared/preload-api';
-import type { MisterSecret } from '@shared/mister-client';
-import type { MisterProfile } from '@shared/types';
+import type {
+  ConnectResult,
+  CoreVisibilityChangeWire,
+  PickedKeyFile,
+  RomVisibilityChangeWire,
+  SystemFileMarkChangeWire,
+} from '@shared/preload-api';
+import type {
+  BulkCoreResult,
+  BulkRomResult,
+  MisterSecret,
+} from '@shared/mister-client';
+import type {
+  FolderClassifications,
+  MisterProfile,
+  SystemFilesMarks,
+} from '@shared/types';
 
 import type { ConnectionManager } from '@app/main/ipc/connection-manager';
 import type { ProfileStore } from '@app/main/storage/profile-store';
@@ -39,7 +53,7 @@ export function registerIpcHandlers(
     store.delete(profileId),
   );
 
-  handle<[string], void>(IPC_CHANNELS.connect, (profileId) =>
+  handle<[string], ConnectResult>(IPC_CHANNELS.connect, (profileId) =>
     manager.connect(profileId),
   );
 
@@ -47,21 +61,76 @@ export function registerIpcHandlers(
 
   handle(IPC_CHANNELS.getConnectionStatus, () => manager.getStatus());
 
-  handle(IPC_CHANNELS.listCores, () => manager.listCores());
+  handle(IPC_CHANNELS.listAllCoresWithFiles, () => manager.listAllCoresWithFiles());
 
-  handle<[string], unknown>(IPC_CHANNELS.listRoms, (coreId) =>
-    manager.listRoms(coreId),
+  handle<[string, string | undefined], unknown>(
+    IPC_CHANNELS.listRoms,
+    (coreId, subPath) => manager.listRoms(coreId, subPath),
   );
 
-  handle<[string, string, boolean], void>(
+  handle<[string, string, boolean, string | undefined], void>(
     IPC_CHANNELS.setRomVisibility,
-    (coreId, filename, hidden) =>
-      manager.setRomVisibility(coreId, filename, hidden),
+    (coreId, filename, hidden, subPath) =>
+      manager.setRomVisibility(coreId, filename, hidden, subPath),
   );
 
-  handle<[string, readonly RomVisibilityChangeWire[]], void>(
+  handle<
+    [string, readonly RomVisibilityChangeWire[], string | undefined],
+    BulkRomResult
+  >(
     IPC_CHANNELS.setBulkRomVisibility,
-    (coreId, changes) => manager.setBulkRomVisibility(coreId, changes),
+    (coreId, changes, subPath) =>
+      manager.setBulkRomVisibility(coreId, changes, subPath),
+  );
+
+  handle<[string], void>(IPC_CHANNELS.hideCore, (coreId) =>
+    manager.hideCore(coreId),
+  );
+
+  handle<[string], void>(IPC_CHANNELS.showCore, (coreId) =>
+    manager.showCore(coreId),
+  );
+
+  handle<
+    [readonly CoreVisibilityChangeWire[], { readonly operationId?: string } | undefined],
+    BulkCoreResult
+  >(
+    IPC_CHANNELS.setBulkCoreVisibility,
+    (changes, options) => manager.setBulkCoreVisibility(changes, options),
+  );
+
+  handle<[], SystemFilesMarks>(IPC_CHANNELS.listSystemFileMarks, () =>
+    manager.listSystemFileMarks(),
+  );
+
+  handle<[string, string], SystemFilesMarks>(
+    IPC_CHANNELS.addSystemFileMark,
+    (coreId, filename) => manager.addSystemFileMark(coreId, filename),
+  );
+
+  handle<[string, string], SystemFilesMarks>(
+    IPC_CHANNELS.removeSystemFileMark,
+    (coreId, filename) => manager.removeSystemFileMark(coreId, filename),
+  );
+
+  handle<[string, readonly SystemFileMarkChangeWire[]], SystemFilesMarks>(
+    IPC_CHANNELS.setSystemFileMarks,
+    (coreId, changes) => manager.setSystemFileMarks(coreId, changes),
+  );
+
+  handle<[], FolderClassifications>(IPC_CHANNELS.listFolderClassifications, () =>
+    manager.listFolderClassifications(),
+  );
+
+  handle<
+    [string, string, 'container' | 'atomic' | null],
+    FolderClassifications
+  >(IPC_CHANNELS.setFolderClassification, (coreId, folderPath, classification) =>
+    manager.setFolderClassification(
+      coreId,
+      folderPath,
+      classification ?? undefined,
+    ),
   );
 
   ipcMain.handle(

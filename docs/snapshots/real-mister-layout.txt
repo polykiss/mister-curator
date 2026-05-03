@@ -1,0 +1,455 @@
+=== /media/fat/ top level ===
+total 8324
+drwxr-xr-x  27 root root  131072 May  2 14:19 .
+drwxr-xr-x  12 root root    4096 Apr  2  2025 ..
+-rwxr-xr-x   1 root root  932024 May  1 03:46 .MiSTer.old
+drwxr-xr-x   3 root root  131072 Feb 27  2024 .Spotlight-V100
+drwxr-xr-x   2 root root  131072 Feb 27  2024 .fseventsd
+drwxr-xr-x   2 root root  131072 May  2 15:51 .mistercurator
+drwxr-xr-x  15 root root  131072 May  1 03:41 Cheats
+drwxr-xr-x  11 root root  131072 May  1 03:41 Filters
+drwxr-xr-x   5 root root  131072 Feb 27  2024 Filters_Audio
+drwxr-xr-x   5 root root  131072 Feb 27  2024 Gamma
+-rwxr-xr-x   1 root root 1014152 May  1 03:46 MiSTer
+-rwxr-xr-x   1 root root   19016 May  1 03:46 MiSTer_example.ini
+drwxr-xr-x   5 root root  131072 Feb 27  2024 Presets
+drwxr-xr-x   3 root root  131072 May  1 03:46 Scripts
+drwxr-xr-x   4 root root  131072 Feb 27  2024 Shadow_Masks
+drwxr-xr-x   6 root root  131072 May  2 14:21 _Arcade
+drwxr-xr-x   2 root root  131072 May  2 15:42 _Computer
+drwxr-xr-x   3 root root  131072 May  2 15:43 _Console
+drwxr-xr-x   2 root root  131072 Feb 27  2024 _Console (autoboot)
+drwxr-xr-x   2 root root  131072 May  2 15:42 _Other
+drwxr-xr-x   2 root root  131072 May  2 15:42 _Utility
+drwxr-xr-x   5 root root  131072 May  1 04:16 config
+drwxr-xr-x 133 root root  131072 May  1 03:47 docs
+-rwxr-xr-x   1 root root     766 May  1 03:37 downloader.ini
+drwxr-xr-x   2 root root  131072 May  1 03:47 font
+drwxr-xr-x 126 root root  131072 May  2 15:50 games
+drwxr-xr-x   5 root root  131072 May  1 03:49 linux
+-rwxr-xr-x   1 root root 2503988 May  1 03:46 menu.rbf
+drwxr-xr-x  11 root root  131072 Mar  5  2024 saves
+drwxr-xr-x   4 root root  131072 Mar  5  2024 savestates
+drwxr-xr-x   4 root root  131072 May  1 03:07 screenshots
+drwxr-xr-x   2 root root  131072 May  1 03:47 wallpapers
+-rwxr-xr-x   1 root root   11833 May  1 03:46 yc.txt
+
+=== /media/fat/_Console/ ===
+total 141696
+drwxr-xr-x  3 root root  131072 May  2 15:43 .
+drwxr-xr-x 27 root root  131072 May  2 14:19 ..
+-rwxr-xr-x  1 root root 2501516 May  1 03:45 .AY-3-8500_20250903.rbf
+-rwxr-xr-x  1 root root 2620844 May  1 03:45 .AdventureVision_20260322.rbf
+-rwxr-xr-x  1 root root 2532916 May  1 03:45 .Arcadia_20250907.rbf
+-rwxr-xr-x  1 root root     110 May  1 03:45 .Atari 2600.mgl
+-rwxr-xr-x  1 root root 2721632 May  1 03:45 .Atari5200_20260325.rbf
+-rwxr-xr-x  1 root root 3597648 May  1 03:45 .Atari7800_20240423.rbf
+-rwxr-xr-x  1 root root 3387560 May  1 03:45 .BBCBridgeCompanion_20250101.rbf
+-rwxr-xr-x  1 root root 2785500 May  1 03:45 .CDi_20250626.rbf
+-rwxr-xr-x  1 root root 2665496 May  1 03:45 .Casio_PV-1000_20250622.rbf
+-rwxr-xr-x  1 root root 2543496 May  1 03:45 .ChannelF_20250907.rbf
+-rwxr-xr-x  1 root root 2797096 May  1 03:46 .ColecoVision_20240502.rbf
+-rwxr-xr-x  1 root root 4499320 May  1 03:46 .GBA2P_20250916.rbf
+-rwxr-xr-x  1 root root     103 May  1 03:46 .Game Gear.mgl
+-rwxr-xr-x  1 root root 4012588 May  1 03:46 .Gameboy2P_20250621.rbf
+-rwxr-xr-x  1 root root     102 May  1 03:46 .GameboyColor.mgl
+-rwxr-xr-x  1 root root 3802200 May  1 03:46 .Gameboy_20250618.rbf
+-rwxr-xr-x  1 root root 2901964 May  1 03:46 .GnW_20250717.rbf
+-rwxr-xr-x  1 root root 3327712 May  1 03:46 .Intellivision_20250903.rbf
+-rwxr-xr-x  1 root root     107 May  1 03:46 .Mega Duck.mgl
+-rwxr-xr-x  1 root root 4187500 May  1 03:46 .MegaCD_20251015.rbf
+-rwxr-xr-x  1 root root 2748440 May  1 03:46 .MyVision_20250622.rbf
+-rwxr-xr-x  1 root root  148768 Feb 28  2024 .N64YCBeta_20240223.rbf
+-rwxr-xr-x  1 root root 3384948 May  1 03:40 .NeoGeoPocket.rbf
+-rwxr-xr-x  1 root root 3683024 May  1 03:46 .NeoGeo_20250909.rbf
+-rwxr-xr-x  1 root root 2853460 May  1 03:46 .Odyssey2_20250717.rbf
+-rwxr-xr-x  1 root root     119 May  1 03:46 .Pocket Challenge V2.mgl
+-rwxr-xr-x  1 root root 2735732 May  1 03:46 .PokemonMini_20250903.rbf
+-rwxr-xr-x  1 root root 3022456 May  1 03:46 .SCV_20250906.rbf
+-rwxr-xr-x  1 root root 4618020 May  1 03:46 .Saturn_20251003.rbf
+-rwxr-xr-x  1 root root 2745056 May  1 03:46 .SuperVision_20250708.rbf
+-rwxr-xr-x  1 root root 2686360 May  1 03:46 .Super_Vision_8000_20250622.rbf
+-rwxr-xr-x  1 root root 4232960 May  1 03:46 .TurboGrafx16_20250830.rbf
+-rwxr-xr-x  1 root root 2536952 May  1 03:46 .VC4000_20250907.rbf
+-rwxr-xr-x  1 root root 3712928 May  1 03:46 .Vectrex_20240524.rbf
+-rwxr-xr-x  1 root root     117 May  1 03:46 .WonderSwan Color.mgl
+drwxr-xr-x  2 root root  131072 Mar  5  2024 ._hidden
+-rwxr-xr-x  1 root root 2750740 May  1 03:45 Astrocade_20240502.rbf
+-rwxr-xr-x  1 root root 3154124 May  1 03:45 AtariLynx_20260129.rbf
+-rwxr-xr-x  1 root root 2815348 May  1 03:46 CreatiVision_20260303.rbf
+-rwxr-xr-x  1 root root 4280756 May  1 03:46 GBA_20250705.rbf
+-rwxr-xr-x  1 root root 2693508 May  1 03:46 Gamate_20250708.rbf
+-rwxr-xr-x  1 root root 4257128 May  1 03:46 MegaDrive_20250707.rbf
+-rwxr-xr-x  1 root root 3927508 May  1 03:46 N64_20260108.rbf
+-rwxr-xr-x  1 root root 3299036 May  1 03:46 NES_20251013.rbf
+-rwxr-xr-x  1 root root 4343992 May  1 03:46 PSX_20260411.rbf
+-rwxr-xr-x  1 root root 4191732 May  1 03:46 S32X_20240418.rbf
+-rwxr-xr-x  1 root root 4112612 May  1 03:46 SGB_20241127.rbf
+-rwxr-xr-x  1 root root 3326972 May  1 03:46 SMS_20240418.rbf
+-rwxr-xr-x  1 root root 4434968 May  1 03:46 SNES_20260325.rbf
+-rwxr-xr-x  1 root root 3518228 May  1 03:46 WonderSwan_20260129.rbf
+
+=== /media/fat/_Computer/ ===
+total 220288
+drwxr-xr-x  2 root root  131072 May  2 15:42 .
+drwxr-xr-x 27 root root  131072 May  2 14:19 ..
+-rwxr-xr-x  1 root root 3315744 May  1 03:45 .AcornElectron_20250930.rbf
+-rwxr-xr-x  1 root root 2536644 Feb 27  2024 .AliceMC10_20210116.rbf
+-rwxr-xr-x  1 root root 3417676 May  1 03:45 .Amstrad-PCW_20250621.rbf
+-rwxr-xr-x  1 root root 2819860 May  1 03:45 .Apogee_20240502.rbf
+-rwxr-xr-x  1 root root 3590020 May  1 03:45 .Apple-II_20241226.rbf
+-rwxr-xr-x  1 root root 2912796 May  1 03:45 .Apple-I_20251001.rbf
+-rwxr-xr-x  1 root root 2952436 May  1 03:45 .Aquarius_20240502.rbf
+-rwxr-xr-x  1 root root 2748380 May  1 03:45 .Archie_20240502.rbf
+-rwxr-xr-x  1 root root 4062060 May  1 03:45 .Atari800_20260325.rbf
+-rwxr-xr-x  1 root root 2789172 May  1 03:45 .AtariST_20240423.rbf
+-rwxr-xr-x  1 root root 3806708 May  1 03:45 .BBCMicro_20240502.rbf
+-rwxr-xr-x  1 root root 3196400 May  1 03:45 .BK0011M_20240502.rbf
+-rwxr-xr-x  1 root root 3294844 May  1 03:45 .C16_20240418.rbf
+-rwxr-xr-x  1 root root 3523404 May  1 03:45 .CoCo3_20240514.rbf
+-rwxr-xr-x  1 root root 3144920 May  1 03:45 .ColecoAdam_20250905.rbf
+-rwxr-xr-x  1 root root 2941708 May  1 03:45 .EDSAC_20250904.rbf
+-rwxr-xr-x  1 root root 3137024 May  1 03:45 .Enterprise_20251125.rbf
+-rwxr-xr-x  1 root root 2597716 May  1 03:45 .Galaksija_20251007.rbf
+-rwxr-xr-x  1 root root 3042964 May  1 03:45 .Homelab_20250906.rbf
+-rwxr-xr-x  1 root root 2974316 May  1 03:45 .IQ151_20251219.rbf
+-rwxr-xr-x  1 root root 2816888 May  1 03:45 .Interact_20251005.rbf
+-rwxr-xr-x  1 root root 2724880 May  1 03:45 .Jupiter_20251001.rbf
+-rwxr-xr-x  1 root root 2801044 May  1 03:45 .Laser310_20250907.rbf
+-rwxr-xr-x  1 root root 3095860 May  1 03:45 .Lynx48_20250907.rbf
+-rwxr-xr-x  1 root root 2682816 May  1 03:45 .MacPlus_20250325.rbf
+-rwxr-xr-x  1 root root 3489580 May  1 03:45 .Minimig_20260220.rbf
+-rwxr-xr-x  1 root root 3702024 May  1 03:45 .MultiComp_20250106.rbf
+-rwxr-xr-x  1 root root 2741244 May  1 03:45 .ORAO_20240729.rbf
+-rwxr-xr-x  1 root root 2897500 May  1 03:45 .Ondra_SPO186_20251219.rbf
+-rwxr-xr-x  1 root root 3263900 May  1 03:45 .Oric_20240524.rbf
+-rwxr-xr-x  1 root root 2956676 May  1 03:45 .PC88_20260415.rbf
+-rwxr-xr-x  1 root root 3891148 May  1 03:45 .PCXT_20260312.rbf
+-rwxr-xr-x  1 root root 3585720 May  1 03:45 .PCjr_20260313.rbf
+-rwxr-xr-x  1 root root 3339060 Feb 27  2024 .PDP1_20190101.rbf
+-rwxr-xr-x  1 root root 2773796 May  1 03:45 .PMD85_20251219.rbf
+-rwxr-xr-x  1 root root 3076816 May  1 03:45 .RX78_20250717.rbf
+-rwxr-xr-x  1 root root 2826140 May  1 03:45 .SAMCoupe_20240421.rbf
+-rwxr-xr-x  1 root root 3620344 Feb 27  2024 .SharpMZ_20210709.rbf
+-rwxr-xr-x  1 root root 3739268 May  1 03:45 .SordM5_20250903.rbf
+-rwxr-xr-x  1 root root 3634156 May  1 03:45 .Specialist_20240524.rbf
+-rwxr-xr-x  1 root root 3352216 May  1 03:45 .Svi328_20241016.rbf
+-rwxr-xr-x  1 root root 2751144 May  1 03:45 .TK2000_20251124.rbf
+-rwxr-xr-x  1 root root 3708164 May  1 03:45 .Tandy1000_20260312.rbf
+-rwxr-xr-x  1 root root 3311576 May  1 03:45 .TatungEinstein_20250907.rbf
+-rwxr-xr-x  1 root root 2839664 May  1 03:45 .Ti994a_20251203.rbf
+-rwxr-xr-x  1 root root 3060640 May  1 03:45 .UK101_20240528.rbf
+-rwxr-xr-x  1 root root 3051692 May  1 03:45 .VIC20_20240418.rbf
+-rwxr-xr-x  1 root root 2847408 May  1 03:45 .VT52_20241120.rbf
+-rwxr-xr-x  1 root root 3736056 May  1 03:45 .Vector-06C_20240524.rbf
+-rwxr-xr-x  1 root root 3238604 May  1 03:45 .ZX-Spectrum_20240421.rbf
+-rwxr-xr-x  1 root root 2886968 May  1 03:45 .ZX81_20240421.rbf
+-rwxr-xr-x  1 root root 4151068 May  1 03:45 .ao486_20241227.rbf
+-rwxr-xr-x  1 root root 3221656 Feb 27  2024 .eg2000_20220930.rbf
+-rwxr-xr-x  1 root root 3062244 May  1 03:45 AcornAtom_20251001.rbf
+-rwxr-xr-x  1 root root 3187292 May  1 03:45 Altair8800_20241230.rbf
+-rwxr-xr-x  1 root root 2798688 May  1 03:45 Amstrad_20240421.rbf
+-rwxr-xr-x  1 root root 3977108 May  1 03:45 C128_20260209.rbf
+-rwxr-xr-x  1 root root 3767168 May  1 03:45 C64_20250828.rbf
+-rwxr-xr-x  1 root root 2817432 May  1 03:45 Casio_PV-2000_20250622.rbf
+-rwxr-xr-x  1 root root 3246868 May  1 03:45 CoCo2_20250312.rbf
+-rwxr-xr-x  1 root root 3725848 May  1 03:45 MSX1_20250108.rbf
+-rwxr-xr-x  1 root root 2677180 May  1 03:45 MSX_20240524.rbf
+-rwxr-xr-x  1 root root 2717212 May  1 03:45 PET2001_20240418.rbf
+-rwxr-xr-x  1 root root 3632400 May  1 03:45 QL_20240524.rbf
+-rwxr-xr-x  1 root root 3546776 May  1 03:45 TRS-80_20251209.rbf
+-rwxr-xr-x  1 root root 3140636 May  1 03:45 TSConf_20240421.rbf
+-rwxr-xr-x  1 root root 3152628 May  1 03:45 TomyTutor_20250622.rbf
+-rwxr-xr-x  1 root root 3677356 May  1 03:45 X68000_20240524.rbf
+-rwxr-xr-x  1 root root 3077592 May  1 03:45 ZXNext_20241227.rbf
+
+=== /media/fat/_Other/ ===
+total 33792
+drwxr-xr-x  2 root root  131072 May  2 15:42 .
+drwxr-xr-x 27 root root  131072 May  2 14:19 ..
+-rwxr-xr-x  1 root root 2704752 May  1 03:46 .Arduboy_20250824.rbf
+-rwxr-xr-x  1 root root 3711324 May  1 03:46 .Chess_20240410.rbf
+-rwxr-xr-x  1 root root 2517348 May  1 03:46 .Chip8_20250905.rbf
+-rwxr-xr-x  1 root root 2449564 May  1 03:46 .Donut_20250217.rbf
+-rwxr-xr-x  1 root root 2527044 May  1 03:46 .FlappyBird_20250708.rbf
+-rwxr-xr-x  1 root root 3412260 May  1 03:46 .GBMidi_20240811.rbf
+-rwxr-xr-x  1 root root 3210568 Feb 27  2024 .GameOfLife_20200430.rbf
+-rwxr-xr-x  1 root root 3704804 May  1 03:46 .GenMidi_20240817.rbf
+-rwxr-xr-x  1 root root 2498892 May  1 03:46 .SlugCross_20240727.rbf
+-rwxr-xr-x  1 root root 3292968 May  1 03:46 EpochGalaxyII_20250717.rbf
+-rwxr-xr-x  1 root root 3291092 May  1 03:46 TomyScramble_20250823.rbf
+
+=== /media/fat/_Utility/ ===
+total 11392
+drwxr-xr-x  2 root root  131072 May  2 15:42 .
+drwxr-xr-x 27 root root  131072 May  2 14:19 ..
+-rwxr-xr-x  1 root root 2488868 May  1 03:46 .ADCTest_20250619.rbf
+-rwxr-xr-x  1 root root 3209484 May  1 03:46 .InputTest_20240727.rbf
+-rwxr-xr-x  1 root root 3080428 May  1 03:46 .MiSTerLaggy_20241113.rbf
+-rwxr-xr-x  1 root root 2396496 Feb 27  2024 .memtest_20210130.rbf
+
+=== /media/fat/_Arcade/ (first 20 entries) ===
+total 138240
+drwxr-xr-x   6 root root  131072 May  2 14:21 .
+drwxr-xr-x  27 root root  131072 May  2 14:19 ..
+drwxr-xr-x   2 root root  131072 Mar  2  2024 ._hidden
+-rwxr-xr-x   1 root root    4275 May  1 03:40 1941 Counter Attack (World 900227).mra
+-rwxr-xr-x   1 root root    5466 May  1 03:40 1942 (Revision B).mra
+-rwxr-xr-x   1 root root    6034 May  1 03:40 1943 Kai Midway Kaisen (Japan).mra
+-rwxr-xr-x   1 root root    6000 May  1 03:40 1943 The Battle of Midway (Euro).mra
+-rwxr-xr-x   1 root root    5952 May  1 03:40 1943 The Battle of Midway Mark II (US).mra
+-rwxr-xr-x   1 root root    4200 May  1 03:40 1944 The Loop Master (Europe 000620).mra
+-rwxr-xr-x   1 root root    4373 May  1 03:40 19XX The War Against Destiny (Europe 960104).mra
+-rwxr-xr-x   1 root root  703469 May  1 03:41 280Z-ZZAP (US).mra
+-rwxr-xr-x   1 root root    3167 May  1 03:41 4D Warriors (315-5162).mra
+-rwxr-xr-x   1 root root    3288 May  1 03:41 ASO.mra
+-rwxr-xr-x   1 root root    5661 May  1 03:40 Ace Attacker (Japan, S16A) [FD1094 317-0060].mra
+-rwxr-xr-x   1 root root    6979 May  1 03:40 Action Fighter (World, S16A) [FD1089A 317-0018].mra
+-rwxr-xr-x   1 root root    2777 May  1 03:41 Adventure Canoe.mra
+-rwxr-xr-x   1 root root    5168 May  1 03:40 Adventure Quiz Capcom World 2 (Japan 920611).mra
+-rwxr-xr-x   1 root root    2550 May  1 03:41 Ah Eikou no Koshien (Japan).mra
+-rwxr-xr-x   1 root root    3845 May  1 03:41 Air Assault (World).mra
+-rwxr-xr-x   1 root root    3144 May  1 03:41 Air Duel (World, M72 hardware).mra
+-rwxr-xr-x   1 root root    6608 May  1 03:40 Ajax.mra
+-rwxr-xr-x   1 root root    2225 May  1 03:41 Alcon Bootleg.mra
+-rwxr-xr-x   1 root root    5688 May  1 03:40 Alex Kidd The Lost Stars (Set 2, World, S16A) [No Protection].mra
+-rwxr-xr-x   1 root root    2483 May  1 03:41 Ali Baba and 40 Thieves.mra
+
+=== /media/fat/_Arcade/ entry counts ===
+_Arcade total entries: 805
+_Arcade .mra count:    802
+_Arcade .rbf count:    0
+_Arcade .mgl count:    0
+_Arcade subdirs:       4
+
+=== /media/fat/games/ top level ===
+total 16128
+drwxr-xr-x 126 root root 131072 May  2 15:50 .
+drwxr-xr-x  27 root root 131072 May  2 14:19 ..
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .APOGEE
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .APPLE-I
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .AQUARIUS
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .ATARI5200
+drwxr-xr-x   3 root root 131072 Feb 27  2024 .ATARI7800
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .AVision
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .AY-3-8500
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .AcornElectron
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .Adam
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .AliceMC10
+drwxr-xr-x   3 root root 131072 May  1 03:41 .Amstrad PCW
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .Apple-II
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .Arcadia
+drwxr-xr-x   3 root root 131072 Feb 27  2024 .Atari2600
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .AtariST
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .BBCBridgeCompanion
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .BBCMicro
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .BK0011M
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .C16
+drwxr-xr-x   2 root root 131072 May  1 03:41 .CD-i
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .Casio_PV-1000
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .ChannelF
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .Coleco
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .EDSAC
+drwxr-xr-x   2 root root 131072 May  1 03:41 .Enterprise
+drwxr-xr-x   3 root root 131072 Feb 27  2024 .GAMEBOY2P
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .GBA2P
+drwxr-xr-x   3 root root 131072 Feb 27  2024 .GBC
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .Galaksija
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .GameGear
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .GameNWatch
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .Homelab
+drwxr-xr-x   2 root root 131072 May  1 03:41 .IQ151
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .Intellivision
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .Interact
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .Jupiter
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .Laser
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .Lynx48
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .MACPLUS
+drwxr-xr-x   3 root root 131072 Feb 27  2024 .MEMTEST
+drwxr-xr-x   3 root root 131072 Feb 27  2024 .MegaDuck
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .MultiComp
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .MyVision
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .NeoGeo-CD
+drwxr-xr-x   2 root root 131072 May  1 03:38 .NeoGeoPocket
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .ODYSSEY2
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .ORAO
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .Ondra_SPO186
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .Oric
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .PC8801
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .PCXT
+drwxr-xr-x   2 root root 131072 May  1 03:41 .PCjr
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .PDP1
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .PMD85
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .PocketChallengeV2
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .PokemonMini
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .RX78
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .SAMCOUPE
+drwxr-xr-x   2 root root 131072 May  1 03:41 .SCV
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .SPMX
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .SVI328
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .SharpMZ
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .Sord M5
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .SuperVision
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .SuperVision8000
+drwxr-xr-x   2 root root 131072 May  1 03:41 .TK2000
+drwxr-xr-x   2 root root 131072 May  1 03:41 .Tandy1000
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .TatungEinstein
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .UK101
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .VC4000
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .VECTOR06
+drwxr-xr-x   3 root root 131072 Feb 27  2024 .VECTREX
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .VIC20
+drwxr-xr-x   2 root root 131072 May  1 03:41 .VT52
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .WonderSwanColor
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .ZX81
+drwxr-xr-x   2 root root 131072 Feb 27  2024 .eg2000
+drwxr-xr-x   8 root root 131072 May  1 03:46 AO486
+drwxr-xr-x   2 root root 131072 Feb 27  2024 ARCHIE
+drwxr-xr-x   2 root root 131072 May  1 03:46 ATARI800
+drwxr-xr-x   2 root root 131072 Feb 27  2024 AcornAtom
+drwxr-xr-x   2 root root 131072 May  1 03:46 Altair8800
+drwxr-xr-x   2 root root 131072 Feb 27  2024 Amiga
+drwxr-xr-x   2 root root 131072 Feb 27  2024 Amstrad
+drwxr-xr-x   2 root root 131072 Feb 27  2024 Astrocade
+drwxr-xr-x   2 root root 131072 Feb 27  2024 AtariLynx
+drwxr-xr-x   2 root root 131072 Feb 27  2024 C128
+drwxr-xr-x   2 root root 131072 Feb 27  2024 C64
+drwxr-xr-x   2 root root 131072 Feb 27  2024 COCO3
+drwxr-xr-x   2 root root 131072 Feb 27  2024 Casio_PV-2000
+drwxr-xr-x   2 root root 131072 May  1 03:46 CoCo2
+drwxr-xr-x   2 root root 131072 Feb 27  2024 CreatiVision
+drwxr-xr-x   2 root root 131072 Feb 27  2024 EpochGalaxyII
+drwxr-xr-x   3 root root 131072 May  1 03:47 GAMEBOY
+drwxr-xr-x   2 root root 131072 May  2 14:14 GBA
+drwxr-xr-x   2 root root 131072 Feb 27  2024 Gamate
+drwxr-xr-x   2 root root 131072 Mar  4  2024 MSX
+drwxr-xr-x   2 root root 131072 Mar  4  2024 MSX1
+drwxr-xr-x  27 root root 131072 Mar  5  2024 MegaCD
+drwxr-xr-x   3 root root 131072 Mar  2  2024 MegaDrive
+drwxr-xr-x   2 root root 131072 May  1 03:46 N64
+drwxr-xr-x  11 root root 131072 May  1 03:46 NEOGEO
+drwxr-xr-x   3 root root 131072 Feb 27  2024 NES
+drwxr-xr-x   2 root root 131072 May  1 03:46 PET2001
+drwxr-xr-x   2 root root 131072 May  1 03:38 PSX
+drwxr-xr-x   2 root root 131072 Feb 27  2024 QL
+drwxr-xr-x   2 root root 131072 Mar  4  2024 S32X
+drwxr-xr-x   2 root root 131072 Feb 27  2024 SGB
+drwxr-xr-x   2 root root 131072 Feb 27  2024 SMS
+drwxr-xr-x   3 root root 131072 May  1 03:46 SNES
+drwxr-xr-x  19 root root 131072 Feb 29  2024 Saturn
+drwxr-xr-x   2 root root 131072 Feb 27  2024 Spectrum
+drwxr-xr-x   3 root root 131072 Mar  5  2024 TGFX16
+drwxr-xr-x  31 root root 131072 Mar  5  2024 TGFX16-CD
+drwxr-xr-x   2 root root 131072 Feb 27  2024 TI-99_4A
+drwxr-xr-x   2 root root 131072 Feb 27  2024 TRS-80
+drwxr-xr-x   2 root root 131072 Feb 27  2024 TSConf
+drwxr-xr-x   2 root root 131072 Feb 27  2024 TomyScramble
+drwxr-xr-x   2 root root 131072 Feb 27  2024 TomyTutor
+drwxr-xr-x   2 root root 131072 Feb 27  2024 WonderSwan
+drwxr-xr-x 649 root root 131072 Feb 29  2024 X68000
+drwxr-xr-x   2 root root 131072 May  1 03:47 ZXNext
+drwxr-xr-x   2 root root 131072 Feb 27  2024 hbmame
+drwxr-xr-x   2 root root 131072 Feb 27  2024 mame
+
+=== /media/fat/games/ shape per directory ===
+AO486                          files=4     dirs=6     hidden=0  
+ARCHIE                         files=1     dirs=0     hidden=0  
+ATARI800                       files=6     dirs=0     hidden=0  
+AcornAtom                      files=1     dirs=0     hidden=0  
+Altair8800                     files=8     dirs=0     hidden=0  
+Amiga                          files=1     dirs=0     hidden=0  
+Amstrad                        files=2     dirs=0     hidden=0  
+Astrocade                      files=1     dirs=0     hidden=0  
+AtariLynx                      files=1     dirs=0     hidden=0  
+C128                           files=10    dirs=0     hidden=0  
+C64                            files=8     dirs=0     hidden=0  
+COCO3                          files=3     dirs=0     hidden=0  
+Casio_PV-2000                  files=1     dirs=0     hidden=0  
+CoCo2                          files=4     dirs=0     hidden=0  
+CreatiVision                   files=1     dirs=0     hidden=0  
+EpochGalaxyII                  files=1     dirs=0     hidden=0  
+GAMEBOY                        files=1     dirs=1     hidden=0  
+GBA                            files=62    dirs=0     hidden=0  
+Gamate                         files=1     dirs=0     hidden=0  
+MSX                            files=32    dirs=0     hidden=0  
+MSX1                           files=33    dirs=0     hidden=0  
+MegaCD                         files=1     dirs=25    hidden=0  
+MegaDrive                      files=44    dirs=1     hidden=0  
+N64                            files=46    dirs=0     hidden=0  
+NEOGEO                         files=12    dirs=9     hidden=0  
+NES                            files=25    dirs=1     hidden=0  
+PET2001                        files=3     dirs=0     hidden=0  
+PSX                            files=6     dirs=0     hidden=0  
+QL                             files=4     dirs=0     hidden=0  
+S32X                           files=21    dirs=0     hidden=0  
+SGB                            files=2     dirs=0     hidden=0  
+SMS                            files=1     dirs=0     hidden=0  
+SNES                           files=33    dirs=1     hidden=0  
+Saturn                         files=1     dirs=17    hidden=0  
+Spectrum                       files=3     dirs=0     hidden=0  
+TGFX16-CD                      files=1     dirs=29    hidden=0  
+TGFX16                         files=50    dirs=1     hidden=0  
+TI-99_4A                       files=1     dirs=0     hidden=0  
+TRS-80                         files=4     dirs=0     hidden=0  
+TSConf                         files=2     dirs=0     hidden=0  
+TomyScramble                   files=1     dirs=0     hidden=0  
+TomyTutor                      files=3     dirs=0     hidden=0  
+WonderSwan                     files=2     dirs=0     hidden=0  
+X68000                         files=3     dirs=647   hidden=0  
+ZXNext                         files=1     dirs=0     hidden=0  
+hbmame                         files=27    dirs=0     hidden=0  
+mame                           files=633   dirs=0     hidden=0  
+
+=== Sample folder-shaped ROMs (Saturn) ===
+Baku Baku Animal - World Zookeeper Contest (USA)
+Burning Rangers (USA)
+Castlevania - Symphony of the Night (v1.021 + Hotfix)
+Grandia (English v1.1.1)
+Mega Man X4 (USA)
+Nights Into Dreams... (USA) (DW0453)
+Panzer Dragoon (USA) (1S)
+Panzer Dragoon II Zwei (USA)
+Panzer Dragoon Saga (USA)
+Policenauts (English v1.01) (Disc 1)
+
+=== Sample folder-shaped ROMs (MegaCD) ===
+After Burner 3
+BC Racers
+Cadillacs & Dinosaurs - The Second Cataclysm
+Dark Wizard
+Dragons Lair
+Eternal Champions
+Europe
+Heart Of The Alien
+Japan
+Popful Mail
+
+=== Inside one Saturn game folder ===
+folder: Baku Baku Animal - World Zookeeper Contest (USA)
+total 615808
+drwxr-xr-x  2 root root    131072 Feb 28  2024 .
+drwxr-xr-x 19 root root    131072 Feb 29  2024 ..
+-rwxr-xr-x  1 root root 177218496 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 01).bin
+-rwxr-xr-x  1 root root  26989200 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 02).bin
+-rwxr-xr-x  1 root root  29289456 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 03).bin
+-rwxr-xr-x  1 root root  28576800 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 04).bin
+-rwxr-xr-x  1 root root  28405104 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 05).bin
+-rwxr-xr-x  1 root root  27200880 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 06).bin
+-rwxr-xr-x  1 root root   1716960 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 07).bin
+-rwxr-xr-x  1 root root   8676528 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 08).bin
+-rwxr-xr-x  1 root root  11341344 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 09).bin
+-rwxr-xr-x  1 root root  20885760 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 10).bin
+-rwxr-xr-x  1 root root  27911184 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 11).bin
+-rwxr-xr-x  1 root root   1545264 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 12).bin
+-rwxr-xr-x  1 root root  10767456 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 13).bin
+-rwxr-xr-x  1 root root   4941552 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 14).bin
+-rwxr-xr-x  1 root root   3567984 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 15).bin
+-rwxr-xr-x  1 root root  23465904 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 16).bin
+-rwxr-xr-x  1 root root  28376880 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 17).bin
+-rwxr-xr-x  1 root root  28407456 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 18).bin
+-rwxr-xr-x  1 root root  25928448 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 19).bin
+-rwxr-xr-x  1 root root  26563488 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 20).bin
+-rwxr-xr-x  1 root root  37467360 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 21).bin
+-rwxr-xr-x  1 root root  25218144 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 22).bin
+-rwxr-xr-x  1 root root  24216192 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA) (Track 23).bin
+-rwxr-xr-x  1 root root      3294 Feb 28  2024 Baku Baku Animal - World Zookeeper Contest (USA).cue

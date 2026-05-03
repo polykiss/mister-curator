@@ -1,19 +1,107 @@
-import type { IMisterClient, MisterSecret, RomVisibilityChange } from '@shared/mister-client';
-import type { ConnectionStatus, Core, Rom } from '@shared/types';
+import {
+  computeAutoReapplyChanges,
+  isCoreHidden,
+  isRealCore,
+} from '@shared/core-matching';
+import {
+  EMPTY_LEDGER,
+  ledgerEqual,
+  withCoreHidden,
+  withCoreShown,
+} from '@shared/ledger';
+import type {
+  BulkCoreProgress,
+  BulkCoreResult,
+  BulkRomResult,
+  CoreVisibilityChange,
+  IMisterClient,
+  MisterSecret,
+  RomVisibilityChange,
+  SystemFileMarkChange,
+} from '@shared/mister-client';
+import { EMPTY_FOLDER_CLASSIFICATIONS } from '@shared/folder-classifications';
+import { EMPTY_SYSTEM_FILES_MARKS } from '@shared/system-files-marks';
+import type {
+  ConnectionStatus,
+  CoreEntry,
+  FolderClassificationOverride,
+  FolderClassifications,
+  HiddenCoreEntry,
+  HideLedger,
+  Rom,
+  SystemFilesMarks,
+} from '@shared/types';
 
 import type { ProfileStore } from '@app/main/storage/profile-store';
 
 type StatusListener = (status: ConnectionStatus) => void;
+type BulkProgressListener = (event: BulkCoreProgressBroadcast) => void;
+
+/**
+ * Bulk core-visibility progress broadcast to listeners (typically the
+ * window webContents adapter). Wraps the client-level event with an
+ * `operationId` the renderer uses to scope progress to the call it
+ * actually triggered — concurrent or stale ops can't trample each
+ * other's progress bar.
+ */
+export interface BulkCoreProgressBroadcast extends BulkCoreProgress {
+  readonly operationId: string;
+}
+
+export interface ConnectResult {
+  /** Number of cores re-hidden by the auto-reapply step (0 when disabled). */
+  readonly reappliedCount: number;
+}
 
 /**
  * Owns the singleton IMisterClient and the ConnectionStatus state machine.
- * Renderer talks to this through IPC; main pushes status transitions back to
- * any registered listener (typically a window.webContents.send adapter).
+ * The renderer talks to this through IPC; main pushes status transitions
+ * back to any registered listener (typically a webContents.send adapter).
+ *
+ * Owns the on-MiSTer hide ledger. Treats it as a *permission slip*:
+ *
+ *   - The cores list returned to the renderer is enriched with
+ *     `managedByApp = true` iff the ledger has an entry for the core.
+ *     The renderer uses this to gate the un-hide UI and to count
+ *     "hidden externally" cores separately.
+ *   - `showCore` / un-hide paths refuse to operate on a core that is
+ *     NOT in the ledger. Pre-existing dot-prefixed directories from
+ *     MiSTer's stock state (or other tools) are left alone.
+ *   - `hideCore` / hide paths only ever add entries we just renamed.
+ *     The ledger is therefore always a strict subset of the things on
+ *     disk that we intend to manage.
+ *
+ * Ledger I/O is intentionally NOT exposed on the IPC bridge — the
+ * renderer only sees its consequences (managedByApp, the reappliedCount
+ * from connect, success/failure of hide/show).
  */
 export class ConnectionManager {
   private status: ConnectionStatus = 'disconnected';
   private currentProfileId: string | null = null;
   private readonly listeners = new Set<StatusListener>();
+  private readonly bulkProgressListeners = new Set<BulkProgressListener>();
+  private nextOperationId = 1;
+  private coresCache: CoreEntry[] = [];
+  /**
+   * In-memory copy of the on-MiSTer ledger. Populated by `readLedgerFresh`
+   * on connect, and kept in sync with every successful hide/show. The
+   * renderer's cores list is enriched against this cache.
+   */
+  private ledgerCache: HideLedger = EMPTY_LEDGER;
+  /**
+   * In-memory copy of the user-marked system-files list. Populated on
+   * connect and kept in sync with add/remove ops. Passed through to
+   * `client.listAllCoresWithFiles` so the per-core counts respect any
+   * marks the user has placed.
+   */
+  private systemFilesMarksCache: SystemFilesMarks = EMPTY_SYSTEM_FILES_MARKS;
+  /**
+   * In-memory copy of the per-folder classification overrides. Populated
+   * on connect, refreshed on every set. Threaded through `listRoms` so
+   * folder-ROM `kind` reflects user overrides.
+   */
+  private folderClassificationsCache: FolderClassifications =
+    EMPTY_FOLDER_CLASSIFICATIONS;
 
   constructor(
     private readonly client: IMisterClient,
@@ -35,9 +123,15 @@ export class ConnectionManager {
     };
   }
 
-  async connect(profileId: string): Promise<void> {
+  onBulkProgress(listener: BulkProgressListener): () => void {
+    this.bulkProgressListeners.add(listener);
+    return () => {
+      this.bulkProgressListeners.delete(listener);
+    };
+  }
+
+  async connect(profileId: string): Promise<ConnectResult> {
     if (this.status === 'connected') {
-      // Drop the previous connection cleanly before opening a new one.
       try {
         await this.client.disconnect();
       } catch {
@@ -46,6 +140,10 @@ export class ConnectionManager {
     }
 
     this.setStatus('connecting');
+    this.coresCache = [];
+    this.ledgerCache = EMPTY_LEDGER;
+    this.systemFilesMarksCache = EMPTY_SYSTEM_FILES_MARKS;
+    this.folderClassificationsCache = EMPTY_FOLDER_CLASSIFICATIONS;
 
     try {
       const profile = await this.store.get(profileId);
@@ -55,7 +153,23 @@ export class ConnectionManager {
       const secret: MisterSecret = await this.store.getSecret(profileId);
       await this.client.connect(profile, secret);
       this.currentProfileId = profileId;
+
+      // Prime the ledger cache. readHideLedger self-heals as a side
+      // effect — drops stale `_hidden` etc. entries and rewrites.
+      this.ledgerCache = await this.client.readHideLedger();
+      // Prime the system-files marks cache. Cheap (small JSON file) and
+      // we want the cores list to reflect marks immediately.
+      this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
+      this.folderClassificationsCache =
+        await this.client.readFolderClassifications();
+
+      let reappliedCount = 0;
+      if (profile.autoReapplyHides === true) {
+        reappliedCount = await this.runAutoReapply();
+      }
+
       this.setStatus('connected');
+      return { reappliedCount };
     } catch (err) {
       this.currentProfileId = null;
       this.setStatus('error');
@@ -68,31 +182,306 @@ export class ConnectionManager {
       await this.client.disconnect();
     } finally {
       this.currentProfileId = null;
+      this.coresCache = [];
+      this.ledgerCache = EMPTY_LEDGER;
+      this.systemFilesMarksCache = EMPTY_SYSTEM_FILES_MARKS;
+      this.folderClassificationsCache = EMPTY_FOLDER_CLASSIFICATIONS;
       this.setStatus('disconnected');
     }
   }
 
-  async listCores(): Promise<Core[]> {
+  async listAllCoresWithFiles(): Promise<CoreEntry[]> {
     this.assertConnected();
-    return this.client.listCores();
+    const raw = await this.client.listAllCoresWithFiles(
+      this.systemFilesMarksCache,
+    );
+    const enriched = raw.map((c) => ({
+      ...c,
+      managedByApp: this.ledgerHasCore(c.id),
+    }));
+    this.coresCache = enriched;
+    return enriched;
   }
 
-  async listRoms(coreId: string): Promise<Rom[]> {
+  async listSystemFileMarks(): Promise<SystemFilesMarks> {
     this.assertConnected();
-    return this.client.listRoms(coreId);
+    return this.systemFilesMarksCache;
   }
 
-  async setRomVisibility(coreId: string, filename: string, hidden: boolean): Promise<void> {
+  async addSystemFileMark(
+    coreId: string,
+    filename: string,
+  ): Promise<SystemFilesMarks> {
     this.assertConnected();
-    await this.client.setRomVisibility(coreId, filename, hidden);
+    await this.client.addSystemFileMark(coreId, filename);
+    this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
+    return this.systemFilesMarksCache;
+  }
+
+  async removeSystemFileMark(
+    coreId: string,
+    filename: string,
+  ): Promise<SystemFilesMarks> {
+    this.assertConnected();
+    await this.client.removeSystemFileMark(coreId, filename);
+    this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
+    return this.systemFilesMarksCache;
+  }
+
+  async setSystemFileMarks(
+    coreId: string,
+    changes: readonly SystemFileMarkChange[],
+  ): Promise<SystemFilesMarks> {
+    this.assertConnected();
+    await this.client.setSystemFileMarks(coreId, changes);
+    this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
+    return this.systemFilesMarksCache;
+  }
+
+  async listRoms(coreId: string, subPath = ''): Promise<Rom[]> {
+    this.assertConnected();
+    return this.client.listRoms(
+      coreId,
+      subPath,
+      this.folderClassificationsCache,
+    );
+  }
+
+  async setRomVisibility(
+    coreId: string,
+    filename: string,
+    hidden: boolean,
+    subPath = '',
+  ): Promise<void> {
+    this.assertConnected();
+    await this.client.setRomVisibility(coreId, filename, hidden, subPath);
   }
 
   async setBulkRomVisibility(
     coreId: string,
     changes: readonly RomVisibilityChange[],
-  ): Promise<void> {
+    subPath = '',
+  ): Promise<BulkRomResult> {
     this.assertConnected();
-    await this.client.setBulkRomVisibility(coreId, changes);
+    return this.client.setBulkRomVisibility(coreId, changes, subPath);
+  }
+
+  async listFolderClassifications(): Promise<FolderClassifications> {
+    this.assertConnected();
+    return this.folderClassificationsCache;
+  }
+
+  async setFolderClassification(
+    coreId: string,
+    folderPath: string,
+    classification: 'container' | 'atomic' | undefined,
+  ): Promise<FolderClassifications> {
+    this.assertConnected();
+    if (classification === undefined) {
+      await this.client.setFolderClassification({
+        coreId,
+        folderPath,
+        classification: undefined,
+      });
+    } else {
+      const override: FolderClassificationOverride = {
+        coreId,
+        folderPath,
+        classification,
+        setAt: new Date().toISOString(),
+      };
+      await this.client.setFolderClassification(override);
+    }
+    this.folderClassificationsCache =
+      await this.client.readFolderClassifications();
+    return this.folderClassificationsCache;
+  }
+
+  async hideCore(coreId: string): Promise<void> {
+    this.assertConnected();
+    const core = await this.lookupCore(coreId);
+    if (!isRealCore(core)) {
+      throw new Error(`Refusing to hide '${coreId}': not a real core.`);
+    }
+    await this.client.hideCore(core);
+    await this.recordHide(core);
+  }
+
+  async showCore(coreId: string): Promise<void> {
+    this.assertConnected();
+    const core = await this.lookupCore(coreId);
+    if (!isRealCore(core)) {
+      throw new Error(`Refusing to show '${coreId}': not a real core.`);
+    }
+    if (!this.ledgerHasCore(core.id)) {
+      throw new Error(
+        `Refusing to show '${core.id}': not managed by MiSTerCurator (likely hidden by another tool — we will not modify it).`,
+      );
+    }
+    await this.client.showCore(core);
+    await this.recordShow(core);
+  }
+
+  async setBulkCoreVisibility(
+    changes: readonly { readonly coreId: string; readonly hidden: boolean }[],
+    options: { readonly operationId?: string } = {},
+  ): Promise<BulkCoreResult> {
+    this.assertConnected();
+    if (changes.length === 0) return { succeeded: [], failed: [] };
+
+    const resolved: CoreVisibilityChange[] = [];
+    const upfrontFailed: { coreId: string; reason: string }[] = [];
+    for (const c of changes) {
+      let core: CoreEntry;
+      try {
+        core = await this.lookupCore(c.coreId);
+      } catch (err) {
+        upfrontFailed.push({
+          coreId: c.coreId,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+        continue;
+      }
+      if (!isRealCore(core)) {
+        upfrontFailed.push({
+          coreId: c.coreId,
+          reason: 'not a real core (likely a user folder or the Arcade placeholder)',
+        });
+        continue;
+      }
+      if (!c.hidden && !this.ledgerHasCore(core.id)) {
+        // Permission slip: the un-hide path refuses cores the app didn't
+        // hide. This is what protects the ~40+ pre-existing dot-prefixed
+        // directories on a real MiSTer from being un-hidden by the user
+        // accidentally clicking "Unhide all".
+        upfrontFailed.push({
+          coreId: core.id,
+          reason: 'not managed by MiSTerCurator (we will not modify it)',
+        });
+        continue;
+      }
+      resolved.push({ core, hidden: c.hidden });
+    }
+
+    if (resolved.length === 0) {
+      return { succeeded: [], failed: upfrontFailed };
+    }
+
+    const operationId = options.operationId ?? `op-${String(this.nextOperationId++)}`;
+    const result = await this.client.setBulkCoreVisibility(resolved, {
+      onProgress: (event) => {
+        const broadcast: BulkCoreProgressBroadcast = { operationId, ...event };
+        for (const listener of this.bulkProgressListeners) {
+          try {
+            listener(broadcast);
+          } catch {
+            /* swallow — never let UI errors break a bulk op */
+          }
+        }
+      },
+    });
+    const failed = [...upfrontFailed, ...result.failed];
+
+    // Ledger update: only for cores whose renames fully succeeded.
+    const succeededIds = new Set(result.succeeded);
+    let ledger = this.ledgerCache;
+    for (const c of resolved) {
+      if (!succeededIds.has(c.core.id)) continue;
+      ledger = c.hidden
+        ? withCoreHidden(ledger, this.toHiddenEntry(c.core))
+        : withCoreShown(ledger, c.core.id);
+    }
+    if (!ledgerEqual(ledger, this.ledgerCache)) {
+      await this.client.writeHideLedger(ledger);
+      this.ledgerCache = ledger;
+    }
+
+    return { succeeded: result.succeeded, failed };
+  }
+
+  private async runAutoReapply(): Promise<number> {
+    if (this.ledgerCache.hiddenCores.length === 0) return 0;
+
+    const cores = await this.client.listAllCoresWithFiles(
+      this.systemFilesMarksCache,
+    );
+    this.coresCache = cores;
+
+    const changes = computeAutoReapplyChanges(this.ledgerCache, cores);
+    if (changes.length === 0) return 0;
+
+    const coresById = new Map(cores.map((c) => [c.id, c]));
+    const resolved: CoreVisibilityChange[] = [];
+    for (const c of changes) {
+      const core = coresById.get(c.coreId);
+      if (!core) continue;
+      if (!isRealCore(core)) continue;
+      resolved.push({ core, hidden: c.hidden });
+    }
+    if (resolved.length === 0) return 0;
+
+    const result = await this.client.setBulkCoreVisibility(resolved);
+
+    // Refresh the cache so subsequent hideCore lookups see the new state.
+    const refreshed = await this.client.listAllCoresWithFiles(
+      this.systemFilesMarksCache,
+    );
+    this.coresCache = refreshed.map((c) => ({
+      ...c,
+      managedByApp: this.ledgerHasCore(c.id),
+    }));
+
+    return result.succeeded.length;
+  }
+
+  private async recordHide(core: CoreEntry): Promise<void> {
+    const next = withCoreHidden(this.ledgerCache, this.toHiddenEntry(core));
+    await this.client.writeHideLedger(next);
+    this.ledgerCache = next;
+  }
+
+  private async recordShow(core: CoreEntry): Promise<void> {
+    const next = withCoreShown(this.ledgerCache, core.id);
+    await this.client.writeHideLedger(next);
+    this.ledgerCache = next;
+  }
+
+  private toHiddenEntry(core: CoreEntry): HiddenCoreEntry {
+    const canonicalRbfs = core.rbfPaths.map((p) => {
+      const slash = p.lastIndexOf('/');
+      const dir = slash < 0 ? '' : p.slice(0, slash);
+      const base = slash < 0 ? p : p.slice(slash + 1);
+      const undotted = base.startsWith('.') ? base.slice(1) : base;
+      return dir === '' ? undotted : `${dir}/${undotted}`;
+    });
+    return {
+      coreId: core.id,
+      gamesDirHidden: core.gamesDirExists,
+      gamesDirName: core.gamesDirName,
+      rbfPaths: canonicalRbfs,
+      hiddenAt: new Date().toISOString(),
+    };
+  }
+
+  private async lookupCore(coreId: string): Promise<CoreEntry> {
+    const lower = coreId.toLowerCase();
+    const cached = this.coresCache.find((c) => c.id.toLowerCase() === lower);
+    if (cached) return cached;
+
+    // Cache miss — refresh and retry once.
+    await this.listAllCoresWithFiles();
+    const fresh = this.coresCache.find((c) => c.id.toLowerCase() === lower);
+    if (!fresh) {
+      throw new Error(`Unknown core: ${coreId}`);
+    }
+    return fresh;
+  }
+
+  private ledgerHasCore(coreId: string): boolean {
+    const lower = coreId.toLowerCase();
+    return this.ledgerCache.hiddenCores.some(
+      (e) => e.coreId.toLowerCase() === lower,
+    );
   }
 
   private assertConnected(): void {
@@ -109,3 +498,6 @@ export class ConnectionManager {
     }
   }
 }
+
+// Re-exported for callers that want the type without importing isCoreHidden.
+export { isCoreHidden };

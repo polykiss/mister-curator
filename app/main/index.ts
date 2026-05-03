@@ -65,6 +65,11 @@ void app.whenReady().then(() => {
       window.webContents.send(IPC_CHANNELS.connectionStatusChanged, status);
     }
   });
+  manager.onBulkProgress((event) => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.bulkCoreProgress, event);
+    }
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -72,6 +77,11 @@ void app.whenReady().then(() => {
       manager.onStatusChange((status) => {
         if (!newWindow.isDestroyed()) {
           newWindow.webContents.send(IPC_CHANNELS.connectionStatusChanged, status);
+        }
+      });
+      manager.onBulkProgress((event) => {
+        if (!newWindow.isDestroyed()) {
+          newWindow.webContents.send(IPC_CHANNELS.bulkCoreProgress, event);
         }
       });
     }

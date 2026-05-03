@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MisterConnectionError } from '@shared/types';
-import type { MisterProfile } from '@shared/types';
+import type { CoreEntry, MisterProfile } from '@shared/types';
 import type { MisterSecret } from '@shared/mister-client';
 
 const mocks = vi.hoisted(() => ({
   connect: vi.fn(),
   dispose: vi.fn(),
   execCommand: vi.fn(),
+  exec: vi.fn(),
   isConnected: vi.fn(),
 }));
 
@@ -16,6 +17,7 @@ vi.mock('node-ssh', () => ({
     connect: mocks.connect,
     dispose: mocks.dispose,
     execCommand: mocks.execCommand,
+    exec: mocks.exec,
     isConnected: mocks.isConnected,
   })),
 }));
@@ -49,6 +51,7 @@ describe('RealMisterClient', () => {
     mocks.connect.mockReset().mockResolvedValue(undefined);
     mocks.dispose.mockReset();
     mocks.execCommand.mockReset().mockResolvedValue(execOk());
+    mocks.exec.mockReset().mockResolvedValue('');
     mocks.isConnected.mockReset().mockReturnValue(true);
   });
 
@@ -169,50 +172,190 @@ describe('RealMisterClient', () => {
     });
   });
 
-  describe('listCores', () => {
-    it('parses the batched core listing', async () => {
+  describe('listAllCoresWithFiles', () => {
+    it('parses R-tagged rbf entries and G-tagged games-dir entries into CoreEntry[]', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
 
-      mocks.execCommand.mockResolvedValueOnce(
-        execOk('Genesis\t10\t2\nNES\t9\t2\nSNES\t9\t2\n'),
-      );
+      // Per-entry GF/GD lines: NES has 9 ROMs (7 visible + 2 hidden),
+      // SNES the same, AO486 has 1 file, Orphan has 3 files. None of
+      // these names match the system-file heuristic so all of them
+      // count toward romCount.
+      const nesGames: string[] = [];
+      for (let i = 0; i < 7; i += 1) nesGames.push(`GF\tNES\tgame${String(i)}.nes`);
+      for (let i = 0; i < 2; i += 1) nesGames.push(`GF\tNES\t.hidden${String(i)}.nes`);
+      const snesGames: string[] = [];
+      for (let i = 0; i < 7; i += 1) snesGames.push(`GF\tSNES\tgame${String(i)}.sfc`);
+      for (let i = 0; i < 2; i += 1) snesGames.push(`GF\tSNES\t.hidden${String(i)}.sfc`);
 
-      const cores = await client.listCores();
+      const stdout = [
+        'R\tConsole\tfile\tNES_20240115.rbf',
+        'R\tConsole\tfile\tNES_20231215.rbf',
+        'R\tConsole\tfile\tSNES_20240115.rbf',
+        'R\tConsole\tfile\tSMS_20240115.rbf',
+        'R\tConsole\tfile\tGame Gear.mgl',
+        'R\tConsole\tfile\tAtari 2600.mgl',
+        'R\tConsole\tfile\tMega Duck.mgl',
+        'R\tComputer\tdir\tAO486',
+        'R\tComputer\tfile\tAtari800_20240220.rbf',
+        'R\tArcade\tfile\tGalaga_20240115.rbf',
+        'R\tArcade\tfile\tPacman_20240310.rbf',
+        'G\tNES',
+        ...nesGames,
+        'G\tSNES',
+        ...snesGames,
+        'G\tAO486',
+        'GF\tAO486\tDefault.img',
+        'G\tOrphan',
+        'GF\tOrphan\ta.bin',
+        'GF\tOrphan\tb.bin',
+        'GF\tOrphan\tc.bin',
+        '',
+      ].join('\n');
+
+      mocks.execCommand.mockResolvedValueOnce(execOk(stdout));
+
+      const cores = await client.listAllCoresWithFiles();
 
       expect(mocks.execCommand).toHaveBeenCalledTimes(1);
-      expect(cores).toEqual([
-        { id: 'Genesis', name: 'Genesis', romCount: 10, hiddenCount: 2 },
-        { id: 'NES', name: 'NES', romCount: 9, hiddenCount: 2 },
-        { id: 'SNES', name: 'SNES', romCount: 9, hiddenCount: 2 },
-      ]);
 
-      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
-      expect(script).toContain(`cd '/media/fat/games'`);
-      expect(script).toContain('for d in */;');
+      const ids = cores.map((c) => c.id);
+      expect(ids).toContain('NES');
+      expect(ids).toContain('SMS');
+      expect(ids).toContain('AO486');
+      expect(ids).toContain('Orphan');
+
+      // .mgl cores are first-class — Game Gear / Atari 2600 / Mega Duck.
+      expect(ids).toContain('Game Gear');
+      expect(ids).toContain('Atari 2600');
+      expect(ids).toContain('Mega Duck');
+      const gameGear = cores.find((c) => c.id === 'Game Gear');
+      expect(gameGear?.rbfPaths).toEqual(['/media/fat/_Console/Game Gear.mgl']);
+
+      // Both arcade entries collapse into one synthetic placeholder.
+      expect(ids).not.toContain('Galaga');
+      expect(ids).not.toContain('Pacman');
+      const arcade = cores.find((c) => c.category === 'Arcade');
+      expect(arcade?.name).toBe('Arcade');
+
+      const nes = cores.find((c) => c.id === 'NES');
+      expect(nes?.category).toBe('Console');
+      expect(nes?.rbfPaths).toEqual([
+        '/media/fat/_Console/NES_20240115.rbf',
+        '/media/fat/_Console/NES_20231215.rbf',
+      ]);
+      expect(nes?.romCount).toBe(9);
+      expect(nes?.hiddenCount).toBe(2);
+      expect(nes?.gamesDirExists).toBe(true);
+
+      const ao486 = cores.find((c) => c.id === 'AO486');
+      expect(ao486?.category).toBe('Computer');
+      expect(ao486?.rbfPaths).toEqual(['/media/fat/_Computer/AO486']);
+
+      const orphan = cores.find((c) => c.id === 'Orphan');
+      expect(orphan?.category).toBe('Unknown');
+      expect(orphan?.rbfPaths).toEqual([]);
+
+      const sms = cores.find((c) => c.id === 'SMS');
+      expect(sms?.gamesDirExists).toBe(false);
+      expect(sms?.romCount).toBe(0);
     });
 
     it('throws when not connected', async () => {
       mocks.isConnected.mockReturnValue(false);
       const client = new RealMisterClient();
 
-      await expect(client.listCores()).rejects.toThrow(/not connected/);
+      await expect(client.listAllCoresWithFiles()).rejects.toThrow(/not connected/);
     });
-  });
 
-  describe('listRoms', () => {
-    it('parses ROM filenames, hidden detection, displayName, and size', async () => {
+    it('emits a shell script that recognises .mgl files alongside .rbf', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.listAllCoresWithFiles();
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      // The case branch for files matches both extensions, both cases.
+      expect(script).toContain('*.rbf|*.RBF|*.mgl|*.MGL');
+    });
+
+    it('emits a shell script that gates folder-shaped cores on rbf/mgl content', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.listAllCoresWithFiles();
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      // The folder branch uses find -iname for both extensions before
+      // emitting an R-line, so user-created folders without a .rbf or
+      // .mgl inside (e.g. _alternatives, _Organized) are skipped.
+      expect(script).toMatch(/find ".*?".*-iname '\*\.rbf'/);
+      expect(script).toMatch(/-iname '\*\.mgl'/);
+    });
+
+    it('emits an arcade-dir probe so the placeholder appears whenever _Arcade exists', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.listAllCoresWithFiles();
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain(`if [ -d '/media/fat/_Arcade' ]; then`);
+      expect(script).toContain(`printf 'A\\n'`);
+    });
+
+    it('parses the A sentinel into a synthetic Arcade placeholder row', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
 
+      // Real-MiSTer shape: _Arcade exists but contains only .mra files,
+      // so no R-Arcade lines are emitted — only the A sentinel.
       mocks.execCommand.mockResolvedValueOnce(
         execOk(
           [
-            '.Action 52 (USA) (Unl).nes\t131072',
-            'Castlevania (USA, Europe).nes\t131072',
-            'Super Mario Bros. (USA).nes\t40960',
+            'R\tConsole\tfile\tNES_20240115.rbf',
+            'A',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const cores = await client.listAllCoresWithFiles();
+      const arcade = cores.find((c) => c.category === 'Arcade');
+      expect(arcade).toBeDefined();
+      expect(arcade?.name).toBe('Arcade');
+    });
+  });
+
+  describe('listRoms', () => {
+    it('parses files + folder classification flags into Rom entries', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      // listRoms emits per-folder classification flags. Round 9 added
+      // a fifth flag (hasManySameExt) between hasCart and hasSubdir:
+      //   F\t<name>\t<size>
+      //   D\t<name>\t<size>\t<has_disc>\t<has_track>\t<has_cart>\t<has_many_same_ext>\t<has_subdir>
+      // The Saturn-shape disc folder has hasDisc=1 → folder-atomic.
+      // The NEOGEO-shape `1 World A-Z` has hasCart=1 → folder-container.
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'F\t.Action 52 (USA) (Unl).nes\t131072',
+            'F\tCastlevania (USA, Europe).nes\t131072',
+            'F\tCastlevania.zip\t40960',
+            'D\tPanzer Dragoon Saga (USA)\t1958295552\t1\t0\t0\t1\t0',
+            'D\t.Hidden Disc Game\t125829120\t1\t0\t0\t1\t0',
+            'D\t1 World A-Z\t52428800\t0\t0\t1\t0\t0',
             '',
           ].join('\n'),
         ),
@@ -220,22 +363,112 @@ describe('RealMisterClient', () => {
 
       const roms = await client.listRoms('NES');
 
-      expect(roms).toHaveLength(3);
+      expect(roms).toHaveLength(6);
 
-      const hidden = roms.find((r) => r.filename === '.Action 52 (USA) (Unl).nes');
-      expect(hidden).toBeDefined();
-      expect(hidden?.hidden).toBe(true);
-      expect(hidden?.displayName).toBe('Action 52 (USA) (Unl).nes');
-      expect(hidden?.path).toBe('/media/fat/games/NES/.Action 52 (USA) (Unl).nes');
-      expect(hidden?.sizeBytes).toBe(131072);
+      const hiddenFile = roms.find((r) => r.filename === '.Action 52 (USA) (Unl).nes');
+      expect(hiddenFile?.kind).toBe('file');
+      expect(hiddenFile?.hidden).toBe(true);
+      // Round 11: `.nes` is now stripped at display time.
+      expect(hiddenFile?.displayName).toBe('Action 52 (USA) (Unl)');
+      expect(hiddenFile?.sizeBytes).toBe(131072);
 
-      const visible = roms.find((r) => r.filename === 'Castlevania (USA, Europe).nes');
-      expect(visible?.hidden).toBe(false);
-      expect(visible?.displayName).toBe('Castlevania (USA, Europe).nes');
+      const visibleFile = roms.find((r) => r.filename === 'Castlevania (USA, Europe).nes');
+      expect(visibleFile?.kind).toBe('file');
+      expect(visibleFile?.hidden).toBe(false);
+
+      // Round 8: archive extension stripped at display time.
+      const archived = roms.find((r) => r.filename === 'Castlevania.zip');
+      expect(archived?.displayName).toBe('Castlevania');
+
+      const discFolder = roms.find((r) => r.filename === 'Panzer Dragoon Saga (USA)');
+      expect(discFolder?.kind).toBe('folder-atomic');
+      expect(discFolder?.hidden).toBe(false);
+      expect(discFolder?.sizeBytes).toBe(1958295552);
+      expect(discFolder?.path).toBe('/media/fat/games/NES/Panzer Dragoon Saga (USA)');
+
+      const hiddenFolder = roms.find((r) => r.filename === '.Hidden Disc Game');
+      expect(hiddenFolder?.kind).toBe('folder-atomic');
+      expect(hiddenFolder?.hidden).toBe(true);
+      expect(hiddenFolder?.displayName).toBe('Hidden Disc Game');
+
+      const containerFolder = roms.find((r) => r.filename === '1 World A-Z');
+      expect(containerFolder?.kind).toBe('folder-container');
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
       expect(script).toContain(`cd '/media/fat/games/NES'`);
-      expect(script).toContain('for f in * .[!.]*');
+      // The new shell emits four classification flags per folder.
+      expect(script).toContain('has_disc');
+      expect(script).toContain('has_track');
+      expect(script).toContain('has_cart');
+      expect(script).toContain('has_many_same_ext');
+      expect(script).toContain('has_subdir');
+      // Round 9 expansion: .neo and friends now match the cart case.
+      expect(script).toContain('*.neo');
+    });
+
+    it('classifies a folder with hasManySameExt=1 as folder-container', async () => {
+      // Round 9 long-tail rule: even when the cart-extension case
+      // doesn't match, the device-side scan flips hasManySameExt and
+      // we treat the folder as drillable.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            // disc=0, track=0, cart=0, manySameExt=1, subdir=0
+            'D\tFutureFormat Collection\t10240\t0\t0\t0\t1\t0',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('FuturePastel');
+      expect(roms[0]?.kind).toBe('folder-container');
+    });
+
+    it('lists ROMs at a sub-path when drilled into a container', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'F\tmslug.zip\t1024',
+            'F\tkof97.zip\t2048',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('NEOGEO', '1 World A-Z');
+
+      expect(roms.map((r) => r.filename)).toEqual(['kof97.zip', 'mslug.zip']);
+      // Display names strip the archive extension.
+      expect(roms.find((r) => r.filename === 'mslug.zip')?.displayName).toBe('mslug');
+      expect(roms[0]?.relativePath).toBe('1 World A-Z/kof97.zip');
+      expect(roms[0]?.path).toBe('/media/fat/games/NEOGEO/1 World A-Z/kof97.zip');
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain(`cd '/media/fat/games/NEOGEO/1 World A-Z'`);
+    });
+
+    it('rejects subPaths that try to climb out of the core dir', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      await expect(client.listRoms('NEOGEO', '../etc')).rejects.toThrow(
+        /Invalid subPath/,
+      );
+      await expect(client.listRoms('NEOGEO', 'foo/..')).rejects.toThrow(
+        /Invalid subPath/,
+      );
+      await expect(client.listRoms('NEOGEO', '/abs')).rejects.toThrow(
+        /Invalid subPath/,
+      );
+      expect(mocks.execCommand).not.toHaveBeenCalled();
     });
 
     it('throws "Unknown core" when the core directory is missing', async () => {
@@ -293,8 +526,14 @@ describe('RealMisterClient', () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
+      // Mock the bulk script's stdout so the parser sees five OK lines.
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(['a.nes', 'b.nes', '.c.nes', 'd.nes', '.e.nes']
+          .map((id) => `OK\t${id}`)
+          .join('\n')),
+      );
 
-      await client.setBulkRomVisibility('NES', [
+      const result = await client.setBulkRomVisibility('NES', [
         { filename: 'a.nes', hidden: true },
         { filename: 'b.nes', hidden: true },
         { filename: '.c.nes', hidden: false },
@@ -303,20 +542,24 @@ describe('RealMisterClient', () => {
       ]);
 
       expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      expect(result.succeeded).toEqual(['a.nes', 'b.nes', '.c.nes', 'd.nes', '.e.nes']);
+      expect(result.failed).toEqual([]);
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
-      expect(script.startsWith('set -e\n')).toBe(true);
       expect(script).toContain(`cd '/media/fat/games/NES'`);
-      const mvLines = script.split('\n').filter((l) => l.startsWith('mv '));
-      expect(mvLines).toHaveLength(5);
-      expect(mvLines).toContain(`mv 'a.nes' '.a.nes'`);
-      expect(mvLines).toContain(`mv '.c.nes' 'c.nes'`);
+      // Each rename is wrapped in an `if err=$(mv ...)` block so the
+      // batch never aborts on the first failure.
+      const ifMvCount = (script.match(/if err=\$\(mv /g) ?? []).length;
+      expect(ifMvCount).toBe(5);
+      expect(script).toContain(`mv 'a.nes' '.a.nes'`);
+      expect(script).toContain(`mv '.c.nes' 'c.nes'`);
     });
 
     it('skips no-op changes but still issues exactly one call when at least one rename is needed', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk('OK\tbar.nes'));
 
       await client.setBulkRomVisibility('NES', [
         { filename: 'foo.nes', hidden: false }, // already visible — no-op
@@ -325,8 +568,10 @@ describe('RealMisterClient', () => {
 
       expect(mocks.execCommand).toHaveBeenCalledTimes(1);
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
-      const mvLines = script.split('\n').filter((l) => l.startsWith('mv '));
-      expect(mvLines).toEqual([`mv 'bar.nes' '.bar.nes'`]);
+      const ifMvCount = (script.match(/if err=\$\(mv /g) ?? []).length;
+      expect(ifMvCount).toBe(1);
+      expect(script).toContain(`mv 'bar.nes' '.bar.nes'`);
+      expect(script).not.toContain(`mv 'foo.nes'`);
     });
 
     it('makes zero SSH calls when every change is a no-op', async () => {
@@ -334,12 +579,771 @@ describe('RealMisterClient', () => {
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
 
-      await client.setBulkRomVisibility('NES', [
+      const result = await client.setBulkRomVisibility('NES', [
         { filename: 'foo.nes', hidden: false },
         { filename: '.bar.nes', hidden: true },
       ]);
 
       expect(mocks.execCommand).not.toHaveBeenCalled();
+      expect(result).toEqual({ succeeded: [], failed: [] });
+    });
+
+    it('returns a partial-success result when some renames fail', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      // One failure mid-batch — parser should still consume the surrounding OKs.
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'OK\ta.nes',
+            'FAIL\tb.nes\tmv: cannot stat b.nes',
+            'OK\tc.nes',
+          ].join('\n'),
+        ),
+      );
+
+      const result = await client.setBulkRomVisibility('NES', [
+        { filename: 'a.nes', hidden: true },
+        { filename: 'b.nes', hidden: true },
+        { filename: 'c.nes', hidden: true },
+      ]);
+
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      expect(result.succeeded).toEqual(['a.nes', 'c.nes']);
+      expect(result.failed).toEqual([
+        { filename: 'b.nes', reason: 'mv: cannot stat b.nes' },
+      ]);
+    });
+  });
+
+  describe('hideCore / showCore', () => {
+    function makeCore(overrides: Partial<CoreEntry> = {}): CoreEntry {
+      return {
+        id: 'NES',
+        name: 'NES',
+        romCount: 9,
+        hiddenCount: 2,
+        category: 'Console',
+        rbfPaths: [
+          '/media/fat/_Console/NES_20240115.rbf',
+          '/media/fat/_Console/NES_20231215.rbf',
+        ],
+        gamesDirExists: true,
+        gamesDirHidden: false,
+        ...overrides,
+      };
+    }
+
+    it('hideCore renames the games dir AND every matching rbf in one shell script', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      await client.hideCore(makeCore());
+
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script.startsWith('set -e\n')).toBe(true);
+      const mvLines = script.split('\n').filter((l) => l.startsWith('mv '));
+      expect(mvLines).toHaveLength(3);
+      expect(mvLines).toContain(`mv '/media/fat/games/NES' '/media/fat/games/.NES'`);
+      expect(mvLines).toContain(
+        `mv '/media/fat/_Console/NES_20240115.rbf' '/media/fat/_Console/.NES_20240115.rbf'`,
+      );
+      expect(mvLines).toContain(
+        `mv '/media/fat/_Console/NES_20231215.rbf' '/media/fat/_Console/.NES_20231215.rbf'`,
+      );
+    });
+
+    it('hideCore on an already-fully-hidden core makes ZERO SSH calls', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      await client.hideCore(
+        makeCore({
+          gamesDirHidden: true,
+          rbfPaths: [
+            '/media/fat/_Console/.NES_20240115.rbf',
+            '/media/fat/_Console/.NES_20231215.rbf',
+          ],
+        }),
+      );
+
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+
+    it('hideCore handles folder-shaped cores (the rbfPath IS a folder)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      await client.hideCore(
+        makeCore({
+          id: 'AO486',
+          category: 'Computer',
+          rbfPaths: ['/media/fat/_Computer/AO486'],
+          gamesDirExists: false,
+        }),
+      );
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      const mvLines = script.split('\n').filter((l) => l.startsWith('mv '));
+      expect(mvLines).toEqual([
+        `mv '/media/fat/_Computer/AO486' '/media/fat/_Computer/.AO486'`,
+      ]);
+    });
+
+    it('hideCore handles rbf-only cores (no games dir to rename)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      await client.hideCore(
+        makeCore({
+          id: 'SMS',
+          rbfPaths: ['/media/fat/_Console/SMS_20240115.rbf'],
+          gamesDirExists: false,
+        }),
+      );
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      const mvLines = script.split('\n').filter((l) => l.startsWith('mv '));
+      expect(mvLines).toEqual([
+        `mv '/media/fat/_Console/SMS_20240115.rbf' '/media/fat/_Console/.SMS_20240115.rbf'`,
+      ]);
+    });
+
+    it('showCore is the inverse — strips the dot from games dir AND rbfs', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      await client.showCore(
+        makeCore({
+          gamesDirHidden: true,
+          rbfPaths: [
+            '/media/fat/_Console/.NES_20240115.rbf',
+            '/media/fat/_Console/.NES_20231215.rbf',
+          ],
+        }),
+      );
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      const mvLines = script.split('\n').filter((l) => l.startsWith('mv '));
+      expect(mvLines).toHaveLength(3);
+      expect(mvLines).toContain(`mv '/media/fat/games/.NES' '/media/fat/games/NES'`);
+      expect(mvLines).toContain(
+        `mv '/media/fat/_Console/.NES_20240115.rbf' '/media/fat/_Console/NES_20240115.rbf'`,
+      );
+    });
+
+    it('hideCore refuses a CoreEntry that is not a real core (user folder shape)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      // No rbfs, no games dir — looks like `_Console/_hidden`.
+      await expect(
+        client.hideCore(
+          makeCore({
+            id: '_hidden',
+            category: 'Console',
+            rbfPaths: [],
+            gamesDirExists: false,
+          }),
+        ),
+      ).rejects.toThrow(/not a real core/i);
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+
+    it('showCore refuses a CoreEntry that is not a real core', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      await expect(
+        client.showCore(
+          makeCore({
+            id: '_alternatives',
+            category: 'Console',
+            rbfPaths: [],
+            gamesDirExists: false,
+          }),
+        ),
+      ).rejects.toThrow(/not a real core/i);
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+
+    it('hideCore refuses arcade cores', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      await expect(
+        client.hideCore(
+          makeCore({
+            id: 'Galaga',
+            category: 'Arcade',
+            rbfPaths: ['/media/fat/_Arcade/Galaga_20240115.rbf'],
+          }),
+        ),
+      ).rejects.toThrow(/Arcade/);
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+
+    it('half-success surfaces a clear error (no special "ledger" handling at the client layer)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      mocks.execCommand.mockResolvedValueOnce(
+        execFail(1, "mv: can't rename '/media/fat/_Console/NES_20231215.rbf'"),
+      );
+
+      await expect(client.hideCore(makeCore())).rejects.toThrow(/hide core NES/);
+    });
+  });
+
+  describe('setBulkCoreVisibility', () => {
+    function makeCore(overrides: Partial<CoreEntry>): CoreEntry {
+      return {
+        id: 'X',
+        name: 'X',
+        romCount: 0,
+        hiddenCount: 0,
+        category: 'Console',
+        rbfPaths: [],
+        gamesDirExists: false,
+        gamesDirHidden: false,
+        ...overrides,
+      };
+    }
+
+    /**
+     * Replays a stream of PROGRESS lines through the `onStdout` callback
+     * the client passes to `ssh.exec`. Mirrors how a real SSH channel
+     * delivers data: the test can split the stream into arbitrary chunk
+     * boundaries to exercise the line-buffering parser.
+     */
+    function makeStreamingExec(
+      chunks: readonly (Buffer | string)[],
+    ): (
+      command: string,
+      params: readonly string[],
+      options: {
+        onStdout?: (chunk: Buffer) => void;
+        stream?: 'stdout' | 'stderr' | 'both';
+      },
+    ) => Promise<string> {
+      return async (_command, _params, options) => {
+        for (const c of chunks) {
+          options.onStdout?.(typeof c === 'string' ? Buffer.from(c) : c);
+        }
+        return '';
+      };
+    }
+
+    it('runs a 5-core batch in exactly one ssh.exec call with a per-core subshell', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.exec.mockClear();
+      mocks.exec.mockImplementationOnce(
+        makeStreamingExec([
+          ['NES', 'SNES', 'Genesis', 'Atari800', 'SMS']
+            .map(
+              (id, i) => `PROGRESS\t${String(i + 1)}\t5\t${id}\n`,
+            )
+            .join(''),
+        ]),
+      );
+
+      const cores = ['NES', 'SNES', 'Genesis', 'Atari800', 'SMS'].map((id) =>
+        makeCore({
+          id,
+          rbfPaths: [`/media/fat/_Console/${id}_20240115.rbf`],
+          gamesDirExists: id !== 'SMS' && id !== 'Atari800',
+        }),
+      );
+
+      const result = await client.setBulkCoreVisibility(
+        cores.map((core) => ({ core, hidden: true })),
+      );
+
+      expect(mocks.exec).toHaveBeenCalledTimes(1);
+      expect(result.succeeded).toEqual(['NES', 'SNES', 'Genesis', 'Atari800', 'SMS']);
+      expect(result.failed).toEqual([]);
+
+      const script = mocks.exec.mock.calls[0]?.[0] as string;
+      // 3 games dirs (NES, SNES, Genesis) + 5 rbfs = 8 mv commands woven
+      // through five `(set -e ...)` per-core subshells.
+      const mvCount = (script.match(/mv '/g) ?? []).length;
+      expect(mvCount).toBe(8);
+      const subshellCount = (script.match(/\(set -e/g) ?? []).length;
+      expect(subshellCount).toBe(5);
+      // Each core line emits PROGRESS / PROGRESS_FAIL — never the old
+      // OK/FAIL shape.
+      expect(script).toMatch(/printf 'PROGRESS\\t/);
+      expect(script).toMatch(/printf 'PROGRESS_FAIL\\t/);
+      expect(script).not.toMatch(/printf 'OK\\t/);
+    });
+
+    it('returns a partial-success result when one core fails mid-batch', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.exec.mockClear();
+      mocks.exec.mockImplementationOnce(
+        makeStreamingExec([
+          'PROGRESS\t1\t3\tNES\n',
+          'PROGRESS_FAIL\t2\t3\tSNES\tmv: cannot stat SNES\n',
+          'PROGRESS\t3\t3\tGenesis\n',
+        ]),
+      );
+
+      const result = await client.setBulkCoreVisibility(
+        ['NES', 'SNES', 'Genesis'].map((id) => ({
+          core: makeCore({
+            id,
+            rbfPaths: [`/media/fat/_Console/${id}_20240115.rbf`],
+            gamesDirExists: true,
+          }),
+          hidden: true,
+        })),
+      );
+
+      expect(mocks.exec).toHaveBeenCalledTimes(1);
+      expect(result.succeeded).toEqual(['NES', 'Genesis']);
+      expect(result.failed).toEqual([
+        { coreId: 'SNES', reason: 'mv: cannot stat SNES' },
+      ]);
+    });
+
+    it('emits a progress event per parseable line in stream order', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.exec.mockClear();
+      // Split chunk on a non-line boundary to exercise the line-buffer
+      // logic — partial line "PROGRESS\t1\t" + rest in next chunk.
+      mocks.exec.mockImplementationOnce(
+        makeStreamingExec([
+          'PROGRESS\t1\t',
+          '3\tNES\nPROGRESS_FAIL\t2\t3\tSNES\twoops\n',
+          'PROGRESS\t3\t3\tGenesis\n',
+        ]),
+      );
+
+      const events: { done: number; total: number; coreId: string; result: string }[] = [];
+      await client.setBulkCoreVisibility(
+        ['NES', 'SNES', 'Genesis'].map((id) => ({
+          core: makeCore({
+            id,
+            rbfPaths: [`/media/fat/_Console/${id}_20240115.rbf`],
+            gamesDirExists: true,
+          }),
+          hidden: true,
+        })),
+        {
+          onProgress: (e) =>
+            events.push({
+              done: e.done,
+              total: e.total,
+              coreId: e.coreId,
+              result: e.result,
+            }),
+        },
+      );
+
+      expect(events).toEqual([
+        { done: 1, total: 3, coreId: 'NES', result: 'ok' },
+        { done: 2, total: 3, coreId: 'SNES', result: 'fail' },
+        { done: 3, total: 3, coreId: 'Genesis', result: 'ok' },
+      ]);
+    });
+
+    it('flushes a trailing partial line that arrives without a newline', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.exec.mockClear();
+      mocks.exec.mockImplementationOnce(
+        // No trailing newline — defensive against shells that drop it.
+        makeStreamingExec(['PROGRESS\t1\t1\tNES']),
+      );
+
+      const result = await client.setBulkCoreVisibility([
+        {
+          core: makeCore({
+            id: 'NES',
+            rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
+            gamesDirExists: true,
+          }),
+          hidden: true,
+        },
+      ]);
+
+      expect(result.succeeded).toEqual(['NES']);
+    });
+
+    it('ignores malformed progress lines silently', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.exec.mockClear();
+      mocks.exec.mockImplementationOnce(
+        makeStreamingExec([
+          'something irrelevant\n',
+          'PROGRESS\tnotanumber\t1\tNES\n',
+          'PROGRESS_FAIL\t1\t1\n', // missing fields
+          'PROGRESS\t1\t1\tNES\n',
+        ]),
+      );
+
+      const events: unknown[] = [];
+      const result = await client.setBulkCoreVisibility(
+        [
+          {
+            core: makeCore({
+              id: 'NES',
+              rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
+              gamesDirExists: true,
+            }),
+            hidden: true,
+          },
+        ],
+        { onProgress: (e) => events.push(e) },
+      );
+
+      expect(result.succeeded).toEqual(['NES']);
+      expect(events).toHaveLength(1);
+    });
+
+    it('issues zero SSH calls when every change is a no-op', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.exec.mockClear();
+      mocks.execCommand.mockClear();
+
+      await client.setBulkCoreVisibility([
+        {
+          core: makeCore({
+            id: 'NES',
+            rbfPaths: ['/media/fat/_Console/.NES_20240115.rbf'],
+            gamesDirExists: true,
+            gamesDirHidden: true,
+          }),
+          hidden: true,
+        },
+      ]);
+
+      expect(mocks.exec).not.toHaveBeenCalled();
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+
+    it('refuses if any change targets an arcade core', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.exec.mockClear();
+
+      await expect(
+        client.setBulkCoreVisibility([
+          {
+            core: makeCore({ id: 'Galaga', category: 'Arcade' }),
+            hidden: true,
+          },
+        ]),
+      ).rejects.toThrow(/Arcade/);
+      expect(mocks.exec).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('readHideLedger / writeHideLedger', () => {
+    it('readHideLedger parses the cat output and tolerates missing files', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      const ledgerJson = JSON.stringify({
+        schemaVersion: 1,
+        hiddenCores: [
+          {
+            coreId: 'NES',
+            gamesDirHidden: true,
+            rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
+            hiddenAt: '2026-05-01T12:00:00Z',
+          },
+        ],
+      });
+      mocks.execCommand.mockResolvedValueOnce(execOk(ledgerJson));
+      // The self-heal step inside readHideLedger calls
+      // listAllCoresWithFiles to verify each entry. Return a snapshot
+      // that includes NES so the entry survives.
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'R\tConsole\tfile\tNES_20240115.rbf',
+            'G\tNES',
+            'GF\tNES\tCastlevania.nes',
+            'GF\tNES\tContra.nes',
+            'GF\tNES\tFinal Fantasy.nes',
+            'GF\tNES\tMega Man 2.nes',
+            'GF\tNES\tMetroid.nes',
+            'GF\tNES\tSuper Mario Bros.nes',
+            'GF\tNES\tZelda.nes',
+            'GF\tNES\t.hidden1.nes',
+            'GF\tNES\t.hidden2.nes',
+          ].join('\n'),
+        ),
+      );
+
+      const ledger = await client.readHideLedger();
+      expect(ledger.hiddenCores).toHaveLength(1);
+      expect(ledger.hiddenCores[0]?.coreId).toBe('NES');
+
+      const command = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(command).toContain(`cat '/media/fat/.mistercurator/state.json'`);
+      // Tolerates the missing-file case at the shell level.
+      expect(command).toContain('|| true');
+    });
+
+    it('readHideLedger self-heals: drops a stale entry and rewrites the ledger', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      // The ledger references a `_hidden` user folder from before the
+      // closeout fix, plus a real NES entry.
+      const ledgerJson = JSON.stringify({
+        schemaVersion: 1,
+        hiddenCores: [
+          {
+            coreId: '_hidden',
+            gamesDirHidden: true,
+            rbfPaths: [],
+            hiddenAt: '2026-05-01T12:00:00Z',
+          },
+          {
+            coreId: 'NES',
+            gamesDirHidden: true,
+            rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
+            hiddenAt: '2026-05-01T12:00:00Z',
+          },
+        ],
+      });
+      mocks.execCommand.mockResolvedValueOnce(execOk(ledgerJson));
+      // listAllCoresWithFiles snapshot: only NES exists. _hidden doesn't.
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'R\tConsole\tfile\tNES_20240115.rbf',
+            'G\tNES',
+            'GF\tNES\tCastlevania.nes',
+            'GF\tNES\tContra.nes',
+            'GF\tNES\tFinal Fantasy.nes',
+            'GF\tNES\tMega Man 2.nes',
+            'GF\tNES\tMetroid.nes',
+            'GF\tNES\tSuper Mario Bros.nes',
+            'GF\tNES\tZelda.nes',
+            'GF\tNES\t.hidden1.nes',
+            'GF\tNES\t.hidden2.nes',
+          ].join('\n'),
+        ),
+      );
+      // The heal triggers a writeHideLedger.
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      const ledger = await client.readHideLedger();
+      expect(ledger.hiddenCores).toHaveLength(1);
+      expect(ledger.hiddenCores[0]?.coreId).toBe('NES');
+
+      // Three execCommands total: cat ledger, list cores, write cleaned ledger.
+      expect(mocks.execCommand).toHaveBeenCalledTimes(3);
+      const writeScript = mocks.execCommand.mock.calls[2]?.[0] as string;
+      expect(writeScript).toContain(`mkdir -p '/media/fat/.mistercurator'`);
+      // The rewrite contains NES but not _hidden.
+      expect(writeScript).toContain('"coreId": "NES"');
+      expect(writeScript).not.toContain('"coreId": "_hidden"');
+    });
+
+    it('readHideLedger returns empty ledger when cat returns nothing (file missing)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      const ledger = await client.readHideLedger();
+      expect(ledger).toEqual({ schemaVersion: 1, hiddenCores: [] });
+    });
+
+    it('writeHideLedger emits mkdir, heredoc with the documented delimiter, and atomic mv', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      await client.writeHideLedger({
+        schemaVersion: 1,
+        hiddenCores: [
+          {
+            coreId: 'NES',
+            gamesDirHidden: true,
+            rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
+            hiddenAt: '2026-05-01T12:00:00Z',
+          },
+        ],
+      });
+
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain(`mkdir -p '/media/fat/.mistercurator'`);
+      expect(script).toContain(`<<'MISTERCURATOR_LEDGER_EOF'`);
+      expect(script).toContain('\nMISTERCURATOR_LEDGER_EOF\n');
+      expect(script).toContain(
+        `mv '/media/fat/.mistercurator/state.json.tmp' '/media/fat/.mistercurator/state.json'`,
+      );
+    });
+
+    it('writeHideLedger rejects fast when payload contains the heredoc delimiter', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      await expect(
+        client.writeHideLedger({
+          schemaVersion: 1,
+          hiddenCores: [
+            {
+              coreId: 'MISTERCURATOR_LEDGER_EOF',
+              gamesDirHidden: true,
+              rbfPaths: [],
+              hiddenAt: '2026-05-01T12:00:00Z',
+            },
+          ],
+        }),
+      ).rejects.toThrow(/heredoc delimiter/);
+
+      // Must short-circuit before issuing any execCommand so a corrupt ledger
+      // can never be written.
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('readSystemFilesMarks / addSystemFileMark / removeSystemFileMark', () => {
+    it('readSystemFilesMarks tolerates a missing file', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      const marks = await client.readSystemFilesMarks();
+      expect(marks).toEqual({ schemaVersion: 1, marked: [] });
+
+      const command = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(command).toContain(`cat '/media/fat/.mistercurator/system-files.json'`);
+      expect(command).toContain('|| true');
+    });
+
+    it('readSystemFilesMarks parses a populated marks file', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      const json = JSON.stringify({
+        schemaVersion: 1,
+        marked: [
+          {
+            coreId: 'C64',
+            filename: 'DolphinDOS_2.0.rom',
+            markedAt: '2026-05-02T12:00:00Z',
+          },
+        ],
+      });
+      mocks.execCommand.mockResolvedValueOnce(execOk(json));
+
+      const marks = await client.readSystemFilesMarks();
+      expect(marks.marked).toHaveLength(1);
+      expect(marks.marked[0]?.coreId).toBe('C64');
+    });
+
+    it('addSystemFileMark reads, mutates, and writes via heredoc', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      // First call: read existing marks (empty).
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+      // Second call: write the mutated marks.
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.addSystemFileMark('C64', 'DolphinDOS_2.0.rom');
+
+      expect(mocks.execCommand).toHaveBeenCalledTimes(2);
+      const writeScript = mocks.execCommand.mock.calls[1]?.[0] as string;
+      expect(writeScript).toContain(`mkdir -p '/media/fat/.mistercurator'`);
+      expect(writeScript).toContain(`<<'MISTERCURATOR_SYSTEM_FILES_EOF'`);
+      expect(writeScript).toContain('"coreId": "C64"');
+      expect(writeScript).toContain('"filename": "DolphinDOS_2.0.rom"');
+      expect(writeScript).toContain(
+        `mv '/media/fat/.mistercurator/system-files.json.tmp' '/media/fat/.mistercurator/system-files.json'`,
+      );
+    });
+
+    it('addSystemFileMark issues only one read when the mark already exists', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      const existing = JSON.stringify({
+        schemaVersion: 1,
+        marked: [
+          {
+            coreId: 'C64',
+            filename: 'DolphinDOS_2.0.rom',
+            markedAt: '2026-05-02T12:00:00Z',
+          },
+        ],
+      });
+      mocks.execCommand.mockResolvedValueOnce(execOk(existing));
+
+      await client.addSystemFileMark('C64', 'DolphinDOS_2.0.rom');
+
+      // Only the read; no write because withMark is idempotent.
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+    });
+
+    it('removeSystemFileMark drops the entry and rewrites the file', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      const existing = JSON.stringify({
+        schemaVersion: 1,
+        marked: [
+          {
+            coreId: 'C64',
+            filename: 'DolphinDOS_2.0.rom',
+            markedAt: '2026-05-02T12:00:00Z',
+          },
+        ],
+      });
+      mocks.execCommand.mockResolvedValueOnce(execOk(existing));
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.removeSystemFileMark('C64', 'DolphinDOS_2.0.rom');
+
+      expect(mocks.execCommand).toHaveBeenCalledTimes(2);
+      const writeScript = mocks.execCommand.mock.calls[1]?.[0] as string;
+      // The rewrite no longer contains the entry.
+      expect(writeScript).not.toContain('DolphinDOS_2.0.rom');
+    });
+
+    it('removeSystemFileMark issues only one read when the entry is absent', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+      await client.removeSystemFileMark('C64', 'never_marked.rom');
+
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
     });
   });
 });

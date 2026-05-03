@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { Core, Rom } from '@shared/types';
+import type { CoreEntry, Rom } from '@shared/types';
 
 import {
   applyBulkVisibilityChange,
@@ -17,6 +17,7 @@ function makeRom(filename: string, hidden: boolean): Rom {
     sizeBytes: 1024,
     hidden,
     path: `/media/fat/games/NES/${filename}`,
+    kind: 'file',
   };
 }
 
@@ -25,13 +26,16 @@ describe('applyVisibilityChange', () => {
     const roms = [makeRom('foo.nes', false), makeRom('bar.nes', false)];
     const next = applyVisibilityChange(roms, { filename: 'foo.nes', hidden: true });
 
+    // displayName matches the same `displayRomName` pipeline the
+    // clients use on listRoms — `.nes` is now stripped at display.
     expect(next[0]).toEqual({
       coreId: 'NES',
       filename: '.foo.nes',
-      displayName: 'foo.nes',
+      displayName: 'foo',
       sizeBytes: 1024,
       hidden: true,
       path: '/media/fat/games/NES/.foo.nes',
+      kind: 'file',
     });
     expect(next[1]).toBe(roms[1]); // unchanged reference
   });
@@ -66,6 +70,45 @@ describe('applyVisibilityChange', () => {
 
     expect(next).toEqual(roms);
   });
+
+  it('strips the trailing archive extension from displayName when hiding', () => {
+    // Round 8 fix: optimistic update was setting displayName to the
+    // raw visible name, leaving "Castlevania.zip" in the row until the
+    // next server roundtrip overwrote it with the proper "Castlevania".
+    const rom: Rom = {
+      coreId: 'GBA',
+      filename: 'Castlevania (USA).zip',
+      displayName: 'Castlevania (USA)',
+      sizeBytes: 4096,
+      hidden: false,
+      path: '/media/fat/games/GBA/Castlevania (USA).zip',
+      kind: 'file',
+    };
+    const next = applyVisibilityChange([rom], {
+      filename: 'Castlevania (USA).zip',
+      hidden: true,
+    });
+    expect(next[0]?.filename).toBe('.Castlevania (USA).zip');
+    expect(next[0]?.displayName).toBe('Castlevania (USA)');
+  });
+
+  it('strips the trailing archive extension when un-hiding', () => {
+    const rom: Rom = {
+      coreId: 'GBA',
+      filename: '.Castlevania (USA).zip',
+      displayName: 'Castlevania (USA)',
+      sizeBytes: 4096,
+      hidden: true,
+      path: '/media/fat/games/GBA/.Castlevania (USA).zip',
+      kind: 'file',
+    };
+    const next = applyVisibilityChange([rom], {
+      filename: '.Castlevania (USA).zip',
+      hidden: false,
+    });
+    expect(next[0]?.filename).toBe('Castlevania (USA).zip');
+    expect(next[0]?.displayName).toBe('Castlevania (USA)');
+  });
 });
 
 describe('applyBulkVisibilityChange', () => {
@@ -80,9 +123,12 @@ describe('applyBulkVisibilityChange', () => {
       { filename: '.b.nes', hidden: false },
     ]);
 
-    expect(next.find((r) => r.displayName === 'a.nes')?.hidden).toBe(true);
-    expect(next.find((r) => r.displayName === 'b.nes')?.hidden).toBe(false);
-    expect(next.find((r) => r.displayName === 'c.nes')?.hidden).toBe(false);
+    // After the bulk apply, lookups by filename are stable across
+    // hide / unhide. (Looking up by displayName would be flaky now
+    // that `displayRomName` strips `.nes`.)
+    expect(next.find((r) => r.filename === '.a.nes')?.hidden).toBe(true);
+    expect(next.find((r) => r.filename === 'b.nes')?.hidden).toBe(false);
+    expect(next.find((r) => r.filename === 'c.nes')?.hidden).toBe(false);
   });
 
   it('handles an empty change set as identity', () => {
@@ -93,7 +139,16 @@ describe('applyBulkVisibilityChange', () => {
 
 describe('recountCore', () => {
   it('recomputes romCount and hiddenCount from the current rom list', () => {
-    const core: Core = { id: 'NES', name: 'NES', romCount: 99, hiddenCount: 99 };
+    const core: CoreEntry = {
+      id: 'NES',
+      name: 'NES',
+      romCount: 99,
+      hiddenCount: 99,
+      category: 'Console',
+      rbfPaths: [],
+      gamesDirExists: true,
+      gamesDirHidden: false,
+    };
     const roms = [
       makeRom('a.nes', false),
       makeRom('.b.nes', true),
@@ -108,7 +163,16 @@ describe('recountCore', () => {
   });
 
   it('returns a new core object even when counts are unchanged', () => {
-    const core: Core = { id: 'NES', name: 'NES', romCount: 1, hiddenCount: 0 };
+    const core: CoreEntry = {
+      id: 'NES',
+      name: 'NES',
+      romCount: 1,
+      hiddenCount: 0,
+      category: 'Console',
+      rbfPaths: [],
+      gamesDirExists: true,
+      gamesDirHidden: false,
+    };
     const roms = [makeRom('a.nes', false)];
     const next = recountCore(core, roms);
     expect(next).not.toBe(core);

@@ -38,6 +38,7 @@ interface FormState {
   readonly keySource: KeySource;
   readonly keyContent: string;
   readonly keyPath: string | null;
+  readonly autoReapplyHides: boolean;
 }
 
 function createBlankForm(profile?: MisterProfile): FormState {
@@ -51,6 +52,7 @@ function createBlankForm(profile?: MisterProfile): FormState {
     keySource: 'paste',
     keyContent: '',
     keyPath: null,
+    autoReapplyHides: profile?.autoReapplyHides ?? false,
   };
 }
 
@@ -125,6 +127,7 @@ export function ProfileDialog({
       port: portNumber,
       username: form.username.trim(),
       authMethod: form.authMethod,
+      autoReapplyHides: form.autoReapplyHides,
     };
     const secret: MisterSecret =
       form.authMethod === 'password'
@@ -288,6 +291,24 @@ export function ProfileDialog({
                 )}
               </div>
             )}
+
+            <label className="mt-2 flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={form.autoReapplyHides}
+                onChange={(e) => update('autoReapplyHides', e.target.checked)}
+              />
+              <span>
+                <span className="font-medium">
+                  Automatically re-hide cores that come back after MiSTer updates
+                </span>
+                <span className="block text-xs text-muted-foreground">
+                  On each connect, compare the on-MiSTer hide ledger to the live state
+                  and re-apply any hides that have drifted. Off by default.
+                </span>
+              </span>
+            </label>
           </div>
 
           <DialogFooter>

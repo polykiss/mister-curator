@@ -36,13 +36,18 @@ export function ProfileList({ onEdit }: ProfileListProps): JSX.Element {
   const onConnect = async (profile: MisterProfile): Promise<void> => {
     setPendingId(profile.id);
     try {
-      await connect(profile.id);
+      const result = await connect(profile.id);
+      if (result.reappliedCount > 0) {
+        const noun = result.reappliedCount === 1 ? 'core' : 'cores';
+        toast.info(
+          `Re-applied ${String(result.reappliedCount)} hidden ${noun} after update.`,
+        );
+      }
     } catch (err) {
       toast.error('Connection failed', {
         description: friendlyConnectionError(err, profile),
       });
       if (!(err instanceof MisterConnectionError)) {
-        // Surface unexpected errors to the dev console for diagnosis.
         console.error(err);
       }
     } finally {

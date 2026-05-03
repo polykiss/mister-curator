@@ -10,8 +10,9 @@ MiSTer FPGA over SSH and lets users curate their ROM collection: audit
 their library, toggle visibility of individual ROMs and whole cores,
 manage saves, and more — without touching the MiSTer directly.
 
-The user's MiSTer is treated as a remote filesystem. Nothing is ever
-permanently installed on the device.
+The user's MiSTer is treated as a remote filesystem. The only persistent
+state the app writes is a small JSON ledger under
+`/media/fat/.mistercurator/`. No code is permanently installed.
 
 ## Core architectural principle: remote-only
 
@@ -19,6 +20,12 @@ The MiSTer is accessed exclusively via SSH and SFTP. No code is permanently
 installed on the device. Helper scripts in `agent/` are copied to
 `/tmp/mistercurator/` on demand, executed, and may be left there for the
 session but must never be assumed to persist.
+
+The app persists a handful of small JSON state files under
+`/media/fat/.mistercurator/` (the hide ledger, user-marked system
+files, per-folder classification overrides). The directory is reserved
+for this app; aside from these files and the renames that implement
+hide/show, nothing is written outside of `/tmp/mistercurator/`.
 
 The app must work correctly against a freshly-flashed MiSTer with default
 settings. If you're tempted to add a "first run setup on the MiSTer"
@@ -79,7 +86,7 @@ Update it before changing consumers.
 ## Never do
 
 - Never install anything persistent on the MiSTer (no apt, no pip, no
-  files outside `/tmp/mistercurator/`).
+  files outside `/tmp/mistercurator/` and `/media/fat/.mistercurator/`).
 - Never delete a user's ROM, save, config, or BIOS file. Hide via rename;
   that's it.
 - Never make assumptions about the MiSTer's filesystem layout beyond
@@ -100,6 +107,13 @@ Update it before changing consumers.
 - App data folder: resolved via Electron's `app.getPath('userData')` —
   yields `MiSTerCurator/` on each platform automatically
 - On-MiSTer agent directory: `/tmp/mistercurator/`
+- On-MiSTer state directory: `/media/fat/.mistercurator/` — holds the
+  small JSON state files the app persists across sessions:
+  - `state.json` — hide ledger (which cores the app hid)
+  - `system-files.json` — user-marked system files (`(coreId, filename)` pairs)
+  - `folder-classifications.json` — per-folder container/atomic overrides
+
+  All small, all our domain. Add new state files here as the app grows.
 - Bundle identifier (for code signing): TBD at packaging time
 
 ## Conventions
