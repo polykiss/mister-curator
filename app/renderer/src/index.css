@@ -1,60 +1,221 @@
+/* IBM Plex Sans (variable font, used at all weights) — Latin + Latin-Ext.
+   Self-hosted because the renderer's CSP `default-src 'self'` blocks
+   the Google Fonts CDN, and we want correct paint when the user is
+   offline against a LAN-only MiSTer. */
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-sans-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+    U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+    U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-sans-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7,
+    U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F,
+    U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+
+/* IBM Plex Mono (static per weight) — Latin + Latin-Ext, weights 400/500/600. */
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-mono-400-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+    U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+    U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-mono-400-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7,
+    U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F,
+    U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-mono-500-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+    U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+    U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-mono-500-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7,
+    U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F,
+    U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-mono-600-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+    U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+    U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-mono-600-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7,
+    U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F,
+    U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* Design tokens — see docs/design/SYSTEM.md.
+   HSL components are space-separated so Tailwind can substitute alpha
+   via `hsl(var(--token) / <alpha-value>)`. Both modes are wired even
+   though v0.1.0 ships dark-only (`<body class="dark">`). */
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
-    --radius: 0.5rem;
+    /* Surfaces — light mode */
+    --bg-canvas: 40 22% 96%;
+    --bg-chrome: 40 16% 98%;
+    --bg-surface: 0 0% 100%;
+    --bg-elevated: 36 14% 94%;
+    --bg-overlay: 36 12% 89%;
+    /* Foregrounds — light mode */
+    --fg-primary: 220 24% 7%;
+    --fg-body: 218 14% 19%;
+    --fg-muted: 218 9% 40%;
+    --fg-disabled: 217 10% 65%;
+    /* Borders — light mode */
+    --border-subtle: 36 16% 90%;
+    --border-default: 36 12% 82%;
+    --border-emphasis: 36 8% 65%;
+    /* Accent — signal green; same hex across modes, fg flips */
+    --accent: 75 100% 48%;
+    --accent-hover: 75 100% 60%;
+    --accent-active: 75 100% 42%;
+    --accent-soft: 80 75% 8%;
+    --accent-fg: 100 17% 5%;
+    /* Status */
+    --success: 158 60% 53%;
+    --warning: 38 87% 61%;
+    --destructive: 358 75% 59%;
+    --info: 219 100% 74%;
+    /* Density-indicator gradient stops — see SYSTEM.md §10 */
+    --density-fill-low: 218 9% 40%;     /* same as fg-muted */
+    --density-fill-high: 75 100% 48%;   /* same as accent */
+    --density-track: 36 14% 94%;        /* same as bg-elevated, light */
+    /* Radius */
+    --radius: 0.375rem;
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 210 40% 98%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 212.7 26.8% 83.9%;
+    /* Surfaces — dark mode (default) */
+    --bg-canvas: 218 30% 4%;
+    --bg-chrome: 212 25% 6%;
+    --bg-surface: 213 22% 8%;
+    --bg-elevated: 213 19% 11%;
+    --bg-overlay: 213 18% 14%;
+    /* Foregrounds — dark mode */
+    --fg-primary: 218 13% 92%;
+    --fg-body: 215 12% 79%;
+    --fg-muted: 218 8% 57%;
+    --fg-disabled: 217 9% 38%;
+    /* Borders — dark mode */
+    --border-subtle: 213 21% 12%;
+    --border-default: 217 17% 17%;
+    --border-emphasis: 217 16% 22%;
+    /* Accent — same as light (the signal-green is constant) */
+    --accent: 75 100% 48%;
+    --accent-hover: 75 100% 60%;
+    --accent-active: 75 100% 42%;
+    --accent-soft: 80 75% 8%;
+    --accent-fg: 100 17% 5%;
+    /* Status — recalibrated for dark */
+    --success: 158 60% 53%;
+    --warning: 38 87% 61%;
+    --destructive: 358 75% 59%;
+    --info: 219 100% 74%;
+    /* Density-indicator gradient stops */
+    --density-fill-low: 218 8% 57%;     /* same as fg-muted, dark */
+    --density-fill-high: 75 100% 48%;   /* same as accent */
+    --density-track: 213 19% 11%;       /* same as bg-elevated, dark */
+  }
+
+  * {
+    border-color: hsl(var(--border-default));
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background-color: hsl(var(--bg-canvas));
+    color: hsl(var(--fg-body));
+    font-family: 'IBM Plex Sans', system-ui, -apple-system, BlinkMacSystemFont,
+      'Segoe UI', sans-serif;
+    font-size: 13px;
+    line-height: 20px;
+    font-feature-settings: 'cv11', 'ss01', 'ss03';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Tabular numerals for counts, sizes, and any alignment-sensitive
+     metadata. Mono inherits this naturally; this rule extends it to
+     elements rendered in sans where digits still need to align. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
   }
 }
 
-@layer base {
-  * {
-    @apply border-border;
+@layer utilities {
+  /* The single density-indicator fill — see SYSTEM.md §10. The fill
+     width is set via inline style; this rule only handles the gradient
+     itself. Track + fill are siblings inside the indicator container. */
+  .density-fill {
+    background-image: linear-gradient(
+      to right,
+      hsl(var(--density-fill-low)) 0%,
+      hsl(var(--density-fill-high)) 100%
+    );
   }
-  body {
-    @apply bg-background text-foreground;
-    font-feature-settings: 'rlig' 1, 'calt' 1;
+
+  /* Subtle pulsed dot for the "connecting" status indicator. Two-keyframe
+     opacity animation — the references prefer breathing motion over
+     blinking. Local to the dot only; the rest of the row stays static. */
+  @keyframes status-pulse {
+    0%, 100% { opacity: 0.55; }
+    50% { opacity: 1; }
+  }
+  .animate-status-pulse {
+    animation: status-pulse 1.5s ease-in-out infinite;
   }
 }
