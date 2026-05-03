@@ -24,30 +24,36 @@ export function ConnectionScreen(): JSX.Element {
   };
 
   return (
-    <div className="mx-auto w-full max-w-2xl px-6 py-12">
-      <header className="mb-8 flex items-end justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">MiSTerCurator</h1>
-          <p className="text-sm text-muted-foreground">
-            Pick a profile to connect, or add one to get started.
-          </p>
-        </div>
-        <Button variant="primary" onClick={openAdd}>
-          <Plus />
-          Add profile
-        </Button>
-      </header>
+    <div className="min-h-screen bg-canvas">
+      <div className="mx-auto w-full max-w-2xl px-8 pt-24 pb-12">
+        <header className="mb-12 flex items-end justify-between gap-6">
+          <div className="flex flex-col gap-3">
+            {/* Wordmark in IBM Plex Sans 700, display size, -0.02em
+                tracking per SYSTEM.md §5. The "MiSTer" / "Curator"
+                split keeps the brand legible at 40px without breaking
+                the existing identity. */}
+            <h1 className="text-display text-fg">MiSTerCurator</h1>
+            <p className="max-w-md text-body-lg text-fg-muted">
+              Pick a profile to connect, or add one to get started.
+            </p>
+          </div>
+          <Button variant="primary" onClick={openAdd}>
+            <Plus strokeWidth={1.5} />
+            Add profile
+          </Button>
+        </header>
 
-      <ProfileList onEdit={openEdit} />
+        <ProfileList onEdit={openEdit} />
 
-      <ProfileDialog
-        open={dialogOpen}
-        onOpenChange={setDialogOpen}
-        profile={editingProfile}
-        onSaveError={(message) => {
-          toast.error('Could not save profile', { description: message });
-        }}
-      />
+        <ProfileDialog
+          open={dialogOpen}
+          onOpenChange={setDialogOpen}
+          profile={editingProfile}
+          onSaveError={(message) => {
+            toast.error('Could not save profile', { description: message });
+          }}
+        />
+      </div>
     </div>
   );
 }
