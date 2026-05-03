@@ -1,11 +1,11 @@
 import {
   ArrowLeft,
-  Cog,
   Eye,
   EyeOff,
   Folder,
   FolderOpen,
   MoreHorizontal,
+  Wrench,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { JSX } from 'react';
@@ -28,7 +28,9 @@ import {
   RomRowMenu,
   type RomRowMenuItem,
 } from '@app/renderer/src/components/RomRowMenu';
+import { Badge } from '@app/renderer/src/components/ui/badge';
 import { Button } from '@app/renderer/src/components/ui/button';
+import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
 import {
   Table,
@@ -165,6 +167,17 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
       return true;
     });
   }, [roms, showHidden, showSystem, systemFlags]);
+
+  // Density-bar denominator for the size column — peer max across the
+  // rows actually being rendered. SYSTEM.md §10: ROMs use file size /
+  // max visible.
+  const maxSizeBytes = useMemo(() => {
+    if (!presentableRoms) return 0;
+    return presentableRoms.reduce(
+      (acc, r) => (r.sizeBytes > acc ? r.sizeBytes : acc),
+      0,
+    );
+  }, [presentableRoms]);
 
   // Counts shown in the header — non-system ROMs only.
   const visibleNonSystem = useMemo(() => {
@@ -555,38 +568,30 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   const backRow = computeBackRow(core.name, subPath);
 
   return (
-    <div className="flex h-full flex-col">
-      {/* Header is a vertical stack — breadcrumb on its own row so a
-          long path can scroll horizontally without crowding the
-          toolbar; subtitle on its own row; action buttons on their
-          own row (wrapping only when the window is unusually narrow);
-          filter checkboxes on the bottom row. Each row owns its full
-          horizontal width. */}
-      <header className="space-y-2 border-b p-4">
+    <div className="flex h-full flex-col bg-surface">
+      {/* Header is a vertical stack — path on its own row so a long
+          path can scroll horizontally without crowding the toolbar;
+          counts; tools; filters. Each row owns its full horizontal
+          width. */}
+      <header className="space-y-3 border-b border-subtle px-4 py-3">
         <nav
-          aria-label="Folder breadcrumb"
-          // Owns the full width of the header. Allows horizontal
-          // scrolling when the path gets too long instead of clipping
-          // or wrapping to two lines.
-          className="flex items-center gap-1 overflow-x-auto whitespace-nowrap text-lg"
+          aria-label="Folder path"
+          className="flex items-center gap-1 overflow-x-auto whitespace-nowrap font-mono text-body-sm"
         >
           {breadcrumb.map((seg, i) => (
             <span
               key={`${String(seg.depth)}-${seg.label}`}
-              className="flex shrink-0 items-center gap-1"
+              className="flex shrink-0 items-center"
             >
               {i > 0 ? (
-                <span
-                  aria-hidden
-                  className="shrink-0 select-none text-base text-muted-foreground/50"
-                >
-                  ›
+                <span aria-hidden className="px-2 select-none text-fg-disabled">
+                  /
                 </span>
               ) : null}
               {seg.current ? (
                 <span
                   aria-current="page"
-                  className="font-semibold text-foreground"
+                  className="font-medium text-fg"
                   title={seg.label}
                 >
                   {seg.label}
@@ -595,7 +600,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                 <button
                   type="button"
                   onClick={() => navigateToDepth(seg.depth)}
-                  className="rounded -mx-1 px-1 text-muted-foreground hover:text-foreground focus-visible:text-foreground hover:underline focus-visible:underline focus-visible:outline-none"
+                  className="rounded text-fg-body transition-colors hover:text-fg focus-visible:text-fg hover:underline focus-visible:underline focus-visible:outline-none"
                   title={`Go to ${seg.label}`}
                 >
                   {seg.label}
@@ -604,9 +609,15 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             </span>
           ))}
         </nav>
-        <p className="text-xs text-muted-foreground">
-          {visibleNonSystem} ROMs · {hiddenNonSystem} hidden
-          {systemCount > 0 ? <> · {systemCount} system</> : null}
+        <p className="font-mono text-body-sm text-fg-muted tabular">
+          <span className="text-fg-body">{visibleNonSystem}</span> ROMs ·{' '}
+          <span className="text-fg-body">{hiddenNonSystem}</span> hidden
+          {systemCount > 0 ? (
+            <>
+              {' '}
+              · <span className="text-fg-body">{systemCount}</span> system
+            </>
+          ) : null}
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <Button
@@ -672,18 +683,20 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             Unmark system ({unmarkableSelected.length})
           </Button>
         </div>
-        <div className="flex flex-wrap gap-4 text-xs">
-          <label className="flex items-center gap-1.5">
+        <div className="flex flex-wrap gap-4 text-body-sm text-fg-body">
+          <label className="flex items-center gap-2">
             <input
               type="checkbox"
+              className="accent-accent"
               checked={showHidden}
               onChange={(e) => setShowHidden(e.target.checked)}
             />
             Show hidden
           </label>
-          <label className="flex items-center gap-1.5">
+          <label className="flex items-center gap-2">
             <input
               type="checkbox"
+              className="accent-accent"
               checked={showSystem}
               onChange={(e) => setShowSystem(e.target.checked)}
             />
@@ -696,11 +709,11 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
         {loading && !roms ? (
           <div className="space-y-1 p-4">
             {Array.from({ length: 8 }).map((_, i) => (
-              <Skeleton key={i} className="h-9 w-full" />
+              <Skeleton key={i} className="h-10 w-full" />
             ))}
           </div>
         ) : !presentableRoms || presentableRoms.length === 0 ? (
-          <div className="p-6 text-sm text-muted-foreground">
+          <div className="p-6 text-body-sm text-fg-muted">
             {(roms ?? []).length === 0
               ? 'No ROMs in this core.'
               : 'Nothing to show. Toggle "Show hidden" or "Show system files" to see more.'}
@@ -708,10 +721,11 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
         ) : (
           <Table>
             <TableHeader>
-              <TableRow>
-                <TableHead className="w-10">
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="w-10 pl-4">
                   <input
                     type="checkbox"
+                    className="accent-accent"
                     aria-label="Select all"
                     checked={
                       presentableRoms.length > 0 &&
@@ -721,15 +735,15 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                   />
                 </TableHead>
                 <TableHead>Name</TableHead>
-                <TableHead className="w-24 text-right">Size</TableHead>
-                <TableHead className="w-24 text-right">Visibility</TableHead>
-                <TableHead className="w-10" aria-label="Actions" />
+                <TableHead className="w-44 text-right">Size</TableHead>
+                <TableHead className="w-28 text-right">Visibility</TableHead>
+                <TableHead className="w-10 pr-2" aria-label="Actions" />
               </TableRow>
             </TableHeader>
             <TableBody>
               {backRow ? (
                 <TableRow
-                  className="bg-muted/40 hover:bg-muted"
+                  className="cursor-pointer bg-elevated/50 hover:bg-elevated"
                   onClick={() => setSubPath(backRow.targetSubPath)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
@@ -742,19 +756,11 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                   aria-label={`Back to ${backRow.parentLabel}`}
                   title={`Back to ${backRow.parentLabel}`}
                 >
-                  {/* Spans every column so this row reads visually
-                      distinct from a regular ROM row — no checkbox, no
-                      size, no visibility toggle. The total column count
-                      matches `<TableHeader>` (5: select / name / size /
-                      visibility / actions). */}
-                  <TableCell colSpan={5} className="cursor-pointer py-1.5">
-                    <span className="inline-flex items-center gap-2 italic text-muted-foreground">
-                      <ArrowLeft
-                        className="h-3.5 w-3.5 shrink-0"
-                        aria-hidden
-                      />
+                  <TableCell colSpan={5} className="pl-4">
+                    <span className="inline-flex items-center gap-2 font-mono text-body-sm text-fg-muted">
+                      <ArrowLeft className="size-3.5 shrink-0" strokeWidth={1.5} aria-hidden />
                       <span className="truncate">
-                        .. (Back to {backRow.parentLabel})
+                        ../ {backRow.parentLabel}
                       </span>
                     </span>
                   </TableCell>
@@ -772,16 +778,16 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                       setMenuFor({ rom, x: e.clientX, y: e.clientY });
                     }}
                     className={cn(
-                      // Hidden ROMs: half-opacity row + solid muted bg +
-                      // italic + a destructive HIDDEN badge left of the
-                      // name. No strikethrough — same treatment as the
-                      // cores list so panes feel consistent.
-                      rom.hidden && 'bg-muted italic text-muted-foreground opacity-50',
+                      // Hidden ROMs recede via foreground only — no
+                      // opacity, no italic, no fill. The HIDDEN badge
+                      // does the signalling.
+                      rom.hidden && 'text-fg-muted',
                     )}
                   >
-                    <TableCell>
+                    <TableCell className="pl-4">
                       <input
                         type="checkbox"
+                        className="accent-accent"
                         aria-label={`Select ${rom.displayName}`}
                         checked={isSelected}
                         onChange={(e) => onToggleSelect(rom.filename, e.target.checked)}
@@ -789,18 +795,13 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                     </TableCell>
                     <TableCell
                       className={cn(
-                        'truncate font-medium',
+                        'truncate',
                         rom.kind === 'folder-container' &&
                           !rom.hidden &&
                           'cursor-pointer',
                       )}
                       onDoubleClick={() => onRowActivate(rom)}
                       onClick={(e) => {
-                        // Single-click drilling on container folders
-                        // (the spec says "click to drill in"). Don't
-                        // intercept clicks on the action buttons in
-                        // adjacent cells — those bubble up via a
-                        // different path.
                         if (rom.kind === 'folder-container' && !rom.hidden) {
                           e.preventDefault();
                           onRowActivate(rom);
@@ -812,76 +813,84 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                           : undefined
                       }
                     >
-                      <span className="inline-flex items-center gap-1.5">
-                        {/* Badge order is fixed: SYSTEM left of HIDDEN
-                            left of name. Mirrors the cores list, where
-                            HIDDEN sits to the left of the core name. */}
+                      <span className="inline-flex items-center gap-2">
+                        {/* Badge order: SYSTEM left of HIDDEN left of
+                            kind icon left of name. Mirrors the cores
+                            pane (HIDDEN to the left of the core name). */}
                         {isSystem ? (
-                          <span
-                            className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide not-italic text-muted-foreground"
+                          <Badge
+                            variant="info"
                             title="System file (BIOS, config, palette). MiSTerCurator never bulk-toggles these."
                           >
                             System
-                          </span>
+                          </Badge>
                         ) : null}
                         {rom.hidden ? (
-                          <span
-                            className="shrink-0 rounded bg-destructive px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide not-italic text-destructive-foreground"
+                          <Badge
+                            variant="muted"
                             title="This ROM is hidden from the MiSTer menu."
                           >
                             Hidden
-                          </span>
+                          </Badge>
                         ) : null}
                         {isSystem ? (
-                          <Cog
-                            className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                          <Wrench
+                            className="size-3.5 shrink-0 text-fg-muted"
+                            strokeWidth={1.5}
                             aria-label="system file"
                           />
                         ) : rom.kind === 'folder-container' ? (
-                          // Container folders are drillable — chevron
-                          // hint mirrors what clicking the row does.
                           <FolderOpen
-                            className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                            className="size-3.5 shrink-0 text-fg-muted"
+                            strokeWidth={1.5}
                             aria-label="container folder"
                           />
                         ) : rom.kind === 'folder-atomic' ? (
                           <Folder
-                            className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                            className="size-3.5 shrink-0 text-fg-muted"
+                            strokeWidth={1.5}
                             aria-label="folder ROM"
                           />
                         ) : null}
-                        <span className="truncate">{rom.displayName}</span>
+                        <span
+                          className={cn(
+                            'truncate',
+                            !rom.hidden && !isSystem && 'text-fg',
+                          )}
+                        >
+                          {rom.displayName}
+                        </span>
                       </span>
                     </TableCell>
-                    <TableCell className="text-right text-xs text-muted-foreground">
-                      {formatBytes(rom.sizeBytes)}
+                    <TableCell className="text-right">
+                      <span className="inline-flex items-center justify-end gap-2 font-mono text-body-sm text-fg-muted tabular">
+                        <DensityBar
+                          value={rom.sizeBytes}
+                          max={maxSizeBytes}
+                          ariaLabel={`${formatBytes(rom.sizeBytes)} of ${formatBytes(maxSizeBytes)} (peer max)`}
+                        />
+                        <span className="min-w-[3.5rem]">{formatBytes(rom.sizeBytes)}</span>
+                      </span>
                     </TableCell>
                     <TableCell className="text-right">
                       {isSystem ? (
-                        <span className="text-xs italic text-muted-foreground">
+                        <span className="font-mono text-body-sm text-fg-disabled">
                           read-only
                         </span>
                       ) : (
-                        // Round 4: rolled back the round-3 fills.
-                        // 9 stacked rows of solid Hide buttons read as
-                        // shouting; outlined variants keep the slate-
-                        // vs-primary colour cue but with less visual
-                        // weight. The full design pass lives in PR #9.
-                        // `min-w-[5.5rem]` retained so a row's button
-                        // cell doesn't reflow when its state flips.
+                        // Ghost-styled per-row toggle (SYSTEM.md §5).
+                        // Stacked solid fills (the round-3 round-trip)
+                        // read as shouting in a long ROM list — the
+                        // ghost variant keeps the action discoverable
+                        // without becoming the loudest thing on screen.
+                        // `canMutate` gates a lost-connection session
+                        // from triggering a rename; the tooltip
+                        // explains why the row is locked.
                         <Button
-                          variant="secondary"
+                          variant="ghost"
                           size="sm"
                           onClick={() => void onSingleToggle(rom)}
                           disabled={!canMutate}
-                          className={cn(
-                            'min-w-[5.5rem] not-italic',
-                            rom.hidden
-                              ? // Show: primary-tinted outline
-                                'border-primary/40 text-primary hover:bg-primary/10 hover:text-primary'
-                              : // Hide: muted slate outline
-                                'border-slate-300 text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800/50 dark:hover:text-slate-100',
-                          )}
                           title={
                             canMutate
                               ? rom.hidden
@@ -892,19 +901,19 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         >
                           {rom.hidden ? (
                             <>
-                              <EyeOff />
+                              <EyeOff strokeWidth={1.5} />
                               Show
                             </>
                           ) : (
                             <>
-                              <Eye />
+                              <Eye strokeWidth={1.5} />
                               Hide
                             </>
                           )}
                         </Button>
                       )}
                     </TableCell>
-                    <TableCell className="text-right">
+                    <TableCell className="pr-2 text-right">
                       <Button
                         variant="ghost"
                         size="icon"
@@ -915,7 +924,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                           setMenuFor({ rom, x: r.left, y: r.bottom });
                         }}
                       >
-                        <MoreHorizontal />
+                        <MoreHorizontal strokeWidth={1.5} />
                       </Button>
                     </TableCell>
                   </TableRow>

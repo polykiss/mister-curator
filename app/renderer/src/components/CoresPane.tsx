@@ -6,7 +6,9 @@ import { toast } from 'sonner';
 import { isArcadePlaceholder, isCoreHidden } from '@shared/core-matching';
 import type { CoreEntry } from '@shared/types';
 
+import { Badge } from '@app/renderer/src/components/ui/badge';
 import { Button } from '@app/renderer/src/components/ui/button';
+import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
 import { HideEmptyCoresDialog } from '@app/renderer/src/components/HideEmptyCoresDialog';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
@@ -197,8 +199,8 @@ export function CoresPane(): JSX.Element {
   };
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="flex flex-wrap items-center justify-between gap-2 border-b p-3 text-xs">
+    <div className="flex h-full flex-col bg-surface">
+      <header className="flex flex-col gap-3 border-b border-subtle px-4 py-3">
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="secondary"
@@ -207,7 +209,7 @@ export function CoresPane(): JSX.Element {
             disabled={!canMutate || emptyHideableCores.length === 0}
             title={canMutate ? undefined : DISCONNECTED_TOOLTIP}
           >
-            <Sparkles />
+            <Sparkles strokeWidth={1.5} />
             Hide empty ({emptyHideableCores.length})
           </Button>
           <Button
@@ -221,13 +223,14 @@ export function CoresPane(): JSX.Element {
                 : DISCONNECTED_TOOLTIP
             }
           >
-            <Undo2 />
+            <Undo2 strokeWidth={1.5} />
             Unhide all ({appHiddenCores.length})
           </Button>
         </div>
-        <label className="flex items-center gap-1.5">
+        <label className="flex items-center gap-2 text-body-sm text-fg-body">
           <input
             type="checkbox"
+            className="accent-accent"
             checked={showHidden}
             onChange={(e) => setShowHidden(e.target.checked)}
           />
@@ -236,11 +239,13 @@ export function CoresPane(): JSX.Element {
       </header>
       {externalHiddenCount > 0 ? (
         <div
-          className="border-b bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+          className="border-b border-subtle border-l-2 border-l-info bg-surface px-4 py-3 text-body-sm text-fg-muted"
           title="These cores were already hidden when MiSTerCurator first connected. We won't modify them."
         >
-          {String(externalHiddenCount)} cores hidden externally — managed by other
-          tools, not by MiSTerCurator.
+          <span className="font-mono text-fg-body">
+            {String(externalHiddenCount)}
+          </span>{' '}
+          cores hidden externally — managed by other tools, not by MiSTerCurator.
         </div>
       ) : null}
 
@@ -298,15 +303,32 @@ function renderCoreList(args: RenderArgs): JSX.Element {
   }
 
   if (args.coresError !== null) {
-    return <div className="p-4 text-sm text-destructive">{args.coresError}</div>;
+    return (
+      <div className="border-l-2 border-destructive bg-surface p-4 text-body-sm text-fg-body">
+        {args.coresError}
+      </div>
+    );
   }
 
   if (!args.visibleCores || args.visibleCores.length === 0) {
-    return <div className="p-4 text-sm text-muted-foreground">No cores found.</div>;
+    return (
+      <div className="p-6 text-body-sm text-fg-muted">No cores found.</div>
+    );
   }
 
+  // Density-bar denominator: max ROM count across the visible cores.
+  // Cores with romCount === 0 render no bar (per SYSTEM.md §10).
+  const maxRomCount = args.visibleCores.reduce(
+    (acc, c) => (c.romCount > acc ? c.romCount : acc),
+    0,
+  );
+
   return (
-    <ul className="flex-1 overflow-auto divide-y" role="listbox" aria-label="MiSTer cores">
+    <ul
+      className="flex-1 overflow-auto"
+      role="listbox"
+      aria-label="MiSTer cores"
+    >
       {args.visibleCores.map((core) => {
         const isSelected = core.id === args.selectedCoreId;
         const isHiddenCore = isCoreHidden(core);
@@ -316,143 +338,154 @@ function renderCoreList(args: RenderArgs): JSX.Element {
         const isPending = args.pendingId === core.id;
 
         return (
-          <li key={core.id}>
-            <div
-              className={cn(
-                'flex w-full items-center gap-1 px-3 py-2 text-sm transition-colors',
-                isSelected && 'bg-accent',
-                !isSelected && 'hover:bg-accent/50',
-                // Hidden cores: half-opacity row + solid muted bg + italic
-                // + a destructive HIDDEN badge to the LEFT of the name.
-                // No strikethrough (it competed with the badge for the
-                // user's eye and reduced legibility on long names).
-                isHiddenCore && 'bg-muted text-muted-foreground italic opacity-50',
-                // Arcade placeholder is read-only; render in a subtle
-                // "coming soon" style so it doesn't compete visually
-                // with active cores.
-                isPlaceholder && 'italic text-muted-foreground/80',
-              )}
+          <li
+            key={core.id}
+            className={cn(
+              'group/row relative flex h-10 items-center gap-2 border-b border-subtle pl-4 pr-2 text-body transition-colors',
+              !isSelected && 'hover:bg-elevated',
+              isSelected && 'bg-overlay',
+              // Hidden cores keep the row clickable but visually
+              // recede via foreground color only — no opacity, no
+              // italic, no fill. The HIDDEN badge does the signalling.
+              isHiddenCore && 'text-fg-muted',
+              isPlaceholder && 'text-fg-disabled',
+            )}
+          >
+            {/* Active row: 2px accent edge per SYSTEM.md §5. Renders
+                inside the row container so it doesn't shift content. */}
+            {isSelected ? (
+              <span
+                aria-hidden
+                className="absolute inset-y-0 left-0 w-[2px] bg-accent"
+              />
+            ) : null}
+
+            <button
+              type="button"
+              role="option"
+              aria-selected={isSelected}
+              onClick={() => args.onSelect(core.id)}
+              className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left focus-visible:outline-none"
             >
-              <button
-                type="button"
-                role="option"
-                aria-selected={isSelected}
-                onClick={() => args.onSelect(core.id)}
-                className="flex flex-1 min-w-0 items-center justify-between gap-2 text-left"
-              >
-                <span className="flex min-w-0 items-center gap-1.5 truncate font-medium">
-                  {isHiddenCore ? (
-                    <span
-                      className="shrink-0 rounded bg-destructive px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide not-italic text-destructive-foreground"
-                      title="This core is hidden from the MiSTer menu."
-                    >
-                      Hidden
-                    </span>
-                  ) : null}
-                  <span className="truncate">{core.name}</span>
+              <span className="flex min-w-0 items-center gap-2">
+                {isHiddenCore ? (
+                  <Badge
+                    variant="muted"
+                    title="This core is hidden from the MiSTer menu."
+                  >
+                    Hidden
+                  </Badge>
+                ) : null}
+                <span
+                  className={cn(
+                    'truncate',
+                    isSelected ? 'font-medium text-fg' : '',
+                  )}
+                >
+                  {core.name}
                 </span>
+              </span>
+
+              <span className="flex shrink-0 items-center gap-2 font-mono text-body-sm text-fg-muted tabular">
                 {isPlaceholder ? (
-                  <span className="shrink-0 text-xs text-muted-foreground">
-                    coming later
-                  </span>
+                  <span className="text-fg-disabled">coming later</span>
                 ) : !core.gamesDirExists && core.rbfPaths.length > 0 ? (
-                  // Cores with an .rbf or .mgl but no games/ dir get a
-                  // small badge instead of "0 ROMs" so users don't think
-                  // their content vanished.
                   <span
-                    className="shrink-0 text-xs italic text-muted-foreground"
+                    className="text-fg-disabled"
                     title={`No games directory at /media/fat/games/${core.id}/`}
                   >
                     no games dir
                   </span>
                 ) : (
-                  <span className="shrink-0 text-xs text-muted-foreground">
-                    {core.romCount}
+                  <>
+                    <DensityBar
+                      value={core.romCount}
+                      max={maxRomCount}
+                      ariaLabel={`${String(core.romCount)} of ${String(maxRomCount)} ROMs (peer max)`}
+                    />
+                    <span className="min-w-[2.5rem] text-right">
+                      {core.romCount}
+                    </span>
                     {core.hiddenCount > 0 ? (
-                      <span className="ml-1 italic">({core.hiddenCount} hidden)</span>
+                      <span className="text-fg-disabled">
+                        ({core.hiddenCount} hidden)
+                      </span>
                     ) : null}
-                  </span>
+                  </>
                 )}
-              </button>
+              </span>
+            </button>
 
-              {askingHide ? (
-                // Two icon-sized buttons replace the eye button — same width
-                // budget, fits inside any reasonable cores-pane width.
-                <div className="flex shrink-0 items-center gap-0.5">
-                  <Button
-                    variant="destructive"
-                    size="icon"
-                    onClick={() => void args.onConfirmHide(core)}
-                    disabled={isPending}
-                    title={`Confirm: hide ${core.name}`}
-                    aria-label={`Confirm hide ${core.name}`}
-                  >
-                    <Check />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={args.onCancelHide}
-                    disabled={isPending}
-                    title="Cancel"
-                    aria-label="Cancel hide"
-                  >
-                    <X />
-                  </Button>
-                </div>
-              ) : isArcade ? (
-                // Arcade is read-only. No checkbox, no eye icon — it's
-                // a label-only row. The tooltip on the row itself
-                // surfaces the "coming later" message; a screen reader
-                // gets the same message via aria-label on the row.
-                <span
-                  className="shrink-0 px-2 text-xs italic text-muted-foreground/70"
-                  title={ARCADE_TOOLTIP}
-                  aria-label={ARCADE_TOOLTIP}
-                >
-                  read-only
-                </span>
-              ) : isHiddenCore ? (
-                // Round 4: rolled back the round-3 solid fills.
-                // Outlined variants keep the slate-vs-primary
-                // colour cue without 9 stacked rows shouting.
+            {askingHide ? (
+              // Two icon-sized buttons replace the eye button — same width
+              // budget, fits inside any reasonable cores-pane width.
+              <div className="flex shrink-0 items-center gap-0.5">
                 <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => void args.onShow(core)}
-                  disabled={isPending || !args.canMutate}
-                  className="min-w-[5.5rem] border-primary/40 text-primary hover:bg-primary/10 hover:text-primary"
-                  title={
-                    args.canMutate
-                      ? `Show ${core.name}`
-                      : 'Reconnect to make changes.'
-                  }
-                  aria-label={`Show ${core.name}`}
+                  variant="destructive"
+                  size="icon"
+                  onClick={() => void args.onConfirmHide(core)}
+                  disabled={isPending}
+                  title={`Confirm: hide ${core.name}`}
+                  aria-label={`Confirm hide ${core.name}`}
                 >
-                  <EyeOff />
-                  Show
+                  <Check strokeWidth={1.5} />
                 </Button>
-              ) : (
-                // Slate-outlined Hide. Triggers the confirm step
-                // (askHide) — same flow, restrained affordance.
                 <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => args.onAskHide(core.id)}
-                  disabled={isPending || !args.canMutate}
-                  className="min-w-[5.5rem] border-slate-300 text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800/50 dark:hover:text-slate-100"
-                  title={
-                    args.canMutate
-                      ? `Hide ${core.name}`
-                      : 'Reconnect to make changes.'
-                  }
-                  aria-label={`Hide ${core.name}`}
+                  variant="ghost"
+                  size="icon"
+                  onClick={args.onCancelHide}
+                  disabled={isPending}
+                  title="Cancel"
+                  aria-label="Cancel hide"
                 >
-                  <Eye />
-                  Hide
+                  <X strokeWidth={1.5} />
                 </Button>
-              )}
-            </div>
+              </div>
+            ) : isArcade ? (
+              <span
+                className="shrink-0 px-2 font-mono text-body-sm text-fg-disabled"
+                title={ARCADE_TOOLTIP}
+                aria-label={ARCADE_TOOLTIP}
+              >
+                read-only
+              </span>
+            ) : isHiddenCore ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => void args.onShow(core)}
+                disabled={isPending || !args.canMutate}
+                title={
+                  args.canMutate ? `Show ${core.name}` : DISCONNECTED_TOOLTIP
+                }
+                aria-label={`Show ${core.name}`}
+                className="opacity-100 group-hover/row:opacity-100"
+              >
+                <EyeOff strokeWidth={1.5} />
+              </Button>
+            ) : (
+              // Hide button reveals on row hover so the rest state stays
+              // visually quiet — a long list of permanent eye icons reads
+              // as noise. Selected and hidden rows always show their
+              // primary action. The mutating action gates on canMutate
+              // so a lost-connection session can't trigger a rename.
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => args.onAskHide(core.id)}
+                disabled={isPending || !args.canMutate}
+                title={
+                  args.canMutate ? `Hide ${core.name}` : DISCONNECTED_TOOLTIP
+                }
+                aria-label={`Hide ${core.name}`}
+                className={cn(
+                  'transition-opacity',
+                  !isSelected && 'opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100',
+                )}
+              >
+                <Eye strokeWidth={1.5} />
+              </Button>
+            )}
           </li>
         );
       })}
