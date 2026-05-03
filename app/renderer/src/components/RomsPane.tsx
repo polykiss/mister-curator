@@ -1,6 +1,5 @@
 import {
-  ChevronLeft,
-  ChevronRight,
+  ArrowLeft,
   Cog,
   Eye,
   EyeOff,
@@ -40,6 +39,11 @@ import {
   TableRow,
 } from '@app/renderer/src/components/ui/table';
 import { romsKey, useCores } from '@app/renderer/src/contexts/CoresContext';
+import {
+  computeBackRow,
+  computeBreadcrumb,
+  subPathAtDepth,
+} from '@app/renderer/src/lib/breadcrumb';
 import { cn } from '@app/renderer/src/lib/cn';
 import { formatBytes, summarizeBulkResult } from '@app/renderer/src/lib/format';
 import type { VisibilityChange } from '@app/renderer/src/lib/optimistic';
@@ -500,76 +504,53 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     }
   }
 
-  function pathSegments(): readonly string[] {
-    if (subPath === '') return [];
-    return subPath.split('/');
+  function navigateToDepth(targetDepth: number): void {
+    setSubPath(subPathAtDepth(subPath, targetDepth));
   }
 
-  function navigateToSegment(targetSegmentIndex: number): void {
-    if (targetSegmentIndex < 0) {
-      setSubPath('');
-      return;
-    }
-    const segs = pathSegments();
-    setSubPath(segs.slice(0, targetSegmentIndex + 1).join('/'));
-  }
-
-  const segs = pathSegments();
-  const isDrilledIn = segs.length > 0;
+  const breadcrumb = computeBreadcrumb(core.name, subPath);
+  const backRow = computeBackRow(core.name, subPath);
 
   return (
     <div className="flex h-full flex-col">
       <header className="border-b p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            {isDrilledIn ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="-ml-2 mb-1 h-7 text-xs"
-                onClick={() => navigateToSegment(segs.length - 2)}
-                title="Back to the previous folder"
-              >
-                <ChevronLeft className="h-3.5 w-3.5" />
-                Back
-              </Button>
-            ) : null}
-            <h2 className="truncate text-lg font-semibold">{core.name}</h2>
-            {isDrilledIn ? (
-              <nav
-                aria-label="Folder breadcrumb"
-                className="mt-0.5 flex flex-wrap items-center gap-0.5 text-xs text-muted-foreground"
-              >
-                <button
-                  type="button"
-                  onClick={() => navigateToSegment(-1)}
-                  className="rounded px-1 py-0.5 hover:bg-accent hover:text-accent-foreground"
-                >
-                  {core.name}
-                </button>
-                {segs.map((s, i) => (
-                  <span
-                    key={`${String(i)}-${s}`}
-                    className="flex items-center gap-0.5"
-                  >
-                    <ChevronRight className="h-3 w-3 shrink-0" />
-                    {i === segs.length - 1 ? (
-                      <span className="px-1 py-0.5 font-medium text-foreground">
-                        {s}
-                      </span>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => navigateToSegment(i)}
-                        className="rounded px-1 py-0.5 hover:bg-accent hover:text-accent-foreground"
-                      >
-                        {s}
-                      </button>
-                    )}
-                  </span>
-                ))}
-              </nav>
-            ) : null}
+            <nav
+              aria-label="Folder breadcrumb"
+              className="flex min-w-0 flex-wrap items-center gap-1 text-lg font-semibold"
+            >
+              {breadcrumb.map((seg, i) => (
+                <span key={`${String(seg.depth)}-${seg.label}`} className="flex items-center gap-1 min-w-0">
+                  {i > 0 ? (
+                    <span
+                      aria-hidden
+                      className="shrink-0 select-none text-muted-foreground/60"
+                    >
+                      ›
+                    </span>
+                  ) : null}
+                  {seg.current ? (
+                    <span
+                      aria-current="page"
+                      className="truncate"
+                      title={seg.label}
+                    >
+                      {seg.label}
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => navigateToDepth(seg.depth)}
+                      className="truncate rounded px-1 -mx-1 text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+                      title={`Go to ${seg.label}`}
+                    >
+                      {seg.label}
+                    </button>
+                  )}
+                </span>
+              ))}
+            </nav>
             <p className="mt-1 text-xs text-muted-foreground">
               {visibleNonSystem} ROMs · {hiddenNonSystem} hidden
               {systemCount > 0 ? <> · {systemCount} system</> : null}
@@ -683,6 +664,39 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
               </TableRow>
             </TableHeader>
             <TableBody>
+              {backRow ? (
+                <TableRow
+                  className="bg-muted/40 hover:bg-muted"
+                  onClick={() => setSubPath(backRow.targetSubPath)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setSubPath(backRow.targetSubPath);
+                    }
+                  }}
+                  tabIndex={0}
+                  role="button"
+                  aria-label={`Back to ${backRow.parentLabel}`}
+                  title={`Back to ${backRow.parentLabel}`}
+                >
+                  {/* Spans every column so this row reads visually
+                      distinct from a regular ROM row — no checkbox, no
+                      size, no visibility toggle. The total column count
+                      matches `<TableHeader>` (5: select / name / size /
+                      visibility / actions). */}
+                  <TableCell colSpan={5} className="cursor-pointer py-1.5">
+                    <span className="inline-flex items-center gap-2 italic text-muted-foreground">
+                      <ArrowLeft
+                        className="h-3.5 w-3.5 shrink-0"
+                        aria-hidden
+                      />
+                      <span className="truncate">
+                        .. (Back to {backRow.parentLabel})
+                      </span>
+                    </span>
+                  </TableCell>
+                </TableRow>
+              ) : null}
               {presentableRoms.map((rom) => {
                 const isSelected = selected.has(rom.filename);
                 const isSystem = systemFlags.get(rom.filename) === true;
