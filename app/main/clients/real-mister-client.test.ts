@@ -474,12 +474,12 @@ describe('RealMisterClient', () => {
       expect(arcade?.name).toBe('Arcade');
     });
 
-    it('emits a games-dir glob that picks up dot-prefixed (hidden) and case-mismatched dirs', async () => {
-      // Round 3 / Issue 4 bug fix: the shell loop had to enumerate
-      // BOTH visible and dot-prefixed games dirs so the matcher can
-      // surface externally-hidden cores like `.ATARI7800`. The glob
-      // pattern `* .[!.]*` covers both buckets in one pass while
-      // still skipping `.` and `..`.
+    it('emits a games-dir glob that picks up dot-prefixed (hidden) games dirs', async () => {
+      // The shell loop enumerates BOTH visible and dot-prefixed
+      // games dirs so the matcher can surface previously-hidden
+      // cores like `.ATARI7800`. The glob pattern `* .[!.]*`
+      // covers both buckets in one pass while still skipping
+      // `.` and `..`.
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -488,29 +488,20 @@ describe('RealMisterClient', () => {
       await client.listAllCoresWithFiles();
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
-      // The games-dir loop iterates both visible and dot-prefixed
-      // entries — the same pattern the matching shell script uses.
       expect(script).toMatch(/cd '\/media\/fat\/games'\s+for d in \* \.\[!\.]\*/);
-      // The G/GD/GF/SE structural tags all come from the same shell
-      // loop so a hidden games dir gets the same treatment as a
-      // visible one.
       expect(script).toContain(`printf 'G\\t%s\\n' "$d"`);
       expect(script).toContain(`printf 'GD\\t%s\\t%s\\n' "$d" "$name"`);
       expect(script).toContain(`printf 'SE\\t%s\\t%s\\tf\\t%s\\n'`);
-      // SR (recursive totals) is emitted by a separate one-shot
-      // find/awk pipeline, not by the per-folder loop. See the
-      // Round 4 perf hotfix below for why.
-      expect(script).toContain(`printf "SR\\t%s\\t%s\\t%d\\t%d\\n"`);
     });
 
-    it('computes SR via a single bulk find/awk pass (Round 4 perf hotfix)', async () => {
-      // Round 3 ran TWO `find` subprocesses per top-level subfolder
-      // (`sr_total=$(find ...)` + `sr_hidden=$(find ...)`). On a real
-      // MiSTer with hundreds of folder ROMs that meant 200+ forks and
-      // a 30-60s walk that overran the 10s SSH op timeout. Round 4
-      // replaces it with one find + one awk over the entire games
-      // tree. This test asserts the new shape is in place and the
-      // old per-folder forks are gone.
+    it('emits raw F-line file paths for the recursive walk (PR #11 round 2)', async () => {
+      // Pre-Round-2 the shell pre-aggregated per (top, sub) totals
+      // via awk. That had no notion of system folders, so files
+      // inside `Vectrex/Overlays/` were counted toward
+      // recursiveRomCount even though listRoms suppressed them.
+      // Round 2 emits raw F-lines and aggregates in JS with the
+      // same `shouldCountAsRom` filter listRoms uses, so the two
+      // paths can never disagree.
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -520,31 +511,61 @@ describe('RealMisterClient', () => {
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
 
-      // The bulk pass: one `find /media/fat/games -mindepth 3 -type f`
-      // piped through awk that aggregates by (top-level dir,
-      // top-level subfolder). The whole tree walks once.
+      // One `find` over the whole games tree; emits per-file
+      // lines tagged 'F\t<%P>'. JS does the filtering and
+      // aggregation.
       expect(script).toMatch(
-        /find '\/media\/fat\/games' -mindepth 3 -type f -printf '%P\\n'/,
+        /find '\/media\/fat\/games' -mindepth 3 -type f -printf 'F\\t%P\\n'/,
       );
-      expect(script).toContain('| awk -F/');
-      // Awk emits SR lines with the same shape the matcher parser
-      // expects: parent / subname / total / hidden.
-      expect(script).toContain(`printf "SR\\t%s\\t%s\\t%d\\t%d\\n"`);
-
-      // The old per-folder forks are gone — no `sr_total=$(find ...)`
-      // or `sr_hidden=$(find ...)` substitution left in the script.
+      // The old awk pre-aggregation is gone.
+      expect(script).not.toContain('| awk -F/');
+      expect(script).not.toContain(`printf "SR\\t%s\\t%s`);
+      // No per-folder forks (`sr_total=$(find …)`).
       expect(script).not.toContain('sr_total=$(find');
       expect(script).not.toContain('sr_hidden=$(find');
-
-      // Total subprocess fork budget for the whole list pass:
-      // - up to 5-8 forks for the dirsScript (one find per
-      //   folder-shape candidate under each category dir + grep)
-      // - exactly one find/awk pipe for the recursive pass
-      // The bulk find should appear exactly once in the script.
+      // Single bulk find — counted exactly once in the recursive
+      // pass.
       const findRecursive = script.match(
         /find '\/media\/fat\/games' -mindepth 3/g,
       );
       expect(findRecursive).toHaveLength(1);
+    });
+
+    it('aggregates F-lines through shouldCountAsRom — Vectrex/Overlays excluded', async () => {
+      // Regression: pre-Round-2, this shape contributed 90 to the
+      // recursive count. The unified filter now drops every file
+      // under `Overlays/` so the matcher's recursiveRomCount and
+      // listRoms agree on 0.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      const fLines: string[] = [];
+      for (let i = 0; i < 90; i += 1) {
+        fLines.push(`F\tVECTREX/Overlays/grav-bezel-${String(i)}.png`);
+      }
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'P\tConsole\t/media/fat/_Console/Vectrex_20240524.rbf',
+            'G\tVECTREX',
+            'GD\tVECTREX\tOverlays',
+            ...fLines,
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const cores = await client.listAllCoresWithFiles();
+      // Vectrex's only top-level entry is `Overlays/`, which is a
+      // system folder. shouldCountAsRom drops it at the top level
+      // → romCount = 0. The orphan filter would normally drop the
+      // entire core (no rbf-only path remains for the entry to
+      // exist as a core), but Vectrex has the rbf, so the core
+      // survives with `0` ROMs.
+      const vectrex = cores.find((c) => c.id === 'VECTREX');
+      expect(vectrex).toBeDefined();
+      expect(vectrex?.romCount).toBe(0);
+      expect(vectrex?.recursiveRomCount).toBe(0);
     });
 
     it('parses a case-mismatched dot-prefixed games dir as a hidden core (Round 5)', async () => {

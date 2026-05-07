@@ -21,6 +21,7 @@ import {
   type RawRbfInput,
   type RawSubFolderInput,
 } from '@shared/core-matching';
+import { shouldCountAsRom } from '@shared/system-files';
 import {
   InMemoryDiagnosticsCollector,
   type DiagRecord,
@@ -372,17 +373,41 @@ export class RealMisterClient implements IMisterClient {
         const sub = ensureSubFolder(ensureDirBuilder(parent), subName);
         if (kind === 'f') sub.files.push(basename);
         else if (kind === 'd') sub.dirs.push(basename);
-      } else if (tag === 'SR' && parts.length >= 5) {
-        // Subfolder recursive totals: parent, subname, total file
-        // count, hidden-file count (anywhere beneath).
-        const parent = parts[1] ?? '';
-        const subName = parts[2] ?? '';
-        const total = Number.parseInt(parts[3] ?? '0', 10);
-        const hidden = Number.parseInt(parts[4] ?? '0', 10);
-        if (parent === '' || subName === '') continue;
-        const sub = ensureSubFolder(ensureDirBuilder(parent), subName);
-        if (!Number.isNaN(total)) sub.recursiveFileCount = total;
-        if (!Number.isNaN(hidden)) sub.recursiveHiddenFileCount = hidden;
+      } else if (tag === 'F' && parts.length >= 2) {
+        // Recursive-file line: %P relative to /media/fat/games.
+        // Format: F\t<topLevelDir>/<subFolder>/<...rest>. We
+        // aggregate per (topLevelDir, subFolder), filtering each
+        // file via shouldCountAsRom — same function `listRoms`
+        // calls, so the two paths can't drift apart.
+        const rel = parts.slice(1).join('\t');
+        const segs = rel.split('/');
+        if (segs.length < 3) continue;
+        const topLevelDir = segs[0]!;
+        const subName = segs[1]!;
+        const visibleTop = topLevelDir.startsWith('.')
+          ? topLevelDir.slice(1)
+          : topLevelDir;
+        // relPath relative to the games dir for shouldCountAsRom:
+        // segments AFTER the topLevelDir. Vectrex/Overlays/x.png
+        // becomes "Overlays/x.png" with coreId="Vectrex".
+        const relInGamesDir = segs.slice(1).join('/');
+        if (
+          !shouldCountAsRom({
+            relPath: relInGamesDir,
+            isDirectory: false,
+            coreId: visibleTop,
+            marks: systemFilesMarks,
+          })
+        ) {
+          continue;
+        }
+        const sub = ensureSubFolder(ensureDirBuilder(topLevelDir), subName);
+        sub.recursiveFileCount = (sub.recursiveFileCount ?? 0) + 1;
+        const leaf = segs[segs.length - 1]!;
+        if (leaf.startsWith('.')) {
+          sub.recursiveHiddenFileCount =
+            (sub.recursiveHiddenFileCount ?? 0) + 1;
+        }
       }
     }
     const gamesDirs: RawGamesDirInput[] = Array.from(
@@ -1299,14 +1324,17 @@ function buildListAllCoresScript(): string {
     'fi',
   ].join('\n');
 
-  // Bulk recursive-count pass for SR lines. Round 4 hotfix:
-  // PR #10 round 3 ran TWO `find` subprocesses per top-level
-  // games-dir subfolder. On a real MiSTer with hundreds of folder
-  // ROMs (Saturn discs, MegaCD games, NEOGEO containers, MegaDrive
-  // regions, X68000 dump tree…) that ballooned into 200+ forks and
-  // the SSH op timed out at 10 s. A single `find` over the whole
-  // games tree runs in ~2 s; piping the output through awk gives us
-  // per-(top-level-dir, top-level-subfolder) totals in one pass.
+  // Bulk recursive-file emission. PR #11 round 2 / Change 3:
+  // the previous awk aggregation pre-computed per-(top, subfolder)
+  // counts on the device, but it had no notion of system folders.
+  // Files inside `Vectrex/Overlays/` were counted toward
+  // recursiveRomCount even though `listRoms` correctly suppressed
+  // them — the cores list and the drill-in disagreed.
+  //
+  // Round 2 emits raw `F\t%P` lines (one per file), and the JS
+  // parser aggregates per (top, subfolder) WITH `shouldCountAsRom`
+  // applied. Both code paths (cores-list count and listRoms) use
+  // the same filter, so they can never drift apart.
   //
   //   `find -mindepth 3 -type f` skips:
   //     - the games-dir layer (depth 1 below games/)
@@ -1314,33 +1342,15 @@ function buildListAllCoresScript(): string {
   //       lines and don't contribute to a SUBFOLDER's count)
   //   and includes:
   //     - every regular file at depth 3+ (i.e. anywhere under a
-  //       top-level subfolder), which is exactly what
-  //       `recursiveFileCount` represents.
+  //       top-level subfolder), which is exactly the candidate set
+  //       for the recursive count.
   //
-  // `recursiveHiddenFileCount` mirrors the original semantics —
-  // count files whose own basename starts with `.`. Files inside a
-  // dot-prefixed parent dir don't count toward the hidden subset
-  // (the matcher applies a separate "whole container is hidden"
-  // rule on top per shared/core-matching.ts).
-  //
-  // SUBSEP is awk's default key separator (\034); using it avoids
-  // collisions with tab / slash / dot chars in real folder names.
+  // Performance: ~6,400 files on the user's MiSTer = ~200KB of
+  // stdout. The single find runs in 2-3 seconds; the JS aggregation
+  // is O(files) and microseconds per call.
   const recursivePass = [
     `if [ -d ${shellQuote(MISTER_GAMES_DIR)} ]; then`,
-    `  find ${shellQuote(MISTER_GAMES_DIR)} -mindepth 3 -type f -printf '%P\\n' 2>/dev/null | awk -F/ '`,
-    '    NF >= 3 && $1 != "" && $2 != "" {',
-    '      key = $1 SUBSEP $2',
-    '      total[key]++',
-    '      if (substr($NF, 1, 1) == ".") hidden_count[key]++',
-    '    }',
-    '    END {',
-    '      for (k in total) {',
-    '        h = (k in hidden_count) ? hidden_count[k] : 0',
-    '        split(k, parts, SUBSEP)',
-    `        printf "SR\\t%s\\t%s\\t%d\\t%d\\n", parts[1], parts[2], total[k], h`,
-    '      }',
-    '    }',
-    "  '",
+    `  find ${shellQuote(MISTER_GAMES_DIR)} -mindepth 3 -type f -printf 'F\\t%P\\n' 2>/dev/null`,
     'fi',
   ].join('\n');
 
@@ -1507,15 +1517,36 @@ function parseListAllCoresShellOutput(stdout: string): {
       const sub = ensureSubFolder(ensureDirBuilder(parent), subName);
       if (kind === 'f') sub.files.push(basename);
       else if (kind === 'd') sub.dirs.push(basename);
-    } else if (tag === 'SR' && parts.length >= 5) {
-      const parent = parts[1] ?? '';
-      const subName = parts[2] ?? '';
-      const total = Number.parseInt(parts[3] ?? '0', 10);
-      const hidden = Number.parseInt(parts[4] ?? '0', 10);
-      if (parent === '' || subName === '') continue;
-      const sub = ensureSubFolder(ensureDirBuilder(parent), subName);
-      if (!Number.isNaN(total)) sub.recursiveFileCount = total;
-      if (!Number.isNaN(hidden)) sub.recursiveHiddenFileCount = hidden;
+    } else if (tag === 'F' && parts.length >= 2) {
+      // Diagnostic helper aggregates without marks (the diag CLI
+      // doesn't have the renderer's user-marks cache); the result
+      // matches what the production path produces for all paths
+      // that are NOT user-marked.
+      const rel = parts.slice(1).join('\t');
+      const segs = rel.split('/');
+      if (segs.length < 3) continue;
+      const topLevelDir = segs[0]!;
+      const subName = segs[1]!;
+      const visibleTop = topLevelDir.startsWith('.')
+        ? topLevelDir.slice(1)
+        : topLevelDir;
+      const relInGamesDir = segs.slice(1).join('/');
+      if (
+        !shouldCountAsRom({
+          relPath: relInGamesDir,
+          isDirectory: false,
+          coreId: visibleTop,
+        })
+      ) {
+        continue;
+      }
+      const sub = ensureSubFolder(ensureDirBuilder(topLevelDir), subName);
+      sub.recursiveFileCount = (sub.recursiveFileCount ?? 0) + 1;
+      const leaf = segs[segs.length - 1]!;
+      if (leaf.startsWith('.')) {
+        sub.recursiveHiddenFileCount =
+          (sub.recursiveHiddenFileCount ?? 0) + 1;
+      }
     }
   }
 
