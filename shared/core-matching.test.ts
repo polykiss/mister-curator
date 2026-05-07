@@ -9,7 +9,6 @@ import {
   dottedPath,
   extractCorePrefix,
   isArcadePlaceholder,
-  isCoreExternallyHidden,
   isCoreFile,
   isCoreHidden,
   isRealCore,
@@ -605,7 +604,7 @@ describe('matchRbfsToGamesDirs', () => {
     });
   });
 
-  describe('case-insensitive hidden games-dir matching (Round 3 / Issue 4)', () => {
+  describe('case-insensitive hidden games-dir matching', () => {
     // The five real-MiSTer shapes from docs/snapshots/real-mister-layout.txt:
     //   _Console/Atari7800_20240423.rbf  + games/.ATARI7800/
     //   _Console/Gameboy2P_20250621.rbf  + games/.GAMEBOY2P/
@@ -614,9 +613,13 @@ describe('matchRbfsToGamesDirs', () => {
     //                                                            — Altair lives
     //                                                            in _Computer)
     //   _Utility/memtest_*.rbf           + games/.MEMTEST/
+    //
     // All five share the same shape: visible rbf + dot-prefixed,
-    // CASE-MISMATCHED games dir. The matcher must surface them as
-    // externally-hidden (romCount=0, dimmed click-through).
+    // CASE-MISMATCHED games dir. Round 5: the matcher resolves them
+    // to a single hidden core entry. The user can click "Show" on
+    // any of them just like a core they hid via the app — the model
+    // is two states (visible / hidden) with no third "externally
+    // hidden" bucket.
 
     it('matches Atari7800 (visible rbf) with .ATARI7800 (hidden, case-mismatch)', () => {
       const result = matchRbfsToGamesDirs({
@@ -646,11 +649,12 @@ describe('matchRbfsToGamesDirs', () => {
       expect(atari?.gamesDirName).toBe('ATARI7800');
       expect(atari?.gamesDirExists).toBe(true);
       expect(atari?.gamesDirHidden).toBe(true);
-      // The "1 ROM" bug is gone — externally-hidden cores report 0.
-      expect(atari?.romCount).toBe(0);
-      expect(atari?.hiddenCount).toBe(0);
-      expect(atari?.recursiveRomCount).toBe(0);
-      expect(isCoreExternallyHidden(atari!)).toBe(true);
+      // Round 5: the dir's actual contents surface — no zeroing-out
+      // of cores that the user might want to inspect / restore.
+      expect(atari?.romCount).toBe(1);
+      expect(atari?.recursiveRomCount).toBe(1);
+      // The two-state model: any dot-prefixed side reads as hidden.
+      expect(isCoreHidden(atari!)).toBe(true);
     });
 
     it('matches Gameboy2P with .GAMEBOY2P (hidden, case-mismatch)', () => {
@@ -671,8 +675,8 @@ describe('matchRbfsToGamesDirs', () => {
       expect(gb2p?.id).toBe('Gameboy2P');
       expect(gb2p?.gamesDirHidden).toBe(true);
       expect(gb2p?.gamesDirName).toBe('GAMEBOY2P');
-      expect(gb2p?.romCount).toBe(0);
-      expect(isCoreExternallyHidden(gb2p!)).toBe(true);
+      expect(gb2p?.romCount).toBe(2);
+      expect(isCoreHidden(gb2p!)).toBe(true);
     });
 
     it('matches Vectrex with .VECTREX (hidden, case-mismatch, single subdir)', () => {
@@ -692,8 +696,8 @@ describe('matchRbfsToGamesDirs', () => {
       const v = result.find((c) => c.id.toLowerCase() === 'vectrex');
       expect(v?.id).toBe('Vectrex');
       expect(v?.gamesDirName).toBe('VECTREX');
-      expect(v?.romCount).toBe(0);
-      expect(isCoreExternallyHidden(v!)).toBe(true);
+      expect(v?.romCount).toBe(1);
+      expect(isCoreHidden(v!)).toBe(true);
     });
 
     it('matches Altair8800 with .ALTAIR8800 (Computer category)', () => {
@@ -713,8 +717,8 @@ describe('matchRbfsToGamesDirs', () => {
       const a = result.find((c) => c.id.toLowerCase() === 'altair8800');
       expect(a?.id).toBe('Altair8800');
       expect(a?.category).toBe('Computer');
-      expect(a?.romCount).toBe(0);
-      expect(isCoreExternallyHidden(a!)).toBe(true);
+      expect(a?.romCount).toBe(1);
+      expect(isCoreHidden(a!)).toBe(true);
     });
 
     it('matches memtest with .MEMTEST (Utility category)', () => {
@@ -732,11 +736,11 @@ describe('matchRbfsToGamesDirs', () => {
       const m = result.find((c) => c.id.toLowerCase() === 'memtest');
       expect(m?.id).toBe('memtest');
       expect(m?.category).toBe('Utility');
-      expect(m?.romCount).toBe(0);
-      expect(isCoreExternallyHidden(m!)).toBe(true);
+      expect(m?.romCount).toBe(1);
+      expect(isCoreHidden(m!)).toBe(true);
     });
 
-    it('rbf with no matching games dir at all stays untouched (no externally-hidden flag)', () => {
+    it('rbf with no matching games dir at all is visible (no hidden flag)', () => {
       const result = matchRbfsToGamesDirs({
         rbfs: [
           {
@@ -751,14 +755,13 @@ describe('matchRbfsToGamesDirs', () => {
       const c = result.find((x) => x.id === 'Newcore');
       expect(c?.gamesDirExists).toBe(false);
       expect(c?.romCount).toBe(0);
-      expect(isCoreExternallyHidden(c!)).toBe(false);
+      expect(isCoreHidden(c!)).toBe(false);
     });
 
-    it('rbf with both visible AND hidden case-mismatched games dirs: visible wins (no externally-hidden)', () => {
-      // Highly unusual but possible: rbf "Foo" + games/foo (visible)
-      // + games/.FOO (hidden). The visible games dir wins via dedupe;
-      // externally-hidden flag should NOT fire because the merged
-      // entry has gamesDirHidden=false.
+    it('rbf with both visible AND hidden case-mismatched games dirs: visible wins', () => {
+      // Highly unusual: rbf "Foo" + games/foo (visible) + games/.FOO
+      // (hidden). The dedupe picks the visible games dir as canonical
+      // and merges the rbf paths; the merged entry reads as visible.
       const result = matchRbfsToGamesDirs({
         rbfs: [
           {
@@ -776,16 +779,15 @@ describe('matchRbfsToGamesDirs', () => {
       const foo = result.find((c) => c.id.toLowerCase() === 'foo');
       expect(foo).toBeDefined();
       expect(foo?.gamesDirHidden).toBe(false);
-      expect(isCoreExternallyHidden(foo!)).toBe(false);
+      expect(isCoreHidden(foo!)).toBe(false);
     });
 
     it('rbf with only visible mismatched-case games dir matches case-insensitively', () => {
-      // Path 3 from the spec: rbf "Apogee" matches games/APOGEE
-      // (visible, case-mismatch). NOT externally hidden — dir is
-      // visible, just oddly cased. The dedupe picks whichever
-      // candidate carries the games dir as canonical (so renames
-      // target the right basename); the rbf path joins it via
-      // mergeAliases.
+      // rbf "Apogee" matches games/APOGEE (visible, case-mismatch).
+      // The dedupe collapses both representations into a single
+      // entry, picking whichever side carries the games dir as
+      // canonical (so renames target the right basename); the rbf
+      // path joins it via mergeAliases.
       const result = matchRbfsToGamesDirs({
         rbfs: [
           {
@@ -805,7 +807,6 @@ describe('matchRbfsToGamesDirs', () => {
       expect(
         result.filter((c) => c.id.toLowerCase() === 'apogee'),
       ).toHaveLength(1);
-      // Both representations of the case appear via id + gamesDirName.
       expect(apogee?.gamesDirName).toBe('APOGEE');
       expect(apogee?.gamesDirHidden).toBe(false);
       expect(apogee?.gamesDirExists).toBe(true);
@@ -813,27 +814,7 @@ describe('matchRbfsToGamesDirs', () => {
       expect(apogee?.rbfPaths).toEqual([
         '/media/fat/_Computer/Apogee_20240502.rbf',
       ]);
-      expect(isCoreExternallyHidden(apogee!)).toBe(false);
-    });
-
-    it('isCoreExternallyHidden returns false for fully-app-hidden cores', () => {
-      // Both rbf and games dir hidden — that's the app-managed hide.
-      // The dedupe drops "all-hidden" groups, so we test on a single
-      // hidden entry without case duplicates.
-      const result = matchRbfsToGamesDirs({
-        rbfs: [
-          {
-            category: 'Console',
-            filename: '.NES_20240115.rbf',
-            fullPath: '/media/fat/_Console/.NES_20240115.rbf',
-            isFolder: false,
-          },
-        ],
-        gamesDirs: [{ rawName: '.NES', files: [], dirs: [] }],
-      });
-      const nes = result.find((c) => c.id === 'NES');
-      // Both sides hidden → not "externally" hidden (no visible rbf).
-      expect(isCoreExternallyHidden(nes!)).toBe(false);
+      expect(isCoreHidden(apogee!)).toBe(false);
     });
   });
 
@@ -1210,6 +1191,13 @@ describe('isCoreHidden', () => {
     };
   }
 
+  // Round 5 simplified the model to two states: a core is hidden if
+  // EITHER its games dir or any of its rbf files is dot-prefixed.
+  // Our own hide flow renames both atomically so they always agree;
+  // the asymmetric cases (rbf hidden + games dir visible, or vice
+  // versa, all dating to MiSTer setups predating this app) read as
+  // hidden so the user can clean them up with one Unhide click.
+
   it('returns true when both games dir and rbfs are hidden', () => {
     expect(
       isCoreHidden(
@@ -1222,19 +1210,64 @@ describe('isCoreHidden', () => {
     ).toBe(true);
   });
 
-  it('returns false when at least one rbf is visible', () => {
+  it('returns true when only the games dir is hidden (rbf visible)', () => {
+    // The Round 3 "externally hidden" case (Atari7800 + .ATARI7800):
+    // pre-Round-5, this read as visible because the rbf was visible.
+    // Round 5 reads it as hidden — the user gets one Unhide click to
+    // clean it up, no special-cased UI.
     expect(
       isCoreHidden(
         makeCore({
           gamesDirExists: true,
           gamesDirHidden: true,
+          rbfPaths: ['/x/X_20240115.rbf'],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns true when any rbf is dot-prefixed (games dir visible)', () => {
+    // The mirror image: rbf hidden, games dir visible. Same rule —
+    // any dot-prefixed component reads as hidden.
+    expect(
+      isCoreHidden(
+        makeCore({
+          gamesDirExists: true,
+          gamesDirHidden: false,
+          rbfPaths: ['/x/.X_20240115.rbf'],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns true when one rbf is hidden and another is visible', () => {
+    // A "sloppy" state where the user manually undotted one rbf but
+    // not the other. Reads as hidden so the eye-click un-prefixes
+    // everything in lockstep.
+    expect(
+      isCoreHidden(
+        makeCore({
+          gamesDirExists: true,
+          gamesDirHidden: false,
           rbfPaths: ['/x/.X_20240115.rbf', '/x/X_20231215.rbf'],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns false when nothing is dot-prefixed', () => {
+    expect(
+      isCoreHidden(
+        makeCore({
+          gamesDirExists: true,
+          gamesDirHidden: false,
+          rbfPaths: ['/x/X_20240115.rbf'],
         }),
       ),
     ).toBe(false);
   });
 
-  it('returns false when the games dir is visible', () => {
+  it('returns false when the games dir is visible and there are no rbfs', () => {
     expect(
       isCoreHidden(
         makeCore({ gamesDirExists: true, gamesDirHidden: false, rbfPaths: [] }),
@@ -1246,6 +1279,17 @@ describe('isCoreHidden', () => {
     expect(
       isCoreHidden(makeCore({ rbfPaths: ['/x/.X_20240115.rbf'] })),
     ).toBe(true);
+  });
+
+  it('returns false for the synthetic placeholder shape (no rbfs, no games dir)', () => {
+    // The arcade placeholder fits this shape. Round 5 reports it as
+    // visible — the cores list has its own placeholder rendering
+    // path that doesn't depend on this signal.
+    expect(
+      isCoreHidden(
+        makeCore({ rbfPaths: [], gamesDirExists: false, gamesDirHidden: false }),
+      ),
+    ).toBe(false);
   });
 });
 

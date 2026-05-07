@@ -527,9 +527,10 @@ describe('RealMisterClient', () => {
       expect(findRecursive).toHaveLength(1);
     });
 
-    it('parses an externally-hidden games dir (visible rbf + .ATARI7800) as romCount=0', async () => {
-      // The Round 3 / Issue 4 case: visible rbf + dot-prefixed,
-      // case-mismatched games dir. Matcher zeroes out romCount.
+    it('parses a case-mismatched dot-prefixed games dir as a hidden core (Round 5)', async () => {
+      // Visible rbf + dot-prefixed, case-mismatched games dir
+      // (Atari7800.rbf alongside .ATARI7800/). Round 5 reports it
+      // as a hidden core with the dir's real romCount, no zeroing.
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -549,7 +550,7 @@ describe('RealMisterClient', () => {
       expect(atari).toBeDefined();
       expect(atari?.gamesDirHidden).toBe(true);
       expect(atari?.gamesDirName).toBe('ATARI7800');
-      expect(atari?.romCount).toBe(0);
+      expect(atari?.romCount).toBe(1);
     });
 
     it('threads SE/SR per-subfolder lines into recursive ROM counts (Issue 5)', async () => {

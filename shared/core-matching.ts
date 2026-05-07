@@ -300,26 +300,6 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     });
   }
 
-  // Externally-hidden cores: rbf visible, games dir hidden. The dir
-  // contents shouldn't be reported as ROMs because (a) the user can't
-  // browse them through this app — listRoms hits a path that may not
-  // even exist case-correctly, and (b) some external tool intentionally
-  // hid the dir, so its contents aren't part of the user's curated
-  // library. Zero the counts here so the cores list shows "0 ROMs"
-  // rather than the misleading "1 ROM" the matcher used to surface.
-  for (let i = 0; i < nonArcade.length; i += 1) {
-    const c = nonArcade[i]!;
-    if (isCoreExternallyHidden(c)) {
-      nonArcade[i] = {
-        ...c,
-        romCount: 0,
-        hiddenCount: 0,
-        recursiveRomCount: 0,
-        recursiveHiddenCount: 0,
-      };
-    }
-  }
-
   nonArcade.sort((a, b) => a.id.localeCompare(b.id, 'en-US', { sensitivity: 'base' }));
   return nonArcade;
 }
@@ -506,34 +486,55 @@ export function undottedPath(path: string): string {
 }
 
 /**
- * True iff the user cannot see the core via the MiSTer menu — both its
- * games dir AND every matching rbf are dot-prefixed (or absent).
+ * Apply a hide / unhide to a single CoreEntry, returning a NEW entry
+ * that matches the post-rename state. Both rbf paths and the
+ * games-dir flag flip — `isCoreHidden` reads from either side, so a
+ * row's visual state only switches cleanly when both are updated
+ * together.
+ *
+ * Used by the renderer's optimistic update path AND by
+ * ConnectionManager's in-memory `coresCache` so a subsequent
+ * `lookupCore` after a hide doesn't return stale rbfPaths to the
+ * client (which would compute the wrong rename targets).
  */
-export function isCoreHidden(core: CoreEntry): boolean {
-  const hasAnyVisibleRbf = core.rbfPaths.some((p) => !pathBasename(p).startsWith('.'));
-  const gamesDirVisible = core.gamesDirExists && !core.gamesDirHidden;
-  return !hasAnyVisibleRbf && !gamesDirVisible;
+export function applyCoreVisibilityChange(
+  core: CoreEntry,
+  hidden: boolean,
+): CoreEntry {
+  const targetRbfPaths = core.rbfPaths.map((p) => {
+    const slash = p.lastIndexOf('/');
+    const dir = slash < 0 ? '' : p.slice(0, slash);
+    const base = slash < 0 ? p : p.slice(slash + 1);
+    const undotted = base.startsWith('.') ? base.slice(1) : base;
+    const target = hidden ? `.${undotted}` : undotted;
+    return dir === '' ? target : `${dir}/${target}`;
+  });
+  return {
+    ...core,
+    rbfPaths: targetRbfPaths,
+    gamesDirHidden: core.gamesDirExists ? hidden : core.gamesDirHidden,
+  };
 }
 
 /**
- * True iff the core's games dir was hidden by something other than this
- * app — the rbf is still visible (so the user can launch the core via
- * the MiSTer menu) but the dot-prefixed games dir means we can't browse
- * ROMs through this UI.
+ * True iff the core reads as hidden in the cores list — either its
+ * games directory is dot-prefixed, OR any of its rbf/mgl files are.
  *
- * The signal is strict: "games dir hidden AND at least one visible
- * rbf". MiSTerCurator always renames *both* sides together when it
- * hides a core, so this asymmetric state can only arise via an
- * external tool (or a manual `mv` outside our app). The Round 3
- * snapshot of a real MiSTer carries five of these — Atari7800,
- * Gameboy2P, memtest, Altair8800, Vectrex — all dating to before
- * MiSTerCurator existed. The cores list dims them and disables
- * click-through; ConnectionManager.listRoms returns an empty list so
- * the renderer never hits a path that doesn't exist on disk.
+ * Round 5 simplified the model to two states: hidden or visible. Our
+ * own hide flow renames both sides atomically so they always agree;
+ * the asymmetric cases (rbf visible + games dir hidden, or vice
+ * versa, all dating to MiSTer setups predating this app) read as
+ * hidden so the user can act on them with a single Unhide click.
+ *
+ * Synthetic placeholder rows (no rbfs and no games dir — only the
+ * Arcade placeholder) are NOT hidden; the cores list has its own
+ * placeholder rendering path that doesn't depend on this signal.
  */
-export function isCoreExternallyHidden(core: CoreEntry): boolean {
-  if (!core.gamesDirExists || !core.gamesDirHidden) return false;
-  return core.rbfPaths.some((p) => !pathBasename(p).startsWith('.'));
+export function isCoreHidden(core: CoreEntry): boolean {
+  if (core.rbfPaths.length === 0 && !core.gamesDirExists) return false;
+  const hasHiddenRbf = core.rbfPaths.some((p) => pathBasename(p).startsWith('.'));
+  const hasHiddenGamesDir = core.gamesDirExists && core.gamesDirHidden;
+  return hasHiddenRbf || hasHiddenGamesDir;
 }
 
 export interface CoreVisibilityChange {

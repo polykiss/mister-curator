@@ -106,6 +106,10 @@ export function registerIpcHandlers(
     (changes, options) => manager.setBulkCoreVisibility(changes, options),
   );
 
+  handle<[], readonly string[]>(IPC_CHANNELS.listLedgerCoreIds, () =>
+    manager.listLedgerCoreIds(),
+  );
+
   handle<[], SystemFilesMarks>(IPC_CHANNELS.listSystemFileMarks, () =>
     manager.listSystemFileMarks(),
   );

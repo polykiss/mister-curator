@@ -14,8 +14,14 @@ import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
 import { useResizablePaneWidth } from '@app/renderer/src/lib/use-resizable-pane';
 
-const CORES_PANE_DEFAULT_WIDTH = 280;
-const CORES_PANE_MIN_WIDTH = 200;
+// Round 5: cores pane min bumped from 200 → 320. Below 320px the
+// "9 folders · ~300 ROMs" breakdown cell wraps and the right-edge
+// density+eye stack starts crowding the row name; the live
+// screenshot caught it. Default initial width stays at 280, but the
+// resizable divider clamps to 320 so a user can't drag past where
+// the layout breaks.
+const CORES_PANE_DEFAULT_WIDTH = 320;
+const CORES_PANE_MIN_WIDTH = 320;
 const ROMS_PANE_MIN_WIDTH = 300;
 
 export function BrowserScreen(): JSX.Element {

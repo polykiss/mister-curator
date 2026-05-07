@@ -743,13 +743,18 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                     right-edge stack so the row's primary visibility
                     toggle owns the far-right slot. */}
                 <TableHead className="w-10" aria-label="Actions" />
-                {/* Density indicator column — `w-5` for the 20px
-                    rectangle, `p-0` so the rectangle bleeds the full
-                    cell height. The header is empty by intent (no
-                    text); the indicator's `aria-label` carries the
-                    semantics per row. */}
-                <TableHead className="w-5 p-0" aria-label="Intensity" />
-                <TableHead className="w-10 pr-2 text-right">Visibility</TableHead>
+                {/* Combined density + eye column. Round 5: the two
+                    used to live in separate cells with default cell
+                    padding between them, which left a too-wide gap
+                    versus the cores pane. One cell + a flex stack
+                    inside lets density sit flush against the eye
+                    icon and the whole stack hugs the row's far edge.
+                    Width = 20 (density) + 32 (eye) + a hair of
+                    right padding ≈ 52px. */}
+                <TableHead
+                  className="w-[3.25rem] p-0"
+                  aria-label="Intensity / visibility"
+                />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -768,7 +773,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                   aria-label={`Back to ${backRow.parentLabel}`}
                   title={`Back to ${backRow.parentLabel}`}
                 >
-                  <TableCell colSpan={6} className="pl-4">
+                  <TableCell colSpan={5} className="pl-4">
                     <span className="inline-flex items-center gap-2 font-mono text-body-sm text-fg-muted">
                       <ArrowLeft className="size-3.5 shrink-0" strokeWidth={1.5} aria-hidden />
                       <span className="truncate">
@@ -888,58 +893,66 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         <MoreHorizontal strokeWidth={1.5} />
                       </Button>
                     </TableCell>
-                    {/* Density rectangle — full-cell-height, 20px
-                        wide, OKLCH-mixed between bg-elevated (the
-                        ROMs pane surface) and accent. System rows
-                        get no rectangle; the row already screams
-                        "system" via the gear icon and dimming. */}
-                    <TableCell className="w-5 p-0">
-                      {!isSystem ? (
-                        <DensityBar
-                          floor="bg-elevated"
-                          value={rom.sizeBytes}
-                          max={maxSizeBytes}
-                          ariaLabel={`${formatBytes(rom.sizeBytes)} of peer max ${formatBytes(maxSizeBytes)}`}
-                        />
-                      ) : null}
-                    </TableCell>
-                    <TableCell className="pr-2 text-right">
-                      {isSystem ? (
-                        <span className="font-mono text-body-sm text-fg-disabled">
-                          read-only
-                        </span>
-                      ) : (
-                        // Eye / EyeOff toggle — always visible at rest
-                        // (Round 3, Issue 1). Hover lifts opacity for
-                        // affordance feedback. `canMutate` gates a
-                        // lost-connection session from triggering a
-                        // rename; the tooltip explains why locked.
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => void onSingleToggle(rom)}
-                          disabled={!canMutate}
-                          title={
-                            canMutate
-                              ? rom.hidden
+                    {/* Combined density + eye column. Round 5: the
+                        density rectangle sits flush against the eye
+                        button's left edge, and the whole stack hugs
+                        the row's far-right edge — same shape as the
+                        cores pane's right-edge stack. System rows
+                        skip the rectangle; the gear icon + dimming
+                        already says "read-only", so the eye-icon
+                        slot reads as "read-only" copy.
+                        `h-10 items-stretch` ensures the rectangle
+                        renders full row height (40px) regardless of
+                        sibling cells' intrinsic heights. */}
+                    <TableCell className="p-0">
+                      <div className="flex h-10 items-stretch justify-end">
+                        {!isSystem ? (
+                          <DensityBar
+                            floor="bg-elevated"
+                            value={rom.sizeBytes}
+                            max={maxSizeBytes}
+                            ariaLabel={`${formatBytes(rom.sizeBytes)} of peer max ${formatBytes(maxSizeBytes)}`}
+                          />
+                        ) : null}
+                        {isSystem ? (
+                          <span
+                            className="flex items-center px-2 font-mono text-body-sm text-fg-disabled"
+                            aria-label="read-only"
+                          >
+                            read-only
+                          </span>
+                        ) : (
+                          // Eye / EyeOff toggle — always visible at
+                          // rest (Round 3 Issue 1). Hover lifts
+                          // opacity. `canMutate` gates against a
+                          // lost-connection session.
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => void onSingleToggle(rom)}
+                            disabled={!canMutate}
+                            title={
+                              canMutate
+                                ? rom.hidden
+                                  ? `Show ${rom.displayName}`
+                                  : `Hide ${rom.displayName}`
+                                : DISCONNECTED_TOOLTIP
+                            }
+                            aria-label={
+                              rom.hidden
                                 ? `Show ${rom.displayName}`
                                 : `Hide ${rom.displayName}`
-                              : DISCONNECTED_TOOLTIP
-                          }
-                          aria-label={
-                            rom.hidden
-                              ? `Show ${rom.displayName}`
-                              : `Hide ${rom.displayName}`
-                          }
-                          className="opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
-                        >
-                          {rom.hidden ? (
-                            <EyeOff strokeWidth={1.5} />
-                          ) : (
-                            <Eye strokeWidth={1.5} />
-                          )}
-                        </Button>
-                      )}
+                            }
+                            className="self-center opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
+                          >
+                            {rom.hidden ? (
+                              <EyeOff strokeWidth={1.5} />
+                            ) : (
+                              <Eye strokeWidth={1.5} />
+                            )}
+                          </Button>
+                        )}
+                      </div>
                     </TableCell>
                   </TableRow>
                 );

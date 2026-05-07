@@ -1,13 +1,9 @@
-import { Check, Eye, EyeOff, Sparkles, Undo2, X } from 'lucide-react';
+import { Eye, EyeOff, Loader2, Sparkles, Undo2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
-import {
-  isArcadePlaceholder,
-  isCoreExternallyHidden,
-  isCoreHidden,
-} from '@shared/core-matching';
+import { isArcadePlaceholder, isCoreHidden } from '@shared/core-matching';
 import type { CoreEntry } from '@shared/types';
 
 import { Button } from '@app/renderer/src/components/ui/button';
@@ -22,8 +18,6 @@ import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
 
 const ARCADE_TOOLTIP = "Arcade cores aren't supported yet — coming in a later release.";
 const DISCONNECTED_TOOLTIP = 'Reconnect to make changes.';
-const EXTERNALLY_HIDDEN_TOOLTIP =
-  'Hidden by an external tool. MiSTerCurator will not modify it; folder browsing is disabled.';
 
 export function CoresPane(): JSX.Element {
   const {
@@ -35,40 +29,26 @@ export function CoresPane(): JSX.Element {
     hideCore,
     showCore,
     setBulkCoreVisibility,
+    pendingCoreIds,
+    ledgerCoreIds,
   } = useCores();
   const { status } = useConnection();
   const canMutate = status === 'connected';
 
-  // Hidden cores are intentionally permanent decisions — keep them
-  // off the default cores list. The user's last choice persists.
+  // Hidden cores stay off the default cores list — they're permanent
+  // decisions and the user opts in to seeing them.
   const [showHidden, setShowHidden] = usePersistedBool(
     'mistercurator.showHiddenCores',
     false,
   );
-  const [confirmHideId, setConfirmHideId] = useState<string | null>(null);
-  const [pendingId, setPendingId] = useState<string | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
 
-  // Cores list excludes externally-hidden entries. They're cores whose
-  // hidden state pre-dates our ledger (MiSTer's stock layout, other
-  // tools). The user can still see they exist via the header count.
-  // Arcade placeholder is always shown — it's a synthetic UI row that
-  // would otherwise get dropped because it has no rbfs and no games dir,
-  // which `isCoreHidden` treats as "hidden".
-  const presentableCores = useMemo(() => {
-    if (!cores) return null;
-    return cores.filter(
-      (c) =>
-        c.category === 'Arcade' || !isCoreHidden(c) || c.managedByApp === true,
-    );
-  }, [cores]);
-
   const visibleCores = useMemo(() => {
-    if (!presentableCores) return null;
+    if (!cores) return null;
     return showHidden
-      ? presentableCores
-      : presentableCores.filter((c) => c.category === 'Arcade' || !isCoreHidden(c));
-  }, [presentableCores, showHidden]);
+      ? cores
+      : cores.filter((c) => c.category === 'Arcade' || !isCoreHidden(c));
+  }, [cores, showHidden]);
 
   const emptyHideableCores = useMemo(
     () =>
@@ -76,38 +56,27 @@ export function CoresPane(): JSX.Element {
         (c) =>
           c.romCount === 0 &&
           c.category !== 'Arcade' &&
-          !isCoreHidden(c) &&
-          // Externally-hidden cores are already not in the user's
-          // browsable library (their games dir is hidden by some other
-          // tool). The "Hide empty cores" sweep would re-rename them,
-          // which is exactly the kind of cross-tool interference
-          // AGENTS.md tells us to avoid — leave them alone.
-          !isCoreExternallyHidden(c),
+          !isCoreHidden(c),
       ),
     [cores],
   );
 
-  // "Unhide all (N)" only counts cores we hid ourselves. Pre-existing
-  // dot-prefixed dirs from MiSTer's stock state stay alone.
+  // "Unhide all (N)" only targets cores in the on-MiSTer ledger — the
+  // ones we hid ourselves. Other dot-prefixed cores (firmware system
+  // folders, externally-hidden cases) stay alone unless the user
+  // unhides them one at a time via the eye icon.
   const appHiddenCores = useMemo(
     () =>
       (cores ?? []).filter(
-        (c) => isCoreHidden(c) && c.managedByApp === true && c.category !== 'Arcade',
-      ),
-    [cores],
-  );
-
-  const externalHiddenCount = useMemo(
-    () =>
-      (cores ?? []).filter(
         (c) =>
-          isCoreHidden(c) && c.managedByApp !== true && c.category !== 'Arcade',
-      ).length,
-    [cores],
+          isCoreHidden(c) &&
+          c.category !== 'Arcade' &&
+          ledgerCoreIds.has(c.id),
+      ),
+    [cores, ledgerCoreIds],
   );
 
   const onHide = async (core: CoreEntry): Promise<void> => {
-    setPendingId(core.id);
     try {
       await hideCore(core.id);
       toast.success(`Hid ${core.name}`, {
@@ -132,14 +101,10 @@ export function CoresPane(): JSX.Element {
       toast.error(`Could not hide ${core.name}`, {
         description: err instanceof Error ? err.message : 'Unexpected error.',
       });
-    } finally {
-      setPendingId(null);
-      setConfirmHideId(null);
     }
   };
 
   const onShow = async (core: CoreEntry): Promise<void> => {
-    setPendingId(core.id);
     try {
       await showCore(core.id);
       toast.success(`Restored ${core.name}`, {
@@ -161,8 +126,6 @@ export function CoresPane(): JSX.Element {
       toast.error(`Could not show ${core.name}`, {
         description: err instanceof Error ? err.message : 'Unexpected error.',
       });
-    } finally {
-      setPendingId(null);
     }
   };
 
@@ -251,17 +214,6 @@ export function CoresPane(): JSX.Element {
           Show hidden
         </label>
       </header>
-      {externalHiddenCount > 0 ? (
-        <div
-          className="border-b border-subtle border-l-2 border-l-info bg-surface px-4 py-3 text-body-sm text-fg-muted"
-          title="These cores were already hidden when MiSTerCurator first connected. We won't modify them."
-        >
-          <span className="font-mono text-fg-body">
-            {String(externalHiddenCount)}
-          </span>{' '}
-          cores hidden externally — managed by other tools, not by MiSTerCurator.
-        </div>
-      ) : null}
 
       {renderCoreList({
         cores,
@@ -269,13 +221,10 @@ export function CoresPane(): JSX.Element {
         coresError,
         visibleCores,
         selectedCoreId,
-        confirmHideId,
-        pendingId,
+        pendingCoreIds,
         canMutate,
         onSelect: selectCore,
-        onAskHide: setConfirmHideId,
-        onConfirmHide: onHide,
-        onCancelHide: () => setConfirmHideId(null),
+        onHide,
         onShow,
       })}
 
@@ -294,14 +243,10 @@ interface RenderArgs {
   readonly coresError: string | null;
   readonly visibleCores: readonly CoreEntry[] | null;
   readonly selectedCoreId: string | null;
-  readonly confirmHideId: string | null;
-  readonly pendingId: string | null;
-  /** Disables every per-row hide/show button when not connected. */
+  readonly pendingCoreIds: ReadonlySet<string>;
   readonly canMutate: boolean;
   readonly onSelect: (id: string | null) => void;
-  readonly onAskHide: (id: string) => void;
-  readonly onConfirmHide: (core: CoreEntry) => Promise<void>;
-  readonly onCancelHide: () => void;
+  readonly onHide: (core: CoreEntry) => Promise<void>;
   readonly onShow: (core: CoreEntry) => Promise<void>;
 }
 
@@ -331,11 +276,11 @@ function renderCoreList(args: RenderArgs): JSX.Element {
   }
 
   // Density-bar denominator: max recursive ROM count across the
-  // visible cores (Round 3 / Issue 5). Recursive values let NEOGEO's
-  // ~300 stand against mame's 633 instead of NEOGEO's top-level "9"
-  // collapsing into the floor. Falls back to top-level `romCount`
-  // when the matcher didn't supply a recursive value (legacy
-  // fixtures, partial test data).
+  // visible cores. Recursive values let NEOGEO's ~300 stand against
+  // mame's 633 instead of NEOGEO's top-level "9" collapsing into the
+  // floor. Falls back to top-level `romCount` when the matcher
+  // didn't supply a recursive value (legacy fixtures, partial test
+  // data).
   const maxRomCount = args.visibleCores.reduce((acc, c) => {
     const v = densityValueFor(c);
     return v > acc ? v : acc;
@@ -350,28 +295,20 @@ function renderCoreList(args: RenderArgs): JSX.Element {
       {args.visibleCores.map((core) => {
         const isSelected = core.id === args.selectedCoreId;
         const isHiddenCore = isCoreHidden(core);
-        const externallyHidden = isCoreExternallyHidden(core);
         const isArcade = core.category === 'Arcade';
         const isPlaceholder = isArcadePlaceholder(core);
-        const askingHide = args.confirmHideId === core.id;
-        const isPending = args.pendingId === core.id;
+        const isPending = args.pendingCoreIds.has(core.id);
 
         return (
           <li
             key={core.id}
             className={cn(
               'group/row relative flex h-10 items-center gap-2 border-b border-subtle pl-4 text-body transition-colors',
-              !isSelected && !externallyHidden && 'hover:bg-elevated',
+              !isSelected && 'hover:bg-elevated',
               isSelected && 'bg-overlay',
-              // Hidden + arcade-placeholder + externally-hidden rows
-              // lean entirely on dimming: opacity + italic + a darker
-              // text color. The HIDDEN/SYSTEM badges that used to sit
-              // on the left were removed in Round 2 — the dimming is
-              // the whole signal. Externally-hidden cores get the
-              // same treatment because the user can't act on them
-              // through this app.
+              // Hidden + arcade-placeholder rows lean entirely on
+              // dimming: opacity + italic + a darker text color.
               isHiddenCore && 'opacity-50 italic text-fg-disabled',
-              externallyHidden && 'opacity-50 italic text-fg-disabled',
               isPlaceholder && 'italic text-fg-disabled',
             )}
           >
@@ -388,16 +325,8 @@ function renderCoreList(args: RenderArgs): JSX.Element {
               type="button"
               role="option"
               aria-selected={isSelected}
-              onClick={() => {
-                if (externallyHidden) return;
-                args.onSelect(core.id);
-              }}
-              disabled={externallyHidden}
-              title={externallyHidden ? EXTERNALLY_HIDDEN_TOOLTIP : undefined}
-              className={cn(
-                'flex min-w-0 flex-1 items-center justify-between gap-3 text-left focus-visible:outline-none',
-                externallyHidden && 'cursor-not-allowed',
-              )}
+              onClick={() => args.onSelect(core.id)}
+              className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left focus-visible:outline-none"
             >
               <span className="flex min-w-0 items-center gap-2">
                 <span
@@ -413,117 +342,85 @@ function renderCoreList(args: RenderArgs): JSX.Element {
               <span className="flex shrink-0 items-center gap-2 font-mono text-body-sm text-fg-muted tabular">
                 {isPlaceholder ? (
                   <span className="text-fg-disabled">coming later</span>
-                ) : externallyHidden ? (
-                  <span
-                    className="text-fg-disabled"
-                    title={EXTERNALLY_HIDDEN_TOOLTIP}
-                  >
-                    hidden externally
-                  </span>
-                ) : !core.gamesDirExists && core.rbfPaths.length > 0 ? (
-                  <span
-                    className="text-fg-disabled"
-                    title={`No games directory at /media/fat/games/${core.id}/`}
-                  >
-                    no games dir
-                  </span>
                 ) : (
                   <CoreCountSummary core={core} />
                 )}
               </span>
             </button>
 
-            {/* Right-edge stack (Round 3): density rectangle inside,
-                eye icon on the far right. Eye is always visible and
-                paired to the row's current state — open Eye for
-                visible cores, EyeOff for hidden. */}
-            {askingHide ? (
-              // Two icon-sized buttons replace the eye button — same width
-              // budget, fits inside any reasonable cores-pane width.
-              <div className="flex shrink-0 items-center gap-0.5 pr-1">
-                <Button
-                  variant="destructive"
-                  size="icon"
-                  onClick={() => void args.onConfirmHide(core)}
-                  disabled={isPending}
-                  title={`Confirm: hide ${core.name}`}
-                  aria-label={`Confirm hide ${core.name}`}
+            {/* Right-edge stack: density rectangle flush against the
+                eye icon on the far right. Wrapping them in a
+                gap-0 flex lets the density's right edge meet the
+                button's left edge with no breathing room — matches
+                the ROMs pane's identical right-edge stack. The
+                surrounding `<li>` keeps `gap-2` for the spacing
+                between the name area and this stack. */}
+            <div className="flex h-full shrink-0 items-stretch">
+              {!isPlaceholder ? (
+                <DensityBar
+                  floor="bg-surface"
+                  value={densityValueFor(core)}
+                  max={maxRomCount}
+                  ariaLabel={`${String(densityValueFor(core))} ROMs of peer max ${String(maxRomCount)}`}
+                />
+              ) : null}
+              {isArcade ? (
+                <span
+                  className="flex shrink-0 items-center px-2 font-mono text-body-sm text-fg-disabled"
+                  title={ARCADE_TOOLTIP}
+                  aria-label={ARCADE_TOOLTIP}
                 >
-                  <Check strokeWidth={1.5} />
-                </Button>
+                  read-only
+                </span>
+              ) : isPending ? (
+                // Inline indicator while the SSH rename is on the
+                // wire (Round 5 Issue 4). Replaces the eye icon at
+                // the same screen position so the row's
+                // optimistic state-flip is paired with a clear
+                // "we're working on it" signal.
+                <span
+                  role="status"
+                  aria-label={
+                    isHiddenCore ? `Showing ${core.name}…` : `Hiding ${core.name}…`
+                  }
+                  className="flex h-8 w-8 shrink-0 items-center justify-center self-center text-fg-muted"
+                >
+                  <Loader2 className="size-4 animate-spin" strokeWidth={1.5} />
+                </span>
+              ) : isHiddenCore ? (
                 <Button
                   variant="ghost"
                   size="icon"
-                  onClick={args.onCancelHide}
-                  disabled={isPending}
-                  title="Cancel"
-                  aria-label="Cancel hide"
+                  onClick={() => void args.onShow(core)}
+                  disabled={!args.canMutate}
+                  title={
+                    args.canMutate ? `Show ${core.name}` : DISCONNECTED_TOOLTIP
+                  }
+                  aria-label={`Show ${core.name}`}
+                  className="self-center opacity-70 transition-opacity group-hover/row:opacity-100 focus-visible:opacity-100"
                 >
-                  <X strokeWidth={1.5} />
+                  <EyeOff strokeWidth={1.5} />
                 </Button>
-              </div>
-            ) : (
-              <>
-                {!isPlaceholder ? (
-                  <DensityBar
-                    floor="bg-surface"
-                    value={densityValueFor(core)}
-                    max={maxRomCount}
-                    ariaLabel={`${String(densityValueFor(core))} ROMs of peer max ${String(maxRomCount)}`}
-                  />
-                ) : null}
-                {isArcade ? (
-                  <span
-                    className="shrink-0 px-2 font-mono text-body-sm text-fg-disabled"
-                    title={ARCADE_TOOLTIP}
-                    aria-label={ARCADE_TOOLTIP}
-                  >
-                    read-only
-                  </span>
-                ) : isHiddenCore ? (
-                  // Eye-off icon is always visible on hidden rows. The
-                  // hover lift is a subtle brightness boost so the user
-                  // gets affordance feedback without the icon disappearing
-                  // at rest. canMutate gates the rename during disconnects.
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => void args.onShow(core)}
-                    disabled={isPending || !args.canMutate}
-                    title={
-                      args.canMutate ? `Show ${core.name}` : DISCONNECTED_TOOLTIP
-                    }
-                    aria-label={`Show ${core.name}`}
-                    className="opacity-70 transition-opacity group-hover/row:opacity-100 focus-visible:opacity-100"
-                  >
-                    <EyeOff strokeWidth={1.5} />
-                  </Button>
-                ) : (
-                  // Eye (open) icon on visible rows — symmetric with the
-                  // hidden state. Always rendered; hover lifts the
-                  // brightness slightly. The mutating action gates on
-                  // canMutate so a lost-connection session can't trigger
-                  // a rename.
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => args.onAskHide(core.id)}
-                    disabled={isPending || !args.canMutate}
-                    title={
-                      args.canMutate ? `Hide ${core.name}` : DISCONNECTED_TOOLTIP
-                    }
-                    aria-label={`Hide ${core.name}`}
-                    className={cn(
-                      'transition-opacity',
-                      !isSelected &&
-                        'opacity-70 group-hover/row:opacity-100 focus-visible:opacity-100',
-                    )}
-                  >
-                    <Eye strokeWidth={1.5} />
-                  </Button>
-                )}
-              </>
-            )}
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => void args.onHide(core)}
+                  disabled={!args.canMutate}
+                  title={
+                    args.canMutate ? `Hide ${core.name}` : DISCONNECTED_TOOLTIP
+                  }
+                  aria-label={`Hide ${core.name}`}
+                  className={cn(
+                    'self-center transition-opacity',
+                    !isSelected &&
+                      'opacity-70 group-hover/row:opacity-100 focus-visible:opacity-100',
+                  )}
+                >
+                  <Eye strokeWidth={1.5} />
+                </Button>
+              )}
+            </div>
           </li>
         );
       })}
@@ -553,6 +450,10 @@ function densityValueFor(core: CoreEntry): number {
  * The `~` is intentional — recursive counts can over- or under-count
  * (non-standard ROM extensions, atomic folders nested inside
  * containers, etc.). Single-number form is used when the two agree.
+ *
+ * Round 5 simplified the model: every non-arcade core renders this
+ * summary, even cores without a games dir (they show `0`). No special
+ * "no games dir" label, no "hidden externally" label.
  */
 function CoreCountSummary({ core }: { readonly core: CoreEntry }): JSX.Element {
   const recursive = core.recursiveRomCount;

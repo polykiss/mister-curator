@@ -71,3 +71,8 @@ export function recountCore(core: CoreEntry, roms: readonly Rom[]): CoreEntry {
   }
   return { ...core, romCount: roms.length, hiddenCount };
 }
+
+// applyCoreVisibilityChange lives in @shared/core-matching now so the
+// main-process ConnectionManager can reuse the same flip logic when
+// updating its in-memory coresCache.
+export { applyCoreVisibilityChange } from '@shared/core-matching';

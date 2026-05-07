@@ -4,8 +4,8 @@ import {
   type ConnectionEvent,
 } from '@shared/connection';
 import {
+  applyCoreVisibilityChange,
   computeAutoReapplyChanges,
-  isCoreExternallyHidden,
   isCoreHidden,
   isRealCore,
 } from '@shared/core-matching';
@@ -66,22 +66,28 @@ export interface ConnectResult {
  * The renderer talks to this through IPC; main pushes status transitions
  * back to any registered listener (typically a webContents.send adapter).
  *
- * Owns the on-MiSTer hide ledger. Treats it as a *permission slip*:
+ * Owns the on-MiSTer hide ledger. Round 5 model: the ledger is purely
+ * a *bookkeeping artifact* for "Unhide all". It is NOT a permission
+ * slip — single-core hide/show operations no longer consult it, so
+ * the user can hide or unhide ANY core (including ones the firmware
+ * or other tools dot-prefixed before MiSTerCurator existed) with one
+ * click. The ledger's only remaining UI-visible role is to scope the
+ * "Unhide all" target list via `listLedgerCoreIds()` so a bulk
+ * un-hide can't sweep up arbitrary system folders the MiSTer placed
+ * there.
  *
- *   - The cores list returned to the renderer is enriched with
- *     `managedByApp = true` iff the ledger has an entry for the core.
- *     The renderer uses this to gate the un-hide UI and to count
- *     "hidden externally" cores separately.
- *   - `showCore` / un-hide paths refuse to operate on a core that is
- *     NOT in the ledger. Pre-existing dot-prefixed directories from
- *     MiSTer's stock state (or other tools) are left alone.
- *   - `hideCore` / hide paths only ever add entries we just renamed.
- *     The ledger is therefore always a strict subset of the things on
- *     disk that we intend to manage.
+ * Bookkeeping rules:
+ *   - `hideCore` / `setBulkCoreVisibility(hidden=true)` add the core
+ *     to the ledger after a successful rename.
+ *   - `showCore` / `setBulkCoreVisibility(hidden=false)` remove the
+ *     core from the ledger after a successful rename. (Idempotent —
+ *     removing a non-existent entry is a no-op.)
+ *   - `healLedger` runs on connect and drops entries whose cores no
+ *     longer exist on the device.
  *
- * Ledger I/O is intentionally NOT exposed on the IPC bridge — the
- * renderer only sees its consequences (managedByApp, the reappliedCount
- * from connect, success/failure of hide/show).
+ * Ledger I/O is NOT exposed on the IPC bridge directly — the renderer
+ * sees its consequences (the reappliedCount from connect, the result
+ * of hide/show, and the read-only `listLedgerCoreIds()`).
  */
 export class ConnectionManager {
   private status: ConnectionStatus = 'disconnected';
@@ -256,15 +262,23 @@ export class ConnectionManager {
 
   async listAllCoresWithFiles(): Promise<CoreEntry[]> {
     this.assertConnected();
-    const raw = await this.client.listAllCoresWithFiles(
+    const cores = await this.client.listAllCoresWithFiles(
       this.systemFilesMarksCache,
     );
-    const enriched = raw.map((c) => ({
-      ...c,
-      managedByApp: this.ledgerHasCore(c.id),
-    }));
-    this.coresCache = enriched;
-    return enriched;
+    this.coresCache = cores;
+    return cores;
+  }
+
+  /**
+   * Read-only view of the on-MiSTer hide ledger — the IDs of cores
+   * MiSTerCurator itself hid in past sessions. The renderer uses this
+   * to scope its "Unhide all" target list (preventing a bulk un-hide
+   * from un-prefixing arbitrary firmware-placed dot folders). Single
+   * hide/show operations don't touch this list.
+   */
+  async listLedgerCoreIds(): Promise<readonly string[]> {
+    this.assertConnected();
+    return this.ledgerCache.hiddenCores.map((e) => e.coreId);
   }
 
   async listSystemFileMarks(): Promise<SystemFilesMarks> {
@@ -304,16 +318,6 @@ export class ConnectionManager {
 
   async listRoms(coreId: string, subPath = ''): Promise<Rom[]> {
     this.assertConnected();
-    const core = this.coresCache.find((c) => c.id === coreId);
-    // Externally-hidden cores (rbf visible, games dir hidden by an
-    // external tool) are not browsable through this app — their dir
-    // isn't part of the user's curated library and the path can be
-    // case-mismatched too. Return an empty list so the renderer
-    // doesn't trigger an "Unknown core" stack trace; the cores list
-    // disables click-through anyway (see CoresPane).
-    if (core && isCoreExternallyHidden(core)) {
-      return [];
-    }
     const dirBase = this.resolveOnDiskGamesDirBasename(coreId);
     const roms = await this.client.listRoms(
       dirBase,
@@ -407,6 +411,7 @@ export class ConnectionManager {
     }
     await this.client.hideCore(core);
     await this.recordHide(core);
+    this.applyCachedVisibilityFlip(core.id, true);
   }
 
   async showCore(coreId: string): Promise<void> {
@@ -415,13 +420,27 @@ export class ConnectionManager {
     if (!isRealCore(core)) {
       throw new Error(`Refusing to show '${coreId}': not a real core.`);
     }
-    if (!this.ledgerHasCore(core.id)) {
-      throw new Error(
-        `Refusing to show '${core.id}': not managed by MiSTerCurator (likely hidden by another tool — we will not modify it).`,
-      );
-    }
+    // Round 5: no ledger gate on single-core un-hide. The user can
+    // un-hide any core in the cores list, including those dot-prefixed
+    // by other tools or the firmware. `recordShow` is still called so
+    // the ledger stays in sync with our own bookkeeping (a no-op when
+    // the core wasn't in the ledger to begin with).
     await this.client.showCore(core);
     await this.recordShow(core);
+    this.applyCachedVisibilityFlip(core.id, false);
+  }
+
+  /**
+   * Update the in-memory cores cache after a successful hide/show so
+   * a subsequent `lookupCore(coreId)` returns the post-rename rbfPaths
+   * and `gamesDirHidden` flag — without that, computing the next
+   * rename for the same core would target the OLD on-disk paths and
+   * be a no-op.
+   */
+  private applyCachedVisibilityFlip(coreId: string, hidden: boolean): void {
+    this.coresCache = this.coresCache.map((c) =>
+      c.id === coreId ? applyCoreVisibilityChange(c, hidden) : c,
+    );
   }
 
   async setBulkCoreVisibility(
@@ -451,17 +470,11 @@ export class ConnectionManager {
         });
         continue;
       }
-      if (!c.hidden && !this.ledgerHasCore(core.id)) {
-        // Permission slip: the un-hide path refuses cores the app didn't
-        // hide. This is what protects the ~40+ pre-existing dot-prefixed
-        // directories on a real MiSTer from being un-hidden by the user
-        // accidentally clicking "Unhide all".
-        upfrontFailed.push({
-          coreId: core.id,
-          reason: 'not managed by MiSTerCurator (we will not modify it)',
-        });
-        continue;
-      }
+      // Round 5: no ledger gate. The renderer's "Unhide all" pre-
+      // filters its bulk-call payload via `listLedgerCoreIds()`, so
+      // by the time we get here the un-hide list is already scoped
+      // to cores we hid ourselves. Other callers (single-core hide /
+      // show via the eye icon) operate on whatever the user clicked.
       resolved.push({ core, hidden: c.hidden });
     }
 
@@ -498,6 +511,16 @@ export class ConnectionManager {
       this.ledgerCache = ledger;
     }
 
+    // Apply the same flip to coresCache so a follow-up lookupCore on
+    // any of these ids sees the post-rename state. Without this, a
+    // back-to-back bulk hide → bulk show on the same core sees stale
+    // rbfPaths and computes an empty rename plan.
+    for (const c of resolved) {
+      if (succeededIds.has(c.core.id)) {
+        this.applyCachedVisibilityFlip(c.core.id, c.hidden);
+      }
+    }
+
     return { succeeded: result.succeeded, failed };
   }
 
@@ -525,13 +548,9 @@ export class ConnectionManager {
     const result = await this.client.setBulkCoreVisibility(resolved);
 
     // Refresh the cache so subsequent hideCore lookups see the new state.
-    const refreshed = await this.client.listAllCoresWithFiles(
+    this.coresCache = await this.client.listAllCoresWithFiles(
       this.systemFilesMarksCache,
     );
-    this.coresCache = refreshed.map((c) => ({
-      ...c,
-      managedByApp: this.ledgerHasCore(c.id),
-    }));
 
     return result.succeeded.length;
   }
@@ -577,13 +596,6 @@ export class ConnectionManager {
       throw new Error(`Unknown core: ${coreId}`);
     }
     return fresh;
-  }
-
-  private ledgerHasCore(coreId: string): boolean {
-    const lower = coreId.toLowerCase();
-    return this.ledgerCache.hiddenCores.some(
-      (e) => e.coreId.toLowerCase() === lower,
-    );
   }
 
   private assertConnected(): void {

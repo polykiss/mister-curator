@@ -109,7 +109,11 @@ Update it before changing consumers.
 - On-MiSTer agent directory: `/tmp/mistercurator/`
 - On-MiSTer state directory: `/media/fat/.mistercurator/` — holds the
   small JSON state files the app persists across sessions:
-  - `state.json` — hide ledger (which cores the app hid)
+  - `state.json` — hide ledger (which cores the app hid). Used solely
+    to scope the "Unhide all" bulk-target list so a one-click revert
+    can't sweep up dot-prefixed system folders the firmware placed.
+    Single-core hide / show ops do NOT consult it; the user can
+    hide or unhide any core in the list directly.
   - `system-files.json` — user-marked system files (`(coreId, filename)` pairs)
   - `folder-classifications.json` — per-folder container/atomic overrides
 

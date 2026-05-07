@@ -629,39 +629,39 @@ describe('FakeMisterClient', () => {
     });
   });
 
-  describe('externally-hidden cores (Round 3 / Issue 4)', () => {
-    // Fixture: _Console/Atari7800_20240423.rbf (visible) +
-    // games/.ATARI7800/leftover.bin (hidden, case-mismatch). The matcher
-    // surfaces this as externally-hidden — the rbf is launchable from
-    // the MiSTer menu but the dir is not part of the curated library.
-    it('flags Atari7800 as externally hidden with romCount=0', async () => {
+  describe('case-mismatched dot-prefixed games dirs (Round 5)', () => {
+    // Fixtures: _Console/Atari7800_*.rbf + games/.ATARI7800/leftover.bin,
+    // and similar shapes for Vectrex / Gameboy2P. These dot-prefixed
+    // case-mismatched dirs predate this app on the user's MiSTer. Round 5
+    // model: the matcher surfaces them as ordinary HIDDEN cores —
+    // single-state UI, the user can click Unhide to clean them up.
+    it('reports Atari7800 as hidden with the actual romCount', async () => {
       const cores = await client.listAllCoresWithFiles();
       const atari = cores.find((c) => c.id === 'Atari7800');
       expect(atari).toBeDefined();
       expect(atari?.gamesDirExists).toBe(true);
       expect(atari?.gamesDirHidden).toBe(true);
       expect(atari?.gamesDirName).toBe('ATARI7800');
-      // The bug: previous behavior counted "1 ROM" for the leftover.bin
-      // file. Round 3 zeroes it out so the cores list isn't misleading.
-      expect(atari?.romCount).toBe(0);
-      expect(atari?.hiddenCount).toBe(0);
-      expect(atari?.recursiveRomCount).toBe(0);
+      // Round 5: report the dir's real contents — no zeroing-out.
+      // The user can inspect what's there before deciding to unhide.
+      expect(atari?.romCount).toBe(1);
+      expect(atari?.recursiveRomCount).toBe(1);
     });
 
-    it('flags Vectrex as externally hidden (case-mismatch with .VECTREX)', async () => {
+    it('reports Vectrex as hidden with the actual romCount', async () => {
       const cores = await client.listAllCoresWithFiles();
       const vectrex = cores.find((c) => c.id === 'Vectrex');
       expect(vectrex?.gamesDirHidden).toBe(true);
       expect(vectrex?.gamesDirName).toBe('VECTREX');
-      expect(vectrex?.romCount).toBe(0);
+      expect(vectrex?.romCount).toBe(1);
     });
 
-    it('flags Gameboy2P as externally hidden (case-mismatch with .GAMEBOY2P)', async () => {
+    it('reports Gameboy2P as hidden with the actual romCount', async () => {
       const cores = await client.listAllCoresWithFiles();
       const gb2p = cores.find((c) => c.id === 'Gameboy2P');
       expect(gb2p?.gamesDirHidden).toBe(true);
       expect(gb2p?.gamesDirName).toBe('GAMEBOY2P');
-      expect(gb2p?.romCount).toBe(0);
+      expect(gb2p?.romCount).toBe(1);
     });
   });
 

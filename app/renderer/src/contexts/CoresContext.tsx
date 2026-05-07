@@ -26,6 +26,7 @@ import { useOperationStatus } from '@app/renderer/src/contexts/OperationStatusCo
 import { shouldFetchCoresOnEffect } from '@app/renderer/src/lib/cores-fetch-gate';
 import {
   applyBulkVisibilityChange,
+  applyCoreVisibilityChange,
   applyVisibilityChange,
   recountCore,
   type VisibilityChange,
@@ -53,6 +54,19 @@ interface CoresContextValue {
   readonly selectedCore: CoreEntry | null;
   readonly romsByCore: RomsByCore;
   readonly romsLoading: LoadingByCore;
+  /**
+   * Cores with an in-flight hide / show operation. The cores list
+   * uses this to render an inline "hiding…" / "showing…" indicator
+   * in place of the eye icon while the rename is on the wire.
+   */
+  readonly pendingCoreIds: ReadonlySet<string>;
+  /**
+   * Core IDs the on-MiSTer hide ledger says we hid in past sessions.
+   * Used exclusively to scope the "Unhide all" target list — the
+   * renderer intersects this with currently-hidden cores to avoid
+   * un-prefixing dot-folders the firmware itself placed there.
+   */
+  readonly ledgerCoreIds: ReadonlySet<string>;
   readonly selectCore: (coreId: string | null) => void;
   readonly refresh: () => Promise<void>;
   readonly ensureRoms: (coreId: string, subPath?: string) => Promise<void>;
@@ -126,6 +140,12 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   const [romsLoading, setRomsLoading] = useState<LoadingByCore>({});
   const [systemFilesMarks, setSystemFilesMarks] = useState<SystemFilesMarks>(
     EMPTY_SYSTEM_FILES_MARKS,
+  );
+  const [pendingCoreIds, setPendingCoreIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [ledgerCoreIds, setLedgerCoreIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
   );
 
   // Refs for stale-closure-safe reads inside async callbacks.
@@ -202,6 +222,16 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       // Marks first — counts in the cores list depend on them.
       const marks = await window.mister.listSystemFileMarks();
       setSystemFilesMarks(marks);
+      // Ledger snapshot — used by the "Unhide all" UI to scope its
+      // target list. Single-core hide/show paths don't read this.
+      try {
+        const ids = await window.mister.listLedgerCoreIds();
+        setLedgerCoreIds(new Set(ids));
+      } catch {
+        // Best-effort; the bulk-unhide button stays disabled if this
+        // fails, which is the safe default.
+        setLedgerCoreIds(new Set());
+      }
       const next = await runWithStatus('Scanning cores…', () =>
         window.mister.listAllCoresWithFiles(),
       );
@@ -347,48 +377,96 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     [updateCoreCounts, runWithStatus],
   );
 
-  const hideCore = useCallback(
-    async (coreId: string) => {
-      await runWithStatus(`Hiding ${coreId}…`, () =>
-        window.mister.hideCore(coreId),
-      );
-      // Invalidate the cores cache so the rebuilt list reflects the new state.
-      const next = await window.mister.listAllCoresWithFiles();
-      setCores(next);
-      // Clear cached ROMs for this core — its games dir may have moved.
-      setRomsByCore((prev) => {
-        if (!(coreId in prev)) return prev;
-        const copy = { ...prev };
-        delete copy[coreId];
-        return copy;
+  /**
+   * Toggle a single core's visibility with an optimistic local update.
+   *
+   * Round 5: no global cores re-fetch on success — the matcher already
+   * gave us all the information we need to flip the row in place. The
+   * row's visual state changes the instant the user clicks; an inline
+   * indicator (driven by `pendingCoreIds`) sits where the eye icon was
+   * until the SSH rename returns. On failure we revert to the saved
+   * snapshot so the row snaps back without the user having to refresh.
+   */
+  const setSingleCoreVisibility = useCallback(
+    async (coreId: string, hidden: boolean): Promise<void> => {
+      const previousCores = coresRef.current;
+      // Optimistic flip: rewrite the row's rbfPaths + gamesDirHidden
+      // so isCoreHidden flips in lockstep across both signals.
+      setCores((prev) => {
+        if (!prev) return prev;
+        return prev.map((c) =>
+          c.id === coreId ? applyCoreVisibilityChange(c, hidden) : c,
+        );
       });
-      // If the user is currently looking at this core, refetch so the
-      // right pane doesn't go blank.
-      if (selectedCoreIdRef.current === coreId) {
-        await refetchSelectedRoms();
+      // Ledger bookkeeping — set is mutated optimistically too so the
+      // "Unhide all (N)" count reflects the change immediately.
+      setLedgerCoreIds((prev) => {
+        const lower = coreId.toLowerCase();
+        const next = new Set(prev);
+        if (hidden) next.add(lower);
+        else next.delete(lower);
+        // Also keep the original-cased id so lookups don't depend on
+        // the renderer normalising every check.
+        if (hidden) next.add(coreId);
+        else next.delete(coreId);
+        return next;
+      });
+      setPendingCoreIds((prev) => {
+        const next = new Set(prev);
+        next.add(coreId);
+        return next;
+      });
+      try {
+        if (hidden) {
+          await window.mister.hideCore(coreId);
+        } else {
+          await window.mister.showCore(coreId);
+        }
+        // The hide/unhide changed the on-disk basename for this
+        // core's ROM list — invalidate the cache so the next
+        // `ensureRoms` re-fetches.
+        setRomsByCore((prev) => {
+          if (!(coreId in prev)) return prev;
+          const copy = { ...prev };
+          delete copy[coreId];
+          return copy;
+        });
+        if (selectedCoreIdRef.current === coreId) {
+          await refetchSelectedRoms();
+        }
+      } catch (err) {
+        // Roll back the optimistic flips.
+        if (previousCores) setCores(previousCores);
+        // Refresh ledger from the source of truth (the IPC call may
+        // have partially succeeded — e.g. games-dir renamed but rbf
+        // failed — and the ledger reflects the actual outcome).
+        try {
+          const ids = await window.mister.listLedgerCoreIds();
+          setLedgerCoreIds(new Set(ids));
+        } catch {
+          /* best-effort */
+        }
+        throw err instanceof Error ? err : new Error(String(err));
+      } finally {
+        setPendingCoreIds((prev) => {
+          if (!prev.has(coreId)) return prev;
+          const next = new Set(prev);
+          next.delete(coreId);
+          return next;
+        });
       }
     },
-    [refetchSelectedRoms, runWithStatus],
+    [refetchSelectedRoms],
+  );
+
+  const hideCore = useCallback(
+    (coreId: string) => setSingleCoreVisibility(coreId, true),
+    [setSingleCoreVisibility],
   );
 
   const showCore = useCallback(
-    async (coreId: string) => {
-      await runWithStatus(`Restoring ${coreId}…`, () =>
-        window.mister.showCore(coreId),
-      );
-      const next = await window.mister.listAllCoresWithFiles();
-      setCores(next);
-      setRomsByCore((prev) => {
-        if (!(coreId in prev)) return prev;
-        const copy = { ...prev };
-        delete copy[coreId];
-        return copy;
-      });
-      if (selectedCoreIdRef.current === coreId) {
-        await refetchSelectedRoms();
-      }
-    },
-    [refetchSelectedRoms, runWithStatus],
+    (coreId: string) => setSingleCoreVisibility(coreId, false),
+    [setSingleCoreVisibility],
   );
 
   const setBulkCoreVisibility = useCallback(
@@ -414,6 +492,14 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       const next = await window.mister.listAllCoresWithFiles();
       setCores(next);
       setRomsByCore({});
+      // Ledger snapshot may have shifted (entries added on hide / removed
+      // on show). Refresh so "Unhide all (N)" stays accurate.
+      try {
+        const ids = await window.mister.listLedgerCoreIds();
+        setLedgerCoreIds(new Set(ids));
+      } catch {
+        /* best-effort */
+      }
       // The bulk op may have renamed the games dir for the currently-
       // selected core (or one of its case-duplicate siblings). Refetch
       // its ROMs so the right pane doesn't go blank.
@@ -595,6 +681,8 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       setCoresError(null);
       setCoresLoading(false);
       setSystemFilesMarks(EMPTY_SYSTEM_FILES_MARKS);
+      setPendingCoreIds(new Set());
+      setLedgerCoreIds(new Set());
     }
   }, [status]);
 
@@ -644,6 +732,8 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       selectedCore,
       romsByCore,
       romsLoading,
+      pendingCoreIds,
+      ledgerCoreIds,
       selectCore,
       refresh,
       ensureRoms,
@@ -668,6 +758,8 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       selectedCore,
       romsByCore,
       romsLoading,
+      pendingCoreIds,
+      ledgerCoreIds,
       selectCore,
       refresh,
       ensureRoms,

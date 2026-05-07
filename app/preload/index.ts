@@ -96,6 +96,8 @@ const api: MisterApi = {
       changes,
       options,
     ),
+  listLedgerCoreIds: () =>
+    invoke<readonly string[]>(IPC_CHANNELS.listLedgerCoreIds),
   onBulkCoreProgress: (handler: (event: BulkCoreProgressEvent) => void) => {
     const listener = (_event: unknown, payload: BulkCoreProgressEvent): void => {
       handler(payload);

@@ -63,14 +63,6 @@ export interface CoreEntry {
    * paired with `games/.APOGEE`).
    */
   readonly gamesDirName?: string;
-  /**
-   * True iff this core's hidden state was caused by MiSTerCurator (i.e.
-   * there is a matching entry in the on-MiSTer ledger). Set by
-   * ConnectionManager after merging the ledger with the device snapshot;
-   * undefined at the IMisterClient layer. The renderer treats undefined
-   * as false (defensive).
-   */
-  readonly managedByApp?: boolean;
 }
 
 export interface Rom {
