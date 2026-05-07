@@ -36,6 +36,21 @@ export interface CoreEntry {
   readonly name: string;
   readonly romCount: number;
   readonly hiddenCount: number;
+  /**
+   * Approximate total ROM count across the games dir, walking into
+   * container folders (NEOGEO's `1 World A-Z`, MegaDrive's `EUR`, ...)
+   * and treating atomic disc folders (Saturn, MegaCD) as a single ROM.
+   * The cores-list density indicator and the "9 folders · ~300 ROMs"
+   * breadcrumb both consume this. May be 0 (empty core, externally
+   * hidden) or undefined (legacy data, computed-on-demand surfaces).
+   *
+   * Approximate by design — recursive walks can over- or under-count
+   * depending on non-standard ROM extensions or unusual nesting. The
+   * UI prefixes the value with `~` when displaying it.
+   */
+  readonly recursiveRomCount?: number;
+  /** Hidden subset of `recursiveRomCount`. Same approximation rules. */
+  readonly recursiveHiddenCount?: number;
   readonly category: CoreCategory;
   readonly rbfPaths: readonly string[];
   readonly gamesDirExists: boolean;

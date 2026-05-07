@@ -17,6 +17,7 @@ import {
   type CoreRename,
   type RawGamesDirInput,
   type RawRbfInput,
+  type RawSubFolderInput,
 } from '@shared/core-matching';
 import { displayRomName } from '@shared/display';
 import {
@@ -249,10 +250,42 @@ export class RealMisterClient implements IMisterClient {
     const rbfs: RawRbfInput[] = [];
     // Aggregate per-games-dir entries from the GF / GD lines so the
     // matcher can apply the system-file filter to derive romCount.
-    const gamesDirsBuilder = new Map<
-      string,
-      { files: string[]; dirs: string[] }
-    >();
+    interface DirBuilder {
+      files: string[];
+      dirs: string[];
+      // One bucket per top-level subfolder (Round 3 / Issue 5). Built
+      // from S* lines emitted by the shell script: SF for the folder
+      // header, SE for each immediate file/dir, SR for the recursive
+      // file totals.
+      subFolders: Map<string, MutableSubFolder>;
+    }
+    interface MutableSubFolder {
+      name: string;
+      files: string[];
+      dirs: string[];
+      recursiveFileCount?: number;
+      recursiveHiddenFileCount?: number;
+    }
+    const gamesDirsBuilder = new Map<string, DirBuilder>();
+    const ensureDirBuilder = (rawName: string): DirBuilder => {
+      let bucket = gamesDirsBuilder.get(rawName);
+      if (!bucket) {
+        bucket = { files: [], dirs: [], subFolders: new Map() };
+        gamesDirsBuilder.set(rawName, bucket);
+      }
+      return bucket;
+    };
+    const ensureSubFolder = (
+      bucket: DirBuilder,
+      subName: string,
+    ): MutableSubFolder => {
+      let sub = bucket.subFolders.get(subName);
+      if (!sub) {
+        sub = { name: subName, files: [], dirs: [] };
+        bucket.subFolders.set(subName, sub);
+      }
+      return sub;
+    };
     let arcadeDirExists = false;
     for (const line of result.stdout.split('\n')) {
       if (line === '') continue;
@@ -282,34 +315,56 @@ export class RealMisterClient implements IMisterClient {
         // dirs (no GF/GD lines following) still appear in the matcher
         // input — without this they'd be lost.
         const rawName = parts[1] ?? '';
-        if (rawName !== '' && !gamesDirsBuilder.has(rawName)) {
-          gamesDirsBuilder.set(rawName, { files: [], dirs: [] });
-        }
+        if (rawName !== '') ensureDirBuilder(rawName);
       } else if (tag === 'GF' && parts.length >= 3) {
         const rawName = parts[1] ?? '';
         const filename = parts.slice(2).join('\t');
-        let bucket = gamesDirsBuilder.get(rawName);
-        if (!bucket) {
-          bucket = { files: [], dirs: [] };
-          gamesDirsBuilder.set(rawName, bucket);
-        }
-        bucket.files.push(filename);
+        ensureDirBuilder(rawName).files.push(filename);
       } else if (tag === 'GD' && parts.length >= 3) {
         const rawName = parts[1] ?? '';
         const dirname = parts.slice(2).join('\t');
-        let bucket = gamesDirsBuilder.get(rawName);
-        if (!bucket) {
-          bucket = { files: [], dirs: [] };
-          gamesDirsBuilder.set(rawName, bucket);
-        }
-        bucket.dirs.push(dirname);
+        ensureDirBuilder(rawName).dirs.push(dirname);
+      } else if (tag === 'SE' && parts.length >= 5) {
+        // Subfolder entry: parent games dir, subfolder name, kind
+        // ('f' for file, 'd' for dir), and the entry's own basename.
+        // Used to feed `classifyFolder` with one-level-deep content.
+        const parent = parts[1] ?? '';
+        const subName = parts[2] ?? '';
+        const kind = parts[3] ?? '';
+        const basename = parts.slice(4).join('\t');
+        if (parent === '' || subName === '' || basename === '') continue;
+        const sub = ensureSubFolder(ensureDirBuilder(parent), subName);
+        if (kind === 'f') sub.files.push(basename);
+        else if (kind === 'd') sub.dirs.push(basename);
+      } else if (tag === 'SR' && parts.length >= 5) {
+        // Subfolder recursive totals: parent, subname, total file
+        // count, hidden-file count (anywhere beneath).
+        const parent = parts[1] ?? '';
+        const subName = parts[2] ?? '';
+        const total = Number.parseInt(parts[3] ?? '0', 10);
+        const hidden = Number.parseInt(parts[4] ?? '0', 10);
+        if (parent === '' || subName === '') continue;
+        const sub = ensureSubFolder(ensureDirBuilder(parent), subName);
+        if (!Number.isNaN(total)) sub.recursiveFileCount = total;
+        if (!Number.isNaN(hidden)) sub.recursiveHiddenFileCount = hidden;
       }
     }
-    const gamesDirs: RawGamesDirInput[] = Array.from(gamesDirsBuilder, ([rawName, b]) => ({
-      rawName,
-      files: b.files,
-      dirs: b.dirs,
-    }));
+    const gamesDirs: RawGamesDirInput[] = Array.from(
+      gamesDirsBuilder,
+      ([rawName, b]): RawGamesDirInput => {
+        const subFolders: RawSubFolderInput[] = Array.from(
+          b.subFolders.values(),
+          (s) => ({
+            name: s.name,
+            files: s.files,
+            dirs: s.dirs,
+            recursiveFileCount: s.recursiveFileCount,
+            recursiveHiddenFileCount: s.recursiveHiddenFileCount,
+          }),
+        );
+        return { rawName, files: b.files, dirs: b.dirs, subFolders };
+      },
+    );
 
     return matchRbfsToGamesDirs({
       rbfs,
@@ -1041,12 +1096,17 @@ function buildListAllCoresScript(): string {
     ].join('\n');
   }).join('\n');
 
-  // Per-entry emission: one G line announcing the games dir, then one
-  // GF/GD line per top-level file/dir inside it. The matcher applies
-  // `isSystemFile` to derive romCount/hiddenCount — keeping the heuristic
-  // in JS means the shell stays dumb and we can extend the patterns
-  // without re-deploying. Folder-shaped ROMs (Saturn/MegaCD discs) come
-  // through as GD lines and are NEVER filtered out as system content.
+  // Per-entry emission: one G line announcing the games dir, then
+  // GF/GD per top-level file/dir, plus SE per immediate child of each
+  // top-level subfolder and SR with the recursive file totals. The
+  // matcher applies `isSystemFile` for the top-level filter and
+  // walks SE/SR data to compute `recursiveRomCount` (Round 3 / Issue
+  // 5). Folder-shaped ROMs (Saturn/MegaCD discs) come through as GD
+  // lines and are NEVER filtered out as system content.
+  //
+  // The case-insensitive globbing (`* .[!.]*` covers BOTH visible AND
+  // dot-prefixed dirs) is what surfaces externally-hidden games dirs
+  // like `.ATARI7800` so the matcher can flag them — see Issue 4.
   const gamesScript = [
     `if [ -d ${shellQuote(MISTER_GAMES_DIR)} ]; then`,
     `  cd ${shellQuote(MISTER_GAMES_DIR)}`,
@@ -1060,6 +1120,26 @@ function buildListAllCoresScript(): string {
     `        printf 'GF\\t%s\\t%s\\n' "$d" "$name"`,
     '      elif [ -d "$entry" ]; then',
     `        printf 'GD\\t%s\\t%s\\n' "$d" "$name"`,
+    // Walk one level deeper so the matcher can classify this folder
+    // (atomic vs container) and pick a recursive count.
+    '        for sub in "$entry"/* "$entry"/.[!.]*; do',
+    '          [ -e "$sub" ] || continue',
+    '          subname="${sub##*/}"',
+    '          if [ -f "$sub" ]; then',
+    `            printf 'SE\\t%s\\t%s\\tf\\t%s\\n' "$d" "$name" "$subname"`,
+    '          elif [ -d "$sub" ]; then',
+    `            printf 'SE\\t%s\\t%s\\td\\t%s\\n' "$d" "$name" "$subname"`,
+    '          fi',
+    '        done',
+    // Recursive totals: total files anywhere beneath this folder
+    // (used as an approximation for container-folder ROM counts) and
+    // the dot-prefixed subset. `find -type f` is cheap enough on the
+    // device — even a 10000-file mame folder finishes in well under a
+    // second on the DE10-Nano. The grep for hidden files relies on
+    // any path component starting with `.` — same rule as listRoms.
+    '        sr_total=$(find "$entry" -type f 2>/dev/null | wc -l)',
+    '        sr_hidden=$(find "$entry" -type f -name ".*" 2>/dev/null | wc -l)',
+    `        printf 'SR\\t%s\\t%s\\t%s\\t%s\\n' "$d" "$name" "$sr_total" "$sr_hidden"`,
     '      fi',
     '    done',
     '  done',

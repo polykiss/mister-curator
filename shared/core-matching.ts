@@ -1,4 +1,5 @@
 import { MISTER_GAMES_DIR } from '@shared/constants';
+import { classifyFolder } from '@shared/folder-rom';
 import { isSystemFile } from '@shared/system-files';
 import { isMarked } from '@shared/system-files-marks';
 import type {
@@ -76,6 +77,46 @@ export interface RawGamesDirInput {
   readonly files: readonly string[];
   /** Top-level subdirectories (basenames, may be dot-prefixed). */
   readonly dirs: readonly string[];
+  /**
+   * One level deeper than `dirs`: per top-level subfolder, the
+   * immediate children plus pre-computed recursive file counts. The
+   * matcher uses this to derive `recursiveRomCount` — atomic folders
+   * (Saturn discs, MegaCD games) count as 1, container folders
+   * (NEOGEO's `1 World A-Z`) contribute their `recursiveFileCount`.
+   *
+   * Optional: clients that don't supply it (e.g. legacy tests) yield a
+   * matcher result whose `recursiveRomCount` mirrors `romCount`. The
+   * cores list falls back to a single-number display in that case.
+   */
+  readonly subFolders?: readonly RawSubFolderInput[];
+}
+
+/**
+ * One level deeper than the games-dir top level. Used by the matcher
+ * to compute approximate recursive ROM counts for container-shaped
+ * folders. The flag scan happens upstream — here we only need the raw
+ * file/dir lists for `classifyFolder` plus the recursive totals.
+ */
+export interface RawSubFolderInput {
+  /** Basename of the top-level subfolder, may be dot-prefixed. */
+  readonly name: string;
+  /** Immediate-child files inside this subfolder. */
+  readonly files: readonly string[];
+  /** Immediate-child dir basenames inside this subfolder. */
+  readonly dirs: readonly string[];
+  /**
+   * Total file count beneath this subfolder, including all nested
+   * subdirs. Used as the approximate ROM count for container folders.
+   * For atomic folders (disc dumps) this is ignored — atomic always
+   * counts as 1. When undefined the matcher falls back to immediate
+   * file + dir count.
+   */
+  readonly recursiveFileCount?: number;
+  /**
+   * Recursive count of dot-prefixed files anywhere beneath this
+   * subfolder. Used for the hidden subset of `recursiveRomCount`.
+   */
+  readonly recursiveHiddenFileCount?: number;
 }
 
 export interface MatchInput {
@@ -106,6 +147,8 @@ interface MutableCoreEntry {
   name: string;
   romCount: number;
   hiddenCount: number;
+  recursiveRomCount: number;
+  recursiveHiddenCount: number;
   category: CoreCategory;
   rbfPaths: string[];
   gamesDirExists: boolean;
@@ -149,6 +192,8 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
         name: prefix,
         romCount: 0,
         hiddenCount: 0,
+        recursiveRomCount: 0,
+        recursiveHiddenCount: 0,
         category: rbf.category,
         rbfPaths: [rbf.fullPath],
         gamesDirExists: false,
@@ -182,6 +227,12 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
       nonSystemFiles.filter((f) => f.startsWith('.')).length +
       nonSystemDirs.filter((d) => d.startsWith('.')).length;
 
+    const { recursiveRomCount, recursiveHiddenCount } = computeRecursiveRomCount(
+      nonSystemFiles,
+      nonSystemDirs,
+      gd.subFolders,
+    );
+
     const existing = byId.get(visibleName);
     if (existing) {
       existing.gamesDirExists = true;
@@ -189,12 +240,16 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
       existing.gamesDirName = visibleName;
       existing.romCount = romCount;
       existing.hiddenCount = hiddenCount;
+      existing.recursiveRomCount = recursiveRomCount;
+      existing.recursiveHiddenCount = recursiveHiddenCount;
     } else {
       byId.set(visibleName, {
         id: visibleName,
         name: visibleName,
         romCount,
         hiddenCount,
+        recursiveRomCount,
+        recursiveHiddenCount,
         category: 'Unknown',
         rbfPaths: [],
         gamesDirExists: true,
@@ -209,6 +264,8 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     name: e.name,
     romCount: e.romCount,
     hiddenCount: e.hiddenCount,
+    recursiveRomCount: e.recursiveRomCount,
+    recursiveHiddenCount: e.recursiveHiddenCount,
     category: e.category,
     rbfPaths: [...e.rbfPaths],
     gamesDirExists: e.gamesDirExists,
@@ -241,6 +298,26 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
       gamesDirExists: false,
       gamesDirHidden: false,
     });
+  }
+
+  // Externally-hidden cores: rbf visible, games dir hidden. The dir
+  // contents shouldn't be reported as ROMs because (a) the user can't
+  // browse them through this app — listRoms hits a path that may not
+  // even exist case-correctly, and (b) some external tool intentionally
+  // hid the dir, so its contents aren't part of the user's curated
+  // library. Zero the counts here so the cores list shows "0 ROMs"
+  // rather than the misleading "1 ROM" the matcher used to surface.
+  for (let i = 0; i < nonArcade.length; i += 1) {
+    const c = nonArcade[i]!;
+    if (isCoreExternallyHidden(c)) {
+      nonArcade[i] = {
+        ...c,
+        romCount: 0,
+        hiddenCount: 0,
+        recursiveRomCount: 0,
+        recursiveHiddenCount: 0,
+      };
+    }
   }
 
   nonArcade.sort((a, b) => a.id.localeCompare(b.id, 'en-US', { sensitivity: 'base' }));
@@ -331,6 +408,8 @@ function mergeAliases(winner: CoreEntry, losers: readonly CoreEntry[]): CoreEntr
   let gamesDirName = winner.gamesDirName;
   let romCount = winner.romCount;
   let hiddenCount = winner.hiddenCount;
+  let recursiveRomCount = winner.recursiveRomCount;
+  let recursiveHiddenCount = winner.recursiveHiddenCount;
   const rbfPaths = [...winner.rbfPaths];
 
   for (const loser of losers) {
@@ -343,6 +422,8 @@ function mergeAliases(winner: CoreEntry, losers: readonly CoreEntry[]): CoreEntr
       gamesDirName = loser.gamesDirName;
       romCount = loser.romCount;
       hiddenCount = loser.hiddenCount;
+      recursiveRomCount = loser.recursiveRomCount;
+      recursiveHiddenCount = loser.recursiveHiddenCount;
     }
   }
 
@@ -354,6 +435,8 @@ function mergeAliases(winner: CoreEntry, losers: readonly CoreEntry[]): CoreEntr
     gamesDirName,
     romCount,
     hiddenCount,
+    recursiveRomCount,
+    recursiveHiddenCount,
   };
 }
 
@@ -432,6 +515,27 @@ export function isCoreHidden(core: CoreEntry): boolean {
   return !hasAnyVisibleRbf && !gamesDirVisible;
 }
 
+/**
+ * True iff the core's games dir was hidden by something other than this
+ * app — the rbf is still visible (so the user can launch the core via
+ * the MiSTer menu) but the dot-prefixed games dir means we can't browse
+ * ROMs through this UI.
+ *
+ * The signal is strict: "games dir hidden AND at least one visible
+ * rbf". MiSTerCurator always renames *both* sides together when it
+ * hides a core, so this asymmetric state can only arise via an
+ * external tool (or a manual `mv` outside our app). The Round 3
+ * snapshot of a real MiSTer carries five of these — Atari7800,
+ * Gameboy2P, memtest, Altair8800, Vectrex — all dating to before
+ * MiSTerCurator existed. The cores list dims them and disables
+ * click-through; ConnectionManager.listRoms returns an empty list so
+ * the renderer never hits a path that doesn't exist on disk.
+ */
+export function isCoreExternallyHidden(core: CoreEntry): boolean {
+  if (!core.gamesDirExists || !core.gamesDirHidden) return false;
+  return core.rbfPaths.some((p) => !pathBasename(p).startsWith('.'));
+}
+
 export interface CoreVisibilityChange {
   readonly coreId: string;
   readonly hidden: boolean;
@@ -477,6 +581,91 @@ export function computeCoreRenames(core: CoreEntry, hidden: boolean): CoreRename
   }
 
   return renames;
+}
+
+/**
+ * Approximates the total ROM count for a games dir, walking into
+ * container folders and treating atomic disc folders as a single ROM.
+ *
+ * Rules (matches the Round 3 spec):
+ *   - Non-system top-level files: each counts 1.
+ *   - Non-system top-level folders, classified via `classifyFolder`:
+ *       atomic / unknown → 1 (the folder is the unit; Saturn discs,
+ *         MegaCD games, single-medium folders).
+ *       container         → walk inside; sum the recursive file count
+ *         the client computed (`recursiveFileCount`). Auto-detected
+ *         system files NESTED inside containers are NOT excluded —
+ *         the recursive count is intentionally cheap. The "~" in the
+ *         display covers this approximation.
+ *   - When `subFolders` is undefined (legacy callers, simple unit
+ *     tests), the function falls back to the top-level count so the
+ *     matcher still produces a number rather than `undefined`.
+ *
+ * Hidden subset: dot-prefixed top-level files contribute to
+ * `recursiveHiddenCount` directly; for container folders, the
+ * client's `recursiveHiddenFileCount` is added.
+ */
+function computeRecursiveRomCount(
+  topLevelFiles: readonly string[],
+  topLevelDirs: readonly string[],
+  subFolders: readonly RawSubFolderInput[] | undefined,
+): { recursiveRomCount: number; recursiveHiddenCount: number } {
+  let total = 0;
+  let totalHidden = 0;
+
+  for (const f of topLevelFiles) {
+    total += 1;
+    if (f.startsWith('.')) totalHidden += 1;
+  }
+
+  if (!subFolders) {
+    // No deep info — treat each top-level dir as 1 (the matcher's
+    // pre-Round-3 behavior). Keeps legacy unit tests passing.
+    for (const d of topLevelDirs) {
+      total += 1;
+      if (d.startsWith('.')) totalHidden += 1;
+    }
+    return { recursiveRomCount: total, recursiveHiddenCount: totalHidden };
+  }
+
+  const subByName = new Map(subFolders.map((s) => [s.name, s]));
+  for (const d of topLevelDirs) {
+    const sub = subByName.get(d);
+    const dirIsHidden = d.startsWith('.');
+    if (!sub) {
+      // Subfolder info missing — fall back to atomic (1).
+      total += 1;
+      if (dirIsHidden) totalHidden += 1;
+      continue;
+    }
+    // Classify using just this subfolder's immediate contents — the
+    // same `classifyFolder` heuristic the renderer uses for the drill-
+    // in decision, so the cores-list count and the ROMs-list view stay
+    // aligned. `unknown` collapses to `atomic` here too.
+    const classification = classifyFolder({ files: sub.files, dirs: sub.dirs });
+    if (classification === 'container') {
+      // Container folder: contribute the recursive file count. Falls
+      // back to immediate file + dir count when the client didn't
+      // supply a precomputed total.
+      const recursive =
+        sub.recursiveFileCount ?? sub.files.length + sub.dirs.length;
+      const recursiveHidden = sub.recursiveHiddenFileCount ?? 0;
+      total += recursive;
+      if (dirIsHidden) {
+        // The whole container is hidden — every ROM under it is
+        // effectively hidden too.
+        totalHidden += recursive;
+      } else {
+        totalHidden += recursiveHidden;
+      }
+    } else {
+      // Atomic or unknown — folder IS one ROM.
+      total += 1;
+      if (dirIsHidden) totalHidden += 1;
+    }
+  }
+
+  return { recursiveRomCount: total, recursiveHiddenCount: totalHidden };
 }
 
 /**

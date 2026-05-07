@@ -1,4 +1,3 @@
-import { MISTER_GAMES_DIR } from '@shared/constants';
 import { displayRomName } from '@shared/display';
 import type { CoreEntry, Rom } from '@shared/types';
 
@@ -23,6 +22,12 @@ export function applyVisibilityChange(roms: readonly Rom[], change: VisibilityCh
     const targetName = change.hidden ? `.${visibleName}` : visibleName;
     if (targetName === rom.filename) return rom;
     changed = true;
+    // Derive the predicted path from the existing on-disk path so we
+    // preserve the actual games-dir basename (case-mismatched cores
+    // carry an on-disk basename that differs from `rom.coreId`, which
+    // is the canonical id).
+    const lastSlash = rom.path.lastIndexOf('/');
+    const dirPart = lastSlash >= 0 ? rom.path.slice(0, lastSlash) : '';
     return {
       ...rom,
       filename: targetName,
@@ -32,7 +37,7 @@ export function applyVisibilityChange(roms: readonly Rom[], change: VisibilityCh
       // back to "Castlevania" on the next server roundtrip.
       displayName: displayRomName(visibleName),
       hidden: change.hidden,
-      path: `${MISTER_GAMES_DIR}/${rom.coreId}/${targetName}`,
+      path: `${dirPart}/${targetName}`,
     };
   });
   return changed ? next : [...roms];

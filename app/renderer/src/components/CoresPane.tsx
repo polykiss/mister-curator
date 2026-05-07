@@ -3,7 +3,11 @@ import { useMemo, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
-import { isArcadePlaceholder, isCoreHidden } from '@shared/core-matching';
+import {
+  isArcadePlaceholder,
+  isCoreExternallyHidden,
+  isCoreHidden,
+} from '@shared/core-matching';
 import type { CoreEntry } from '@shared/types';
 
 import { Button } from '@app/renderer/src/components/ui/button';
@@ -18,6 +22,8 @@ import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
 
 const ARCADE_TOOLTIP = "Arcade cores aren't supported yet — coming in a later release.";
 const DISCONNECTED_TOOLTIP = 'Reconnect to make changes.';
+const EXTERNALLY_HIDDEN_TOOLTIP =
+  'Hidden by an external tool. MiSTerCurator will not modify it; folder browsing is disabled.';
 
 export function CoresPane(): JSX.Element {
   const {
@@ -67,7 +73,16 @@ export function CoresPane(): JSX.Element {
   const emptyHideableCores = useMemo(
     () =>
       (cores ?? []).filter(
-        (c) => c.romCount === 0 && c.category !== 'Arcade' && !isCoreHidden(c),
+        (c) =>
+          c.romCount === 0 &&
+          c.category !== 'Arcade' &&
+          !isCoreHidden(c) &&
+          // Externally-hidden cores are already not in the user's
+          // browsable library (their games dir is hidden by some other
+          // tool). The "Hide empty cores" sweep would re-rename them,
+          // which is exactly the kind of cross-tool interference
+          // AGENTS.md tells us to avoid — leave them alone.
+          !isCoreExternallyHidden(c),
       ),
     [cores],
   );
@@ -315,12 +330,16 @@ function renderCoreList(args: RenderArgs): JSX.Element {
     );
   }
 
-  // Density-bar denominator: max ROM count across the visible cores.
-  // Cores with romCount === 0 render no bar (per SYSTEM.md §10).
-  const maxRomCount = args.visibleCores.reduce(
-    (acc, c) => (c.romCount > acc ? c.romCount : acc),
-    0,
-  );
+  // Density-bar denominator: max recursive ROM count across the
+  // visible cores (Round 3 / Issue 5). Recursive values let NEOGEO's
+  // ~300 stand against mame's 633 instead of NEOGEO's top-level "9"
+  // collapsing into the floor. Falls back to top-level `romCount`
+  // when the matcher didn't supply a recursive value (legacy
+  // fixtures, partial test data).
+  const maxRomCount = args.visibleCores.reduce((acc, c) => {
+    const v = densityValueFor(c);
+    return v > acc ? v : acc;
+  }, 0);
 
   return (
     <ul
@@ -331,6 +350,7 @@ function renderCoreList(args: RenderArgs): JSX.Element {
       {args.visibleCores.map((core) => {
         const isSelected = core.id === args.selectedCoreId;
         const isHiddenCore = isCoreHidden(core);
+        const externallyHidden = isCoreExternallyHidden(core);
         const isArcade = core.category === 'Arcade';
         const isPlaceholder = isArcadePlaceholder(core);
         const askingHide = args.confirmHideId === core.id;
@@ -341,14 +361,17 @@ function renderCoreList(args: RenderArgs): JSX.Element {
             key={core.id}
             className={cn(
               'group/row relative flex h-10 items-center gap-2 border-b border-subtle pl-4 text-body transition-colors',
-              !isSelected && 'hover:bg-elevated',
+              !isSelected && !externallyHidden && 'hover:bg-elevated',
               isSelected && 'bg-overlay',
-              // Hidden + arcade-placeholder rows lean entirely on
-              // dimming: opacity + italic + a darker text color.
-              // The HIDDEN/SYSTEM badges that used to sit on the
-              // left were removed in Round 2 — the dimming is the
-              // whole signal.
+              // Hidden + arcade-placeholder + externally-hidden rows
+              // lean entirely on dimming: opacity + italic + a darker
+              // text color. The HIDDEN/SYSTEM badges that used to sit
+              // on the left were removed in Round 2 — the dimming is
+              // the whole signal. Externally-hidden cores get the
+              // same treatment because the user can't act on them
+              // through this app.
               isHiddenCore && 'opacity-50 italic text-fg-disabled',
+              externallyHidden && 'opacity-50 italic text-fg-disabled',
               isPlaceholder && 'italic text-fg-disabled',
             )}
           >
@@ -365,8 +388,16 @@ function renderCoreList(args: RenderArgs): JSX.Element {
               type="button"
               role="option"
               aria-selected={isSelected}
-              onClick={() => args.onSelect(core.id)}
-              className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left focus-visible:outline-none"
+              onClick={() => {
+                if (externallyHidden) return;
+                args.onSelect(core.id);
+              }}
+              disabled={externallyHidden}
+              title={externallyHidden ? EXTERNALLY_HIDDEN_TOOLTIP : undefined}
+              className={cn(
+                'flex min-w-0 flex-1 items-center justify-between gap-3 text-left focus-visible:outline-none',
+                externallyHidden && 'cursor-not-allowed',
+              )}
             >
               <span className="flex min-w-0 items-center gap-2">
                 <span
@@ -382,6 +413,13 @@ function renderCoreList(args: RenderArgs): JSX.Element {
               <span className="flex shrink-0 items-center gap-2 font-mono text-body-sm text-fg-muted tabular">
                 {isPlaceholder ? (
                   <span className="text-fg-disabled">coming later</span>
+                ) : externallyHidden ? (
+                  <span
+                    className="text-fg-disabled"
+                    title={EXTERNALLY_HIDDEN_TOOLTIP}
+                  >
+                    hidden externally
+                  </span>
                 ) : !core.gamesDirExists && core.rbfPaths.length > 0 ? (
                   <span
                     className="text-fg-disabled"
@@ -390,37 +428,19 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                     no games dir
                   </span>
                 ) : (
-                  <>
-                    <span className="min-w-[2.5rem] text-right">
-                      {core.romCount}
-                    </span>
-                    {core.hiddenCount > 0 ? (
-                      <span className="text-fg-disabled">
-                        ({core.hiddenCount} hidden)
-                      </span>
-                    ) : null}
-                  </>
+                  <CoreCountSummary core={core} />
                 )}
               </span>
             </button>
 
-            {/* Density rectangle — full row height, ~20px wide,
-                color-mixed in OKLCH between bg-surface and accent.
-                Sits immediately before any trailing action. Skipped
-                for the arcade placeholder, which carries no count. */}
-            {!isPlaceholder ? (
-              <DensityBar
-                floor="bg-surface"
-                value={core.romCount}
-                max={maxRomCount}
-                ariaLabel={`${String(core.romCount)} ROMs of peer max ${String(maxRomCount)}`}
-              />
-            ) : null}
-
+            {/* Right-edge stack (Round 3): density rectangle inside,
+                eye icon on the far right. Eye is always visible and
+                paired to the row's current state — open Eye for
+                visible cores, EyeOff for hidden. */}
             {askingHide ? (
               // Two icon-sized buttons replace the eye button — same width
               // budget, fits inside any reasonable cores-pane width.
-              <div className="flex shrink-0 items-center gap-0.5">
+              <div className="flex shrink-0 items-center gap-0.5 pr-1">
                 <Button
                   variant="destructive"
                   size="icon"
@@ -442,54 +462,122 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                   <X strokeWidth={1.5} />
                 </Button>
               </div>
-            ) : isArcade ? (
-              <span
-                className="shrink-0 px-2 font-mono text-body-sm text-fg-disabled"
-                title={ARCADE_TOOLTIP}
-                aria-label={ARCADE_TOOLTIP}
-              >
-                read-only
-              </span>
-            ) : isHiddenCore ? (
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => void args.onShow(core)}
-                disabled={isPending || !args.canMutate}
-                title={
-                  args.canMutate ? `Show ${core.name}` : DISCONNECTED_TOOLTIP
-                }
-                aria-label={`Show ${core.name}`}
-                className="opacity-100 group-hover/row:opacity-100"
-              >
-                <EyeOff strokeWidth={1.5} />
-              </Button>
             ) : (
-              // Hide button reveals on row hover so the rest state stays
-              // visually quiet — a long list of permanent eye icons reads
-              // as noise. Selected and hidden rows always show their
-              // primary action. The mutating action gates on canMutate
-              // so a lost-connection session can't trigger a rename.
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => args.onAskHide(core.id)}
-                disabled={isPending || !args.canMutate}
-                title={
-                  args.canMutate ? `Hide ${core.name}` : DISCONNECTED_TOOLTIP
-                }
-                aria-label={`Hide ${core.name}`}
-                className={cn(
-                  'transition-opacity',
-                  !isSelected && 'opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100',
+              <>
+                {!isPlaceholder ? (
+                  <DensityBar
+                    floor="bg-surface"
+                    value={densityValueFor(core)}
+                    max={maxRomCount}
+                    ariaLabel={`${String(densityValueFor(core))} ROMs of peer max ${String(maxRomCount)}`}
+                  />
+                ) : null}
+                {isArcade ? (
+                  <span
+                    className="shrink-0 px-2 font-mono text-body-sm text-fg-disabled"
+                    title={ARCADE_TOOLTIP}
+                    aria-label={ARCADE_TOOLTIP}
+                  >
+                    read-only
+                  </span>
+                ) : isHiddenCore ? (
+                  // Eye-off icon is always visible on hidden rows. The
+                  // hover lift is a subtle brightness boost so the user
+                  // gets affordance feedback without the icon disappearing
+                  // at rest. canMutate gates the rename during disconnects.
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => void args.onShow(core)}
+                    disabled={isPending || !args.canMutate}
+                    title={
+                      args.canMutate ? `Show ${core.name}` : DISCONNECTED_TOOLTIP
+                    }
+                    aria-label={`Show ${core.name}`}
+                    className="opacity-70 transition-opacity group-hover/row:opacity-100 focus-visible:opacity-100"
+                  >
+                    <EyeOff strokeWidth={1.5} />
+                  </Button>
+                ) : (
+                  // Eye (open) icon on visible rows — symmetric with the
+                  // hidden state. Always rendered; hover lifts the
+                  // brightness slightly. The mutating action gates on
+                  // canMutate so a lost-connection session can't trigger
+                  // a rename.
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => args.onAskHide(core.id)}
+                    disabled={isPending || !args.canMutate}
+                    title={
+                      args.canMutate ? `Hide ${core.name}` : DISCONNECTED_TOOLTIP
+                    }
+                    aria-label={`Hide ${core.name}`}
+                    className={cn(
+                      'transition-opacity',
+                      !isSelected &&
+                        'opacity-70 group-hover/row:opacity-100 focus-visible:opacity-100',
+                    )}
+                  >
+                    <Eye strokeWidth={1.5} />
+                  </Button>
                 )}
-              >
-                <Eye strokeWidth={1.5} />
-              </Button>
+              </>
             )}
           </li>
         );
       })}
     </ul>
+  );
+}
+
+/**
+ * Value the cores-list density indicator uses for `value`. Prefers
+ * the recursive ROM count when the matcher computed it (the cores
+ * with containers — NEOGEO, MegaCD, Saturn, ...). Falls back to the
+ * top-level `romCount` when the matcher input lacked sub-folder data.
+ */
+function densityValueFor(core: CoreEntry): number {
+  return core.recursiveRomCount ?? core.romCount;
+}
+
+/**
+ * Cores-list count summary. When the recursive ROM count exceeds the
+ * top-level item count (i.e. the core has at least one container
+ * folder that the matcher walked into), we surface BOTH numbers:
+ *
+ *   "9 folders · ~300 ROMs"
+ *
+ * The folder count is `romCount` (top-level entries after the system-
+ * file filter); the ROM total is the recursive-walk approximation.
+ * The `~` is intentional — recursive counts can over- or under-count
+ * (non-standard ROM extensions, atomic folders nested inside
+ * containers, etc.). Single-number form is used when the two agree.
+ */
+function CoreCountSummary({ core }: { readonly core: CoreEntry }): JSX.Element {
+  const recursive = core.recursiveRomCount;
+  const hasBreakdown =
+    recursive !== undefined && recursive !== core.romCount && core.romCount > 0;
+  if (hasBreakdown) {
+    return (
+      <>
+        <span className="min-w-[2.5rem] text-right">{core.romCount}</span>
+        <span className="font-sans text-fg-disabled">folders ·</span>
+        <span>~{recursive}</span>
+        <span className="font-sans text-fg-disabled">ROMs</span>
+        {core.hiddenCount > 0 ? (
+          <span className="text-fg-disabled">({core.hiddenCount} hidden)</span>
+        ) : null}
+      </>
+    );
+  }
+  const single = recursive ?? core.romCount;
+  return (
+    <>
+      <span className="min-w-[2.5rem] text-right">{single}</span>
+      {core.hiddenCount > 0 ? (
+        <span className="text-fg-disabled">({core.hiddenCount} hidden)</span>
+      ) : null}
+    </>
   );
 }

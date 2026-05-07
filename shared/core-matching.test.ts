@@ -9,6 +9,7 @@ import {
   dottedPath,
   extractCorePrefix,
   isArcadePlaceholder,
+  isCoreExternallyHidden,
   isCoreFile,
   isCoreHidden,
   isRealCore,
@@ -152,6 +153,10 @@ describe('matchRbfsToGamesDirs', () => {
         name: 'NES',
         romCount: 9,
         hiddenCount: 2,
+        // No subFolders supplied → recursive equals top-level count
+        // (Round 3 fallback, Issue 5).
+        recursiveRomCount: 9,
+        recursiveHiddenCount: 2,
         category: 'Console',
         rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
         gamesDirExists: true,
@@ -597,6 +602,459 @@ describe('matchRbfsToGamesDirs', () => {
       });
       expect(result.find((c) => c.id === 'C64')?.romCount).toBe(0);
       expect(result.find((c) => c.id === 'NES')?.romCount).toBe(1);
+    });
+  });
+
+  describe('case-insensitive hidden games-dir matching (Round 3 / Issue 4)', () => {
+    // The five real-MiSTer shapes from docs/snapshots/real-mister-layout.txt:
+    //   _Console/Atari7800_20240423.rbf  + games/.ATARI7800/
+    //   _Console/Gameboy2P_20250621.rbf  + games/.GAMEBOY2P/
+    //   _Console/Vectrex_20240524.rbf    + games/.VECTREX/
+    //   _Computer/Altair8800_*.rbf       + games/.ALTAIR8800/  (hypothetical
+    //                                                            — Altair lives
+    //                                                            in _Computer)
+    //   _Utility/memtest_*.rbf           + games/.MEMTEST/
+    // All five share the same shape: visible rbf + dot-prefixed,
+    // CASE-MISMATCHED games dir. The matcher must surface them as
+    // externally-hidden (romCount=0, dimmed click-through).
+
+    it('matches Atari7800 (visible rbf) with .ATARI7800 (hidden, case-mismatch)', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: 'Atari7800_20240423.rbf',
+            fullPath: '/media/fat/_Console/Atari7800_20240423.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [
+          {
+            rawName: '.ATARI7800',
+            files: ['random_data.bin'],
+            dirs: [],
+          },
+        ],
+      });
+
+      const atari = result.find((c) => c.id.toLowerCase() === 'atari7800');
+      expect(atari).toBeDefined();
+      // Canonical id from the rbf wins.
+      expect(atari?.id).toBe('Atari7800');
+      // On-disk basename (visible form) is preserved so renames
+      // target /media/fat/games/.ATARI7800.
+      expect(atari?.gamesDirName).toBe('ATARI7800');
+      expect(atari?.gamesDirExists).toBe(true);
+      expect(atari?.gamesDirHidden).toBe(true);
+      // The "1 ROM" bug is gone — externally-hidden cores report 0.
+      expect(atari?.romCount).toBe(0);
+      expect(atari?.hiddenCount).toBe(0);
+      expect(atari?.recursiveRomCount).toBe(0);
+      expect(isCoreExternallyHidden(atari!)).toBe(true);
+    });
+
+    it('matches Gameboy2P with .GAMEBOY2P (hidden, case-mismatch)', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: 'Gameboy2P_20250621.rbf',
+            fullPath: '/media/fat/_Console/Gameboy2P_20250621.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [
+          { rawName: '.GAMEBOY2P', files: ['stuff.bin', 'stuff2.bin'], dirs: [] },
+        ],
+      });
+      const gb2p = result.find((c) => c.id.toLowerCase() === 'gameboy2p');
+      expect(gb2p?.id).toBe('Gameboy2P');
+      expect(gb2p?.gamesDirHidden).toBe(true);
+      expect(gb2p?.gamesDirName).toBe('GAMEBOY2P');
+      expect(gb2p?.romCount).toBe(0);
+      expect(isCoreExternallyHidden(gb2p!)).toBe(true);
+    });
+
+    it('matches Vectrex with .VECTREX (hidden, case-mismatch, single subdir)', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: 'Vectrex_20240524.rbf',
+            fullPath: '/media/fat/_Console/Vectrex_20240524.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [
+          { rawName: '.VECTREX', files: [], dirs: ['_subdir'] },
+        ],
+      });
+      const v = result.find((c) => c.id.toLowerCase() === 'vectrex');
+      expect(v?.id).toBe('Vectrex');
+      expect(v?.gamesDirName).toBe('VECTREX');
+      expect(v?.romCount).toBe(0);
+      expect(isCoreExternallyHidden(v!)).toBe(true);
+    });
+
+    it('matches Altair8800 with .ALTAIR8800 (Computer category)', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Computer',
+            filename: 'Altair8800_20241230.rbf',
+            fullPath: '/media/fat/_Computer/Altair8800_20241230.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [
+          { rawName: '.ALTAIR8800', files: ['rom1.bin'], dirs: [] },
+        ],
+      });
+      const a = result.find((c) => c.id.toLowerCase() === 'altair8800');
+      expect(a?.id).toBe('Altair8800');
+      expect(a?.category).toBe('Computer');
+      expect(a?.romCount).toBe(0);
+      expect(isCoreExternallyHidden(a!)).toBe(true);
+    });
+
+    it('matches memtest with .MEMTEST (Utility category)', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Utility',
+            filename: 'memtest_20210130.rbf',
+            fullPath: '/media/fat/_Utility/memtest_20210130.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [{ rawName: '.MEMTEST', files: ['data.bin'], dirs: [] }],
+      });
+      const m = result.find((c) => c.id.toLowerCase() === 'memtest');
+      expect(m?.id).toBe('memtest');
+      expect(m?.category).toBe('Utility');
+      expect(m?.romCount).toBe(0);
+      expect(isCoreExternallyHidden(m!)).toBe(true);
+    });
+
+    it('rbf with no matching games dir at all stays untouched (no externally-hidden flag)', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: 'Newcore_20260101.rbf',
+            fullPath: '/media/fat/_Console/Newcore_20260101.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [],
+      });
+      const c = result.find((x) => x.id === 'Newcore');
+      expect(c?.gamesDirExists).toBe(false);
+      expect(c?.romCount).toBe(0);
+      expect(isCoreExternallyHidden(c!)).toBe(false);
+    });
+
+    it('rbf with both visible AND hidden case-mismatched games dirs: visible wins (no externally-hidden)', () => {
+      // Highly unusual but possible: rbf "Foo" + games/foo (visible)
+      // + games/.FOO (hidden). The visible games dir wins via dedupe;
+      // externally-hidden flag should NOT fire because the merged
+      // entry has gamesDirHidden=false.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: 'Foo_20260101.rbf',
+            fullPath: '/media/fat/_Console/Foo_20260101.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [
+          { rawName: 'foo', files: ['game.bin'], dirs: [] },
+          { rawName: '.FOO', files: ['leftover.bin'], dirs: [] },
+        ],
+      });
+      const foo = result.find((c) => c.id.toLowerCase() === 'foo');
+      expect(foo).toBeDefined();
+      expect(foo?.gamesDirHidden).toBe(false);
+      expect(isCoreExternallyHidden(foo!)).toBe(false);
+    });
+
+    it('rbf with only visible mismatched-case games dir matches case-insensitively', () => {
+      // Path 3 from the spec: rbf "Apogee" matches games/APOGEE
+      // (visible, case-mismatch). NOT externally hidden — dir is
+      // visible, just oddly cased. The dedupe picks whichever
+      // candidate carries the games dir as canonical (so renames
+      // target the right basename); the rbf path joins it via
+      // mergeAliases.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Computer',
+            filename: 'Apogee_20240502.rbf',
+            fullPath: '/media/fat/_Computer/Apogee_20240502.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [
+          { rawName: 'APOGEE', files: ['game.bin'], dirs: [] },
+        ],
+      });
+      const apogee = result.find((c) => c.id.toLowerCase() === 'apogee');
+      expect(apogee).toBeDefined();
+      // No duplicate entries — case-mismatched siblings collapse.
+      expect(
+        result.filter((c) => c.id.toLowerCase() === 'apogee'),
+      ).toHaveLength(1);
+      // Both representations of the case appear via id + gamesDirName.
+      expect(apogee?.gamesDirName).toBe('APOGEE');
+      expect(apogee?.gamesDirHidden).toBe(false);
+      expect(apogee?.gamesDirExists).toBe(true);
+      expect(apogee?.romCount).toBe(1);
+      expect(apogee?.rbfPaths).toEqual([
+        '/media/fat/_Computer/Apogee_20240502.rbf',
+      ]);
+      expect(isCoreExternallyHidden(apogee!)).toBe(false);
+    });
+
+    it('isCoreExternallyHidden returns false for fully-app-hidden cores', () => {
+      // Both rbf and games dir hidden — that's the app-managed hide.
+      // The dedupe drops "all-hidden" groups, so we test on a single
+      // hidden entry without case duplicates.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: '.NES_20240115.rbf',
+            fullPath: '/media/fat/_Console/.NES_20240115.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [{ rawName: '.NES', files: [], dirs: [] }],
+      });
+      const nes = result.find((c) => c.id === 'NES');
+      // Both sides hidden → not "externally" hidden (no visible rbf).
+      expect(isCoreExternallyHidden(nes!)).toBe(false);
+    });
+  });
+
+  describe('recursive ROM count (Round 3 / Issue 5)', () => {
+    // The matcher walks one level deep into the games dir, classifies
+    // each top-level subfolder, and either contributes the recursive
+    // file count (containers) or 1 (atomic / unknown). The `~` prefix
+    // in the UI is intentional — recursive walks can over- or
+    // under-count due to non-standard ROM extensions.
+
+    it('atomic disc folders count as 1 (Saturn shape)', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          {
+            rawName: 'Saturn',
+            files: ['sega_bios.rom'],
+            dirs: ['Game A', 'Game B', 'Game C'],
+            subFolders: [
+              {
+                name: 'Game A',
+                files: ['Game A.cue', 'Game A (Track 01).bin', 'Game A (Track 02).bin'],
+                dirs: [],
+                recursiveFileCount: 3,
+              },
+              {
+                name: 'Game B',
+                files: ['Game B.iso'],
+                dirs: [],
+                recursiveFileCount: 1,
+              },
+              {
+                name: 'Game C',
+                files: ['Game C (Track 01).bin', 'Game C (Track 02).bin'],
+                dirs: [],
+                recursiveFileCount: 2,
+              },
+            ],
+          },
+        ],
+      });
+      const saturn = result.find((c) => c.id === 'Saturn');
+      // System BIOS dropped; 3 disc folders, each = 1 atomic ROM.
+      expect(saturn?.romCount).toBe(3);
+      expect(saturn?.recursiveRomCount).toBe(3);
+    });
+
+    it('container folders contribute their recursive file count (NEOGEO shape)', () => {
+      // Real NEOGEO has 9 organisational subfolders (containers) plus
+      // 12 BIOS files at the top.
+      const subFolders = Array.from({ length: 9 }, (_, i) => ({
+        name: `org${String(i)}`,
+        // Many files of the same extension → container by the long-
+        // tail rule.
+        files: Array.from({ length: 30 }, (__, j) => `g${String(j)}.zip`),
+        dirs: [],
+        recursiveFileCount: 30,
+      }));
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          {
+            rawName: 'NEOGEO',
+            files: [
+              '000-lo.lo',
+              'sfix.sfix',
+              'sp-s2.sp1',
+              'neo-epo.sp1',
+              'uni-bios.rom',
+              'uni-bioscd.rom',
+              'top-sp1.bin',
+              'neocd.bin',
+              'cd_bios.rom',
+              'romsets.xml',
+              'gog-romsets.xml',
+              'boot.rom',
+            ],
+            dirs: subFolders.map((s) => s.name),
+            subFolders,
+          },
+        ],
+      });
+      const neogeo = result.find((c) => c.id === 'NEOGEO');
+      // Top-level: 9 (subfolders, BIOSes filtered out).
+      expect(neogeo?.romCount).toBe(9);
+      // Recursive: 9 × 30 = 270 (matches "9 folders · ~270 ROMs").
+      expect(neogeo?.recursiveRomCount).toBe(270);
+    });
+
+    it('disc images dedupe via the atomic classification (one folder = 1)', () => {
+      // A folder with both .iso AND .cue+.bin: the disc-marker rule
+      // pins it atomic, so it counts 1 regardless of how many .bin
+      // companion files live inside.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          {
+            rawName: 'Mixed',
+            files: [],
+            dirs: ['Some Game'],
+            subFolders: [
+              {
+                name: 'Some Game',
+                files: [
+                  'Game.iso',
+                  'Game.cue',
+                  'Game.bin',
+                  'Game (Track 02).bin',
+                ],
+                dirs: [],
+                recursiveFileCount: 4,
+              },
+            ],
+          },
+        ],
+      });
+      const mixed = result.find((c) => c.id === 'Mixed');
+      expect(mixed?.romCount).toBe(1);
+      expect(mixed?.recursiveRomCount).toBe(1);
+    });
+
+    it('system files at the top level are excluded from both counts', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          {
+            rawName: 'AtariLynx',
+            files: ['lynxboot.img', 'mygame.lnx'],
+            dirs: [],
+            subFolders: [],
+          },
+        ],
+      });
+      const lynx = result.find((c) => c.id === 'AtariLynx');
+      expect(lynx?.romCount).toBe(1); // BIOS dropped
+      expect(lynx?.recursiveRomCount).toBe(1);
+    });
+
+    it('hidden top-level files contribute to recursiveHiddenCount but not visible bucket', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          {
+            rawName: 'NES',
+            files: ['a.nes', '.b.nes', '.c.nes'],
+            dirs: [],
+            subFolders: [],
+          },
+        ],
+      });
+      const nes = result.find((c) => c.id === 'NES');
+      expect(nes?.romCount).toBe(3);
+      expect(nes?.hiddenCount).toBe(2);
+      expect(nes?.recursiveRomCount).toBe(3);
+      expect(nes?.recursiveHiddenCount).toBe(2);
+    });
+
+    it('hidden container folder pulls every nested file into the hidden bucket', () => {
+      // A container folder that has been dot-prefixed (whole
+      // organisational tree hidden) — every ROM under it is
+      // effectively hidden. The matcher sums the recursive count
+      // into recursiveHiddenCount.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          {
+            rawName: 'NEOGEO',
+            files: [],
+            dirs: ['.org-a'],
+            subFolders: [
+              {
+                name: '.org-a',
+                files: Array.from({ length: 10 }, (_, i) => `g${String(i)}.zip`),
+                dirs: [],
+                recursiveFileCount: 10,
+              },
+            ],
+          },
+        ],
+      });
+      const neogeo = result.find((c) => c.id === 'NEOGEO');
+      expect(neogeo?.recursiveRomCount).toBe(10);
+      expect(neogeo?.recursiveHiddenCount).toBe(10);
+    });
+
+    it('empty container folder counts 0 inside (recursive = 0)', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          {
+            rawName: 'Empty',
+            files: [],
+            dirs: ['containerish'],
+            subFolders: [
+              {
+                name: 'containerish',
+                // 5+ same extension triggers container heuristic.
+                files: ['a.zip', 'b.zip', 'c.zip', 'd.zip', 'e.zip'],
+                dirs: [],
+                recursiveFileCount: 0, // simulating a stale snapshot
+              },
+            ],
+          },
+        ],
+      });
+      const e = result.find((c) => c.id === 'Empty');
+      expect(e?.romCount).toBe(1);
+      expect(e?.recursiveRomCount).toBe(0);
+    });
+
+    it('legacy callers without subFolders fall back to top-level count', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          { rawName: 'NES', files: ['a.nes', 'b.nes'], dirs: ['c'] },
+        ],
+      });
+      const nes = result.find((c) => c.id === 'NES');
+      // No subFolders → matcher mirrors top-level count.
+      expect(nes?.romCount).toBe(3);
+      expect(nes?.recursiveRomCount).toBe(3);
     });
   });
 

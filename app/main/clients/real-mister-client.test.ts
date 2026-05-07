@@ -453,6 +453,95 @@ describe('RealMisterClient', () => {
       expect(arcade).toBeDefined();
       expect(arcade?.name).toBe('Arcade');
     });
+
+    it('emits a games-dir glob that picks up dot-prefixed (hidden) and case-mismatched dirs', async () => {
+      // Round 3 / Issue 4 bug fix: the shell loop had to enumerate
+      // BOTH visible and dot-prefixed games dirs so the matcher can
+      // surface externally-hidden cores like `.ATARI7800`. The glob
+      // pattern `* .[!.]*` covers both buckets in one pass while
+      // still skipping `.` and `..`.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.listAllCoresWithFiles();
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      // The games-dir loop iterates both visible and dot-prefixed
+      // entries — the same pattern the matching shell script uses.
+      expect(script).toMatch(/cd '\/media\/fat\/games'\s+for d in \* \.\[!\.]\*/);
+      // The G/GD/GF/SE/SR header tags are all emitted from the same
+      // loop so a hidden games dir gets the same treatment as a
+      // visible one.
+      expect(script).toContain(`printf 'G\\t%s\\n' "$d"`);
+      expect(script).toContain(`printf 'GD\\t%s\\t%s\\n' "$d" "$name"`);
+      expect(script).toContain(`printf 'SE\\t%s\\t%s\\tf\\t%s\\n'`);
+      expect(script).toContain(`printf 'SR\\t%s\\t%s\\t%s\\t%s\\n'`);
+    });
+
+    it('parses an externally-hidden games dir (visible rbf + .ATARI7800) as romCount=0', async () => {
+      // The Round 3 / Issue 4 case: visible rbf + dot-prefixed,
+      // case-mismatched games dir. Matcher zeroes out romCount.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'R\tConsole\tfile\tAtari7800_20240423.rbf',
+            'G\t.ATARI7800',
+            'GF\t.ATARI7800\tleftover.bin',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const cores = await client.listAllCoresWithFiles();
+      const atari = cores.find((c) => c.id === 'Atari7800');
+      expect(atari).toBeDefined();
+      expect(atari?.gamesDirHidden).toBe(true);
+      expect(atari?.gamesDirName).toBe('ATARI7800');
+      expect(atari?.romCount).toBe(0);
+    });
+
+    it('threads SE/SR per-subfolder lines into recursive ROM counts (Issue 5)', async () => {
+      // Real-MiSTer NEOGEO shape: 12 BIOS files at top level (filtered
+      // as system) + 9 organisational subfolders (containers).
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      const subDirs = Array.from({ length: 9 }, (_, i) => `org${String(i)}`);
+      const subLines: string[] = [];
+      for (const sd of subDirs) {
+        // Mark each subfolder as a container by listing many same-
+        // extension files.
+        for (let j = 0; j < 30; j += 1) {
+          subLines.push(`SE\tNEOGEO\t${sd}\tf\tg${String(j)}.zip`);
+        }
+        // SR tells the matcher the recursive total (cheap on the
+        // device — `find -type f | wc -l`).
+        subLines.push(`SR\tNEOGEO\t${sd}\t30\t0`);
+      }
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'R\tConsole\tfile\tNEOGEO_20250909.rbf',
+            'G\tNEOGEO',
+            'GF\tNEOGEO\tboot.rom',
+            'GF\tNEOGEO\tsfix.sfix',
+            ...subDirs.map((sd) => `GD\tNEOGEO\t${sd}`),
+            ...subLines,
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const cores = await client.listAllCoresWithFiles();
+      const neo = cores.find((c) => c.id === 'NEOGEO');
+      expect(neo?.romCount).toBe(9);
+      expect(neo?.recursiveRomCount).toBe(270);
+    });
   });
 
   describe('listRoms', () => {

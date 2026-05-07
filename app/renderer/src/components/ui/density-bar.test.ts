@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  DENSITY_CURVE_EXPONENT,
   densityFillColor,
   densityRatio,
 } from '@app/renderer/src/components/ui/density-bar';
@@ -15,10 +16,52 @@ describe('densityRatio', () => {
     expect(densityRatio(100, 100)).toBe(1);
   });
 
-  it('returns the ratio for in-range values', () => {
-    expect(densityRatio(25, 100)).toBe(0.25);
-    expect(densityRatio(50, 100)).toBe(0.5);
-    expect(densityRatio(75, 100)).toBe(0.75);
+  it('applies the power-0.4 curve to in-range values', () => {
+    // Anchors: 0 → 0, 1 → 1 (boundary special-cases).
+    expect(densityRatio(0, 100)).toBe(0);
+    expect(densityRatio(100, 100)).toBe(1);
+
+    // Mid-range follows the curve. 0.5^0.4 ≈ 0.7579, well above the
+    // pre-Round-3 linear 0.5 — that's the whole point of the curve.
+    expect(densityRatio(50, 100)).toBeCloseTo(Math.pow(0.5, 0.4), 5);
+    expect(densityRatio(25, 100)).toBeCloseTo(Math.pow(0.25, 0.4), 5);
+    expect(densityRatio(75, 100)).toBeCloseTo(Math.pow(0.75, 0.4), 5);
+  });
+
+  it('matches the Round 3 worked example with mame=633 (real MiSTer)', () => {
+    // From the Round 3 spec: with mame=633 as max, the curve lifts
+    // mid-range cores into the visible band. Tolerance ±2% — the
+    // spec's "~38% / ~26% / ~9%" anchors are illustrative; the
+    // assertions below pin the actual `(value/max)^0.4` outputs.
+    expect(densityRatio(633, 633)).toBe(1);
+    expect(densityRatio(61, 633) * 100).toBeGreaterThan(36);
+    expect(densityRatio(61, 633) * 100).toBeLessThan(42);
+    expect(densityRatio(25, 633) * 100).toBeGreaterThan(24);
+    expect(densityRatio(25, 633) * 100).toBeLessThan(30);
+    expect(densityRatio(2, 633) * 100).toBeGreaterThan(7);
+    expect(densityRatio(2, 633) * 100).toBeLessThan(12);
+  });
+
+  it('is monotonic — strictly increases as value increases', () => {
+    const max = 1000;
+    let prev = densityRatio(0, max);
+    for (const v of [1, 2, 5, 10, 25, 50, 100, 250, 500, 750, 999, 1000]) {
+      const r = densityRatio(v, max);
+      expect(r).toBeGreaterThanOrEqual(prev);
+      prev = r;
+    }
+  });
+
+  it('boundary values: 0, 0.5*max, max', () => {
+    expect(densityRatio(0, 200)).toBe(0);
+    expect(densityRatio(100, 200)).toBeCloseTo(Math.pow(0.5, 0.4), 5);
+    expect(densityRatio(200, 200)).toBe(1);
+  });
+
+  it('exposes DENSITY_CURVE_EXPONENT at the agreed value', () => {
+    // Locked-in tuning value — change here only with a design-pass
+    // update because every cores-list / ROMs-list surface inherits it.
+    expect(DENSITY_CURVE_EXPONENT).toBe(0.4);
   });
 
   it('clamps negative values to 0', () => {

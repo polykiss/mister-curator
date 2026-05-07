@@ -5,6 +5,7 @@ import {
 } from '@shared/connection';
 import {
   computeAutoReapplyChanges,
+  isCoreExternallyHidden,
   isCoreHidden,
   isRealCore,
 } from '@shared/core-matching';
@@ -303,11 +304,28 @@ export class ConnectionManager {
 
   async listRoms(coreId: string, subPath = ''): Promise<Rom[]> {
     this.assertConnected();
-    return this.client.listRoms(
-      coreId,
+    const core = this.coresCache.find((c) => c.id === coreId);
+    // Externally-hidden cores (rbf visible, games dir hidden by an
+    // external tool) are not browsable through this app — their dir
+    // isn't part of the user's curated library and the path can be
+    // case-mismatched too. Return an empty list so the renderer
+    // doesn't trigger an "Unknown core" stack trace; the cores list
+    // disables click-through anyway (see CoresPane).
+    if (core && isCoreExternallyHidden(core)) {
+      return [];
+    }
+    const dirBase = this.resolveOnDiskGamesDirBasename(coreId);
+    const roms = await this.client.listRoms(
+      dirBase,
       subPath,
       this.folderClassificationsCache,
     );
+    if (dirBase === coreId) return roms;
+    // Translate the on-disk basename back to the canonical coreId so
+    // the renderer's view stays casing/dot agnostic. The on-disk path
+    // (`rom.path`) stays as the actual on-disk path so renames target
+    // the right file.
+    return roms.map((r) => ({ ...r, coreId }));
   }
 
   async setRomVisibility(
@@ -317,7 +335,8 @@ export class ConnectionManager {
     subPath = '',
   ): Promise<void> {
     this.assertConnected();
-    await this.client.setRomVisibility(coreId, filename, hidden, subPath);
+    const dirBase = this.resolveOnDiskGamesDirBasename(coreId);
+    await this.client.setRomVisibility(dirBase, filename, hidden, subPath);
   }
 
   async setBulkRomVisibility(
@@ -326,7 +345,27 @@ export class ConnectionManager {
     subPath = '',
   ): Promise<BulkRomResult> {
     this.assertConnected();
-    return this.client.setBulkRomVisibility(coreId, changes, subPath);
+    const dirBase = this.resolveOnDiskGamesDirBasename(coreId);
+    return this.client.setBulkRomVisibility(dirBase, changes, subPath);
+  }
+
+  /**
+   * Resolve the on-disk basename of a core's games dir from its
+   * canonical id. Returns `coreId` unchanged when no `CoreEntry` is
+   * cached (defensive — keeps legacy IPC paths working) or when the
+   * id and the on-disk basename agree.
+   *
+   * Real MiSTers carry case mismatches (`.rbf` named `Atari7800` next
+   * to `games/.ATARI7800/`) that the matcher dedupes by lowercase id;
+   * this method threads the actual on-disk basename — including the
+   * leading dot when hidden — back to the client so paths target the
+   * right directory.
+   */
+  private resolveOnDiskGamesDirBasename(coreId: string): string {
+    const core = this.coresCache.find((c) => c.id === coreId);
+    if (!core || !core.gamesDirExists) return coreId;
+    const base = core.gamesDirName ?? core.id;
+    return core.gamesDirHidden ? `.${base}` : base;
   }
 
   async listFolderClassifications(): Promise<FolderClassifications> {

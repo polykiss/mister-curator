@@ -739,14 +739,17 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                 </TableHead>
                 <TableHead>Name</TableHead>
                 <TableHead className="w-32 text-right">Size</TableHead>
-                <TableHead className="w-28 text-right">Visibility</TableHead>
+                {/* MoreHorizontal column. Sits left of the density+eye
+                    right-edge stack so the row's primary visibility
+                    toggle owns the far-right slot. */}
+                <TableHead className="w-10" aria-label="Actions" />
                 {/* Density indicator column — `w-5` for the 20px
                     rectangle, `p-0` so the rectangle bleeds the full
                     cell height. The header is empty by intent (no
                     text); the indicator's `aria-label` carries the
                     semantics per row. */}
                 <TableHead className="w-5 p-0" aria-label="Intensity" />
-                <TableHead className="w-10 pr-2" aria-label="Actions" />
+                <TableHead className="w-10 pr-2 text-right">Visibility</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -866,46 +869,24 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         {formatBytes(rom.sizeBytes)}
                       </span>
                     </TableCell>
-                    <TableCell className="text-right">
-                      {isSystem ? (
-                        <span className="font-mono text-body-sm text-fg-disabled">
-                          read-only
-                        </span>
-                      ) : (
-                        // Ghost-styled per-row toggle (SYSTEM.md §5).
-                        // Stacked solid fills (the round-3 round-trip)
-                        // read as shouting in a long ROM list — the
-                        // ghost variant keeps the action discoverable
-                        // without becoming the loudest thing on screen.
-                        // `canMutate` gates a lost-connection session
-                        // from triggering a rename; the tooltip
-                        // explains why the row is locked.
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => void onSingleToggle(rom)}
-                          disabled={!canMutate}
-                          title={
-                            canMutate
-                              ? rom.hidden
-                                ? `Show ${rom.displayName}`
-                                : `Hide ${rom.displayName}`
-                              : DISCONNECTED_TOOLTIP
-                          }
-                        >
-                          {rom.hidden ? (
-                            <>
-                              <EyeOff strokeWidth={1.5} />
-                              Show
-                            </>
-                          ) : (
-                            <>
-                              <Eye strokeWidth={1.5} />
-                              Hide
-                            </>
-                          )}
-                        </Button>
-                      )}
+                    {/* MoreHorizontal lives left of the density+eye
+                        right-edge stack (Round 3 / SYSTEM.md §5). The
+                        eye toggle owns the far-right slot so the
+                        primary action is always at the same screen
+                        position across cores and ROMs lists. */}
+                    <TableCell className="w-10">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        title="More actions"
+                        aria-label={`More actions for ${rom.displayName}`}
+                        onClick={(e) => {
+                          const r = e.currentTarget.getBoundingClientRect();
+                          setMenuFor({ rom, x: r.left, y: r.bottom });
+                        }}
+                      >
+                        <MoreHorizontal strokeWidth={1.5} />
+                      </Button>
                     </TableCell>
                     {/* Density rectangle — full-cell-height, 20px
                         wide, OKLCH-mixed between bg-elevated (the
@@ -923,18 +904,42 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                       ) : null}
                     </TableCell>
                     <TableCell className="pr-2 text-right">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        title="More actions"
-                        aria-label={`More actions for ${rom.displayName}`}
-                        onClick={(e) => {
-                          const r = e.currentTarget.getBoundingClientRect();
-                          setMenuFor({ rom, x: r.left, y: r.bottom });
-                        }}
-                      >
-                        <MoreHorizontal strokeWidth={1.5} />
-                      </Button>
+                      {isSystem ? (
+                        <span className="font-mono text-body-sm text-fg-disabled">
+                          read-only
+                        </span>
+                      ) : (
+                        // Eye / EyeOff toggle — always visible at rest
+                        // (Round 3, Issue 1). Hover lifts opacity for
+                        // affordance feedback. `canMutate` gates a
+                        // lost-connection session from triggering a
+                        // rename; the tooltip explains why locked.
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => void onSingleToggle(rom)}
+                          disabled={!canMutate}
+                          title={
+                            canMutate
+                              ? rom.hidden
+                                ? `Show ${rom.displayName}`
+                                : `Hide ${rom.displayName}`
+                              : DISCONNECTED_TOOLTIP
+                          }
+                          aria-label={
+                            rom.hidden
+                              ? `Show ${rom.displayName}`
+                              : `Hide ${rom.displayName}`
+                          }
+                          className="opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
+                        >
+                          {rom.hidden ? (
+                            <EyeOff strokeWidth={1.5} />
+                          ) : (
+                            <Eye strokeWidth={1.5} />
+                          )}
+                        </Button>
+                      )}
                     </TableCell>
                   </TableRow>
                 );

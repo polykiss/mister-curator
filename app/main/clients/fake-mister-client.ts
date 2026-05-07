@@ -18,6 +18,7 @@ import {
   matchRbfsToGamesDirs,
   type RawGamesDirInput,
   type RawRbfInput,
+  type RawSubFolderInput,
 } from '@shared/core-matching';
 import { displayRomName } from '@shared/display';
 import {
@@ -206,7 +207,22 @@ export class FakeMisterClient implements IMisterClient {
         if (f.isFile()) files.push(f.name);
         else if (f.isDirectory()) dirs.push(f.name);
       }
-      gamesDirs.push({ rawName: entry.name, files, dirs });
+      // One level deeper: per-subfolder content + recursive file count.
+      // The matcher uses these to derive `recursiveRomCount` (Issue 5):
+      // container folders contribute their recursive count; atomic
+      // disc folders count as 1.
+      const subFolders: RawSubFolderInput[] = [];
+      for (const subName of dirs) {
+        const subPath = path.join(dirPath, subName);
+        try {
+          subFolders.push(await readSubFolderForMatcher(subPath, subName));
+        } catch {
+          // Unreadable / vanished — skip; the matcher falls back to
+          // atomic (1) when there's no subfolder data for a top-level
+          // dir.
+        }
+      }
+      gamesDirs.push({ rawName: entry.name, files, dirs, subFolders });
     }
 
     let arcadeDirExists = false;
@@ -798,4 +814,55 @@ async function sumDirectoryBytes(dir: string): Promise<number> {
     }
   }
   return total;
+}
+
+/**
+ * Walks a top-level games-dir subfolder and produces the input the
+ * matcher needs to compute `recursiveRomCount`: immediate children
+ * (for `classifyFolder`) plus a recursive file count. Files anywhere
+ * beneath the folder count toward `recursiveFileCount`; dot-prefixed
+ * leaf files count toward `recursiveHiddenFileCount`.
+ *
+ * Mirrors the real client's `find -type f` shell pass, so an identical
+ * fixture tree yields identical counts across both clients.
+ */
+async function readSubFolderForMatcher(
+  dir: string,
+  name: string,
+): Promise<RawSubFolderInput> {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const files: string[] = [];
+  const dirs: string[] = [];
+  for (const e of entries) {
+    if (e.isFile()) files.push(e.name);
+    else if (e.isDirectory()) dirs.push(e.name);
+  }
+  const { recursiveFileCount, recursiveHiddenFileCount } =
+    await countRecursiveFiles(dir);
+  return {
+    name,
+    files,
+    dirs,
+    recursiveFileCount,
+    recursiveHiddenFileCount,
+  };
+}
+
+async function countRecursiveFiles(
+  dir: string,
+): Promise<{ recursiveFileCount: number; recursiveHiddenFileCount: number }> {
+  let total = 0;
+  let hidden = 0;
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isFile()) {
+      total += 1;
+      if (entry.name.startsWith('.')) hidden += 1;
+    } else if (entry.isDirectory()) {
+      const nested = await countRecursiveFiles(path.join(dir, entry.name));
+      total += nested.recursiveFileCount;
+      hidden += nested.recursiveHiddenFileCount;
+    }
+  }
+  return { recursiveFileCount: total, recursiveHiddenFileCount: hidden };
 }

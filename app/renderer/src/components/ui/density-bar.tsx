@@ -65,17 +65,34 @@ export function DensityBar({
 }
 
 /**
- * Clamps `value / max` into `[0, 1]`. Defensive against zero/negative
- * denominators, NaNs, and out-of-range values — those all produce 0
- * (the visually-invisible end of the scale) so a corrupt feed can't
- * paint a row signal-green by accident.
+ * Power-curve exponent applied to the raw `value / max` ratio. Round 3
+ * tuning: linear normalization is dominated by outliers — on a real
+ * MiSTer, mame at 633 ROMs paints full-bright while everything else
+ * (GBA at 61, MegaCD at 25, Intellivision at 2) clusters near the
+ * floor and reads as "all empty". Exponentiating by 0.4 lifts the mid
+ * and lower ranges so peer differences become visually scannable while
+ * the top still tops out at 100%. Examples (max=633): GBA(61)→~38%,
+ * MegaCD(25)→~26%, Intellivision(2)→~9%.
+ */
+export const DENSITY_CURVE_EXPONENT = 0.4;
+
+/**
+ * Maps `value / max` into `[0, 1]` after applying the Round 3 power-0.4
+ * curve. Defensive against zero/negative denominators, NaNs, and
+ * out-of-range values — those all produce 0 (the visually-invisible
+ * end of the scale) so a corrupt feed can't paint a row signal-green
+ * by accident.
+ *
+ * The curve is monotonic, anchored at (0, 0) and (1, 1), and applied
+ * only to in-range values — the boundaries return exactly 0 / 1 so a
+ * row at the peer max always reads as full signal.
  */
 export function densityRatio(value: number, max: number): number {
   if (!Number.isFinite(value) || !Number.isFinite(max)) return 0;
   if (max <= 0) return 0;
   if (value <= 0) return 0;
   if (value >= max) return 1;
-  return value / max;
+  return Math.pow(value / max, DENSITY_CURVE_EXPONENT);
 }
 
 /**

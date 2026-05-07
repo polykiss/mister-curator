@@ -294,6 +294,30 @@ are correct.
 - Selection (multi-select): no checkbox visual at rest — Cmd/Shift-click
   selection inserts a 1px `border-emphasis` ring inside the row hover
 
+### List row — count semantics
+
+The metadata slot on the right of a cores-list row shows either a
+single number or a two-part breakdown:
+
+- **Single number** when the recursive ROM count equals the top-level
+  item count (no container subfolders to walk into). NES with 9
+  cartridge files reads as `9`. The hidden-count tail
+  (`(N hidden)`) follows in `fg-disabled` when relevant.
+- **Two-part breakdown** when the recursive count exceeds the
+  top-level count (containers were walked). NEOGEO's 9 organisational
+  subfolders containing ~30 games each renders as
+  `9 folders · ~300 ROMs`. Numbers stay in `font-mono` (tabular);
+  the labels (`folders`, `ROMs`, separator) render in
+  `fg-disabled`. The tilde (`~`) on the recursive total is
+  intentional — recursive counts are approximate (non-standard ROM
+  extensions, atomic folders nested inside containers, …) and the
+  user reads the prefix as "approximately."
+
+Atomic disc folders (Saturn, MegaCD) count as 1 ROM each, so a
+Saturn games dir with 17 disc folders renders the single-number
+form (`17`). This matches the user's mental model — the folder is
+the unit.
+
 ### Buttons
 
 Six variants total. `cva` setup keeps shadcn's API.
@@ -618,9 +642,14 @@ Cores list (bg-surface)              ROMs list (bg-elevated)
 
 ### Where it appears
 
-- **Cores list** (CoreRow): `r = core.romCount / max(romCount over
-  visible cores)`. Empty cores (`romCount === 0`) render the
-  rectangle at floor color (effectively invisible against the row).
+- **Cores list** (CoreRow): `r` uses each core's recursive ROM count
+  (top-level files plus the contents of every container subfolder)
+  rather than the top-level item count. Empty cores
+  (`recursiveRomCount === 0`) render the rectangle at floor color
+  (effectively invisible against the row). The cores-list label keeps
+  showing the top-level count alongside the recursive total when the
+  two diverge — e.g. NEOGEO's "9 folders · ~300 ROMs" — see §5
+  Component patterns / List row count semantics.
 - **ROMs list** (RomRow), file rows: `r = rom.sizeBytes / maxSize`.
 - **ROMs list**, folder rows (atomic + container): same — folder
   size is the byte count `formatBytes` already shows.
