@@ -12,6 +12,8 @@ import {
 } from '@shared/constants';
 import {
   computeCoreRenames,
+  extractCorePrefix,
+  isCoreFile,
   isRealCore,
   matchRbfsToGamesDirs,
   type CoreRename,
@@ -19,6 +21,11 @@ import {
   type RawRbfInput,
   type RawSubFolderInput,
 } from '@shared/core-matching';
+import {
+  InMemoryDiagnosticsCollector,
+  type DiagRecord,
+  type DiagReport,
+} from '@shared/diag';
 import { displayRomName } from '@shared/display';
 import {
   EMPTY_FOLDER_CLASSIFICATIONS,
@@ -372,6 +379,109 @@ export class RealMisterClient implements IMisterClient {
       arcadeDirExists,
       systemFilesMarks,
     });
+  }
+
+  /**
+   * Collect a structured diagnostic report — one record per matcher
+   * decision plus a discovery pass that enumerates directories the
+   * normal code path would skip.
+   *
+   * Read-only, pure observation. Calls the same `buildListAllCoresScript`
+   * the production path uses (so what the matcher sees is exactly what
+   * the live cores list saw) plus a separate discovery script that
+   * lists every _* dir under /media/fat and any rbf/mgl at the fat
+   * root. The matcher itself runs with an `InMemoryDiagnosticsCollector`
+   * so every rbf, games-dir, system-filter check, recursive-count walk
+   * step, and dedupe group is captured in the returned report.
+   *
+   * Diagnostic mode only — used by `scripts/diag-real-client.ts`. Not
+   * exposed on the IPC bridge.
+   */
+  async collectDiagnosticReport(connectionInfo: {
+    readonly host: string;
+    readonly port: number;
+    readonly username: string;
+  }): Promise<DiagReport> {
+    this.assertConnected();
+
+    const collector = new InMemoryDiagnosticsCollector();
+    const startedAtMs = Date.now();
+    const startedAt = new Date(startedAtMs).toISOString();
+
+    // Pass 1: the production list-all-cores script. Same shell as the
+    // live cores list — so any drift between this report and the
+    // on-screen list is downstream of parsing or matcher logic.
+    const listScript = buildListAllCoresScript();
+    const listStartMs = Date.now();
+    const listResult = await this.runSshOp(() =>
+      this.ssh.execCommand(listScript),
+    );
+    const listElapsed = Date.now() - listStartMs;
+    collector.emit({
+      kind: 'shell-raw',
+      source: 'list-all-cores',
+      stdout: listResult.stdout,
+      stderr: listResult.stderr,
+      exitCode: listResult.code ?? 0,
+      elapsedMs: listElapsed,
+    });
+    if (listResult.code !== 0) {
+      throw new Error(
+        `Failed to list cores during diagnostics: ${
+          listResult.stderr.trim() || `exit code ${String(listResult.code)}`
+        }`,
+      );
+    }
+
+    const { rbfs, gamesDirs, arcadeDirExists } =
+      parseListAllCoresShellOutput(listResult.stdout);
+
+    // Pass 2: the discovery script. Enumerates ALL _* dirs (catches
+    // _Console (autoboot)/ which the production loop misses), the
+    // _Console/._hidden/ stash, and any rbf/mgl at /media/fat root
+    // (e.g. menu.rbf). One DiscoveryRecord per find.
+    const discoveryScript = buildDiscoveryScript();
+    const discoveryStartMs = Date.now();
+    const discoveryResult = await this.runSshOp(() =>
+      this.ssh.execCommand(discoveryScript),
+    );
+    const discoveryElapsed = Date.now() - discoveryStartMs;
+    collector.emit({
+      kind: 'shell-raw',
+      source: 'discovery',
+      stdout: discoveryResult.stdout,
+      stderr: discoveryResult.stderr,
+      exitCode: discoveryResult.code ?? 0,
+      elapsedMs: discoveryElapsed,
+    });
+    parseDiscoveryShellOutput(discoveryResult.stdout, collector);
+
+    // Pass 3: re-run the matcher with the collector active. Same
+    // input as the production path, so the records reflect the
+    // exact decisions the live cores list saw.
+    const cores = matchRbfsToGamesDirs({
+      rbfs,
+      gamesDirs,
+      arcadeDirExists,
+      diagnostics: collector,
+    });
+
+    const elapsedMs = Date.now() - startedAtMs;
+    const records: readonly DiagRecord[] = collector.toArray();
+    return {
+      header: {
+        version: 1,
+        mister: { ...connectionInfo },
+        startedAt,
+        elapsedMs,
+        // Two ssh.execCommand calls; each command's internal shell
+        // forks vary by device shape (the regular pass forks per
+        // category dir for the find-rbf check).
+        subprocessForks: 2,
+      },
+      records,
+      cores,
+    };
   }
 
   async listRoms(
@@ -1245,6 +1355,252 @@ function parseCategory(name: string): CoreCategory | null {
     'Arcade',
   ]);
   return valid.has(name as CoreCategory) ? (name as CoreCategory) : null;
+}
+
+/**
+ * Parses the stdout of `buildListAllCoresScript()` into the matcher
+ * input shape. Mirrors the inline parser in `listAllCoresWithFiles`
+ * verbatim; pulled out as a top-level helper so the diagnostic path
+ * can reuse it without forking the production parsing logic.
+ *
+ * Diagnostic-only: do not call this from new production code without
+ * confirming the inline parser stays bug-compatible.
+ */
+function parseListAllCoresShellOutput(stdout: string): {
+  readonly rbfs: readonly RawRbfInput[];
+  readonly gamesDirs: readonly RawGamesDirInput[];
+  readonly arcadeDirExists: boolean;
+} {
+  const rbfs: RawRbfInput[] = [];
+  interface DirBuilder {
+    files: string[];
+    dirs: string[];
+    subFolders: Map<string, MutableSubFolderBuilder>;
+  }
+  interface MutableSubFolderBuilder {
+    name: string;
+    files: string[];
+    dirs: string[];
+    recursiveFileCount?: number;
+    recursiveHiddenFileCount?: number;
+  }
+  const gamesDirsBuilder = new Map<string, DirBuilder>();
+  const ensureDirBuilder = (rawName: string): DirBuilder => {
+    let bucket = gamesDirsBuilder.get(rawName);
+    if (!bucket) {
+      bucket = { files: [], dirs: [], subFolders: new Map() };
+      gamesDirsBuilder.set(rawName, bucket);
+    }
+    return bucket;
+  };
+  const ensureSubFolder = (
+    bucket: DirBuilder,
+    subName: string,
+  ): MutableSubFolderBuilder => {
+    let sub = bucket.subFolders.get(subName);
+    if (!sub) {
+      sub = { name: subName, files: [], dirs: [] };
+      bucket.subFolders.set(subName, sub);
+    }
+    return sub;
+  };
+
+  let arcadeDirExists = false;
+  for (const line of stdout.split('\n')) {
+    if (line === '') continue;
+    const parts = line.split('\t');
+    const tag = parts[0];
+    if (tag === 'A') {
+      arcadeDirExists = true;
+    } else if (tag === 'R' && parts.length >= 4) {
+      const categoryName = parts[1] ?? '';
+      const kind = parts[2] ?? '';
+      const filename = parts.slice(3).join('\t');
+      const category = parseCategory(categoryName);
+      if (!category) continue;
+      const dirForCategory = MISTER_CATEGORY_DIRS.find(
+        (c) => c.category === category,
+      )?.dir;
+      if (dirForCategory === undefined) continue;
+      rbfs.push({
+        category,
+        filename,
+        fullPath: `${dirForCategory}/${filename}`,
+        isFolder: kind === 'dir',
+      });
+    } else if (tag === 'G' && parts.length >= 2) {
+      const rawName = parts[1] ?? '';
+      if (rawName !== '') ensureDirBuilder(rawName);
+    } else if (tag === 'GF' && parts.length >= 3) {
+      const rawName = parts[1] ?? '';
+      const filename = parts.slice(2).join('\t');
+      ensureDirBuilder(rawName).files.push(filename);
+    } else if (tag === 'GD' && parts.length >= 3) {
+      const rawName = parts[1] ?? '';
+      const dirname = parts.slice(2).join('\t');
+      ensureDirBuilder(rawName).dirs.push(dirname);
+    } else if (tag === 'SE' && parts.length >= 5) {
+      const parent = parts[1] ?? '';
+      const subName = parts[2] ?? '';
+      const kind = parts[3] ?? '';
+      const basename = parts.slice(4).join('\t');
+      if (parent === '' || subName === '' || basename === '') continue;
+      const sub = ensureSubFolder(ensureDirBuilder(parent), subName);
+      if (kind === 'f') sub.files.push(basename);
+      else if (kind === 'd') sub.dirs.push(basename);
+    } else if (tag === 'SR' && parts.length >= 5) {
+      const parent = parts[1] ?? '';
+      const subName = parts[2] ?? '';
+      const total = Number.parseInt(parts[3] ?? '0', 10);
+      const hidden = Number.parseInt(parts[4] ?? '0', 10);
+      if (parent === '' || subName === '') continue;
+      const sub = ensureSubFolder(ensureDirBuilder(parent), subName);
+      if (!Number.isNaN(total)) sub.recursiveFileCount = total;
+      if (!Number.isNaN(hidden)) sub.recursiveHiddenFileCount = hidden;
+    }
+  }
+
+  const gamesDirs: RawGamesDirInput[] = Array.from(
+    gamesDirsBuilder,
+    ([rawName, b]): RawGamesDirInput => {
+      const subFolders: RawSubFolderInput[] = Array.from(
+        b.subFolders.values(),
+        (s) => ({
+          name: s.name,
+          files: s.files,
+          dirs: s.dirs,
+          recursiveFileCount: s.recursiveFileCount,
+          recursiveHiddenFileCount: s.recursiveHiddenFileCount,
+        }),
+      );
+      return { rawName, files: b.files, dirs: b.dirs, subFolders };
+    },
+  );
+
+  return { rbfs, gamesDirs, arcadeDirExists };
+}
+
+/**
+ * Discovery shell pass — enumerates every directory under
+ * /media/fat that could plausibly hold rbf or mgl cores plus any
+ * rbf/mgl files at /media/fat root itself.
+ *
+ * Output line shapes (TAB-separated):
+ *   TOP\t<type>\t<name>           one per top-level entry at /media/fat
+ *                                  (type = d|f, the GNU `find -printf %y`)
+ *   FILE\t<categoryDir>\t<rel>    one per rbf/mgl found inside any _*
+ *                                  category dir (recursive, includes
+ *                                  dot-prefixed paths)
+ *   HIDDEN\t<type>\t<name>        one per entry inside _Console/._hidden
+ *                                  (the firmware's stash that the
+ *                                  production loop does not enumerate)
+ *
+ * Read-only — never writes, never modifies. Safe to run repeatedly.
+ */
+function buildDiscoveryScript(): string {
+  return [
+    // 1. Every top-level entry at /media/fat — surfaces _* dirs (incl
+    //    `_Console (autoboot)`) and any rbf/mgl at root (menu.rbf).
+    `if [ -d ${shellQuote('/media/fat')} ]; then`,
+    `  find ${shellQuote('/media/fat')} -maxdepth 1 -mindepth 1 -printf 'TOP\\t%y\\t%P\\n' 2>/dev/null`,
+    'fi',
+    // 2. Recursive find of rbf/mgl inside every _* dir — captures
+    //    files in _Console (autoboot)/ AND the contents of any
+    //    dot-prefixed subdir like _Console/._hidden/.
+    'for d in /media/fat/_*; do',
+    '  [ -d "$d" ] || continue',
+    '  base="${d##*/}"',
+    `  find "$d" -type f \\( -iname '*.rbf' -o -iname '*.mgl' \\) -printf "FILE\\t\${base}\\t%P\\n" 2>/dev/null`,
+    'done',
+    // 3. Explicit listing of _Console/._hidden — the find above
+    //    would catch the rbf/mgl files inside, but a flat listing
+    //    here also captures any non-core files / nested subdirs the
+    //    user may want to see.
+    `if [ -d ${shellQuote('/media/fat/_Console/._hidden')} ]; then`,
+    `  for entry in ${shellQuote('/media/fat/_Console/._hidden')}/* ${shellQuote('/media/fat/_Console/._hidden')}/.[!.]*; do`,
+    '    [ -e "$entry" ] || continue',
+    '    base="${entry##*/}"',
+    '    if [ -f "$entry" ]; then',
+    `      printf 'HIDDEN\\tfile\\t%s\\n' "$base"`,
+    '    elif [ -d "$entry" ]; then',
+    `      printf 'HIDDEN\\tdir\\t%s\\n' "$base"`,
+    '    fi',
+    '  done',
+    'fi',
+  ].join('\n');
+}
+
+/**
+ * Parse the discovery shell output into DiscoveryRecords on the
+ * collector. Each line yields exactly one record.
+ */
+function parseDiscoveryShellOutput(
+  stdout: string,
+  collector: InMemoryDiagnosticsCollector,
+): void {
+  for (const line of stdout.split('\n')) {
+    if (line === '') continue;
+    const parts = line.split('\t');
+    const tag = parts[0];
+    if (tag === 'TOP' && parts.length >= 3) {
+      const typeChar = parts[1] ?? '';
+      const name = parts.slice(2).join('\t');
+      const entryType: 'file' | 'dir' = typeChar === 'd' ? 'dir' : 'file';
+      const path = `/media/fat/${name}`;
+      let note: string;
+      if (entryType === 'dir' && name.startsWith('_')) {
+        note = 'category-like dir at /media/fat root';
+      } else if (entryType === 'file' && isCoreFile(name)) {
+        note = 'rbf/mgl at /media/fat root';
+      } else if (entryType === 'dir') {
+        note = 'top-level dir at /media/fat (informational)';
+      } else {
+        note = 'top-level file at /media/fat (informational)';
+      }
+      const extractedPrefix =
+        entryType === 'file' && isCoreFile(name)
+          ? extractCorePrefix(name)
+          : undefined;
+      collector.emit({
+        kind: 'discovery',
+        path,
+        entryType,
+        note,
+        extractedPrefix,
+      });
+    } else if (tag === 'FILE' && parts.length >= 3) {
+      const categoryDir = parts[1] ?? '';
+      const rel = parts.slice(2).join('\t');
+      const path = `/media/fat/${categoryDir}/${rel}`;
+      const baseName = rel.includes('/') ? rel.slice(rel.lastIndexOf('/') + 1) : rel;
+      const extractedPrefix = isCoreFile(baseName)
+        ? extractCorePrefix(baseName)
+        : undefined;
+      collector.emit({
+        kind: 'discovery',
+        path,
+        entryType: 'file',
+        note: `rbf/mgl found under ${categoryDir}`,
+        extractedPrefix,
+      });
+    } else if (tag === 'HIDDEN' && parts.length >= 3) {
+      const typeChar = parts[1] ?? '';
+      const name = parts.slice(2).join('\t');
+      const entryType: 'file' | 'dir' = typeChar === 'dir' ? 'dir' : 'file';
+      const path = `/media/fat/_Console/._hidden/${name}`;
+      const extractedPrefix =
+        entryType === 'file' && isCoreFile(name)
+          ? extractCorePrefix(name)
+          : undefined;
+      collector.emit({
+        kind: 'discovery',
+        path,
+        entryType,
+        note: 'inside _Console/._hidden — the firmware stash',
+        extractedPrefix,
+      });
+    }
+  }
 }
 
 function assertSafeSegment(label: string, value: string): void {

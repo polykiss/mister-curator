@@ -16,6 +16,7 @@ import {
   pathBasename,
   undottedPath,
 } from '@shared/core-matching';
+import { InMemoryDiagnosticsCollector } from '@shared/diag';
 
 describe('extractCorePrefix', () => {
   it('strips a trailing 8-digit date suffix', () => {
@@ -1354,6 +1355,178 @@ describe('computeCoreRenames', () => {
     expect(renames).toEqual([
       { from: '/media/fat/games/.APOGEE', to: '/media/fat/games/APOGEE' },
     ]);
+  });
+});
+
+describe('matchRbfsToGamesDirs — diagnostics collector (PR #11 prep)', () => {
+  it('emits an rbf record per RawRbfInput, with extractedPrefix', () => {
+    const diag = new InMemoryDiagnosticsCollector();
+    matchRbfsToGamesDirs({
+      rbfs: [
+        {
+          category: 'Console',
+          filename: 'NES_20240115.rbf',
+          fullPath: '/media/fat/_Console/NES_20240115.rbf',
+          isFolder: false,
+        },
+        {
+          category: 'Console',
+          filename: 'Game Gear.mgl',
+          fullPath: '/media/fat/_Console/Game Gear.mgl',
+          isFolder: false,
+        },
+      ],
+      gamesDirs: [],
+      diagnostics: diag,
+    });
+    const rbfRecords = diag.byKind('rbf');
+    expect(rbfRecords).toHaveLength(2);
+    expect(rbfRecords[0]?.extractedPrefix).toBe('NES');
+    expect(rbfRecords[1]?.extractedPrefix).toBe('Game Gear');
+    expect(rbfRecords[1]?.type).toBe('file');
+  });
+
+  it('emits a games-dir record per RawGamesDirInput with hidden flag', () => {
+    const diag = new InMemoryDiagnosticsCollector();
+    matchRbfsToGamesDirs({
+      rbfs: [],
+      gamesDirs: [
+        { rawName: 'NES', files: ['a.nes', 'b.nes'], dirs: [] },
+        { rawName: '.HIDDEN', files: [], dirs: [] },
+      ],
+      diagnostics: diag,
+    });
+    const recs = diag.byKind('games-dir');
+    expect(recs).toHaveLength(2);
+    expect(recs[0]?.visibleName).toBe('NES');
+    expect(recs[0]?.isHidden).toBe(false);
+    expect(recs[1]?.visibleName).toBe('HIDDEN');
+    expect(recs[1]?.isHidden).toBe(true);
+  });
+
+  it('emits a system-filter record per file/dir, distinguishing auto vs user-mark', () => {
+    const diag = new InMemoryDiagnosticsCollector();
+    matchRbfsToGamesDirs({
+      rbfs: [],
+      gamesDirs: [
+        {
+          rawName: 'NEOGEO',
+          files: ['mslug.zip', 'boot.rom'],
+          dirs: ['1 World A-Z', 'Overlays'],
+        },
+      ],
+      diagnostics: diag,
+    });
+    const filterRecs = diag.byKind('system-filter');
+    const byPath = new Map(filterRecs.map((r) => [r.path, r]));
+    // boot.rom is auto-detected as system; mslug.zip is not.
+    expect(byPath.get('boot.rom')?.isAutoSystem).toBe(true);
+    expect(byPath.get('boot.rom')?.decision).toBe('filtered');
+    expect(byPath.get('mslug.zip')?.isAutoSystem).toBe(false);
+    expect(byPath.get('mslug.zip')?.decision).toBe('kept');
+    // Overlays IS auto-detected as a system folder, but the matcher
+    // only filters dirs by user-mark — so the cores list keeps it as
+    // a top-level entry while listRoms suppresses it. That asymmetry
+    // is exactly the Vectrex bug, and the diag record makes it
+    // visible: isAutoSystem=true, decision='kept'.
+    expect(byPath.get('Overlays')?.entryType).toBe('dir');
+    expect(byPath.get('Overlays')?.isAutoSystem).toBe(true);
+    expect(byPath.get('Overlays')?.decision).toBe('kept');
+  });
+
+  it('emits a recursive-count record per top-level entry walked', () => {
+    const diag = new InMemoryDiagnosticsCollector();
+    matchRbfsToGamesDirs({
+      rbfs: [],
+      gamesDirs: [
+        {
+          rawName: 'NEOGEO',
+          files: [],
+          dirs: ['1 World A-Z'],
+          subFolders: [
+            {
+              name: '1 World A-Z',
+              files: ['mslug.zip', 'kof97.zip'],
+              dirs: [],
+              recursiveFileCount: 30,
+            },
+          ],
+        },
+      ],
+      diagnostics: diag,
+    });
+    const recs = diag.byKind('recursive-count');
+    expect(recs).toHaveLength(1);
+    expect(recs[0]?.coreId).toBe('NEOGEO');
+    expect(recs[0]?.classification).toBe('container');
+    expect(recs[0]?.contributesCount).toBe(30);
+  });
+
+  it('emits a match-attempt record per dedupe group', () => {
+    const diag = new InMemoryDiagnosticsCollector();
+    matchRbfsToGamesDirs({
+      rbfs: [
+        {
+          category: 'Computer',
+          filename: 'Apogee_20240502.rbf',
+          fullPath: '/media/fat/_Computer/Apogee_20240502.rbf',
+          isFolder: false,
+        },
+      ],
+      gamesDirs: [{ rawName: 'APOGEE', files: ['game.bin'], dirs: [] }],
+      diagnostics: diag,
+    });
+    const matchRecs = diag.byKind('match-attempt');
+    const merged = matchRecs.find((r) => r.outcome === 'merged');
+    expect(merged).toBeDefined();
+    expect(merged?.lowerKey).toBe('apogee');
+    expect(merged?.groupSize).toBe(2);
+    expect([...(merged?.groupIds ?? [])].sort()).toEqual(['APOGEE', 'Apogee']);
+  });
+
+  it('emits a core-entry record per finalized CoreEntry', () => {
+    const diag = new InMemoryDiagnosticsCollector();
+    matchRbfsToGamesDirs({
+      rbfs: [
+        {
+          category: 'Console',
+          filename: 'NES_20240115.rbf',
+          fullPath: '/media/fat/_Console/NES_20240115.rbf',
+          isFolder: false,
+        },
+      ],
+      gamesDirs: [{ rawName: 'NES', files: ['a.nes'], dirs: [] }],
+      diagnostics: diag,
+    });
+    const cores = diag.byKind('core-entry');
+    expect(cores).toHaveLength(1);
+    expect(cores[0]?.coreId).toBe('NES');
+    expect(cores[0]?.romCount).toBe(1);
+    expect(cores[0]?.hasAnyVisibleRbf).toBe(true);
+    expect(cores[0]?.rbfPaths).toEqual([
+      '/media/fat/_Console/NES_20240115.rbf',
+    ]);
+  });
+
+  it('does not change matcher output when diagnostics is supplied', () => {
+    // Bug-prevention: any future emit that accidentally mutates
+    // matcher state would break this. The matcher with and without
+    // a collector must produce structurally identical results.
+    const input = {
+      rbfs: [
+        {
+          category: 'Console' as const,
+          filename: 'NES_20240115.rbf',
+          fullPath: '/media/fat/_Console/NES_20240115.rbf',
+          isFolder: false,
+        },
+      ],
+      gamesDirs: [{ rawName: 'NES', files: ['a.nes', '.b.nes'], dirs: [] }],
+    };
+    const without = matchRbfsToGamesDirs(input);
+    const diag = new InMemoryDiagnosticsCollector();
+    const withDiag = matchRbfsToGamesDirs({ ...input, diagnostics: diag });
+    expect(withDiag).toEqual(without);
   });
 });
 

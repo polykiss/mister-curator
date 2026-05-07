@@ -1,6 +1,7 @@
 import { MISTER_GAMES_DIR } from '@shared/constants';
+import { emit, type DiagnosticsCollector } from '@shared/diag';
 import { classifyFolder } from '@shared/folder-rom';
-import { isSystemFile } from '@shared/system-files';
+import { isAutoDetectedSystemFile, isSystemFile } from '@shared/system-files';
 import { isMarked } from '@shared/system-files-marks';
 import type {
   CoreCategory,
@@ -140,6 +141,14 @@ export interface MatchInput {
    * folders.
    */
   readonly systemFilesMarks?: SystemFilesMarks;
+  /**
+   * Optional observer for the matcher's internal decisions. When set,
+   * the matcher emits one record per rbf, games dir, system-file
+   * filter check, recursive-count walk step, dedupe group, and final
+   * core entry. The matcher's LOGIC is unchanged — diagnostics are
+   * pure side-channel observation for PR #11. Off in production.
+   */
+  readonly diagnostics?: DiagnosticsCollector;
 }
 
 interface MutableCoreEntry {
@@ -173,10 +182,20 @@ interface MutableCoreEntry {
  *     'Arcade' so the UI can disable hide on them.
  */
 export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
+  const diag = input.diagnostics;
   const byId = new Map<string, MutableCoreEntry>();
 
   for (const rbf of input.rbfs) {
     const prefix = extractCorePrefix(rbf.filename);
+    emit(diag, {
+      kind: 'rbf',
+      category: rbf.category,
+      type: rbf.isFolder ? 'dir' : 'file',
+      filename: rbf.filename,
+      fullPath: rbf.fullPath,
+      extractedPrefix: prefix,
+      hasLeadingDot: rbf.filename.startsWith('.'),
+    });
     if (prefix === '') continue;
 
     const existing = byId.get(prefix);
@@ -205,6 +224,14 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
   for (const gd of input.gamesDirs) {
     const isHidden = gd.rawName.startsWith('.');
     const visibleName = isHidden ? gd.rawName.slice(1) : gd.rawName;
+    emit(diag, {
+      kind: 'games-dir',
+      rawName: gd.rawName,
+      visibleName,
+      isHidden,
+      fileCount: gd.files.length,
+      dirCount: gd.dirs.length,
+    });
     if (visibleName === '') continue;
 
     // System files (BIOSes, .xml/.ini configs, BIOS-suffix images) are
@@ -217,11 +244,44 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     const marks = input.systemFilesMarks;
     const isMarkedHere = (filename: string): boolean =>
       marks ? isMarked(marks, visibleName, filename) : false;
-    const nonSystemFiles = gd.files.filter(
-      (f) =>
-        !isSystemFile({ filename: f, kind: 'file' }, { marks, coreId: visibleName }),
-    );
-    const nonSystemDirs = gd.dirs.filter((d) => !isMarkedHere(d));
+    const nonSystemFiles = gd.files.filter((f) => {
+      const auto = isAutoDetectedSystemFile({ filename: f, kind: 'file' });
+      const marked = isMarkedHere(f);
+      const filtered = isSystemFile(
+        { filename: f, kind: 'file' },
+        { marks, coreId: visibleName },
+      );
+      emit(diag, {
+        kind: 'system-filter',
+        coreId: visibleName,
+        path: f,
+        entryType: 'file',
+        isAutoSystem: auto,
+        isMarkedSystem: marked,
+        decision: filtered ? 'filtered' : 'kept',
+      });
+      return !filtered;
+    });
+    const nonSystemDirs = gd.dirs.filter((d) => {
+      // Folders are NOT auto-filtered by isSystemFile (file kind) here
+      // — the matcher's existing rule is "user-marks only for dirs".
+      // Capture the auto-detector's verdict separately so the diag
+      // record reveals the asymmetry between cores-list filtering and
+      // listRoms folder filtering (the Vectrex/Overlays mystery).
+      const auto = isAutoDetectedSystemFile({ filename: d, kind: 'folder' });
+      const marked = isMarkedHere(d);
+      const filtered = marked;
+      emit(diag, {
+        kind: 'system-filter',
+        coreId: visibleName,
+        path: d,
+        entryType: 'dir',
+        isAutoSystem: auto,
+        isMarkedSystem: marked,
+        decision: filtered ? 'filtered' : 'kept',
+      });
+      return !filtered;
+    });
     const romCount = nonSystemFiles.length + nonSystemDirs.length;
     const hiddenCount =
       nonSystemFiles.filter((f) => f.startsWith('.')).length +
@@ -231,6 +291,8 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
       nonSystemFiles,
       nonSystemDirs,
       gd.subFolders,
+      visibleName,
+      diag,
     );
 
     const existing = byId.get(visibleName);
@@ -277,7 +339,7 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
   // e.g. `_Computer/.Apogee_*.rbf` next to `games/.APOGEE`. Both refer to
   // the same logical core; we collapse them and remember the on-disk
   // `gamesDirName` so renames target the correct path.
-  const all = dedupeByLowercaseId(allRaw);
+  const all = dedupeByLowercaseId(allRaw, diag);
 
   // Collapse arcade into a single placeholder row. Arcade is out of scope
   // for the hide feature (per AGENTS.md), but users still expect to see
@@ -301,6 +363,28 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
   }
 
   nonArcade.sort((a, b) => a.id.localeCompare(b.id, 'en-US', { sensitivity: 'base' }));
+
+  for (const c of nonArcade) {
+    const hasAnyVisibleRbf = c.rbfPaths.some(
+      (p) => !pathBasename(p).startsWith('.'),
+    );
+    emit(diag, {
+      kind: 'core-entry',
+      coreId: c.id,
+      name: c.name,
+      category: c.category,
+      romCount: c.romCount,
+      hiddenCount: c.hiddenCount,
+      recursiveRomCount: c.recursiveRomCount,
+      recursiveHiddenCount: c.recursiveHiddenCount,
+      gamesDirExists: c.gamesDirExists,
+      gamesDirHidden: c.gamesDirHidden,
+      gamesDirName: c.gamesDirName,
+      hasAnyVisibleRbf,
+      rbfPaths: c.rbfPaths,
+    });
+  }
+
   return nonArcade;
 }
 
@@ -327,7 +411,10 @@ export function isArcadePlaceholder(core: CoreEntry): boolean {
  * on-disk basename of the games dir (preserving its case), `rbfPaths`
  * are the exact on-disk paths from the rbf entries.
  */
-function dedupeByLowercaseId(entries: readonly CoreEntry[]): CoreEntry[] {
+function dedupeByLowercaseId(
+  entries: readonly CoreEntry[],
+  diag: DiagnosticsCollector | undefined,
+): CoreEntry[] {
   const groups = new Map<string, CoreEntry[]>();
   for (const e of entries) {
     if (e.category === 'Arcade') {
@@ -346,8 +433,16 @@ function dedupeByLowercaseId(entries: readonly CoreEntry[]): CoreEntry[] {
   }
 
   const out: CoreEntry[] = [];
-  for (const group of groups.values()) {
+  for (const [lowerKey, group] of groups.entries()) {
     if (group.length === 1) {
+      emit(diag, {
+        kind: 'match-attempt',
+        key: group[0]!.id,
+        lowerKey,
+        groupSize: 1,
+        groupIds: group.map((c) => c.id),
+        outcome: 'kept-singleton',
+      });
       out.push(group[0]!);
       continue;
     }
@@ -357,6 +452,14 @@ function dedupeByLowercaseId(entries: readonly CoreEntry[]): CoreEntry[] {
     if (visible.length === 0) {
       // All siblings are hidden. Per spec, treat as MiSTer leftover and
       // drop the whole group.
+      emit(diag, {
+        kind: 'match-attempt',
+        key: group[0]!.id,
+        lowerKey,
+        groupSize: group.length,
+        groupIds: group.map((c) => c.id),
+        outcome: 'dropped-all-hidden',
+      });
       continue;
     }
 
@@ -370,6 +473,15 @@ function dedupeByLowercaseId(entries: readonly CoreEntry[]): CoreEntry[] {
     });
     const winner = sorted[0]!;
     const losers = group.filter((c) => c !== winner);
+    emit(diag, {
+      kind: 'match-attempt',
+      key: winner.id,
+      lowerKey,
+      groupSize: group.length,
+      groupIds: group.map((c) => c.id),
+      outcome: 'merged',
+      winnerId: winner.id,
+    });
     out.push(mergeAliases(winner, losers));
   }
 
@@ -610,13 +722,25 @@ function computeRecursiveRomCount(
   topLevelFiles: readonly string[],
   topLevelDirs: readonly string[],
   subFolders: readonly RawSubFolderInput[] | undefined,
+  coreId: string,
+  diag: DiagnosticsCollector | undefined,
 ): { recursiveRomCount: number; recursiveHiddenCount: number } {
   let total = 0;
   let totalHidden = 0;
 
   for (const f of topLevelFiles) {
     total += 1;
-    if (f.startsWith('.')) totalHidden += 1;
+    const hidden = f.startsWith('.') ? 1 : 0;
+    if (hidden) totalHidden += 1;
+    emit(diag, {
+      kind: 'recursive-count',
+      coreId,
+      topLevelEntry: f,
+      entryType: 'file',
+      contributesCount: 1,
+      contributesHiddenCount: hidden,
+      reason: 'top-level file counts as 1',
+    });
   }
 
   if (!subFolders) {
@@ -624,7 +748,18 @@ function computeRecursiveRomCount(
     // pre-Round-3 behavior). Keeps legacy unit tests passing.
     for (const d of topLevelDirs) {
       total += 1;
-      if (d.startsWith('.')) totalHidden += 1;
+      const hidden = d.startsWith('.') ? 1 : 0;
+      if (hidden) totalHidden += 1;
+      emit(diag, {
+        kind: 'recursive-count',
+        coreId,
+        topLevelEntry: d,
+        entryType: 'folder',
+        classification: 'no-info',
+        contributesCount: 1,
+        contributesHiddenCount: hidden,
+        reason: 'no subFolders payload — fall back to atomic (1)',
+      });
     }
     return { recursiveRomCount: total, recursiveHiddenCount: totalHidden };
   }
@@ -636,7 +771,18 @@ function computeRecursiveRomCount(
     if (!sub) {
       // Subfolder info missing — fall back to atomic (1).
       total += 1;
+      const hidden = dirIsHidden ? 1 : 0;
       if (dirIsHidden) totalHidden += 1;
+      emit(diag, {
+        kind: 'recursive-count',
+        coreId,
+        topLevelEntry: d,
+        entryType: 'folder',
+        classification: 'no-info',
+        contributesCount: 1,
+        contributesHiddenCount: hidden,
+        reason: 'subFolder bucket missing — fall back to atomic (1)',
+      });
       continue;
     }
     // Classify using just this subfolder's immediate contents — the
@@ -652,17 +798,45 @@ function computeRecursiveRomCount(
         sub.recursiveFileCount ?? sub.files.length + sub.dirs.length;
       const recursiveHidden = sub.recursiveHiddenFileCount ?? 0;
       total += recursive;
+      let hiddenContribution: number;
+      let reason: string;
       if (dirIsHidden) {
         // The whole container is hidden — every ROM under it is
         // effectively hidden too.
         totalHidden += recursive;
+        hiddenContribution = recursive;
+        reason =
+          'container; whole subfolder dot-prefixed → all recursive files hidden';
       } else {
         totalHidden += recursiveHidden;
+        hiddenContribution = recursiveHidden;
+        reason = 'container; recursive file count from subFolder.recursiveFileCount';
       }
+      emit(diag, {
+        kind: 'recursive-count',
+        coreId,
+        topLevelEntry: d,
+        entryType: 'folder',
+        classification: 'container',
+        contributesCount: recursive,
+        contributesHiddenCount: hiddenContribution,
+        reason,
+      });
     } else {
       // Atomic or unknown — folder IS one ROM.
       total += 1;
+      const hidden = dirIsHidden ? 1 : 0;
       if (dirIsHidden) totalHidden += 1;
+      emit(diag, {
+        kind: 'recursive-count',
+        coreId,
+        topLevelEntry: d,
+        entryType: 'folder',
+        classification,
+        contributesCount: 1,
+        contributesHiddenCount: hidden,
+        reason: `${classification} folder counts as 1`,
+      });
     }
   }
 
