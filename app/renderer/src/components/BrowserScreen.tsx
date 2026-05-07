@@ -14,8 +14,14 @@ import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
 import { useResizablePaneWidth } from '@app/renderer/src/lib/use-resizable-pane';
 
-const CORES_PANE_DEFAULT_WIDTH = 280;
-const CORES_PANE_MIN_WIDTH = 200;
+// Round 5: cores pane min bumped from 200 → 320. Below 320px the
+// "9 folders · ~300 ROMs" breakdown cell wraps and the right-edge
+// density+eye stack starts crowding the row name; the live
+// screenshot caught it. Default initial width stays at 280, but the
+// resizable divider clamps to 320 so a user can't drag past where
+// the layout breaks.
+const CORES_PANE_DEFAULT_WIDTH = 320;
+const CORES_PANE_MIN_WIDTH = 320;
 const ROMS_PANE_MIN_WIDTH = 300;
 
 export function BrowserScreen(): JSX.Element {
@@ -56,19 +62,19 @@ export function BrowserScreen(): JSX.Element {
   return (
     <div
       className={cn(
-        'flex h-screen flex-col',
-        // Disable text selection while dragging the divider so the user
-        // doesn't accidentally highlight chunks of the cores list.
+        'flex h-screen flex-col bg-canvas text-fg',
+        // Disable text selection while dragging the divider so the
+        // user doesn't accidentally highlight chunks of the cores list.
         isDragging && 'select-none',
       )}
     >
       <DisconnectBanner />
-      <header className="flex items-center justify-between gap-3 border-b px-4 py-3">
+      <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-subtle bg-chrome px-4">
         <div className="min-w-0">
-          <div className="truncate text-sm font-semibold">
+          <div className="truncate text-body font-medium text-fg">
             {currentProfile?.name ?? 'MiSTer'}
           </div>
-          <div className="truncate text-xs text-muted-foreground">
+          <div className="truncate font-mono text-body-sm text-fg-muted">
             {currentProfile
               ? `${currentProfile.username}@${currentProfile.host}:${currentProfile.port}`
               : 'connected'}
@@ -76,16 +82,19 @@ export function BrowserScreen(): JSX.Element {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <Button
-            variant="outline"
+            variant="secondary"
             size="sm"
             onClick={() => void onRefresh()}
             disabled={coresLoading}
           >
-            <RefreshCw className={coresLoading ? 'animate-spin' : undefined} />
+            <RefreshCw
+              className={coresLoading ? 'animate-spin' : undefined}
+              strokeWidth={1.5}
+            />
             Refresh
           </Button>
-          <Button variant="outline" size="sm" onClick={() => void onDisconnect()}>
-            <LogOut />
+          <Button variant="ghost" size="sm" onClick={() => void onDisconnect()}>
+            <LogOut strokeWidth={1.5} />
             Disconnect
           </Button>
         </div>
@@ -103,7 +112,7 @@ export function BrowserScreen(): JSX.Element {
       >
         <aside
           style={{ width: `${String(coresWidth)}px` }}
-          className="shrink-0 overflow-auto border-r bg-muted/30"
+          className="shrink-0 overflow-auto border-r border-subtle bg-surface"
         >
           <CoresPane />
         </aside>
@@ -113,7 +122,7 @@ export function BrowserScreen(): JSX.Element {
           aria-label="Resize cores pane"
           onPointerDown={onDragStart}
           className={cn(
-            'group relative w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-accent',
+            'group relative w-px shrink-0 cursor-col-resize bg-overlay transition-colors hover:bg-accent',
             isDragging && 'bg-accent',
           )}
         >
@@ -121,27 +130,27 @@ export function BrowserScreen(): JSX.Element {
               to grab without making the visible bar fat. */}
           <span className="absolute inset-y-0 -left-1.5 -right-1.5" />
         </div>
-        <main className="min-w-0 flex-1">
+        <main className="min-w-0 flex-1 bg-elevated">
           {selectedCore ? (
             isArcadePlaceholder(selectedCore) ? (
-              <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
-                <h2 className="text-lg font-semibold">Arcade</h2>
-                <p className="max-w-md text-sm text-muted-foreground">
+              <div className="flex h-full flex-col items-center justify-center gap-3 p-12 text-center">
+                <h2 className="text-heading text-fg">Arcade</h2>
+                <p className="max-w-md text-body-lg text-fg-muted">
                   Arcade core management is coming in a later release. For now, your
                   .mra files are visible to MiSTer as normal.
                 </p>
               </div>
             ) : !selectedCore.gamesDirExists ? (
-              <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
-                <h2 className="text-lg font-semibold">{selectedCore.name}</h2>
-                <p className="max-w-md text-sm text-muted-foreground">
+              <div className="flex h-full flex-col items-center justify-center gap-3 p-12 text-center">
+                <h2 className="text-heading text-fg">{selectedCore.name}</h2>
+                <p className="max-w-md text-body-lg text-fg-muted">
                   This core has no games directory. ROMs go in{' '}
-                  <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                  <code className="rounded border border-default bg-overlay px-1.5 py-0.5 font-mono text-body-sm text-fg-body">
                     /media/fat/games/{selectedCore.id}/
                   </code>
                   .
                 </p>
-                <p className="max-w-md text-xs text-muted-foreground/80">
+                <p className="max-w-md text-body-sm text-fg-disabled">
                   MiSTerCurator does not create directories on the device — copy your
                   ROMs over and refresh.
                 </p>
@@ -150,7 +159,7 @@ export function BrowserScreen(): JSX.Element {
               <RomsPane core={selectedCore} />
             )
           ) : (
-            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+            <div className="flex h-full items-center justify-center text-body-sm text-fg-muted">
               Select a core on the left to browse its ROMs.
             </div>
           )}

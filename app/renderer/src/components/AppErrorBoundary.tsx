@@ -1,4 +1,4 @@
-import { AlertCircle, RotateCcw } from 'lucide-react';
+import { RotateCcw } from 'lucide-react';
 import { Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 
@@ -20,6 +20,10 @@ interface AppErrorBoundaryProps {
  * have to keep catching their async work. This component just makes
  * sure a thrown error during render shows a useful screen rather than
  * a blank window.
+ *
+ * Visual shape follows SYSTEM.md §5 empty-state pattern: display
+ * heading, body-lg description, one primary CTA, vertically centered
+ * in the viewport.
  */
 export class AppErrorBoundary extends Component<
   AppErrorBoundaryProps,
@@ -46,41 +50,29 @@ export class AppErrorBoundary extends Component<
       return this.props.children;
     }
     return (
-      <div className="flex min-h-screen items-center justify-center bg-background p-6">
-        <div
-          role="alert"
-          className="max-w-md rounded-lg border border-destructive/40 bg-destructive/10 p-5 text-sm"
-        >
-          <div className="flex items-start gap-3">
-            <AlertCircle
-              className="mt-0.5 h-5 w-5 shrink-0 text-destructive"
-              aria-hidden
-            />
-            <div className="min-w-0 flex-1 space-y-2">
-              <h2 className="text-base font-semibold text-destructive">
-                Something went wrong.
-              </h2>
-              <p className="text-muted-foreground">
-                MiSTerCurator hit an unexpected error and couldn&apos;t finish
-                rendering. Reloading the window usually fixes this.
-              </p>
-              <details className="text-xs text-muted-foreground">
-                <summary className="cursor-pointer select-none">
-                  Technical details
-                </summary>
-                <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-muted p-2">
-                  {this.state.error.message}
-                </pre>
-              </details>
-              <div className="pt-1">
-                <Button onClick={this.handleReload} size="sm">
-                  <RotateCcw />
-                  Reload
-                </Button>
-              </div>
-            </div>
-          </div>
+      <div
+        role="alert"
+        className="flex min-h-screen flex-col items-center justify-center gap-6 bg-canvas px-8 text-center"
+      >
+        <div className="flex max-w-md flex-col items-center gap-3">
+          <h1 className="text-display text-fg">Something went wrong.</h1>
+          <p className="text-body-lg text-fg-muted">
+            MiSTerCurator hit an unexpected error and couldn&apos;t finish
+            rendering. Reloading the window usually fixes this.
+          </p>
         </div>
+        <Button variant="primary" size="lg" onClick={this.handleReload}>
+          <RotateCcw strokeWidth={1.5} />
+          Reload window
+        </Button>
+        <details className="max-w-md text-left text-body-sm text-fg-muted">
+          <summary className="cursor-pointer select-none text-fg-body">
+            Technical details
+          </summary>
+          <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded border border-default bg-surface p-3 font-mono text-body-sm text-fg-body">
+            {this.state.error.message}
+          </pre>
+        </details>
       </div>
     );
   }

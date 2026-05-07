@@ -17,10 +17,14 @@ interface ConnectionFailureCardProps {
 }
 
 /**
- * Sticky inline failure card rendered directly under the profile row
+ * Sticky inline failure banner rendered directly under the profile row
  * that failed. Persistent — does not auto-dismiss like a toast — so
  * the user can read it, then decide whether to retry, edit, or
  * dismiss.
+ *
+ * Visual shape follows SYSTEM.md §5 banner pattern: 2px left border in
+ * the destructive color, no fill, content carries hierarchy through
+ * weight + color rather than chrome.
  */
 export function ConnectionFailureCard({
   profile,
@@ -37,42 +41,41 @@ export function ConnectionFailureCard({
   return (
     <div
       role="alert"
-      className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm"
+      className="flex items-start gap-3 border-l-2 border-destructive bg-surface px-4 py-3"
     >
-      <div className="flex items-start gap-3">
-        <AlertCircle
-          className="mt-0.5 h-4 w-4 shrink-0 text-destructive"
-          aria-hidden
-        />
-        <div className="min-w-0 flex-1">
-          <p className="text-destructive">{message}</p>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <Button
-              variant="default"
-              size="sm"
-              onClick={onRetry}
-              disabled={retrying}
-            >
-              <RotateCcw />
-              {retrying ? 'Retrying…' : 'Retry'}
-            </Button>
-            <Button variant="outline" size="sm" onClick={onEdit}>
-              <Pencil />
-              Edit profile
-            </Button>
-          </div>
+      <AlertCircle
+        className="mt-0.5 size-4 shrink-0 text-destructive"
+        strokeWidth={1.5}
+        aria-hidden
+      />
+      <div className="min-w-0 flex-1">
+        <p className="text-body font-medium text-fg">{message}</p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={onRetry}
+            disabled={retrying}
+          >
+            <RotateCcw strokeWidth={1.5} />
+            {retrying ? 'Retrying…' : 'Retry'}
+          </Button>
+          <Button variant="secondary" size="sm" onClick={onEdit}>
+            <Pencil strokeWidth={1.5} />
+            Edit profile
+          </Button>
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={onDismiss}
-          aria-label="Dismiss"
-          title="Dismiss"
-          className="-mr-1 -mt-1 h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
-        >
-          <X />
-        </Button>
       </div>
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={onDismiss}
+        aria-label="Dismiss"
+        title="Dismiss"
+        className="-mr-1 -mt-1 shrink-0"
+      >
+        <X strokeWidth={1.5} />
+      </Button>
     </div>
   );
 }

@@ -10,6 +10,10 @@ import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
  * is informational ("Reconnecting (1/3)…"); after retries are
  * exhausted it offers Reconnect / Disconnect actions. Filters and
  * navigation underneath stay enabled — only mutating actions disable.
+ *
+ * Visual shape follows SYSTEM.md §5 banner pattern: 2px left border
+ * in the destructive color (the situation IS destructive), no fill,
+ * content carries hierarchy through weight and color.
  */
 export function DisconnectBanner(): JSX.Element | null {
   const {
@@ -24,42 +28,48 @@ export function DisconnectBanner(): JSX.Element | null {
   if (!lostConnection) return null;
 
   const profileName = currentProfile?.name ?? 'this MiSTer';
-  const headline = autoRetry !== null && !autoRetryFailed
+  const retrying = autoRetry !== null && !autoRetryFailed;
+  const headline = retrying
     ? `Reconnecting to ${profileName}… (attempt ${String(autoRetry.attempt)} of ${String(autoRetry.totalAttempts)})`
     : `Connection to ${profileName} was lost.`;
 
   return (
     <div
       role="alert"
-      // Destructive-coloured strip pinned to the top of the browser
-      // screen. `border-b` keeps it visually distinct from the
-      // content underneath without occluding it.
-      className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-destructive/40 bg-destructive/15 px-4 py-2 text-sm text-destructive"
+      className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-subtle border-l-2 border-l-destructive bg-surface px-4 py-3"
     >
-      <div className="flex min-w-0 items-center gap-2">
-        {autoRetry !== null && !autoRetryFailed ? (
-          <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+      <div className="flex min-w-0 items-center gap-2 text-body text-fg">
+        {retrying ? (
+          <Loader2
+            className="size-4 shrink-0 animate-spin text-destructive"
+            strokeWidth={1.5}
+            aria-hidden
+          />
         ) : (
-          <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden />
+          <AlertTriangle
+            className="size-4 shrink-0 text-destructive"
+            strokeWidth={1.5}
+            aria-hidden
+          />
         )}
-        <span className="truncate">{headline}</span>
+        <span className="truncate font-medium">{headline}</span>
       </div>
       <div className="flex shrink-0 items-center gap-2">
         <Button
-          variant="default"
+          variant="primary"
           size="sm"
           onClick={() => void reconnect()}
-          disabled={autoRetry !== null && !autoRetryFailed}
+          disabled={retrying}
         >
-          <Plug />
+          <Plug strokeWidth={1.5} />
           Reconnect
         </Button>
         <Button
-          variant="outline"
+          variant="secondary"
           size="sm"
           onClick={() => void disconnect()}
         >
-          <Power />
+          <Power strokeWidth={1.5} />
           Disconnect
         </Button>
       </div>

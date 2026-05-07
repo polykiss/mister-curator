@@ -13,7 +13,7 @@ export const Label = forwardRef<HTMLLabelElement, LabelProps>(function Label(
     <label
       ref={ref}
       className={cn(
-        'text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70',
+        'text-body-sm font-medium leading-none text-fg peer-disabled:cursor-not-allowed peer-disabled:opacity-50',
         className,
       )}
       {...props}

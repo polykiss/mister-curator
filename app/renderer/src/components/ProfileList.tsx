@@ -32,14 +32,19 @@ export function ProfileList({ onEdit }: ProfileListProps): JSX.Element {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   if (profilesLoading) {
-    return <p className="text-sm text-muted-foreground">Loading profiles…</p>;
+    return <p className="text-body-sm text-fg-muted">Loading profiles…</p>;
   }
 
   if (profiles.length === 0) {
     return (
-      <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
-        No saved profiles yet. Click <span className="font-medium">Add profile</span> to
-        connect to your first MiSTer.
+      <div className="rounded border border-dashed border-emphasis bg-surface p-12 text-center">
+        <p className="text-body text-fg-body">
+          No saved profiles yet.
+        </p>
+        <p className="mt-1 text-body-sm text-fg-muted">
+          Click <span className="font-medium text-fg">Add profile</span> to connect to your
+          first MiSTer.
+        </p>
       </div>
     );
   }
@@ -99,19 +104,28 @@ export function ProfileList({ onEdit }: ProfileListProps): JSX.Element {
 
         return (
           <Fragment key={profile.id}>
-            <li className="flex items-center justify-between gap-3 rounded-lg border bg-card p-4">
+            <li className="flex items-center justify-between gap-3 rounded border border-default bg-surface px-5 py-4 transition-colors hover:border-emphasis">
               <div className="min-w-0">
-                <div className="truncate font-medium">{profile.name}</div>
-                <div className="truncate text-xs text-muted-foreground">
+                <div className="truncate text-body font-medium text-fg">
+                  {profile.name}
+                </div>
+                <div className="truncate font-mono text-body-sm text-fg-muted">
                   {profile.username}@{profile.host}:{profile.port}
                 </div>
                 {connectingMessage !== null ? (
-                  <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                  // Reveal-delay window from PR #9: the elapsed-message
+                  // line only appears after the threshold elapses, so a
+                  // fast connect never flashes it. Mono carries the
+                  // counter so the digits stay aligned as they tick.
+                  <div className="mt-1.5 flex items-center gap-2 text-body-sm text-fg-muted">
                     <Loader2
-                      className="h-3 w-3 shrink-0 animate-spin"
+                      className="size-3 shrink-0 animate-spin"
+                      strokeWidth={1.5}
                       aria-hidden
                     />
-                    <span className="truncate">{connectingMessage}</span>
+                    <span className="truncate font-mono tabular">
+                      {connectingMessage}
+                    </span>
                   </div>
                 ) : null}
               </div>
@@ -119,7 +133,7 @@ export function ProfileList({ onEdit }: ProfileListProps): JSX.Element {
               <div className="flex shrink-0 items-center gap-2">
                 {isPending ? (
                   <>
-                    <span className="text-xs text-muted-foreground">Delete?</span>
+                    <span className="text-body-sm text-fg-muted">Delete?</span>
                     <Button
                       variant="destructive"
                       size="sm"
@@ -138,12 +152,16 @@ export function ProfileList({ onEdit }: ProfileListProps): JSX.Element {
                 ) : (
                   <>
                     <Button
-                      variant="default"
+                      variant="primary"
                       size="sm"
                       disabled={isConnecting}
                       onClick={() => void onConnect(profile)}
                     >
-                      {isConnecting ? <Loader2 className="animate-spin" /> : <Plug />}
+                      {isConnecting ? (
+                        <Loader2 className="animate-spin" strokeWidth={1.5} />
+                      ) : (
+                        <Plug strokeWidth={1.5} />
+                      )}
                       {isConnecting ? 'Connecting…' : 'Connect'}
                     </Button>
                     <Button
@@ -152,7 +170,7 @@ export function ProfileList({ onEdit }: ProfileListProps): JSX.Element {
                       aria-label={`Edit ${profile.name}`}
                       onClick={() => onEdit(profile)}
                     >
-                      <Pencil />
+                      <Pencil strokeWidth={1.5} />
                     </Button>
                     <Button
                       variant="ghost"
@@ -160,7 +178,7 @@ export function ProfileList({ onEdit }: ProfileListProps): JSX.Element {
                       aria-label={`Delete ${profile.name}`}
                       onClick={() => setConfirmDeleteId(profile.id)}
                     >
-                      <Trash2 />
+                      <Trash2 strokeWidth={1.5} />
                     </Button>
                   </>
                 )}

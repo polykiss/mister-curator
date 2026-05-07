@@ -453,6 +453,143 @@ describe('RealMisterClient', () => {
       expect(arcade).toBeDefined();
       expect(arcade?.name).toBe('Arcade');
     });
+
+    it('emits a games-dir glob that picks up dot-prefixed (hidden) and case-mismatched dirs', async () => {
+      // Round 3 / Issue 4 bug fix: the shell loop had to enumerate
+      // BOTH visible and dot-prefixed games dirs so the matcher can
+      // surface externally-hidden cores like `.ATARI7800`. The glob
+      // pattern `* .[!.]*` covers both buckets in one pass while
+      // still skipping `.` and `..`.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.listAllCoresWithFiles();
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      // The games-dir loop iterates both visible and dot-prefixed
+      // entries — the same pattern the matching shell script uses.
+      expect(script).toMatch(/cd '\/media\/fat\/games'\s+for d in \* \.\[!\.]\*/);
+      // The G/GD/GF/SE structural tags all come from the same shell
+      // loop so a hidden games dir gets the same treatment as a
+      // visible one.
+      expect(script).toContain(`printf 'G\\t%s\\n' "$d"`);
+      expect(script).toContain(`printf 'GD\\t%s\\t%s\\n' "$d" "$name"`);
+      expect(script).toContain(`printf 'SE\\t%s\\t%s\\tf\\t%s\\n'`);
+      // SR (recursive totals) is emitted by a separate one-shot
+      // find/awk pipeline, not by the per-folder loop. See the
+      // Round 4 perf hotfix below for why.
+      expect(script).toContain(`printf "SR\\t%s\\t%s\\t%d\\t%d\\n"`);
+    });
+
+    it('computes SR via a single bulk find/awk pass (Round 4 perf hotfix)', async () => {
+      // Round 3 ran TWO `find` subprocesses per top-level subfolder
+      // (`sr_total=$(find ...)` + `sr_hidden=$(find ...)`). On a real
+      // MiSTer with hundreds of folder ROMs that meant 200+ forks and
+      // a 30-60s walk that overran the 10s SSH op timeout. Round 4
+      // replaces it with one find + one awk over the entire games
+      // tree. This test asserts the new shape is in place and the
+      // old per-folder forks are gone.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.listAllCoresWithFiles();
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+
+      // The bulk pass: one `find /media/fat/games -mindepth 3 -type f`
+      // piped through awk that aggregates by (top-level dir,
+      // top-level subfolder). The whole tree walks once.
+      expect(script).toMatch(
+        /find '\/media\/fat\/games' -mindepth 3 -type f -printf '%P\\n'/,
+      );
+      expect(script).toContain('| awk -F/');
+      // Awk emits SR lines with the same shape the matcher parser
+      // expects: parent / subname / total / hidden.
+      expect(script).toContain(`printf "SR\\t%s\\t%s\\t%d\\t%d\\n"`);
+
+      // The old per-folder forks are gone — no `sr_total=$(find ...)`
+      // or `sr_hidden=$(find ...)` substitution left in the script.
+      expect(script).not.toContain('sr_total=$(find');
+      expect(script).not.toContain('sr_hidden=$(find');
+
+      // Total subprocess fork budget for the whole list pass:
+      // - up to 5-8 forks for the dirsScript (one find per
+      //   folder-shape candidate under each category dir + grep)
+      // - exactly one find/awk pipe for the recursive pass
+      // The bulk find should appear exactly once in the script.
+      const findRecursive = script.match(
+        /find '\/media\/fat\/games' -mindepth 3/g,
+      );
+      expect(findRecursive).toHaveLength(1);
+    });
+
+    it('parses a case-mismatched dot-prefixed games dir as a hidden core (Round 5)', async () => {
+      // Visible rbf + dot-prefixed, case-mismatched games dir
+      // (Atari7800.rbf alongside .ATARI7800/). Round 5 reports it
+      // as a hidden core with the dir's real romCount, no zeroing.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'R\tConsole\tfile\tAtari7800_20240423.rbf',
+            'G\t.ATARI7800',
+            'GF\t.ATARI7800\tleftover.bin',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const cores = await client.listAllCoresWithFiles();
+      const atari = cores.find((c) => c.id === 'Atari7800');
+      expect(atari).toBeDefined();
+      expect(atari?.gamesDirHidden).toBe(true);
+      expect(atari?.gamesDirName).toBe('ATARI7800');
+      expect(atari?.romCount).toBe(1);
+    });
+
+    it('threads SE/SR per-subfolder lines into recursive ROM counts (Issue 5)', async () => {
+      // Real-MiSTer NEOGEO shape: 12 BIOS files at top level (filtered
+      // as system) + 9 organisational subfolders (containers).
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      const subDirs = Array.from({ length: 9 }, (_, i) => `org${String(i)}`);
+      const subLines: string[] = [];
+      for (const sd of subDirs) {
+        // Mark each subfolder as a container by listing many same-
+        // extension files.
+        for (let j = 0; j < 30; j += 1) {
+          subLines.push(`SE\tNEOGEO\t${sd}\tf\tg${String(j)}.zip`);
+        }
+        // SR tells the matcher the recursive total (cheap on the
+        // device — `find -type f | wc -l`).
+        subLines.push(`SR\tNEOGEO\t${sd}\t30\t0`);
+      }
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'R\tConsole\tfile\tNEOGEO_20250909.rbf',
+            'G\tNEOGEO',
+            'GF\tNEOGEO\tboot.rom',
+            'GF\tNEOGEO\tsfix.sfix',
+            ...subDirs.map((sd) => `GD\tNEOGEO\t${sd}`),
+            ...subLines,
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const cores = await client.listAllCoresWithFiles();
+      const neo = cores.find((c) => c.id === 'NEOGEO');
+      expect(neo?.romCount).toBe(9);
+      expect(neo?.recursiveRomCount).toBe(270);
+    });
   });
 
   describe('listRoms', () => {

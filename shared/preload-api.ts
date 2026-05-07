@@ -29,6 +29,7 @@ export const IPC_CHANNELS = {
   hideCore: 'mister:hideCore',
   showCore: 'mister:showCore',
   setBulkCoreVisibility: 'mister:setBulkCoreVisibility',
+  listLedgerCoreIds: 'mister:listLedgerCoreIds',
   pickKeyFile: 'mister:pickKeyFile',
   connectionStatusChanged: 'mister:connectionStatusChanged',
   listSystemFileMarks: 'mister:listSystemFileMarks',
@@ -79,8 +80,10 @@ export interface PickedKeyFile {
  *
  * Note: ledger I/O (`readHideLedger` / `writeHideLedger`) is intentionally
  * NOT exposed on this bridge — the renderer has no direct access to the
- * ledger, only to its consequences (this field, and `gamesDirHidden` /
- * `rbfPaths` on each `CoreEntry`). The ConnectionManager owns the ledger.
+ * ledger, only to its consequences (this field, the read-only
+ * `listLedgerCoreIds()` for the "Unhide all" target list, and
+ * `gamesDirHidden` / `rbfPaths` on each `CoreEntry`). The
+ * ConnectionManager owns the ledger.
  */
 export interface ConnectResult {
   readonly reappliedCount: number;
@@ -133,6 +136,15 @@ export interface MisterApi {
     changes: readonly CoreVisibilityChangeWire[],
     options?: { readonly operationId?: string },
   ): Promise<BulkCoreResult>;
+  /**
+   * Read-only IDs from the on-MiSTer hide ledger — the cores
+   * MiSTerCurator itself hid in past sessions. Used exclusively to
+   * scope the "Unhide all" target list so a bulk un-hide can't sweep
+   * up arbitrary dot-prefixed system folders the MiSTer firmware
+   * placed there. Single-core hide/show operations do NOT consult
+   * this list — the user can hide or unhide any core directly.
+   */
+  listLedgerCoreIds(): Promise<readonly string[]>;
   /**
    * Subscribe to per-core progress ticks for bulk core-visibility
    * operations. Events arrive in real time as the SSH stream parses

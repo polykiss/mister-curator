@@ -18,7 +18,7 @@ import { ConnectionManager } from '@app/main/ipc/connection-manager';
 import type { ProfileStore } from '@app/main/storage/profile-store';
 import type { ConnectionEvent } from '@shared/connection';
 import type { MisterSecret } from '@shared/mister-client';
-import type { CoreEntry, MisterProfile } from '@shared/types';
+import type { MisterProfile } from '@shared/types';
 
 const fixturesDir = path.resolve(import.meta.dirname, '../../../fixtures/sample-mister');
 
@@ -54,7 +54,7 @@ function makeStubStore(): ProfileStore {
   } as unknown as ProfileStore;
 }
 
-describe('ConnectionManager — permission slip', () => {
+describe('ConnectionManager — hide / show + ledger bookkeeping', () => {
   let workDir: string;
   let client: FakeMisterClient;
   let manager: ConnectionManager;
@@ -78,97 +78,75 @@ describe('ConnectionManager — permission slip', () => {
     await manager.connect(profile.id);
   });
 
-  it('marks cores in the ledger as managedByApp on listAllCoresWithFiles', async () => {
-    // Pre-state: nothing in the ledger. Hide NES via the manager.
+  it('returns ledger-tracked core ids via listLedgerCoreIds', async () => {
+    expect(await manager.listLedgerCoreIds()).toEqual([]);
     await manager.hideCore('NES');
-
-    const cores = await manager.listAllCoresWithFiles();
-    const nes = cores.find((c) => c.id === 'NES');
-    expect(nes?.gamesDirHidden).toBe(true);
-    expect(nes?.managedByApp).toBe(true);
-
-    const sms = cores.find((c) => c.id === 'SMS');
-    // SMS was never hidden through the app.
-    expect(sms?.managedByApp).toBe(false);
+    expect(await manager.listLedgerCoreIds()).toEqual(['NES']);
+    await manager.hideCore('SNES');
+    expect([...(await manager.listLedgerCoreIds())].sort()).toEqual(['NES', 'SNES']);
+    await manager.showCore('NES');
+    expect(await manager.listLedgerCoreIds()).toEqual(['SNES']);
   });
 
-  it('refuses showCore for a core that is not in the ledger', async () => {
-    // Manually pre-create a hidden games dir that LOOKS hidden but
-    // wasn't done by the app. This simulates MiSTer's stock state
-    // where dot-prefixed dirs are pre-existing.
+  it('showCore on a non-ledger (externally-hidden) core succeeds', async () => {
+    // Round 5: single-core un-hide no longer consults the ledger.
+    // The user can reach into firmware-placed dot-folders and reveal
+    // them with a single eye-click. Previously this raised
+    // "not managed by MiSTerCurator".
     await fs.rename(
       path.join(workDir, 'games', 'AO486'),
       path.join(workDir, 'games', '.AO486'),
     );
-
-    // The cores list now reports AO486 as hidden but managedByApp=false.
     const cores = await manager.listAllCoresWithFiles();
     const ao486 = cores.find((c) => c.id === 'AO486');
     expect(ao486?.gamesDirHidden).toBe(true);
-    expect(ao486?.managedByApp).toBe(false);
 
-    await expect(manager.showCore('AO486')).rejects.toThrow(/not managed/i);
+    await expect(manager.showCore('AO486')).resolves.toBeUndefined();
+    await fs.access(path.join(workDir, 'games', 'AO486'));
   });
 
-  it('"show all" via setBulkCoreVisibility skips ledger-foreign cores (3-of-10)', async () => {
-    // Manually pre-hide three games dirs ourselves (they go into the
-    // ledger). Then manually pre-hide three OTHER games dirs without
-    // going through the manager (these do NOT go into the ledger).
-    await manager.hideCore('NES');
-    await manager.hideCore('SNES');
-    await manager.hideCore('Genesis');
-
-    // Three external-hidden dirs (simulating stock MiSTer state):
+  it('setBulkCoreVisibility unhide does NOT reject non-ledger cores', async () => {
+    // Round 5 simplification: the bulk path is now a thin wrapper
+    // around the per-core renames. The renderer's "Unhide all"
+    // button pre-filters its payload via listLedgerCoreIds, so the
+    // gate has moved to the renderer.
     await fs.rename(
       path.join(workDir, 'games', 'AO486'),
       path.join(workDir, 'games', '.AO486'),
     );
-    await fs.rename(
-      path.join(workDir, 'games', 'Saturn'),
-      path.join(workDir, 'games', '.Saturn'),
-    );
-    await fs.rename(
-      path.join(workDir, 'games', 'Orphan'),
-      path.join(workDir, 'games', '.Orphan'),
-    );
-
-    // The user clicks "Unhide all" — but the manager only un-hides
-    // ledger-managed cores. We simulate this by passing every hidden
-    // core's coreId.
-    const cores = await manager.listAllCoresWithFiles();
-    const hiddenCoreIds = cores
-      .filter((c: CoreEntry) => c.gamesDirHidden || c.rbfPaths.some((p) => p.includes('/.')))
-      .map((c) => c.id);
-
-    const result = await manager.setBulkCoreVisibility(
-      hiddenCoreIds.map((coreId) => ({ coreId, hidden: false })),
-    );
-
-    expect([...result.succeeded].sort()).toEqual(['Genesis', 'NES', 'SNES']);
-    // The non-managed ones are reported as failed (not silently dropped).
-    const failedIds = result.failed.map((f) => f.coreId).sort();
-    expect(failedIds).toContain('AO486');
-    expect(failedIds).toContain('Saturn');
-    expect(failedIds).toContain('Orphan');
-    for (const f of result.failed) {
-      expect(f.reason).toMatch(/not managed/i);
-    }
-
-    // The three external-hidden dirs are still hidden on disk.
-    await fs.access(path.join(workDir, 'games', '.AO486'));
-    await fs.access(path.join(workDir, 'games', '.Saturn'));
-    await fs.access(path.join(workDir, 'games', '.Orphan'));
+    const result = await manager.setBulkCoreVisibility([
+      { coreId: 'AO486', hidden: false },
+    ]);
+    expect(result.succeeded).toEqual(['AO486']);
+    expect(result.failed).toEqual([]);
+    await fs.access(path.join(workDir, 'games', 'AO486'));
   });
 
-  it('hideCore round-trip leaves the ledger in sync', async () => {
+  it('hide / unhide round-trip leaves the ledger in sync', async () => {
     await manager.hideCore('NES');
-    const after = await manager.listAllCoresWithFiles();
-    expect(after.find((c) => c.id === 'NES')?.managedByApp).toBe(true);
+    expect(await manager.listLedgerCoreIds()).toEqual(['NES']);
+    const afterHide = await manager.listAllCoresWithFiles();
+    expect(afterHide.find((c) => c.id === 'NES')?.gamesDirHidden).toBe(true);
 
     await manager.showCore('NES');
-    const final = await manager.listAllCoresWithFiles();
-    expect(final.find((c) => c.id === 'NES')?.managedByApp).toBe(false);
-    expect(final.find((c) => c.id === 'NES')?.gamesDirHidden).toBe(false);
+    expect(await manager.listLedgerCoreIds()).toEqual([]);
+    const afterShow = await manager.listAllCoresWithFiles();
+    expect(afterShow.find((c) => c.id === 'NES')?.gamesDirHidden).toBe(false);
+  });
+
+  it('setBulkCoreVisibility hide adds to the ledger; unhide removes', async () => {
+    const hideResult = await manager.setBulkCoreVisibility([
+      { coreId: 'NES', hidden: true },
+      { coreId: 'SNES', hidden: true },
+    ]);
+    expect([...hideResult.succeeded].sort()).toEqual(['NES', 'SNES']);
+    expect([...(await manager.listLedgerCoreIds())].sort()).toEqual(['NES', 'SNES']);
+
+    const showResult = await manager.setBulkCoreVisibility([
+      { coreId: 'NES', hidden: false },
+    ]);
+    expect(showResult.succeeded).toEqual(['NES']);
+    expect(await manager.listLedgerCoreIds()).toEqual(['SNES']);
   });
 });
 
