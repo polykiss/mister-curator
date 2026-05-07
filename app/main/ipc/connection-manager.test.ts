@@ -14,6 +14,7 @@ import {
 } from 'vitest';
 
 import { CacheManager } from '@app/main/cache/cache-manager';
+import type { CacheEvent } from '@app/main/cache/cache-types';
 import { FakeMisterClient } from '@app/main/clients/fake-mister-client';
 import { ConnectionManager } from '@app/main/ipc/connection-manager';
 import type { ProfileStore } from '@app/main/storage/profile-store';
@@ -234,6 +235,134 @@ describe('ConnectionManager — PR #12 disk cache', () => {
     await manager.listRoms('NES');
     expect(networkSpy2).toHaveBeenCalled();
     networkSpy2.mockRestore();
+  });
+});
+
+describe('ConnectionManager — cache observability events (PR #12 round 3)', () => {
+  let workDir: string;
+  let cacheRoot: string;
+  let perTestCacheDir: string;
+  let events: CacheEvent[];
+  let client: FakeMisterClient;
+  let cache: CacheManager;
+  let manager: ConnectionManager;
+
+  beforeAll(async () => {
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-cache-events-fs-'));
+    cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-cache-events-cache-'));
+  });
+
+  afterAll(async () => {
+    await fs.rm(workDir, { recursive: true, force: true });
+    await fs.rm(cacheRoot, { recursive: true, force: true });
+  });
+
+  beforeEach(async () => {
+    client = new FakeMisterClient({
+      rootPath: workDir,
+      pristineRootPath: fixturesDir,
+      latencyMs: 0,
+    });
+    await client.reset();
+    perTestCacheDir = await fs.mkdtemp(path.join(cacheRoot, 'run-'));
+    events = [];
+    cache = new CacheManager(perTestCacheDir, {
+      onEvent: (e) => events.push(e),
+    });
+    manager = new ConnectionManager(client, makeStubStore(), cache);
+  });
+
+  it('cold connect emits cache.miss + cache.write; warm reconnect emits cache.hit', async () => {
+    // Cold connect: file doesn't exist on disk. CacheManager fires
+    // miss internally; ConnectionManager doesn't yet know there's
+    // anything to validate.
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+    const coldEvents = events
+      .filter((e) => e.surface === 'cores')
+      .map((e) => e.kind);
+    expect(coldEvents).toEqual(['miss', 'write']);
+
+    // Warm reconnect: cache file exists, primeConnect's witnesses
+    // match. The hit event is the load-bearing assertion of this
+    // round — without recordHit it never fires.
+    events.length = 0;
+    await manager.disconnect();
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+    expect(events.find((e) => e.kind === 'hit' && e.surface === 'cores')).toBeDefined();
+  });
+
+  it('warm reconnect with mtime drift emits cache.stale + cache.invalidate (no hit)', async () => {
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+    await manager.disconnect();
+    // Bump games/ mtime out-of-band. Witnesses recorded on the
+    // cold connect no longer match.
+    const future = new Date(Date.now() + 60_000);
+    await fs.utimes(path.join(workDir, 'games'), future, future);
+
+    events.length = 0;
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+
+    const kinds = events
+      .filter((e) => e.surface === 'cores')
+      .map((e) => e.kind);
+    // The first miss-or-stale signal MUST be `stale` (file existed
+    // and parsed; witnesses moved). Then we invalidate, then
+    // listAllCoresWithFiles fires a fresh write.
+    expect(kinds).toContain('stale');
+    expect(kinds).toContain('invalidate');
+    expect(kinds).toContain('write');
+    // No hit on this path.
+    expect(kinds).not.toContain('hit');
+  });
+
+  it('listRoms cache hit emits cache.hit with coreId and subPath; mismatch emits cache.stale', async () => {
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+    await manager.listRoms('NES'); // populate roms cache
+
+    events.length = 0;
+    // Second call: witness stat matches, slot is served from cache.
+    const cached = await manager.listRoms('NES');
+    expect(cached.length).toBeGreaterThan(0);
+    const hit = events.find((e) => e.kind === 'hit' && e.surface === 'roms');
+    expect(hit).toBeDefined();
+    expect(hit?.coreId).toBe('NES');
+    expect(hit?.subPath).toBe('');
+
+    // Bump games/NES mtime → witness mismatch → stale event then
+    // re-fetch. Plain rename within the same wall-clock second can
+    // produce identical floor-second mtimes; utimes sidesteps that.
+    const future = new Date(Date.now() + 60_000);
+    await fs.utimes(path.join(workDir, 'games', 'NES'), future, future);
+    events.length = 0;
+    await manager.listRoms('NES');
+    expect(
+      events.find((e) => e.kind === 'stale' && e.surface === 'roms'),
+    ).toBeDefined();
+    expect(
+      events.find((e) => e.kind === 'hit' && e.surface === 'roms'),
+    ).toBeUndefined();
+  });
+
+  it('Refresh button (forceRefresh) does NOT emit cache.hit', async () => {
+    // The user explicitly clicked Refresh — the cache must be
+    // bypassed. We expect invalidate (the existing file is dropped)
+    // followed by write, but never a hit on this path.
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+
+    events.length = 0;
+    await manager.listAllCoresWithFiles({ forceRefresh: true });
+    const kinds = events
+      .filter((e) => e.surface === 'cores')
+      .map((e) => e.kind);
+    expect(kinds).not.toContain('hit');
+    expect(kinds).toContain('invalidate');
+    expect(kinds).toContain('write');
   });
 });
 

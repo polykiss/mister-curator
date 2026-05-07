@@ -332,3 +332,87 @@ describe('witnessesMatch', () => {
     expect(witnessesMatch({ a: 1, b: 2 }, { b: 2, a: 1 })).toBe(true);
   });
 });
+
+describe('CacheManager — observability hooks (PR #12 round 3)', () => {
+  let root: string;
+  let events: CacheEvent[];
+  let cm: CacheManager;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'mc-cache-events-'));
+    events = [];
+    cm = new CacheManager(root, { onEvent: (e) => events.push(e) });
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('recordHit fires `cache.hit` with the cores surface', () => {
+    cm.recordHit('cores', { host: 'h1' });
+    expect(events).toEqual([{ kind: 'hit', surface: 'cores', host: 'h1' }]);
+  });
+
+  it('recordHit fires `cache.hit` with the roms surface and per-call context', () => {
+    cm.recordHit('roms', { host: 'h1', coreId: 'NES', subPath: '' });
+    cm.recordHit('roms', { host: 'h1', coreId: 'NEOGEO', subPath: '1 World A-Z' });
+    expect(events).toEqual([
+      { kind: 'hit', surface: 'roms', host: 'h1', coreId: 'NES', subPath: '' },
+      {
+        kind: 'hit',
+        surface: 'roms',
+        host: 'h1',
+        coreId: 'NEOGEO',
+        subPath: '1 World A-Z',
+      },
+    ]);
+  });
+
+  it('recordStale fires `cache.stale` distinct from `cache.miss`', () => {
+    // Use case: file existed and schema-validated, but witnesses
+    // moved on. Distinct from miss (file absent / corrupt).
+    cm.recordStale('cores', { host: 'h1' });
+    cm.recordStale('roms', { host: 'h1', coreId: 'NES', subPath: '' });
+    expect(events.map((e) => e.kind)).toEqual(['stale', 'stale']);
+    expect(events[0]?.surface).toBe('cores');
+    expect(events[1]?.surface).toBe('roms');
+  });
+
+  it('invalidateCoresCache forwards the optional note onto the event', async () => {
+    // The catch-block recovery paths in ConnectionManager pass
+    // `note: 'write-failed'` so dev logs distinguish recovery
+    // invalidates from routine user-initiated ones.
+    await cm.setCoresCache('h1', [], { p: 1 });
+    events.length = 0;
+    await cm.invalidateCoresCache('h1', { note: 'write-failed' });
+    expect(events).toEqual([
+      { kind: 'invalidate', surface: 'cores', host: 'h1', note: 'write-failed' },
+    ]);
+  });
+
+  it('invalidateRomsCache forwards the optional note onto the event', async () => {
+    await cm.setRomsCache('h1', 'NES', '', [], { p: 1 });
+    events.length = 0;
+    await cm.invalidateRomsCache('h1', 'NES', { note: 'write-failed' });
+    expect(events).toEqual([
+      {
+        kind: 'invalidate',
+        surface: 'roms',
+        host: 'h1',
+        coreId: 'NES',
+        note: 'write-failed',
+      },
+    ]);
+  });
+
+  it('invalidate methods omit the note field when none is supplied', async () => {
+    // Backward-compat: the existing invalidate event shape is
+    // `{ kind, surface, host[, coreId] }` with no note for routine
+    // invalidates. Adding the optional note must not surface as
+    // `note: undefined` on existing callers.
+    await cm.setCoresCache('h1', [], { p: 1 });
+    events.length = 0;
+    await cm.invalidateCoresCache('h1');
+    expect(events).toEqual([{ kind: 'invalidate', surface: 'cores', host: 'h1' }]);
+  });
+});

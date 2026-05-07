@@ -247,9 +247,18 @@ export class ConnectionManager {
       const cached = await this.cache.getCoresCache(profile.host);
       if (cached !== null && witnessesMatch(cached.witnesses, prime.witnesses)) {
         this.coresCache = [...cached.data];
+        // PR #12 round 3: emit cache.hit so MISTERCURATOR_CACHE_LOG=1
+        // surfaces the warm-reconnect path. CacheManager fires miss
+        // itself when the file is absent; the witness-match decision
+        // happens here in the manager (only it has the fresh mtimes
+        // from `primeConnect`), so the hit event also has to fire
+        // here through CacheManager.recordHit.
+        this.cache.recordHit('cores', { host: profile.host });
       } else if (cached !== null) {
-        // Stale — drop it so the next listAllCoresWithFiles writes a
-        // fresh entry instead of layering on top.
+        // Stale — file existed, schema validated, but mtime witnesses
+        // moved on. Distinct from `miss` so dev logs can tell apart
+        // "cache empty" from "cache went out of date."
+        this.cache.recordStale('cores', { host: profile.host });
         await this.cache.invalidateCoresCache(profile.host).catch(() => {
           /* swallow */
         });
@@ -366,9 +375,13 @@ export class ConnectionManager {
       } catch {
         // Stat or write failure → drop the cache so the next session
         // refetches rather than serves something we can't validate.
-        await this.cache.invalidateCoresCache(this.currentHost).catch(() => {
-          /* swallow */
-        });
+        // The `note` flags this as recovery in the dev log so it's
+        // distinguishable from routine user-initiated invalidates.
+        await this.cache
+          .invalidateCoresCache(this.currentHost, { note: 'write-failed' })
+          .catch(() => {
+            /* swallow */
+          });
       }
     }
     return cores;
@@ -470,10 +483,27 @@ export class ConnectionManager {
         try {
           const fresh = await this.client.statWitnesses([witnessPath]);
           if (witnessesMatch(slot.witnesses, fresh)) {
+            this.cache.recordHit('roms', {
+              host: this.currentHost,
+              coreId,
+              subPath,
+            });
             return [...slot.data];
           }
+          // Witnesses moved — emit stale and fall through. Don't
+          // invalidate the file here: the upcoming
+          // `fetchAndCacheRoms` will rewrite the slot in place via
+          // `setRomsCache`, which preserves the other subPath slots
+          // in the same core file. A blanket `invalidateRomsCache`
+          // would drop those siblings unnecessarily.
+          this.cache.recordStale('roms', {
+            host: this.currentHost,
+            coreId,
+            subPath,
+          });
         } catch {
           // Witness stat failure → fall through to network fetch.
+          // The fall-through write will refresh whatever it can.
         }
       }
     }
@@ -517,7 +547,9 @@ export class ConnectionManager {
         );
       } catch {
         await this.cache
-          .invalidateRomsCache(this.currentHost, coreId)
+          .invalidateRomsCache(this.currentHost, coreId, {
+            note: 'write-failed',
+          })
           .catch(() => {
             /* swallow */
           });
@@ -673,12 +705,16 @@ export class ConnectionManager {
       );
       await this.cache.invalidateRomsCache(this.currentHost, coreId);
     } catch {
-      await this.cache.invalidateCoresCache(this.currentHost).catch(() => {
-        /* swallow */
-      });
-      await this.cache.invalidateRomsCache(this.currentHost, coreId).catch(() => {
-        /* swallow */
-      });
+      await this.cache
+        .invalidateCoresCache(this.currentHost, { note: 'write-failed' })
+        .catch(() => {
+          /* swallow */
+        });
+      await this.cache
+        .invalidateRomsCache(this.currentHost, coreId, { note: 'write-failed' })
+        .catch(() => {
+          /* swallow */
+        });
     }
   }
 
@@ -791,9 +827,11 @@ export class ConnectionManager {
           ),
         );
       } catch {
-        await this.cache.invalidateCoresCache(this.currentHost).catch(() => {
-          /* swallow */
-        });
+        await this.cache
+          .invalidateCoresCache(this.currentHost, { note: 'write-failed' })
+          .catch(() => {
+            /* swallow */
+          });
       }
     }
 
@@ -1008,7 +1046,16 @@ export class ConnectionManager {
             witnessesMatch(cached.witnesses, prime.witnesses)
           ) {
             this.coresCache = [...cached.data];
+            this.cache.recordHit('cores', { host: profile.host });
           } else {
+            if (cached !== null) {
+              this.cache.recordStale('cores', { host: profile.host });
+              await this.cache
+                .invalidateCoresCache(profile.host)
+                .catch(() => {
+                  /* swallow */
+                });
+            }
             this.coresCache = [];
           }
         } catch {

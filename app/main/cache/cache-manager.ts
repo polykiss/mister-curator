@@ -88,11 +88,14 @@ export class CacheManager {
     this.fire('write', { surface: 'cores', host });
   }
 
-  async invalidateCoresCache(host: string): Promise<void> {
+  async invalidateCoresCache(
+    host: string,
+    options: { readonly note?: string } = {},
+  ): Promise<void> {
     const path = this.coresCachePath(host);
     const removed = await unlinkIfExists(path);
     if (removed) {
-      this.fire('invalidate', { surface: 'cores', host });
+      this.fire('invalidate', { surface: 'cores', host, note: options.note });
     }
   }
 
@@ -147,12 +150,62 @@ export class CacheManager {
     await this.enforceLruBudget(host);
   }
 
-  async invalidateRomsCache(host: string, coreId: string): Promise<void> {
+  async invalidateRomsCache(
+    host: string,
+    coreId: string,
+    options: { readonly note?: string } = {},
+  ): Promise<void> {
     const path = this.romsCachePath(host, coreId);
     const removed = await unlinkIfExists(path);
     if (removed) {
-      this.fire('invalidate', { surface: 'roms', host, coreId });
+      this.fire('invalidate', {
+        surface: 'roms',
+        host,
+        coreId,
+        note: options.note,
+      });
     }
+  }
+
+  // ─── observability hooks ──────────────────────────────────────────
+
+  /**
+   * Record a cache hit. Witness validation lives in the consumer
+   * (ConnectionManager has the fresh mtimes from `primeConnect` /
+   * `statWitnesses` and only it can decide if the cached entry is
+   * actually serviceable), so we expose this hook for the consumer
+   * to fire `cache.hit` events through the same emitter pipeline as
+   * `miss` / `write` / `invalidate` / `evict`. Without this hook,
+   * MISTERCURATOR_CACHE_LOG=1 would never show the hit case — the
+   * single most useful signal during cache verification.
+   */
+  recordHit(
+    surface: 'cores' | 'roms',
+    ctx: {
+      readonly host: string;
+      readonly coreId?: string;
+      readonly subPath?: string;
+    },
+  ): void {
+    this.fire('hit', { surface, ...ctx });
+  }
+
+  /**
+   * Record a stale cache entry — file existed and schema-validated,
+   * but its mtime witnesses no longer match the device. Distinct
+   * from `miss` (file missing / corrupt / schema mismatch) so dev
+   * logs can tell "cache was empty" from "cache went out of date".
+   */
+  recordStale(
+    surface: 'cores' | 'roms',
+    ctx: {
+      readonly host: string;
+      readonly coreId?: string;
+      readonly subPath?: string;
+      readonly note?: string;
+    },
+  ): void {
+    this.fire('stale', { surface, ...ctx });
   }
 
   // ─── host-wide ops ────────────────────────────────────────────────
