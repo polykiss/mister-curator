@@ -40,8 +40,45 @@ export const IPC_CHANNELS = {
   bulkCoreProgress: 'mister:bulkCoreProgress',
   listFolderClassifications: 'mister:listFolderClassifications',
   setFolderClassification: 'mister:setFolderClassification',
+  setFolderClassifications: 'mister:setFolderClassifications',
   connectionEvent: 'mister:connectionEvent',
 } as const;
+
+/**
+ * One row in the row-menu's tri-state classification picker. PR #13
+ * reuses two existing storage files instead of growing
+ * folder-classifications.json with a third value:
+ *
+ *   - `'atomic'` / `'container'` → `folder-classifications.json` per
+ *     the existing `(coreId, folderPath)` shape.
+ *   - `'system'` → `system-files.json` keyed on the folder's basename.
+ *     `shouldCountAsRom` already walks every path segment against the
+ *     marks list, so a system-marked folder filters its entire subtree
+ *     from the cores list count and the ROMs view.
+ *
+ * The dispatch happens inside `ConnectionManager.setFolderClassification`
+ * so the renderer doesn't need to know the storage split.
+ */
+export type FolderRowClassification = 'atomic' | 'container' | 'system';
+
+/**
+ * Return shape of the tri-state IPC. The dispatch can touch BOTH
+ * stores (e.g. flipping system → atomic clears the system mark AND
+ * writes a folder-classifications override), so we return fresh
+ * snapshots of both so the renderer can refresh its local state in
+ * one round-trip without a follow-up `listSystemFileMarks` call.
+ */
+export interface FolderClassificationDispatchResult {
+  readonly folderClassifications: FolderClassifications;
+  readonly systemFilesMarks: SystemFilesMarks;
+}
+
+/** One entry in a batched setFolderClassifications call. */
+export interface FolderClassificationUpdateWire {
+  readonly folderPath: string;
+  /** `null` = remove any override / system-mark for this folder. */
+  readonly value: FolderRowClassification | null;
+}
 
 /**
  * Wire-side bulk progress event. The renderer uses `operationId` to
@@ -221,14 +258,35 @@ export interface MisterApi {
    */
   listFolderClassifications(): Promise<FolderClassifications>;
   /**
-   * Sets or removes a per-folder classification override. Pass
-   * `classification: null` to remove. Returns the refreshed list.
+   * Tri-state per-folder classification dispatch. PR #13:
+   *
+   *   - `'atomic'` / `'container'` write to `folder-classifications.json`
+   *     and remove any system-mark for the same `(coreId, folderName)`.
+   *   - `'system'` adds a system-mark and removes any
+   *     folder-classifications override.
+   *   - `null` clears both stores (resets to heuristic).
+   *
+   * Returns fresh snapshots of BOTH stores so the renderer can
+   * refresh its local state in a single round trip — see
+   * `FolderClassificationDispatchResult`.
    */
   setFolderClassification(
     coreId: string,
     folderPath: string,
-    classification: 'container' | 'atomic' | null,
-  ): Promise<FolderClassifications>;
+    value: FolderRowClassification | null,
+  ): Promise<FolderClassificationDispatchResult>;
+  /**
+   * Batched form of `setFolderClassification` for the bulk-action
+   * toolbar. Applies every update under one read-modify-write pair
+   * (one for `folder-classifications.json`, one for
+   * `system-files.json`) so a 600-folder X68000 "Treat as ROM" sweep
+   * is two file writes rather than 1200. Returns fresh snapshots of
+   * both stores in one shot.
+   */
+  setFolderClassifications(
+    coreId: string,
+    updates: readonly FolderClassificationUpdateWire[],
+  ): Promise<FolderClassificationDispatchResult>;
   /**
    * Wipe the on-disk cache for the currently-connected host. Hidden
    * command in v0 — exposed via IPC so a future settings UI can wire

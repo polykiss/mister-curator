@@ -10,6 +10,9 @@ import type {
   BulkCoreProgressEvent,
   ConnectResult,
   CoreVisibilityChangeWire,
+  FolderClassificationDispatchResult,
+  FolderClassificationUpdateWire,
+  FolderRowClassification,
   MisterApi,
   PickedKeyFile,
   RomVisibilityChangeWire,
@@ -149,13 +152,22 @@ const api: MisterApi = {
   setFolderClassification: (
     coreId: string,
     folderPath: string,
-    classification: 'container' | 'atomic' | null,
+    value: FolderRowClassification | null,
   ) =>
-    invoke<FolderClassifications>(
+    invoke<FolderClassificationDispatchResult>(
       IPC_CHANNELS.setFolderClassification,
       coreId,
       folderPath,
-      classification,
+      value,
+    ),
+  setFolderClassifications: (
+    coreId: string,
+    updates: readonly FolderClassificationUpdateWire[],
+  ) =>
+    invoke<FolderClassificationDispatchResult>(
+      IPC_CHANNELS.setFolderClassifications,
+      coreId,
+      updates,
     ),
   clearCache: () => invoke<void>(IPC_CHANNELS.clearCache),
 };

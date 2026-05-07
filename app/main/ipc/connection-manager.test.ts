@@ -660,3 +660,184 @@ describe('ConnectionManager — mid-session disconnect + auto-retry', () => {
     stub.mockRestore();
   });
 });
+
+describe('ConnectionManager — tri-state setFolderClassification (PR #13)', () => {
+  let workDir: string;
+  let cacheRoot: string;
+  let perTestCacheDir: string;
+  let client: FakeMisterClient;
+  let cache: CacheManager;
+  let manager: ConnectionManager;
+
+  beforeAll(async () => {
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-classification-'));
+    cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-classification-cache-'));
+  });
+
+  afterAll(async () => {
+    await fs.rm(workDir, { recursive: true, force: true });
+    await fs.rm(cacheRoot, { recursive: true, force: true });
+  });
+
+  beforeEach(async () => {
+    client = new FakeMisterClient({
+      rootPath: workDir,
+      pristineRootPath: fixturesDir,
+      latencyMs: 0,
+    });
+    await client.reset();
+    perTestCacheDir = await fs.mkdtemp(path.join(cacheRoot, 'run-'));
+    cache = new CacheManager(perTestCacheDir);
+    manager = new ConnectionManager(client, makeStubStore(), cache);
+    await manager.connect(profile.id);
+  });
+
+  it('atomic: writes folder-classifications, clears any system mark', async () => {
+    // Pre-state: folder is system-marked AND has no override.
+    await manager.addSystemFileMark('NES', 'someFolder');
+
+    const result = await manager.setFolderClassification(
+      'NES',
+      'someFolder',
+      'atomic',
+    );
+
+    // Folder-classifications has the new override.
+    expect(
+      result.folderClassifications.overrides.find(
+        (o) => o.coreId === 'NES' && o.folderPath === 'someFolder',
+      )?.classification,
+    ).toBe('atomic');
+    // System mark is gone — atomic and system are mutually exclusive
+    // in the tri-state UX.
+    expect(
+      result.systemFilesMarks.marked.find(
+        (m) => m.coreId === 'NES' && m.filename === 'someFolder',
+      ),
+    ).toBeUndefined();
+  });
+
+  it("system: writes system-files-marks, clears any classifications override", async () => {
+    // Pre-state: folder has a container override and no system mark.
+    await manager.setFolderClassification('NES', 'someFolder', 'container');
+
+    const result = await manager.setFolderClassification(
+      'NES',
+      'someFolder',
+      'system',
+    );
+
+    // System mark added.
+    expect(
+      result.systemFilesMarks.marked.find(
+        (m) => m.coreId === 'NES' && m.filename === 'someFolder',
+      ),
+    ).toBeDefined();
+    // Folder-classifications override removed — system is the only
+    // active state for this folder now.
+    expect(
+      result.folderClassifications.overrides.find(
+        (o) => o.coreId === 'NES' && o.folderPath === 'someFolder',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('null: clears both stores (resets to heuristic)', async () => {
+    // Pre-state: BOTH stores have entries (engineered by going
+    // atomic→system→null).
+    await manager.setFolderClassification('NES', 'someFolder', 'atomic');
+    await manager.setFolderClassification('NES', 'someFolder', 'system');
+
+    const result = await manager.setFolderClassification(
+      'NES',
+      'someFolder',
+      null,
+    );
+
+    expect(
+      result.folderClassifications.overrides.find(
+        (o) => o.coreId === 'NES' && o.folderPath === 'someFolder',
+      ),
+    ).toBeUndefined();
+    expect(
+      result.systemFilesMarks.marked.find(
+        (m) => m.coreId === 'NES' && m.filename === 'someFolder',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('container: writes folder-classifications, clears any system mark', async () => {
+    await manager.addSystemFileMark('NES', 'someFolder');
+    const result = await manager.setFolderClassification(
+      'NES',
+      'someFolder',
+      'container',
+    );
+    expect(
+      result.folderClassifications.overrides.find(
+        (o) => o.coreId === 'NES' && o.folderPath === 'someFolder',
+      )?.classification,
+    ).toBe('container');
+    expect(
+      result.systemFilesMarks.marked.find(
+        (m) => m.coreId === 'NES' && m.filename === 'someFolder',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('batched setFolderClassifications writes each store at most once', async () => {
+    // The batched form is the bulk-action toolbar's path. The
+    // expensive case is N folders × 2 file writes per change; the
+    // dispatcher must collapse to 1 write per file regardless of N.
+    const writeFolderSpy = vi.spyOn(client, 'writeFolderClassifications');
+    const writeMarksSpy = vi.spyOn(client, 'writeSystemFilesMarks');
+
+    const updates = Array.from({ length: 6 }, (_, i) => ({
+      folderPath: `Game${String(i)}`,
+      value: 'atomic' as const,
+    }));
+    const result = await manager.setFolderClassifications('NES', updates);
+
+    // 6 updates → at most 1 write per store.
+    expect(writeFolderSpy).toHaveBeenCalledTimes(1);
+    // No system marks were touched (no folder had one), so the marks
+    // file is left alone.
+    expect(writeMarksSpy).not.toHaveBeenCalled();
+    expect(result.folderClassifications.overrides).toHaveLength(6);
+    writeFolderSpy.mockRestore();
+    writeMarksSpy.mockRestore();
+  });
+
+  it('cache invalidation: cores cache + roms cache for the affected core', async () => {
+    // Cold-warm the cache so we can assert invalidation flips it back.
+    await manager.listAllCoresWithFiles();
+    await manager.listRoms('NES');
+
+    const coresCacheFile = path.join(perTestCacheDir, '127.0.0.1', 'cores.json');
+    const romsCacheFile = path.join(perTestCacheDir, '127.0.0.1', 'roms', 'NES.json');
+    await fs.access(coresCacheFile);
+    await fs.access(romsCacheFile);
+
+    await manager.setFolderClassification('NES', 'someFolder', 'atomic');
+
+    // Both invalidated — the recursiveRomCount changed (cores) and
+    // the kind reflects the override (roms).
+    await expect(fs.access(coresCacheFile)).rejects.toThrow();
+    await expect(fs.access(romsCacheFile)).rejects.toThrow();
+  });
+
+  it('null on a folder with no existing entry is a no-op (no writes)', async () => {
+    const writeFolderSpy = vi.spyOn(client, 'writeFolderClassifications');
+    const writeMarksSpy = vi.spyOn(client, 'writeSystemFilesMarks');
+
+    // Reset something that was never set. No file write should happen
+    // because both withoutFolderOverride and withoutMark are
+    // idempotent (returning the same reference when nothing matched).
+    await manager.setFolderClassification('NES', 'untouchedFolder', null);
+
+    expect(writeFolderSpy).not.toHaveBeenCalled();
+    expect(writeMarksSpy).not.toHaveBeenCalled();
+    writeFolderSpy.mockRestore();
+    writeMarksSpy.mockRestore();
+  });
+});

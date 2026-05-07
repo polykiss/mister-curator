@@ -7,6 +7,9 @@ import { encodeIpcError, IPC_CHANNELS } from '@shared/preload-api';
 import type {
   ConnectResult,
   CoreVisibilityChangeWire,
+  FolderClassificationDispatchResult,
+  FolderClassificationUpdateWire,
+  FolderRowClassification,
   PickedKeyFile,
   RomVisibilityChangeWire,
   SystemFileMarkChangeWire,
@@ -140,14 +143,17 @@ export function registerIpcHandlers(
   );
 
   handle<
-    [string, string, 'container' | 'atomic' | null],
-    FolderClassifications
-  >(IPC_CHANNELS.setFolderClassification, (coreId, folderPath, classification) =>
-    manager.setFolderClassification(
-      coreId,
-      folderPath,
-      classification ?? undefined,
-    ),
+    [string, string, FolderRowClassification | null],
+    FolderClassificationDispatchResult
+  >(IPC_CHANNELS.setFolderClassification, (coreId, folderPath, value) =>
+    manager.setFolderClassification(coreId, folderPath, value),
+  );
+
+  handle<
+    [string, readonly FolderClassificationUpdateWire[]],
+    FolderClassificationDispatchResult
+  >(IPC_CHANNELS.setFolderClassifications, (coreId, updates) =>
+    manager.setFolderClassifications(coreId, updates),
   );
 
   handle<[], void>(IPC_CHANNELS.clearCache, () =>

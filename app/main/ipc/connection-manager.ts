@@ -30,8 +30,21 @@ import type {
   RomVisibilityChange,
   SystemFileMarkChange,
 } from '@shared/mister-client';
-import { EMPTY_FOLDER_CLASSIFICATIONS } from '@shared/folder-classifications';
-import { EMPTY_SYSTEM_FILES_MARKS } from '@shared/system-files-marks';
+import {
+  EMPTY_FOLDER_CLASSIFICATIONS,
+  withFolderOverride,
+  withoutFolderOverride,
+} from '@shared/folder-classifications';
+import {
+  EMPTY_SYSTEM_FILES_MARKS,
+  withMark,
+  withoutMark,
+} from '@shared/system-files-marks';
+import type {
+  FolderClassificationDispatchResult,
+  FolderClassificationUpdateWire,
+  FolderRowClassification,
+} from '@shared/preload-api';
 import { witnessesMatch } from '@app/main/cache/cache-types';
 import type {
   ConnectionStatus,
@@ -364,6 +377,7 @@ export class ConnectionManager {
   private async fetchAndCacheCores(): Promise<CoreEntry[]> {
     const cores = await this.client.listAllCoresWithFiles(
       this.systemFilesMarksCache,
+      this.folderClassificationsCache,
     );
     this.coresCache = cores;
     if (this.currentHost !== null) {
@@ -621,38 +635,146 @@ export class ConnectionManager {
     return this.folderClassificationsCache;
   }
 
+  /**
+   * PR #13 tri-state classification dispatch. Single-folder
+   * convenience wrapper around `setFolderClassifications`. The
+   * `value` axis joins the two existing stores under one IPC:
+   *
+   *   - `'atomic'` / `'container'` write to
+   *     `folder-classifications.json` and clear any matching
+   *     system-mark for `(coreId, basename(folderPath))`.
+   *   - `'system'` writes to `system-files.json` and clears any
+   *     matching folder-classifications override.
+   *   - `null` clears both stores (resets to heuristic).
+   *
+   * Returns fresh snapshots of both stores so the renderer can
+   * refresh its local state in one round trip — see
+   * `FolderClassificationDispatchResult`.
+   */
   async setFolderClassification(
     coreId: string,
     folderPath: string,
-    classification: 'container' | 'atomic' | undefined,
-  ): Promise<FolderClassifications> {
+    value: FolderRowClassification | null,
+  ): Promise<FolderClassificationDispatchResult> {
+    return this.setFolderClassifications(coreId, [{ folderPath, value }]);
+  }
+
+  /**
+   * Batched form of the tri-state dispatch. Drives the bulk-action
+   * toolbar (e.g. "Treat all 600 X68000 folders as ROM"). Reads each
+   * store once, applies every update in memory, and writes each store
+   * at most once. Reduces a 600-folder sweep from 1200 device writes
+   * to two.
+   */
+  async setFolderClassifications(
+    coreId: string,
+    updates: readonly FolderClassificationUpdateWire[],
+  ): Promise<FolderClassificationDispatchResult> {
     this.assertConnected();
-    if (classification === undefined) {
-      await this.client.setFolderClassification({
-        coreId,
-        folderPath,
-        classification: undefined,
-      });
-    } else {
-      const override: FolderClassificationOverride = {
-        coreId,
-        folderPath,
-        classification,
-        setAt: new Date().toISOString(),
+    if (updates.length === 0) {
+      return {
+        folderClassifications: this.folderClassificationsCache,
+        systemFilesMarks: this.systemFilesMarksCache,
       };
-      await this.client.setFolderClassification(override);
     }
+
+    // Read both stores once. Operating on fresh-from-server snapshots
+    // ensures we converge on the right end state even if our
+    // in-memory caches had drifted.
+    let folderClassifications = await this.client.readFolderClassifications();
+    let systemFilesMarks = await this.client.readSystemFilesMarks();
+    const setAt = new Date().toISOString();
+    let classificationsChanged = false;
+    let marksChanged = false;
+
+    for (const u of updates) {
+      const folderName = basenameOfFolderPath(u.folderPath);
+      const beforeClassifications = folderClassifications;
+      const beforeMarks = systemFilesMarks;
+
+      if (u.value === null) {
+        // Reset to heuristic: clear both stores for this folder.
+        folderClassifications = withoutFolderOverride(
+          folderClassifications,
+          coreId,
+          u.folderPath,
+        );
+        systemFilesMarks = withoutMark(systemFilesMarks, coreId, folderName);
+      } else if (u.value === 'system') {
+        // System mark: write to system-files-marks. Drop any
+        // folder-classifications override so it can't re-classify on
+        // the next show-system toggle.
+        folderClassifications = withoutFolderOverride(
+          folderClassifications,
+          coreId,
+          u.folderPath,
+        );
+        systemFilesMarks = withMark(systemFilesMarks, {
+          coreId,
+          filename: folderName,
+          markedAt: setAt,
+        });
+      } else {
+        // 'atomic' or 'container'. Override the heuristic. Drop any
+        // system-mark so the folder reappears in normal view.
+        const override: FolderClassificationOverride = {
+          coreId,
+          folderPath: u.folderPath,
+          classification: u.value,
+          setAt,
+        };
+        folderClassifications = withFolderOverride(folderClassifications, override);
+        systemFilesMarks = withoutMark(systemFilesMarks, coreId, folderName);
+      }
+
+      if (folderClassifications !== beforeClassifications) {
+        classificationsChanged = true;
+      }
+      if (systemFilesMarks !== beforeMarks) {
+        marksChanged = true;
+      }
+    }
+
+    if (classificationsChanged) {
+      await this.client.writeFolderClassifications(folderClassifications);
+    }
+    if (marksChanged) {
+      await this.client.writeSystemFilesMarks(systemFilesMarks);
+    }
+
+    // Re-read from the device — the in-memory copy we just computed
+    // matches what we wrote, but reading back is the canonical
+    // truth and accommodates any concurrent writer.
     this.folderClassificationsCache =
       await this.client.readFolderClassifications();
-    // Folder-classification changes flip Rom.kind (container ↔ atomic)
-    // for the affected core's listRoms output. cores cache is
-    // unaffected (kind isn't part of CoreEntry).
-    if (this.currentHost !== null) {
-      await this.cache.invalidateRomsCache(this.currentHost, coreId).catch(() => {
-        /* swallow */
-      });
+    this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
+
+    // Cache invalidation: classification AND system-mark changes
+    // affect both surfaces.
+    //   - cores list: `recursiveRomCount` reflects atomic/container
+    //     overrides (PR #13) and system-marked folders are filtered
+    //     out entirely by `shouldCountAsRom`.
+    //   - roms list: `Rom.kind` reflects the override; system-marked
+    //     folders are dimmed by the renderer.
+    // Invalidate both so the next read fetches fresh.
+    if (this.currentHost !== null && (classificationsChanged || marksChanged)) {
+      this.coresCache = [];
+      await this.cache
+        .invalidateCoresCache(this.currentHost)
+        .catch(() => {
+          /* swallow */
+        });
+      await this.cache
+        .invalidateRomsCache(this.currentHost, coreId)
+        .catch(() => {
+          /* swallow */
+        });
     }
-    return this.folderClassificationsCache;
+
+    return {
+      folderClassifications: this.folderClassificationsCache,
+      systemFilesMarks: this.systemFilesMarksCache,
+    };
   }
 
   async hideCore(coreId: string): Promise<void> {
@@ -1081,3 +1203,15 @@ export class ConnectionManager {
 
 // Re-exported for callers that want the type without importing isCoreHidden.
 export { isCoreHidden };
+
+/**
+ * Returns the basename component of a slash-joined `folderPath`. Used
+ * by the tri-state dispatch to derive the system-mark filename — the
+ * marks file keys on basename only, mirroring how files are marked.
+ * A top-level folder like `'_translations'` is its own basename;
+ * `'Region/USA/_translations'` resolves to `'_translations'`.
+ */
+function basenameOfFolderPath(folderPath: string): string {
+  const slash = folderPath.lastIndexOf('/');
+  return slash < 0 ? folderPath : folderPath.slice(slash + 1);
+}
