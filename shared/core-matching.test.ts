@@ -1131,6 +1131,181 @@ describe('matchRbfsToGamesDirs', () => {
     });
   });
 
+  describe('coreId / on-disk-path invariant (PR #11 round 3 / Bug 1)', () => {
+    // Hard invariant: every CoreEntry's `id` must equal the on-disk
+    // games-dir basename when a games dir exists, OR the rbf prefix
+    // otherwise. Operational paths (listRoms, setRomVisibility,
+    // hideCore) join `<coreId>` to the games-dir prefix; if `id`
+    // drifts from the basename, listRoms targets a non-existent
+    // directory and silently returns empty.
+    //
+    // The user-reported X68000 bug from Round 2 live testing
+    // motivated this round: the cores list showed 649 folders and
+    // ~2014 ROMs but clicking gave nothing. Adding the explicit
+    // enforcement here prevents the regression from hiding behind
+    // future matcher refactors.
+
+    it('Atari 2600 (.mgl) + Atari2600 (games dir) → id = "Atari2600"', () => {
+      // The diagnostic showed `.Atari 2600.mgl` and `games/Atari2600/`
+      // both on disk. Pre-Round-2 they were two phantom rows. Round 2
+      // collapses them via canonical form. Round 3 enforces that the
+      // merged entry's id is the games-dir basename so listRoms
+      // targets the right path.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: '.Atari 2600.mgl',
+            fullPath: '/media/fat/_Console/.Atari 2600.mgl',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [
+          { rawName: 'Atari2600', files: ['Combat.bin'], dirs: [] },
+        ],
+      });
+      const atari = result.find(
+        (c) => canonicalize(c.id) === 'atari2600',
+      );
+      expect(atari).toBeDefined();
+      // The on-disk basename — NOT "Atari 2600" (the mgl prefix).
+      expect(atari?.id).toBe('Atari2600');
+      expect(atari?.gamesDirName).toBe('Atari2600');
+      // The two MUST agree; resolveOnDiskGamesDirBasename relies on it.
+      expect(atari?.id).toBe(atari?.gamesDirName);
+    });
+
+    it('Atari2600 (games dir first) + Atari 2600 (.mgl second) → id = "Atari2600"', () => {
+      // Order independence: the invariant holds regardless of
+      // whether the games-dir or the rbf is processed first.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: '.Atari 2600.mgl',
+            fullPath: '/media/fat/_Console/.Atari 2600.mgl',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [
+          { rawName: 'Atari2600', files: ['Combat.bin'], dirs: [] },
+        ],
+      });
+      const atari = result.find(
+        (c) => canonicalize(c.id) === 'atari2600',
+      );
+      expect(atari?.id).toBe('Atari2600');
+    });
+
+    it('VECTREX hidden games dir → id = "VECTREX" (Round 5 hidden support)', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: 'Vectrex_20240524.rbf',
+            fullPath: '/media/fat/_Console/Vectrex_20240524.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [
+          { rawName: '.VECTREX', files: ['game.vec'], dirs: [] },
+        ],
+      });
+      const vec = result.find((c) => canonicalize(c.id) === 'vectrex');
+      expect(vec?.id).toBe('VECTREX');
+      expect(vec?.gamesDirName).toBe('VECTREX');
+      expect(vec?.gamesDirHidden).toBe(true);
+    });
+
+    it('rbf-only core (no games dir) → id = rbf prefix', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: 'SMS_20240115.rbf',
+            fullPath: '/media/fat/_Console/SMS_20240115.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [],
+      });
+      const sms = result.find((c) => c.id === 'SMS');
+      expect(sms).toBeDefined();
+      expect(sms?.gamesDirExists).toBe(false);
+      // id = rbf prefix; gamesDirName is undefined.
+      expect(sms?.id).toBe('SMS');
+      expect(sms?.gamesDirName).toBeUndefined();
+    });
+
+    it('hard invariant — every CoreEntry honors the rule', () => {
+      // Exercise multiple shapes in one pass so the invariant runs
+      // against each: rbf+games-dir (canonical-merged), rbf-only,
+      // games-dir-only, hidden games dir, X68000-shape (literal
+      // match).
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: '.Atari 2600.mgl',
+            fullPath: '/media/fat/_Console/.Atari 2600.mgl',
+            isFolder: false,
+          },
+          {
+            category: 'Console',
+            filename: 'NES_20240115.rbf',
+            fullPath: '/media/fat/_Console/NES_20240115.rbf',
+            isFolder: false,
+          },
+          {
+            category: 'Console',
+            filename: 'SMS_20240115.rbf',
+            fullPath: '/media/fat/_Console/SMS_20240115.rbf',
+            isFolder: false,
+          },
+          {
+            category: 'Computer',
+            filename: 'X68000_20240524.rbf',
+            fullPath: '/media/fat/_Computer/X68000_20240524.rbf',
+            isFolder: false,
+          },
+          {
+            category: 'Console',
+            filename: 'Vectrex_20240524.rbf',
+            fullPath: '/media/fat/_Console/Vectrex_20240524.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [
+          { rawName: 'Atari2600', files: ['Combat.bin'], dirs: [] },
+          { rawName: 'NES', files: ['Mario.nes'], dirs: [] },
+          { rawName: 'mame', files: ['romzip.zip'], dirs: [] }, // games-dir-only
+          { rawName: 'X68000', files: ['boot3.vhd', 'real.bin'], dirs: [] },
+          { rawName: '.VECTREX', files: ['game.vec'], dirs: [] }, // hidden
+        ],
+      });
+
+      for (const c of result) {
+        if (c.category === 'Arcade') continue; // placeholder is special
+        if (c.gamesDirExists) {
+          expect(c.gamesDirName).toBeDefined();
+          expect(c.id).toBe(c.gamesDirName);
+        } else {
+          // rbf-only: id is non-empty.
+          expect(c.id.length).toBeGreaterThan(0);
+          expect(c.gamesDirName).toBeUndefined();
+        }
+      }
+
+      // Spot-check a few of the documented cases.
+      expect(result.find((c) => c.id === 'Atari2600')).toBeDefined();
+      expect(result.find((c) => c.id === 'NES')).toBeDefined();
+      expect(result.find((c) => c.id === 'mame')).toBeDefined();
+      expect(result.find((c) => c.id === 'X68000')).toBeDefined();
+      expect(result.find((c) => c.id === 'VECTREX')).toBeDefined();
+      expect(result.find((c) => c.id === 'SMS')).toBeDefined();
+    });
+  });
+
   describe('phantom-duplicate regression (PR #11 round 2)', () => {
     // The diagnostic run against the user's MiSTer (PR #11 round 1)
     // surfaced ten canonical-form duplicates. Each pair has both

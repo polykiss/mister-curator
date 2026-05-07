@@ -694,6 +694,29 @@ describe('RealMisterClient', () => {
   });
 
   describe('listRoms', () => {
+    it('targets the games-dir basename via the coreId argument (PR #11 round 3 / Bug 1)', async () => {
+      // The matcher's invariant guarantees CoreEntry.id === on-disk
+      // basename when a games dir exists. listRoms uses that id
+      // directly to build `/media/fat/games/<id>/`. This test pins
+      // the contract: callers can pass the matcher-supplied id and
+      // get the right path, even when the original mgl/rbf prefix
+      // had spaces or punctuation that canonicalize away.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      // The matcher would have collapsed `.Atari 2600.mgl` and
+      // `games/Atari2600/` into one CoreEntry with id="Atari2600".
+      // Calling listRoms with that id must hit /media/fat/games/Atari2600/.
+      await client.listRoms('Atari2600');
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain(`cd '/media/fat/games/Atari2600'`);
+      // And critically — it does NOT target the rbf-prefix variant.
+      expect(script).not.toContain('Atari 2600');
+    });
+
     it('parses files + folder classification flags into Rom entries', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);

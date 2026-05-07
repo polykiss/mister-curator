@@ -406,6 +406,26 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     });
   }
 
+  // Hard invariant (PR #11 round 3 / Bug 1): every CoreEntry's `id`
+  // MUST be the on-disk games-dir basename when a games dir exists,
+  // and MUST be the rbf prefix otherwise. Operational paths
+  // (`listRoms`, `setRomVisibility`, `hideCore`) join `<coreId>` to
+  // the games-dir prefix; if `id` drifts from the on-disk basename,
+  // those paths target a non-existent directory and silently return
+  // empty.
+  //
+  // The games-dir loop already overrides `id = visibleName` whenever
+  // it processes a games dir, but defensive enforcement here makes
+  // the invariant unconditional and survives future edits to either
+  // loop. The rbf-only branch has nothing to enforce — `id = prefix`
+  // is set at insertion and never reassigned.
+  for (const e of byKey.values()) {
+    if (e.gamesDirExists && e.gamesDirName !== undefined) {
+      e.id = e.gamesDirName;
+      e.name = e.gamesDirName;
+    }
+  }
+
   const allRaw: CoreEntry[] = Array.from(byKey.values()).map((e) => ({
     id: e.id,
     name: e.name,
