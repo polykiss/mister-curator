@@ -531,6 +531,65 @@ describe('RealMisterClient', () => {
       expect(findRecursive).toHaveLength(1);
     });
 
+    it('matches the diagnostic-observed real-MiSTer shape (PR #11 round 2 regression)', async () => {
+      // Mini-snapshot of the user's real MiSTer that exhibits the
+      // four bugs the diagnostic surfaced. After the round 2
+      // rewrite:
+      //   - No `_hidden` synthetic core (the shell prune drops
+      //     `_Console/._hidden/` from enumeration).
+      //   - No `Atari 2600` + `Atari2600` duplicate (canonical-form
+      //     merging collapses them).
+      //   - Vectrex `Overlays/` filtered (shouldCountAsRom drops
+      //     ancestor system folders) → recursiveRomCount = 0.
+      //   - Empty orphan `games/Adam/` dropped (orphan filter).
+      //   - `_Console (autoboot)/SEGA 32X.mgl` enumerated as a
+      //     standalone core (autoboot category dir included).
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      // Build a stdout that mimics the real shape.
+      const lines: string[] = [
+        // _Console rbfs (visible)
+        'P\tConsole\t/media/fat/_Console/Vectrex_20240524.rbf',
+        'P\tConsole\t/media/fat/_Console/.Atari 2600.mgl',
+        // Autoboot — the dir the matcher used to miss
+        'P\tConsole\t/media/fat/_Console (autoboot)/SEGA 32X.mgl',
+        // Games-dir announcements
+        'G\tVECTREX',
+        'GD\tVECTREX\tOverlays',
+        'G\tAtari2600',
+        'GF\tAtari2600\tCombat.bin',
+        'G\tAdam', // empty
+        'A',
+      ];
+      // Vectrex/Overlays has 90 image files — pre-Round-2 those
+      // counted; now they don't.
+      for (let i = 0; i < 90; i += 1) {
+        lines.push(`F\tVECTREX/Overlays/grav-bezel-${String(i)}.png`);
+      }
+      mocks.execCommand.mockResolvedValueOnce(execOk([...lines, ''].join('\n')));
+
+      const cores = await client.listAllCoresWithFiles();
+      const ids = cores.map((c) => c.id);
+
+      // No phantom `_hidden` core (the shell prune killed it).
+      expect(ids).not.toContain('_hidden');
+      // No duplicate Atari 2600 / Atari2600 — they collapse to one.
+      const atariRows = cores.filter(
+        (c) => c.id.toLowerCase().replace(/[^a-z0-9]/g, '') === 'atari2600',
+      );
+      expect(atariRows).toHaveLength(1);
+      // Empty orphan dropped.
+      expect(ids).not.toContain('Adam');
+      // Autoboot entry surfaced as its own core.
+      expect(ids).toContain('SEGA 32X');
+      // Vectrex's Overlays filtered → 0 ROMs (cores-list count
+      // matches what listRoms would return).
+      const vectrex = cores.find((c) => c.id === 'VECTREX');
+      expect(vectrex?.romCount).toBe(0);
+      expect(vectrex?.recursiveRomCount).toBe(0);
+    });
+
     it('aggregates F-lines through shouldCountAsRom — Vectrex/Overlays excluded', async () => {
       // Regression: pre-Round-2, this shape contributed 90 to the
       // recursive count. The unified filter now drops every file
