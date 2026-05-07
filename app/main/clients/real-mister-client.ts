@@ -255,6 +255,13 @@ export class RealMisterClient implements IMisterClient {
     }
 
     const rbfs: RawRbfInput[] = [];
+    // Tracks folder-shaped core dirs we've already emitted an rbf
+    // record for — deduplicates the case where multiple rbf/mgl
+    // versions sit inside the same folder-shaped core (e.g.
+    // `_Computer/AO486/AO486_20240115.rbf` and
+    // `_Computer/AO486/AO486_20231215.rbf` both surface
+    // `_Computer/AO486` as the core dir).
+    const folderCoreDirs = new Set<string>();
     // Aggregate per-games-dir entries from the GF / GD lines so the
     // matcher can apply the system-file filter to derive romCount.
     interface DirBuilder {
@@ -303,20 +310,42 @@ export class RealMisterClient implements IMisterClient {
         // on the device. Triggers the synthetic Arcade placeholder row
         // regardless of the directory's contents.
         arcadeDirExists = true;
-      } else if (tag === 'R' && parts.length >= 4) {
+      } else if (tag === 'P' && parts.length >= 3) {
+        // P-line: rbf/mgl found by the per-category find. Format:
+        //   P\t<category>\t<fullPath>
+        // fullPath starts with one of the configured category dirs.
+        // Top-level files (`<catDir>/<filename>`) become file rbfs.
+        // Files at depth 2 (`<catDir>/<folder>/<rbf>`) collapse to a
+        // single folder-shaped rbf record per parent dir.
         const categoryName = parts[1] ?? '';
-        const kind = parts[2] ?? '';
-        const filename = parts.slice(3).join('\t');
+        const fullPath = parts.slice(2).join('\t');
         const category = parseCategory(categoryName);
         if (!category) continue;
-        const dirForCategory = MISTER_CATEGORY_DIRS.find((c) => c.category === category)?.dir;
-        if (dirForCategory === undefined) continue;
-        rbfs.push({
-          category,
-          filename,
-          fullPath: `${dirForCategory}/${filename}`,
-          isFolder: kind === 'dir',
-        });
+        const catDir = MISTER_CATEGORY_DIRS.find(
+          (c) => c.category === category && fullPath.startsWith(`${c.dir}/`),
+        )?.dir;
+        if (catDir === undefined) continue;
+        const rel = fullPath.slice(catDir.length + 1);
+        const slash = rel.indexOf('/');
+        if (slash < 0) {
+          rbfs.push({
+            category,
+            filename: rel,
+            fullPath,
+            isFolder: false,
+          });
+        } else {
+          const folder = rel.slice(0, slash);
+          const folderFullPath = `${catDir}/${folder}`;
+          if (folderCoreDirs.has(folderFullPath)) continue;
+          folderCoreDirs.add(folderFullPath);
+          rbfs.push({
+            category,
+            filename: folder,
+            fullPath: folderFullPath,
+            isFolder: true,
+          });
+        }
       } else if (tag === 'G' && parts.length >= 2) {
         // Games-dir announcement. Initialises the bucket so empty
         // dirs (no GF/GD lines following) still appear in the matcher
@@ -1181,27 +1210,42 @@ export class RealMisterClient implements IMisterClient {
 }
 
 function buildListAllCoresScript(): string {
-  // Both `.rbf` (compiled FPGA cores) and `.mgl` (XML pointer cores)
-  // count as cores. A subdirectory under a category dir is only treated
-  // as a folder-shaped core when it contains at least one such file
-  // directly inside — otherwise it's a user-created organizational
-  // folder (e.g. `_alternatives`) and we ignore it.
+  // PR #11 round 2 / Change 1: one `find` per category dir does the
+  // entire structural enumeration. Replaces the per-entry shell loop
+  // that ran a second find inside each top-level subdir to check for
+  // folder-shaped cores — that pattern (a) had a per-folder fork
+  // cost we couldn't afford, and (b) treated `_Console/._hidden/` as
+  // a folder-shaped core because the dir contained rbfs (it's the
+  // firmware's stash; we MUST NOT enumerate inside it).
+  //
+  // The new shape:
+  //
+  //   find "$catDir" -mindepth 1 -maxdepth 2 \
+  //     \( -type d -name '.*' -prune \) -o \
+  //     \( -type f \( -iname '*.rbf' -o -iname '*.mgl' \) -printf '%p\n' \)
+  //
+  // The `-prune` clause skips any DIRECTORY whose name starts with
+  // a dot — `._hidden`, `._foo`, etc. Top-level dot-prefixed FILES
+  // (`.Atari 2600.mgl`, `.Game Gear.mgl`) are user-hidden cores and
+  // the prune doesn't touch them.
+  //
+  // Output: one line per rbf/mgl, full path. Top-level files print
+  // as `<catDir>/<filename>`; folder-shaped cores print as
+  // `<catDir>/<folder>/<rbf>`. JS picks the parent on slash and
+  // dedupes folder-shaped emission.
+  //
+  // The R record format: `R\t<category>\t<file|dir>\t<fullPath>`.
+  // Including the full path lets the matcher disambiguate when two
+  // category dirs share a category — e.g. `_Console` and
+  // `_Console (autoboot)` both have category=Console; the rbf in
+  // either dir resolves to the right `fullPath`.
   const dirsScript = MISTER_CATEGORY_DIRS.map(({ category, dir }) => {
     return [
       `if [ -d ${shellQuote(dir)} ]; then`,
-      `  cd ${shellQuote(dir)}`,
-      '  for entry in * .[!.]*; do',
-      '    [ -e "$entry" ] || continue',
-      '    if [ -d "$entry" ]; then',
-      `      if find "$entry" -maxdepth 1 -type f \\( -iname '*.rbf' -o -iname '*.mgl' \\) 2>/dev/null | grep -q .; then`,
-      `        printf 'R\\t${category}\\tdir\\t%s\\n' "$entry"`,
-      '      fi',
-      '    elif [ -f "$entry" ]; then',
-      '      case "$entry" in',
-      `        *.rbf|*.RBF|*.mgl|*.MGL) printf 'R\\t${category}\\tfile\\t%s\\n' "$entry" ;;`,
-      '      esac',
-      '    fi',
-      '  done',
+      `  find ${shellQuote(dir)} -mindepth 1 -maxdepth 2 \\`,
+      `    \\( -type d -name '.*' -prune \\) -o \\`,
+      `    \\( -type f \\( -iname '*.rbf' -o -iname '*.mgl' \\) -printf 'P\\t${category}\\t%p\\n' \\) \\`,
+      `    2>/dev/null`,
       'fi',
     ].join('\n');
   }).join('\n');
@@ -1372,6 +1416,7 @@ function parseListAllCoresShellOutput(stdout: string): {
   readonly arcadeDirExists: boolean;
 } {
   const rbfs: RawRbfInput[] = [];
+  const folderCoreDirs = new Set<string>();
   interface DirBuilder {
     files: string[];
     dirs: string[];
@@ -1412,22 +1457,36 @@ function parseListAllCoresShellOutput(stdout: string): {
     const tag = parts[0];
     if (tag === 'A') {
       arcadeDirExists = true;
-    } else if (tag === 'R' && parts.length >= 4) {
+    } else if (tag === 'P' && parts.length >= 3) {
       const categoryName = parts[1] ?? '';
-      const kind = parts[2] ?? '';
-      const filename = parts.slice(3).join('\t');
+      const fullPath = parts.slice(2).join('\t');
       const category = parseCategory(categoryName);
       if (!category) continue;
-      const dirForCategory = MISTER_CATEGORY_DIRS.find(
-        (c) => c.category === category,
+      const catDir = MISTER_CATEGORY_DIRS.find(
+        (c) => c.category === category && fullPath.startsWith(`${c.dir}/`),
       )?.dir;
-      if (dirForCategory === undefined) continue;
-      rbfs.push({
-        category,
-        filename,
-        fullPath: `${dirForCategory}/${filename}`,
-        isFolder: kind === 'dir',
-      });
+      if (catDir === undefined) continue;
+      const rel = fullPath.slice(catDir.length + 1);
+      const slash = rel.indexOf('/');
+      if (slash < 0) {
+        rbfs.push({
+          category,
+          filename: rel,
+          fullPath,
+          isFolder: false,
+        });
+      } else {
+        const folder = rel.slice(0, slash);
+        const folderFullPath = `${catDir}/${folder}`;
+        if (folderCoreDirs.has(folderFullPath)) continue;
+        folderCoreDirs.add(folderFullPath);
+        rbfs.push({
+          category,
+          filename: folder,
+          fullPath: folderFullPath,
+          isFolder: true,
+        });
+      }
     } else if (tag === 'G' && parts.length >= 2) {
       const rawName = parts[1] ?? '';
       if (rawName !== '') ensureDirBuilder(rawName);

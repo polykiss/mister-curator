@@ -293,7 +293,7 @@ describe('RealMisterClient', () => {
   });
 
   describe('listAllCoresWithFiles', () => {
-    it('parses R-tagged rbf entries and G-tagged games-dir entries into CoreEntry[]', async () => {
+    it('parses P-tagged rbf entries and G-tagged games-dir entries into CoreEntry[]', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -309,18 +309,24 @@ describe('RealMisterClient', () => {
       for (let i = 0; i < 7; i += 1) snesGames.push(`GF\tSNES\tgame${String(i)}.sfc`);
       for (let i = 0; i < 2; i += 1) snesGames.push(`GF\tSNES\t.hidden${String(i)}.sfc`);
 
+      // PR #11 round 2 / Change 1: P-line records carry the FULL
+      // path emitted by `find` so the parser can disambiguate
+      // category dirs that share a category (e.g. `_Console` and
+      // `_Console (autoboot)` are both Console). Folder-shaped
+      // cores surface as a depth-2 path; the parser dedupes by
+      // parent dir.
       const stdout = [
-        'R\tConsole\tfile\tNES_20240115.rbf',
-        'R\tConsole\tfile\tNES_20231215.rbf',
-        'R\tConsole\tfile\tSNES_20240115.rbf',
-        'R\tConsole\tfile\tSMS_20240115.rbf',
-        'R\tConsole\tfile\tGame Gear.mgl',
-        'R\tConsole\tfile\tAtari 2600.mgl',
-        'R\tConsole\tfile\tMega Duck.mgl',
-        'R\tComputer\tdir\tAO486',
-        'R\tComputer\tfile\tAtari800_20240220.rbf',
-        'R\tArcade\tfile\tGalaga_20240115.rbf',
-        'R\tArcade\tfile\tPacman_20240310.rbf',
+        'P\tConsole\t/media/fat/_Console/NES_20240115.rbf',
+        'P\tConsole\t/media/fat/_Console/NES_20231215.rbf',
+        'P\tConsole\t/media/fat/_Console/SNES_20240115.rbf',
+        'P\tConsole\t/media/fat/_Console/SMS_20240115.rbf',
+        'P\tConsole\t/media/fat/_Console/Game Gear.mgl',
+        'P\tConsole\t/media/fat/_Console/Atari 2600.mgl',
+        'P\tConsole\t/media/fat/_Console/Mega Duck.mgl',
+        'P\tComputer\t/media/fat/_Computer/AO486/AO486_20240115.rbf',
+        'P\tComputer\t/media/fat/_Computer/Atari800_20240220.rbf',
+        'P\tArcade\t/media/fat/_Arcade/Galaga_20240115.rbf',
+        'P\tArcade\t/media/fat/_Arcade/Pacman_20240310.rbf',
         'G\tNES',
         ...nesGames,
         'G\tSNES',
@@ -398,11 +404,20 @@ describe('RealMisterClient', () => {
       await client.listAllCoresWithFiles();
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
-      // The case branch for files matches both extensions, both cases.
-      expect(script).toContain('*.rbf|*.RBF|*.mgl|*.MGL');
+      // The find clause matches both extensions, both cases.
+      expect(script).toMatch(/-iname '\*\.rbf'/);
+      expect(script).toMatch(/-iname '\*\.mgl'/);
     });
 
-    it('emits a shell script that gates folder-shaped cores on rbf/mgl content', async () => {
+    it('emits a shell script that prunes dot-prefixed subdirs and enumerates _Console (autoboot)', async () => {
+      // PR #11 round 2 / Change 1: the structural pass uses one
+      // `find` per category dir with a `-prune` clause that skips
+      // every dot-prefixed subdirectory. That stops the matcher
+      // from treating `_Console/._hidden/` (the firmware's stash)
+      // as a folder-shaped core. The autoboot category dir is in
+      // the same loop so .mgl files in
+      // `/media/fat/_Console (autoboot)/` get enumerated too —
+      // they were missed entirely pre-Round-2.
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -411,11 +426,16 @@ describe('RealMisterClient', () => {
       await client.listAllCoresWithFiles();
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
-      // The folder branch uses find -iname for both extensions before
-      // emitting an R-line, so user-created folders without a .rbf or
-      // .mgl inside (e.g. _alternatives, _Organized) are skipped.
-      expect(script).toMatch(/find ".*?".*-iname '\*\.rbf'/);
-      expect(script).toMatch(/-iname '\*\.mgl'/);
+      // One find per category dir with -mindepth 1 -maxdepth 2.
+      expect(script).toMatch(/find '\/media\/fat\/_Console' -mindepth 1 -maxdepth 2/);
+      expect(script).toMatch(
+        /find '\/media\/fat\/_Console \(autoboot\)' -mindepth 1 -maxdepth 2/,
+      );
+      expect(script).toMatch(/find '\/media\/fat\/_Computer' -mindepth 1 -maxdepth 2/);
+      // The prune clause skips dot-prefixed subdirs.
+      expect(script).toContain(`-type d -name '.*' -prune`);
+      // Output format: one line per rbf/mgl with full path.
+      expect(script).toMatch(/-printf 'P\\t.*?\\t%p\\n'/);
     });
 
     it('emits an arcade-dir probe so the placeholder appears whenever _Arcade exists', async () => {
