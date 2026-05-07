@@ -311,10 +311,9 @@ describe('RealMisterClient', () => {
 
       // PR #11 round 2 / Change 1: P-line records carry the FULL
       // path emitted by `find` so the parser can disambiguate
-      // category dirs that share a category (e.g. `_Console` and
-      // `_Console (autoboot)` are both Console). Folder-shaped
-      // cores surface as a depth-2 path; the parser dedupes by
-      // parent dir.
+      // folder-shaped cores (e.g. `_Computer/AO486/AO486.rbf` at
+      // depth 2) from flat ones (`_Console/NES.rbf` at depth 1).
+      // The parser dedupes folder-shaped cores by parent dir.
       const stdout = [
         'P\tConsole\t/media/fat/_Console/NES_20240115.rbf',
         'P\tConsole\t/media/fat/_Console/NES_20231215.rbf',
@@ -409,15 +408,18 @@ describe('RealMisterClient', () => {
       expect(script).toMatch(/-iname '\*\.mgl'/);
     });
 
-    it('emits a shell script that prunes dot-prefixed subdirs and enumerates _Console (autoboot)', async () => {
-      // PR #11 round 2 / Change 1: the structural pass uses one
-      // `find` per category dir with a `-prune` clause that skips
-      // every dot-prefixed subdirectory. That stops the matcher
-      // from treating `_Console/._hidden/` (the firmware's stash)
-      // as a folder-shaped core. The autoboot category dir is in
-      // the same loop so .mgl files in
-      // `/media/fat/_Console (autoboot)/` get enumerated too —
-      // they were missed entirely pre-Round-2.
+    it('emits a shell script that prunes dot subdirs and skips _Console (autoboot)', async () => {
+      // PR #11 round 3 / Bug 2: the autoboot dir holds firmware
+      // shortcuts ("Sony PlayStation.mgl" etc.) that reference
+      // existing cores under canonical-mismatched names. They
+      // surfaced as 10 phantom rows post-Round-2 because nothing
+      // in the user's games dirs canonicalised to "sonyplaystation"
+      // or "nintendo64". Round 3 drops the dir from
+      // MISTER_CATEGORY_DIRS so the shell never enumerates it.
+      //
+      // The dot-prefixed subdir prune (Round 2 / Change 1) stays:
+      // `_Console/._hidden/` would otherwise leak as a phantom
+      // folder-shaped core.
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -428,14 +430,13 @@ describe('RealMisterClient', () => {
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
       // One find per category dir with -mindepth 1 -maxdepth 2.
       expect(script).toMatch(/find '\/media\/fat\/_Console' -mindepth 1 -maxdepth 2/);
-      expect(script).toMatch(
-        /find '\/media\/fat\/_Console \(autoboot\)' -mindepth 1 -maxdepth 2/,
-      );
       expect(script).toMatch(/find '\/media\/fat\/_Computer' -mindepth 1 -maxdepth 2/);
       // The prune clause skips dot-prefixed subdirs.
       expect(script).toContain(`-type d -name '.*' -prune`);
       // Output format: one line per rbf/mgl with full path.
       expect(script).toMatch(/-printf 'P\\t.*?\\t%p\\n'/);
+      // Round 3: autoboot dir is intentionally NOT enumerated.
+      expect(script).not.toContain('_Console (autoboot)');
     });
 
     it('emits an arcade-dir probe so the placeholder appears whenever _Arcade exists', async () => {
@@ -531,29 +532,31 @@ describe('RealMisterClient', () => {
       expect(findRecursive).toHaveLength(1);
     });
 
-    it('matches the diagnostic-observed real-MiSTer shape (PR #11 round 2 regression)', async () => {
+    it('matches the diagnostic-observed real-MiSTer shape (PR #11 round 3 regression)', async () => {
       // Mini-snapshot of the user's real MiSTer that exhibits the
-      // four bugs the diagnostic surfaced. After the round 2
-      // rewrite:
+      // bugs the diagnostic surfaced. After Round 2 + Round 3:
       //   - No `_hidden` synthetic core (the shell prune drops
       //     `_Console/._hidden/` from enumeration).
-      //   - No `Atari 2600` + `Atari2600` duplicate (canonical-form
-      //     merging collapses them).
+      //   - No duplicate row when an mgl name canonicalises to a
+      //     games-dir basename — `.Atari 2600.mgl` + `Atari2600/`
+      //     collapse to one row whose id is `Atari2600` (Bug 1
+      //     hard invariant: id === gamesDirBasename).
       //   - Vectrex `Overlays/` filtered (shouldCountAsRom drops
       //     ancestor system folders) → recursiveRomCount = 0.
       //   - Empty orphan `games/Adam/` dropped (orphan filter).
-      //   - `_Console (autoboot)/SEGA 32X.mgl` enumerated as a
-      //     standalone core (autoboot category dir included).
+      //   - No `_Console (autoboot)/` enumeration: autoboot is
+      //     intentionally NOT in MISTER_CATEGORY_DIRS (Round 3
+      //     Bug 2). The shell would not emit a P-line for it; the
+      //     stdout fixture mirrors that.
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
       // Build a stdout that mimics the real shape.
       const lines: string[] = [
-        // _Console rbfs (visible)
+        // _Console rbfs (visible). Note: no autoboot P-line — the
+        // shell does not enumerate `_Console (autoboot)/` post-Round 3.
         'P\tConsole\t/media/fat/_Console/Vectrex_20240524.rbf',
         'P\tConsole\t/media/fat/_Console/.Atari 2600.mgl',
-        // Autoboot — the dir the matcher used to miss
-        'P\tConsole\t/media/fat/_Console (autoboot)/SEGA 32X.mgl',
         // Games-dir announcements
         'G\tVECTREX',
         'GD\tVECTREX\tOverlays',
@@ -574,15 +577,20 @@ describe('RealMisterClient', () => {
 
       // No phantom `_hidden` core (the shell prune killed it).
       expect(ids).not.toContain('_hidden');
-      // No duplicate Atari 2600 / Atari2600 — they collapse to one.
+      // No duplicate Atari 2600 / Atari2600 — they collapse to one
+      // and the id is the on-disk games-dir basename (Bug 1).
       const atariRows = cores.filter(
         (c) => c.id.toLowerCase().replace(/[^a-z0-9]/g, '') === 'atari2600',
       );
       expect(atariRows).toHaveLength(1);
+      expect(atariRows[0]?.id).toBe('Atari2600');
       // Empty orphan dropped.
       expect(ids).not.toContain('Adam');
-      // Autoboot entry surfaced as its own core.
-      expect(ids).toContain('SEGA 32X');
+      // Round 3 Bug 2: no autoboot phantom row. None of the
+      // autoboot mgl names should surface as standalone cores.
+      expect(ids).not.toContain('SEGA 32X');
+      expect(ids).not.toContain('Sony PlayStation');
+      expect(ids).not.toContain('Nintendo 64');
       // Vectrex's Overlays filtered → 0 ROMs (cores-list count
       // matches what listRoms would return).
       const vectrex = cores.find((c) => c.id === 'VECTREX');
