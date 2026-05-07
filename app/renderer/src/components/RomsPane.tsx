@@ -878,8 +878,16 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         right-edge stack (Round 3 / SYSTEM.md §5). The
                         eye toggle owns the far-right slot so the
                         primary action is always at the same screen
-                        position across cores and ROMs lists. */}
-                    <TableCell className="w-10">
+                        position across cores and ROMs lists.
+                        `py-0`: the icon button is h-8 (32px); the
+                        TableCell default `py-2` would push the cell
+                        content to 48px and force the row past its
+                        h-10 design height. With py-0 the row stays
+                        at 40px and `align-middle` (TableCell default)
+                        keeps the button vertically centered — same
+                        result the cores pane gets from `flex
+                        items-center` on the row. */}
+                    <TableCell className="w-10 py-0">
                       <Button
                         variant="ghost"
                         size="icon"
@@ -893,19 +901,19 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         <MoreHorizontal strokeWidth={1.5} />
                       </Button>
                     </TableCell>
-                    {/* Combined density + eye column. Round 5: the
-                        density rectangle sits flush against the eye
-                        button's left edge, and the whole stack hugs
-                        the row's far-right edge — same shape as the
-                        cores pane's right-edge stack. System rows
+                    {/* Combined density + eye column. The wrapper's
+                        `h-full` lets the density rectangle and eye
+                        button stretch to the row's actual height —
+                        same flex bridge the cores pane uses. The
+                        `<td>` here has `p-0`, the inner flex has
+                        `items-stretch`, and DensityBar's hardcoded
+                        h-10 sits flush against the eye button with
+                        no gap utility class between them. System rows
                         skip the rectangle; the gear icon + dimming
                         already says "read-only", so the eye-icon
-                        slot reads as "read-only" copy.
-                        `h-10 items-stretch` ensures the rectangle
-                        renders full row height (40px) regardless of
-                        sibling cells' intrinsic heights. */}
+                        slot reads as "read-only" copy. */}
                     <TableCell className="p-0">
-                      <div className="flex h-10 items-stretch justify-end">
+                      <div className="flex h-full shrink-0 items-stretch">
                         {!isSystem ? (
                           <DensityBar
                             floor="bg-elevated"
@@ -924,8 +932,12 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         ) : (
                           // Eye / EyeOff toggle — always visible at
                           // rest (Round 3 Issue 1). Hover lifts
-                          // opacity. `canMutate` gates against a
-                          // lost-connection session.
+                          // opacity on row-hover (matches cores pane,
+                          // which uses the same `group-hover/row`
+                          // pattern via the `group/row` class on
+                          // TableRow from the Table primitive).
+                          // `canMutate` gates against a lost-
+                          // connection session.
                           <Button
                             variant="ghost"
                             size="icon"
@@ -943,7 +955,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                                 ? `Show ${rom.displayName}`
                                 : `Hide ${rom.displayName}`
                             }
-                            className="self-center opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
+                            className="self-center opacity-70 transition-opacity group-hover/row:opacity-100 focus-visible:opacity-100"
                           >
                             {rom.hidden ? (
                               <EyeOff strokeWidth={1.5} />
