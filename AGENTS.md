@@ -106,6 +106,23 @@ Update it before changing consumers.
 - Repo / package / binary: `mister-curator`
 - App data folder: resolved via Electron's `app.getPath('userData')` —
   yields `MiSTerCurator/` on each platform automatically
+- App-local cache directory: `<userData>/cache/<host>/` (PR #12). One
+  subdirectory per MiSTer host. Holds:
+  - `cores.json` — last `listAllCoresWithFiles` result + the on-device
+    mtime witnesses used to validate it on next connect.
+  - `roms/<coreId>.json` — last `listRoms` result(s) per core, keyed
+    internally by `subPath`. LRU-evicted at 100 files per host.
+
+  Cold-connect-then-warm-reconnect benchmark on a real MiSTer goes
+  from ~7s → ~500ms once the cache is populated. The cache layer
+  validates with one-shot `stat` calls on the device — no on-device
+  writes for cache management, no agent code. Safe to delete the
+  directory at any time; next connect rebuilds it. Known staleness
+  caveat: a ROM file added inside an existing core's games dir via
+  SFTP doesn't bump the cores-list witnesses (the parent `games/`
+  mtime only changes on top-level renames), so the cores-list
+  romCount can read stale until Refresh. Drilling into the affected
+  core picks up the change correctly via the listRoms cache.
 - On-MiSTer agent directory: `/tmp/mistercurator/`
 - On-MiSTer state directory: `/media/fat/.mistercurator/` — holds the
   small JSON state files the app persists across sessions:

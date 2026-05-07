@@ -4,6 +4,8 @@ import { app, BrowserWindow, shell } from 'electron';
 
 import { IPC_CHANNELS } from '@shared/preload-api';
 
+import { CacheManager } from '@app/main/cache/cache-manager';
+import type { CacheEvent } from '@app/main/cache/cache-types';
 import { createMisterClient } from '@app/main/clients';
 import { ConnectionManager } from '@app/main/ipc/connection-manager';
 import { registerIpcHandlers } from '@app/main/ipc/register';
@@ -11,6 +13,25 @@ import { ProfileStore } from '@app/main/storage/profile-store';
 
 function resolveClientMode(): 'real' | 'fake' {
   return process.env['MISTERCURATOR_CLIENT_MODE'] === 'fake' ? 'fake' : 'real';
+}
+
+/**
+ * Build the dev-time cache event logger. Off by default; enable with
+ * `MISTERCURATOR_CACHE_LOG=1` to confirm hit/miss/stale behavior
+ * during development. The renderer never sees these — they're a
+ * main-process diagnostic only.
+ */
+function cacheEventLogger(): ((event: CacheEvent) => void) | undefined {
+  if (process.env['MISTERCURATOR_CACHE_LOG'] !== '1') return undefined;
+  return (event: CacheEvent): void => {
+    const tag = `cache.${event.kind}`;
+    const ctx: string[] = [`surface=${event.surface}`, `host=${event.host}`];
+    if (event.coreId !== undefined) ctx.push(`coreId=${event.coreId}`);
+    if (event.subPath !== undefined) ctx.push(`subPath="${event.subPath}"`);
+    if (event.evictedCoreId !== undefined) ctx.push(`evicted=${event.evictedCoreId}`);
+    if (event.note !== undefined) ctx.push(`note="${event.note}"`);
+    process.stderr.write(`${tag} ${ctx.join(' ')}\n`);
+  };
 }
 
 function createWindow(): BrowserWindow {
@@ -54,7 +75,15 @@ void app.whenReady().then(() => {
   });
 
   const client = createMisterClient(resolveClientMode());
-  const manager = new ConnectionManager(client, profileStore);
+  // PR #12 cache. Lives at <userData>/cache/<host>/. Documented in
+  // AGENTS.md so users / support can locate it for diagnostic
+  // deletion. The optional logger is gated on
+  // MISTERCURATOR_CACHE_LOG=1 so dev runs can confirm hit/miss
+  // behavior without flooding production stderr.
+  const cache = new CacheManager(path.join(app.getPath('userData'), 'cache'), {
+    onEvent: cacheEventLogger(),
+  });
+  const manager = new ConnectionManager(client, profileStore, cache);
 
   registerIpcHandlers(manager, profileStore);
 

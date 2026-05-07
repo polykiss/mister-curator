@@ -43,3 +43,44 @@ export const HIDEABLE_CATEGORIES: ReadonlySet<CoreCategory> = new Set([
   'Utility',
   'Unknown',
 ]);
+
+/**
+ * Witness paths the cores-cache (cores.json) validates against on
+ * each connect. Mtime changes on any of these mean a rename or new
+ * core — exactly what `listAllCoresWithFiles` would surface
+ * differently. Notably absent: `_Arcade` (read-only, mutations are
+ * rare and the placeholder row doesn't carry user data) and per-core
+ * `games/<coreId>` (those are the listRoms cache's witnesses, not
+ * the cores cache's).
+ *
+ * Documented staleness: a ROM added inside an existing core's games
+ * dir via SFTP changes `games/<coreId>` mtime but NOT `games/`
+ * mtime. The cores list's romCount field will read stale until the
+ * user clicks Refresh. Acceptable for v0; the listRoms cache picks
+ * up the same change correctly when the user drills in. See PR #12
+ * description for the design rationale.
+ */
+export const CORES_CACHE_WITNESS_PATHS: readonly string[] = [
+  '/media/fat/_Console',
+  '/media/fat/_Computer',
+  '/media/fat/_Other',
+  '/media/fat/_Utility',
+  MISTER_GAMES_DIR,
+];
+
+/**
+ * Build the listRoms cache witness path for a given (coreId, subPath).
+ * Top-level → `/media/fat/games/<coreId>`. Drilled-in → that path
+ * with the subPath joined on. The on-disk basename includes the
+ * leading dot when the games dir is hidden — callers must pass the
+ * resolved on-disk basename (the `.NES` form), not the canonical id.
+ */
+export function romsCacheWitnessPath(
+  onDiskGamesDirBasename: string,
+  subPath: string,
+): string {
+  if (subPath === '') {
+    return `${MISTER_GAMES_DIR}/${onDiskGamesDirBasename}`;
+  }
+  return `${MISTER_GAMES_DIR}/${onDiskGamesDirBasename}/${subPath}`;
+}

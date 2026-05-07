@@ -30,6 +30,7 @@ export const IPC_CHANNELS = {
   showCore: 'mister:showCore',
   setBulkCoreVisibility: 'mister:setBulkCoreVisibility',
   listLedgerCoreIds: 'mister:listLedgerCoreIds',
+  clearCache: 'mister:clearCache',
   pickKeyFile: 'mister:pickKeyFile',
   connectionStatusChanged: 'mister:connectionStatusChanged',
   listSystemFileMarks: 'mister:listSystemFileMarks',
@@ -101,13 +102,30 @@ export interface MisterApi {
   connect(profileId: string): Promise<ConnectResult>;
   disconnect(): Promise<void>;
   getConnectionStatus(): Promise<ConnectionStatus>;
-  listAllCoresWithFiles(): Promise<CoreEntry[]>;
+  /**
+   * Returns the cores list. By default served from the local-disk
+   * cache when its mtime witnesses match the device's current state
+   * (PR #12) — typically <500ms warm. Pass `forceRefresh: true` to
+   * skip the cache and walk the device unconditionally; wired to the
+   * renderer's "Refresh" button so the user always has an escape
+   * hatch from a stuck or invalidated cache.
+   */
+  listAllCoresWithFiles(options?: {
+    readonly forceRefresh?: boolean;
+  }): Promise<CoreEntry[]>;
   /**
    * List ROMs at the optional subPath inside the core's games dir.
    * Empty `subPath` returns top-level entries; a slash-joined path
    * returns the contents of a (drilled-into) container folder.
+   *
+   * Cache-validated against a single mtime witness for the games-dir
+   * (or the drilled-into sub-folder). `forceRefresh` skips the cache.
    */
-  listRoms(coreId: string, subPath?: string): Promise<Rom[]>;
+  listRoms(
+    coreId: string,
+    subPath?: string,
+    options?: { readonly forceRefresh?: boolean },
+  ): Promise<Rom[]>;
   setRomVisibility(
     coreId: string,
     filename: string,
@@ -211,6 +229,13 @@ export interface MisterApi {
     folderPath: string,
     classification: 'container' | 'atomic' | null,
   ): Promise<FolderClassifications>;
+  /**
+   * Wipe the on-disk cache for the currently-connected host. Hidden
+   * command in v0 — exposed via IPC so a future settings UI can wire
+   * it up without a protocol change. Safe to call when disconnected
+   * (no-op).
+   */
+  clearCache(): Promise<void>;
 }
 
 const VALID_CONNECTION_ERROR_CODES: ReadonlySet<ConnectionErrorCode> = new Set([
