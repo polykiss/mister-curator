@@ -146,36 +146,6 @@ export function classifyFolder(contents: FolderContents): FolderClassification {
 }
 
 /**
- * Flag-based classifier — same logic as `classifyFolder`, but driven by
- * pre-computed booleans. The real client's shell script does the heavy
- * lifting on the device (one case-statement scan) and emits flags; the
- * client side calls this to assign a classification without re-walking
- * the listing in JS.
- */
-export interface FolderFlags {
-  readonly hasDisc: boolean;
-  readonly hasTrack: boolean;
-  readonly hasCart: boolean;
-  /**
-   * True iff the device-side scan saw at least
-   * `SAME_EXTENSION_THRESHOLD` files sharing a single (case-insensitive)
-   * extension. The shell computes the max-same-extension count once
-   * per folder and emits this boolean so the JS classifier mirrors
-   * `classifyFolder`'s long-tail rule.
-   */
-  readonly hasManySameExt: boolean;
-  readonly hasSubdir: boolean;
-}
-
-export function classifyFromFlags(flags: FolderFlags): FolderClassification {
-  if (flags.hasDisc || flags.hasTrack) return 'atomic';
-  if (flags.hasCart) return 'container';
-  if (flags.hasManySameExt) return 'container';
-  if (flags.hasSubdir) return 'container';
-  return 'unknown';
-}
-
-/**
  * Resolves the final classification with optional override layered on
  * top. `'unknown'` from the heuristic falls through to `'atomic'` so the
  * renderer always has a definite call to act on (the safer of the two —

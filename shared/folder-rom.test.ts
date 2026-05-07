@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 
 import {
   classifyFolder,
-  classifyFromFlags,
   resolveClassification,
   type FolderContents,
 } from '@shared/folder-rom';
@@ -225,81 +224,6 @@ describe('classifyFolder — round 9 many-similar-files rule', () => {
     // not fire. They go through to the dirs check / unknown.
     const files = ['readme', 'notes', 'license', 'changelog', 'authors'];
     expect(classifyFolder({ files, dirs: [] })).toBe('unknown');
-  });
-});
-
-describe('classifyFromFlags', () => {
-  it('mirrors the content-based classifier on representative inputs', () => {
-    // Saturn: hasDisc=1
-    expect(
-      classifyFromFlags({
-        hasDisc: true,
-        hasTrack: false,
-        hasCart: true,
-        hasManySameExt: false,
-        hasSubdir: false,
-      }),
-    ).toBe('atomic');
-    // NEOGEO subfolder: hasCart=1
-    expect(
-      classifyFromFlags({
-        hasDisc: false,
-        hasTrack: false,
-        hasCart: true,
-        hasManySameExt: false,
-        hasSubdir: false,
-      }),
-    ).toBe('container');
-    // Just subdirs (likely organisational tree)
-    expect(
-      classifyFromFlags({
-        hasDisc: false,
-        hasTrack: false,
-        hasCart: false,
-        hasManySameExt: false,
-        hasSubdir: true,
-      }),
-    ).toBe('container');
-    // Empty / unrecognisable
-    expect(
-      classifyFromFlags({
-        hasDisc: false,
-        hasTrack: false,
-        hasCart: false,
-        hasManySameExt: false,
-        hasSubdir: false,
-      }),
-    ).toBe('unknown');
-  });
-
-  it('returns container when hasManySameExt fires (long-tail rule)', () => {
-    // Round 9 catch-all: even when no recognised cart extension is
-    // present, a folder with many files of one extension is treated
-    // as a container. The shell-side scan computes this flag.
-    expect(
-      classifyFromFlags({
-        hasDisc: false,
-        hasTrack: false,
-        hasCart: false,
-        hasManySameExt: true,
-        hasSubdir: false,
-      }),
-    ).toBe('container');
-  });
-
-  it('disc evidence still wins over hasManySameExt', () => {
-    // A Saturn-shape folder (`.cue` + many `.bin`s) sets hasDisc=1
-    // and hasManySameExt=1 on the device. The disc rule must remain
-    // higher-precedence so we never treat a disc folder as drillable.
-    expect(
-      classifyFromFlags({
-        hasDisc: true,
-        hasTrack: false,
-        hasCart: false,
-        hasManySameExt: true,
-        hasSubdir: false,
-      }),
-    ).toBe('atomic');
   });
 });
 

@@ -37,7 +37,7 @@ import {
   withFolderOverride,
   withoutFolderOverride,
 } from '@shared/folder-classifications';
-import { classifyFromFlags, resolveClassification } from '@shared/folder-rom';
+import { classifyFolder, resolveClassification } from '@shared/folder-rom';
 import {
   healLedger,
   ledgerEqual,
@@ -553,64 +553,35 @@ export class RealMisterClient implements IMisterClient {
         : `${MISTER_GAMES_DIR}/${coreId}/${subPath}`;
     const relPrefix = subPath === '' ? '' : `${subPath}/`;
 
-    // Single batched script that emits per-entry rows. For folders we
-    // also emit four classification flags (disc / track / cart / sub-
-    // dir) computed by a single case-statement scan over their direct
-    // contents — keeps classification on the device but the *decision*
-    // in JS so we can layer user overrides without re-deploying the
-    // shell.
+    // PR #11 round 4: one find pass, JS aggregation. The pre-Round-4
+    // shell ran `du -sb` + a case-statement scan per immediate
+    // sub-folder; on cores like X68000 (649 folders × ~3 files each)
+    // that was 1300+ subprocess invocations on busybox and tripped
+    // the 10s SSH op deadline. Now: a single `find` with maxdepth=3
+    // emits raw `<type>\t<relpath>\t<size>` lines and JS does the
+    // aggregation + classification using `classifyFolder` directly
+    // (the same function the FakeMisterClient + shared tests use).
     //
-    // Lines:
-    //   F\t<filename>\t<size>
-    //   D\t<dirname>\t<size>\t<has_disc>\t<has_track>\t<has_cart>\t<has_many_same_ext>\t<has_subdir>
+    // Output line format: `<%y>\t<%P>\t<%s>` where
+    //   %y → 'f' (file) or 'd' (directory)
+    //   %P → path relative to the find starting point (no leading
+    //         './'; busybox find supports this idiom — already in
+    //         production use in `listAllCoresWithFiles` and the
+    //         discovery script).
+    //   %s → size in bytes.
     //
-    // The cart extension list intentionally tracks the JS one — see
-    // CART_EXTENSIONS in shared/folder-rom.ts for the source of truth.
-    // The `has_many_same_ext` flag fires when at least 5 files in the
-    // folder share the same (case-insensitive) extension; it catches
-    // the long tail of formats we haven't enumerated yet.
+    // maxdepth=3 keeps the output bounded and covers the realistic
+    // depth of folder ROMs (top-level entry, direct children for
+    // classification, grandchildren for size accuracy on multi-disc
+    // dumps like Saturn `Game/Disc 1/file.bin`). Files at depth 4+
+    // do not contribute to folder size; we accept that tradeoff to
+    // bound stdout volume on cores with very deep trees.
+    //
+    // Subprocess budget: 1 fork for `find`. The `[` test and `echo`
+    // are shell builtins on busybox ash. Total per-call: 1 fork.
     const script = [
-      `cd ${shellQuote(targetDir)} 2>/dev/null || { echo MISSING_DIR; exit 1; }`,
-      `find . -mindepth 1 -maxdepth 1 -type f -printf 'F\\t%f\\t%s\\n' 2>/dev/null || true`,
-      // For each immediate dir: collect a recursive byte total (du -sb)
-      // AND a flag scan of its top level.
-      'for d in */ .[!.]*/; do',
-      '  [ -d "$d" ] || continue',
-      '  d="${d%/}"',
-      '  size=$(du -sb -- "$d" 2>/dev/null | awk \'{print $1; exit}\')',
-      '  [ -z "$size" ] && size=0',
-      '  has_disc=0; has_track=0; has_cart=0; has_subdir=0',
-      '  for child in "$d"/* "$d"/.[!.]*; do',
-      '    [ -e "$child" ] || continue',
-      '    base="${child##*/}"',
-      '    if [ -d "$child" ]; then has_subdir=1; continue; fi',
-      '    case "$base" in',
-      '      *.cue|*.CUE|*.gdi|*.GDI|*.iso|*.ISO|*.chd|*.CHD) has_disc=1 ;;',
-      '    esac',
-      '    case "$base" in',
-      '      *Track\\ *|*track\\ *|*Track[0-9]*|*track[0-9]*) has_track=1 ;;',
-      '    esac',
-      '    case "$base" in',
-      '      *.zip|*.ZIP|*.7z|*.7Z|*.rar|*.RAR|*.sfc|*.SFC|*.smc|*.SMC|*.nes|*.NES|*.gba|*.GBA|*.gb|*.GB|*.gbc|*.GBC|*.md|*.MD|*.gen|*.GEN|*.pce|*.PCE|*.lnx|*.LNX|*.col|*.COL|*.gg|*.GG|*.sms|*.SMS|*.a78|*.A78|*.a26|*.A26|*.bin|*.BIN|*.neo|*.NEO|*.j64|*.J64|*.jag|*.JAG|*.32x|*.32X|*.int|*.INT|*.vec|*.VEC|*.ws|*.WS|*.wsc|*.WSC|*.tap|*.TAP|*.tzx|*.TZX|*.dsk|*.DSK|*.cdt|*.CDT|*.cas|*.CAS|*.cdi|*.CDI|*.adf|*.ADF|*.adz|*.ADZ|*.hdf|*.HDF|*.st|*.ST|*.msa|*.MSA|*.uef|*.UEF|*.cdx|*.CDX|*.bbc|*.BBC) has_cart=1 ;;',
-      '    esac',
-      '  done',
-      // Many-similar-files flag. Two passes over the children would be
-      // wasteful for a 10000-file mame folder, so we let the awk
-      // pipeline short-circuit at the threshold: print '1' as soon as
-      // any ext crosses the line, then exit.
-      '  has_many_same_ext=$(',
-      '    for child in "$d"/* "$d"/.[!.]*; do',
-      '      [ -e "$child" ] || continue',
-      '      [ -d "$child" ] && continue',
-      '      base="${child##*/}"',
-      '      case "$base" in',
-      '        *.*) printf \'%s\\n\' "${base##*.}" ;;',
-      '      esac',
-      `    done | tr 'A-Z' 'a-z' | sort | uniq -c | awk 'BEGIN{m=0} { if ($1>m) { m=$1; if (m>=5) { print 1; exit } } } END { if (m<5) print 0 }'`,
-      '  )',
-      '  [ -z "$has_many_same_ext" ] && has_many_same_ext=0',
-      '  printf "D\\t%s\\t%s\\t%d\\t%d\\t%d\\t%d\\t%d\\n" "$d" "$size" "$has_disc" "$has_track" "$has_cart" "$has_many_same_ext" "$has_subdir"',
-      'done',
+      `[ -d ${shellQuote(targetDir)} ] || { echo MISSING_DIR; exit 1; }`,
+      `find ${shellQuote(targetDir)} -mindepth 1 -maxdepth 3 -printf '%y\\t%P\\t%s\\n' 2>/dev/null`,
     ].join('\n');
 
     const result = await this.runSshOp(() => this.ssh.execCommand(script));
@@ -618,62 +589,100 @@ export class RealMisterClient implements IMisterClient {
       throw new Error(`Unknown core: ${coreId}`);
     }
 
-    const roms: Rom[] = [];
+    interface FolderAcc {
+      readonly name: string;
+      sizeBytes: number;
+      readonly directFiles: string[];
+      readonly directDirs: string[];
+    }
+    const topLevelFiles: { name: string; sizeBytes: number }[] = [];
+    const folderAccs = new Map<string, FolderAcc>();
+    const ensureFolderAcc = (name: string): FolderAcc => {
+      let acc = folderAccs.get(name);
+      if (acc === undefined) {
+        acc = { name, sizeBytes: 0, directFiles: [], directDirs: [] };
+        folderAccs.set(name, acc);
+      }
+      return acc;
+    };
+
     for (const line of result.stdout.split('\n')) {
       if (line === '' || line === 'MISSING_DIR') continue;
       const parts = line.split('\t');
-      const tag = parts[0];
-      if (tag === 'F' && parts.length >= 3) {
-        const filename = parts[1] ?? '';
-        const sizeBytes = Number.parseInt(parts[2] ?? '0', 10);
-        if (filename === '' || Number.isNaN(sizeBytes)) continue;
-        const hidden = filename.startsWith('.');
-        const visibleBase = hidden ? filename.slice(1) : filename;
-        const relativePath = `${relPrefix}${filename}`;
-        roms.push({
-          coreId,
-          filename,
-          displayName: displayRomName(visibleBase),
-          sizeBytes,
-          hidden,
-          path: `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`,
-          kind: 'file',
-          relativePath,
-        });
-      } else if (tag === 'D' && parts.length >= 8) {
-        const filename = parts[1] ?? '';
-        const sizeBytes = Number.parseInt(parts[2] ?? '0', 10);
-        if (filename === '' || Number.isNaN(sizeBytes)) continue;
-        const hidden = filename.startsWith('.');
-        const visibleBase = hidden ? filename.slice(1) : filename;
-        const flags = {
-          hasDisc: parts[3] === '1',
-          hasTrack: parts[4] === '1',
-          hasCart: parts[5] === '1',
-          hasManySameExt: parts[6] === '1',
-          hasSubdir: parts[7] === '1',
-        };
-        const relativePath = `${relPrefix}${filename}`;
-        const visibleRelPath = `${relPrefix}${visibleBase}`;
-        const heuristic = classifyFromFlags(flags);
-        const override = getFolderOverride(
-          folderClassifications,
-          coreId,
-          visibleRelPath,
-        );
-        const classification = resolveClassification(heuristic, override);
-        roms.push({
-          coreId,
-          filename,
-          displayName: displayRomName(visibleBase),
-          sizeBytes,
-          hidden,
-          path: `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`,
-          kind:
-            classification === 'container' ? 'folder-container' : 'folder-atomic',
-          relativePath,
-        });
+      if (parts.length < 3) continue;
+      const type = parts[0];
+      const relPath = parts[1] ?? '';
+      const sizeBytes = Number.parseInt(parts[2] ?? '0', 10);
+      if (relPath === '' || Number.isNaN(sizeBytes)) continue;
+      if (type !== 'f' && type !== 'd') continue;
+
+      const segments = relPath.split('/');
+      if (segments.length === 1) {
+        // Top-level entry.
+        const name = segments[0]!;
+        if (type === 'f') {
+          topLevelFiles.push({ name, sizeBytes });
+        } else {
+          ensureFolderAcc(name);
+        }
+      } else {
+        // Descendant of a top-level folder. Top is segments[0].
+        const top = segments[0]!;
+        const acc = ensureFolderAcc(top);
+        if (type === 'f') acc.sizeBytes += sizeBytes;
+        // Direct children of the top-level folder feed classifyFolder.
+        // segments.length === 2 means the entry sits exactly one level
+        // below the top folder.
+        if (segments.length === 2) {
+          const childName = segments[1]!;
+          if (type === 'f') acc.directFiles.push(childName);
+          else acc.directDirs.push(childName);
+        }
       }
+    }
+
+    const roms: Rom[] = [];
+    for (const f of topLevelFiles) {
+      const hidden = f.name.startsWith('.');
+      const visibleBase = hidden ? f.name.slice(1) : f.name;
+      const relativePath = `${relPrefix}${f.name}`;
+      roms.push({
+        coreId,
+        filename: f.name,
+        displayName: displayRomName(visibleBase),
+        sizeBytes: f.sizeBytes,
+        hidden,
+        path: `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`,
+        kind: 'file',
+        relativePath,
+      });
+    }
+    for (const acc of folderAccs.values()) {
+      const hidden = acc.name.startsWith('.');
+      const visibleBase = hidden ? acc.name.slice(1) : acc.name;
+      const relativePath = `${relPrefix}${acc.name}`;
+      const visibleRelPath = `${relPrefix}${visibleBase}`;
+      const heuristic = classifyFolder({
+        files: acc.directFiles,
+        dirs: acc.directDirs,
+      });
+      const override = getFolderOverride(
+        folderClassifications,
+        coreId,
+        visibleRelPath,
+      );
+      const classification = resolveClassification(heuristic, override);
+      roms.push({
+        coreId,
+        filename: acc.name,
+        displayName: displayRomName(visibleBase),
+        sizeBytes: acc.sizeBytes,
+        hidden,
+        path: `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`,
+        kind:
+          classification === 'container' ? 'folder-container' : 'folder-atomic',
+        relativePath,
+      });
     }
 
     roms.sort((a, b) => a.displayName.localeCompare(b.displayName));
