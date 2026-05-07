@@ -1129,6 +1129,214 @@ describe('matchRbfsToGamesDirs', () => {
       expect(nes?.romCount).toBe(3);
       expect(nes?.recursiveRomCount).toBe(3);
     });
+
+    describe('PR #13 — folderClassifications overrides flow into recursiveRomCount', () => {
+      // The X68000 reproduction: a multi-disk game folder with 6 .dim
+      // files trips the heuristic's many-same-ext rule and classifies
+      // as container by default. Six top-level folders of this shape
+      // produce recursive=36 (= 6 × 6) before any user override.
+      function buildSixMultiDiskFolders(): {
+        readonly fixture: Parameters<typeof matchRbfsToGamesDirs>[0];
+        readonly folderNames: readonly string[];
+      } {
+        const folderNames = ['Game01', 'Game02', 'Game03', 'Game04', 'Game05', 'Game06'];
+        const subFolders = folderNames.map((name) => ({
+          name,
+          files: ['disk1.dim', 'disk2.dim', 'disk3.dim', 'disk4.dim', 'disk5.dim', 'disk6.dim'],
+          dirs: [],
+          recursiveFileCount: 6,
+        }));
+        return {
+          fixture: {
+            rbfs: [],
+            gamesDirs: [
+              {
+                rawName: 'X68000',
+                files: [],
+                dirs: folderNames,
+                subFolders,
+              },
+            ],
+          },
+          folderNames,
+        };
+      }
+
+      it('multi-disk folders classify container without overrides → recursive overcounts', () => {
+        const { fixture } = buildSixMultiDiskFolders();
+        const result = matchRbfsToGamesDirs(fixture);
+        const x68000 = result.find((c) => c.id === 'X68000');
+        // Heuristic-only baseline: each multi-disk folder hits the
+        // many-same-ext rule and contributes its recursive file count.
+        expect(x68000?.romCount).toBe(6);
+        expect(x68000?.recursiveRomCount).toBe(36);
+      });
+
+      it('user atomic override on every folder collapses recursive to folder count', () => {
+        const { fixture, folderNames } = buildSixMultiDiskFolders();
+        const result = matchRbfsToGamesDirs({
+          ...fixture,
+          folderClassifications: {
+            schemaVersion: 1,
+            overrides: folderNames.map((name) => ({
+              coreId: 'X68000',
+              folderPath: name,
+              classification: 'atomic' as const,
+              setAt: '2026-01-01T00:00:00.000Z',
+            })),
+          },
+        });
+        const x68000 = result.find((c) => c.id === 'X68000');
+        expect(x68000?.romCount).toBe(6);
+        // Each atomic-overridden folder contributes 1 → total 6.
+        // recursive === romCount, so the cores-pane breakdown rule
+        // collapses to a single-number display.
+        expect(x68000?.recursiveRomCount).toBe(6);
+      });
+
+      it('user container override on a single-zip atomic folder expands count', () => {
+        // X68000 single-zip folder (atomic by heuristic). User picks
+        // "Treat as folder of ROMs" because they bundled multiple
+        // games into the .zip and want drill-in. The override flips
+        // to container; recursive contributes the file count.
+        const result = matchRbfsToGamesDirs({
+          rbfs: [],
+          gamesDirs: [
+            {
+              rawName: 'X68000',
+              files: [],
+              dirs: ['Castlevania'],
+              subFolders: [
+                {
+                  name: 'Castlevania',
+                  files: ['castlevania.zip'],
+                  dirs: [],
+                  recursiveFileCount: 1,
+                },
+              ],
+            },
+          ],
+          folderClassifications: {
+            schemaVersion: 1,
+            overrides: [
+              {
+                coreId: 'X68000',
+                folderPath: 'Castlevania',
+                classification: 'container',
+                setAt: '2026-01-01T00:00:00.000Z',
+              },
+            ],
+          },
+        });
+        const x68000 = result.find((c) => c.id === 'X68000');
+        expect(x68000?.romCount).toBe(1);
+        // Container override → contributes recursiveFileCount (1).
+        expect(x68000?.recursiveRomCount).toBe(1);
+      });
+
+      it('mix of overrides matches per-folder behavior', () => {
+        // Two atomic-overridden folders + one container-overridden
+        // folder. recursive = 1 + 1 + (recursive count of container).
+        const result = matchRbfsToGamesDirs({
+          rbfs: [],
+          gamesDirs: [
+            {
+              rawName: 'X68000',
+              files: [],
+              dirs: ['A', 'B', 'C'],
+              subFolders: [
+                {
+                  name: 'A',
+                  files: ['d1.dim', 'd2.dim', 'd3.dim', 'd4.dim', 'd5.dim'],
+                  dirs: [],
+                  recursiveFileCount: 5,
+                },
+                {
+                  name: 'B',
+                  files: ['d1.dim', 'd2.dim', 'd3.dim', 'd4.dim', 'd5.dim'],
+                  dirs: [],
+                  recursiveFileCount: 5,
+                },
+                {
+                  name: 'C',
+                  files: ['game.zip'],
+                  dirs: [],
+                  recursiveFileCount: 1,
+                },
+              ],
+            },
+          ],
+          folderClassifications: {
+            schemaVersion: 1,
+            overrides: [
+              {
+                coreId: 'X68000',
+                folderPath: 'A',
+                classification: 'atomic',
+                setAt: '2026-01-01T00:00:00.000Z',
+              },
+              {
+                coreId: 'X68000',
+                folderPath: 'B',
+                classification: 'atomic',
+                setAt: '2026-01-01T00:00:00.000Z',
+              },
+              {
+                coreId: 'X68000',
+                folderPath: 'C',
+                classification: 'container',
+                setAt: '2026-01-01T00:00:00.000Z',
+              },
+            ],
+          },
+        });
+        const x68000 = result.find((c) => c.id === 'X68000');
+        expect(x68000?.romCount).toBe(3);
+        // 1 (A atomic) + 1 (B atomic) + 1 (C container's recursive=1) = 3.
+        // recursive === romCount → cores pane shows simple count.
+        expect(x68000?.recursiveRomCount).toBe(3);
+      });
+
+      it('system-marked folder is filtered before classifyFolder runs (zero contribution)', () => {
+        // The classification-override layer is one axis; the system-
+        // mark layer is another. A folder marked system never reaches
+        // computeRecursiveRomCount (filtered upstream by
+        // shouldCountAsRom). This test belt-and-suspenders against a
+        // future regression where system-mark stops filtering folders.
+        const result = matchRbfsToGamesDirs({
+          rbfs: [],
+          gamesDirs: [
+            {
+              rawName: 'SNES',
+              files: ['Castlevania.smc'],
+              dirs: ['_translations'],
+              subFolders: [
+                {
+                  name: '_translations',
+                  files: Array.from({ length: 30 }, (_, i) => `t${String(i)}.smc`),
+                  dirs: [],
+                  recursiveFileCount: 30,
+                },
+              ],
+            },
+          ],
+          systemFilesMarks: {
+            schemaVersion: 1,
+            marked: [
+              {
+                coreId: 'SNES',
+                filename: '_translations',
+                markedAt: '2026-01-01T00:00:00.000Z',
+              },
+            ],
+          },
+        });
+        const snes = result.find((c) => c.id === 'SNES');
+        // _translations filtered → only the .smc file counts.
+        expect(snes?.romCount).toBe(1);
+        expect(snes?.recursiveRomCount).toBe(1);
+      });
+    });
   });
 
   describe('coreId / on-disk-path invariant (PR #11 round 3 / Bug 1)', () => {

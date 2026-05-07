@@ -139,6 +139,7 @@ export class FakeMisterClient implements IMisterClient {
 
   async listAllCoresWithFiles(
     systemFilesMarks?: SystemFilesMarks,
+    folderClassifications?: FolderClassifications,
   ): Promise<CoreEntry[]> {
     this.assertConnected();
     await this.delay();
@@ -240,6 +241,7 @@ export class FakeMisterClient implements IMisterClient {
       gamesDirs,
       arcadeDirExists,
       systemFilesMarks,
+      folderClassifications,
     });
   }
 
@@ -603,7 +605,7 @@ export class FakeMisterClient implements IMisterClient {
     await this.writeFolderClassifications(next);
   }
 
-  private async writeFolderClassifications(
+  async writeFolderClassifications(
     marks: FolderClassifications,
   ): Promise<void> {
     await this.delay();
@@ -676,7 +678,7 @@ export class FakeMisterClient implements IMisterClient {
     }
   }
 
-  private async writeSystemFilesMarks(marks: SystemFilesMarks): Promise<void> {
+  async writeSystemFilesMarks(marks: SystemFilesMarks): Promise<void> {
     await this.delay();
     const localDir = this.toLocal(MISTER_LEDGER_DIR);
     const localPath = this.toLocal(MISTER_SYSTEM_FILES_PATH);

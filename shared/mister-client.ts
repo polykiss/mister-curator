@@ -123,9 +123,16 @@ export interface IMisterClient {
    * `romCount` / `hiddenCount` exactly like auto-detected BIOSes. The
    * caller (ConnectionManager) typically caches the marks once per
    * connection and passes them on every list call.
+   *
+   * `folderClassifications` (PR #13) layers the user's per-folder
+   * `'atomic'` / `'container'` overrides on top of the matcher's
+   * heuristic when computing `recursiveRomCount`. Without this, an
+   * X68000 folder the user marked atomic would still contribute its
+   * recursive file count via the heuristic's many-same-ext rule.
    */
   listAllCoresWithFiles(
     systemFilesMarks?: SystemFilesMarks,
+    folderClassifications?: FolderClassifications,
   ): Promise<CoreEntry[]>;
 
   /**
@@ -258,6 +265,23 @@ export interface IMisterClient {
   setFolderClassification(
     override: FolderClassificationOverride | { coreId: string; folderPath: string; classification: undefined },
   ): Promise<void>;
+
+  /**
+   * Replace the entire folder-classifications.json with `marks`. Used
+   * by ConnectionManager's batched tri-state dispatch (PR #13) so a
+   * 600-folder X68000 "Treat as ROM" sweep is one file write rather
+   * than 600. Idempotent: a payload identical to the on-disk content
+   * is a no-op write.
+   */
+  writeFolderClassifications(marks: FolderClassifications): Promise<void>;
+
+  /**
+   * Replace the entire system-files marks file with `marks`. Mirror
+   * of `writeFolderClassifications`; used by the same batched
+   * dispatch path so the system-mark side of a tri-state flip can
+   * land in one write too.
+   */
+  writeSystemFilesMarks(marks: SystemFilesMarks): Promise<void>;
 
   /**
    * PR #12 connect-time prime. One SSH round trip that returns the

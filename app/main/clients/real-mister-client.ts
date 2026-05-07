@@ -244,6 +244,7 @@ export class RealMisterClient implements IMisterClient {
 
   async listAllCoresWithFiles(
     systemFilesMarks?: SystemFilesMarks,
+    folderClassifications?: FolderClassifications,
   ): Promise<CoreEntry[]> {
     this.assertConnected();
 
@@ -440,6 +441,7 @@ export class RealMisterClient implements IMisterClient {
       gamesDirs,
       arcadeDirExists,
       systemFilesMarks,
+      folderClassifications,
     });
   }
 
@@ -1049,7 +1051,7 @@ export class RealMisterClient implements IMisterClient {
     await this.writeSystemFilesMarks(next);
   }
 
-  private async writeSystemFilesMarks(marks: SystemFilesMarks): Promise<void> {
+  async writeSystemFilesMarks(marks: SystemFilesMarks): Promise<void> {
     const json = serializeSystemFilesMarks(marks);
     const tmpPath = `${MISTER_SYSTEM_FILES_PATH}.tmp`;
     const script =
@@ -1171,7 +1173,7 @@ export class RealMisterClient implements IMisterClient {
     return parsed;
   }
 
-  private async writeFolderClassifications(
+  async writeFolderClassifications(
     marks: FolderClassifications,
   ): Promise<void> {
     const json = serializeFolderClassifications(marks);

@@ -1,6 +1,10 @@
 import { MISTER_GAMES_DIR } from '@shared/constants';
 import { emit, type DiagnosticsCollector } from '@shared/diag';
-import { classifyFolder } from '@shared/folder-rom';
+import {
+  EMPTY_FOLDER_CLASSIFICATIONS,
+  getFolderOverride,
+} from '@shared/folder-classifications';
+import { classifyFolder, resolveClassification } from '@shared/folder-rom';
 import {
   isAutoDetectedSystemFile,
   isAutoDetectedSystemFolder,
@@ -10,6 +14,7 @@ import { isMarked } from '@shared/system-files-marks';
 import type {
   CoreCategory,
   CoreEntry,
+  FolderClassifications,
   HideLedger,
   SystemFilesMarks,
 } from '@shared/types';
@@ -175,6 +180,17 @@ export interface MatchInput {
    * folders.
    */
   readonly systemFilesMarks?: SystemFilesMarks;
+  /**
+   * Optional user-supplied folder-classification overrides — the
+   * `(coreId, folderPath)` → `'atomic' | 'container'` pairs from
+   * `folder-classifications.json`. PR #13: the recursive ROM count
+   * honors these overrides so a user marking an X68000 game folder
+   * `'atomic'` (each multi-disk dump is one game, not five) drops the
+   * cores-list count by N-1 per folder. The renderer's `listRoms`
+   * already consumed this layer for `Rom.kind`; the matcher pulls it
+   * in here so the cores-list count and the drilled-in display agree.
+   */
+  readonly folderClassifications?: FolderClassifications;
   /**
    * Optional observer for the matcher's internal decisions. When set,
    * the matcher emits one record per rbf, games dir, system-file
@@ -344,6 +360,7 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
       filteredDirs,
       gd.subFolders,
       visibleName,
+      input.folderClassifications,
       diag,
     );
 
@@ -674,11 +691,13 @@ export function computeCoreRenames(core: CoreEntry, hidden: boolean): CoreRename
  * Approximates the total ROM count for a games dir, walking into
  * container folders and treating atomic disc folders as a single ROM.
  *
- * Rules (matches the Round 3 spec):
+ * Rules (matches the Round 3 spec, with PR #13 overrides):
  *   - Non-system top-level files: each counts 1.
- *   - Non-system top-level folders, classified via `classifyFolder`:
+ *   - Non-system top-level folders, classified via `classifyFolder`
+ *     with the user's per-folder override layered on top:
  *       atomic / unknown → 1 (the folder is the unit; Saturn discs,
- *         MegaCD games, single-medium folders).
+ *         MegaCD games, single-medium folders, X68000 multi-disk
+ *         dumps the user marked atomic).
  *       container         → walk inside; sum the recursive file count
  *         the client computed (`recursiveFileCount`). Auto-detected
  *         system files NESTED inside containers are NOT excluded —
@@ -687,6 +706,11 @@ export function computeCoreRenames(core: CoreEntry, hidden: boolean): CoreRename
  *   - When `subFolders` is undefined (legacy callers, simple unit
  *     tests), the function falls back to the top-level count so the
  *     matcher still produces a number rather than `undefined`.
+ *
+ * System-marked folders never reach this function — they're filtered
+ * upstream by `shouldCountAsRom` against `systemFilesMarks`. Marking a
+ * folder as system removes it from `topLevelDirs` entirely, so it
+ * contributes 0 here regardless of any folder-classification override.
  *
  * Hidden subset: dot-prefixed top-level files contribute to
  * `recursiveHiddenCount` directly; for container folders, the
@@ -697,8 +721,13 @@ function computeRecursiveRomCount(
   topLevelDirs: readonly string[],
   subFolders: readonly RawSubFolderInput[] | undefined,
   coreId: string,
+  folderClassifications: FolderClassifications | undefined,
   diag: DiagnosticsCollector | undefined,
 ): { recursiveRomCount: number; recursiveHiddenCount: number } {
+  // Default to the empty marks-set so the override lookup is a cheap
+  // no-op when the caller didn't supply classifications (legacy unit
+  // tests, the matcher's pre-PR-13 contract).
+  const overrides = folderClassifications ?? EMPTY_FOLDER_CLASSIFICATIONS;
   let total = 0;
   let totalHidden = 0;
 
@@ -763,7 +792,17 @@ function computeRecursiveRomCount(
     // same `classifyFolder` heuristic the renderer uses for the drill-
     // in decision, so the cores-list count and the ROMs-list view stay
     // aligned. `unknown` collapses to `atomic` here too.
-    const classification = classifyFolder({ files: sub.files, dirs: sub.dirs });
+    //
+    // PR #13: layer the user's per-folder override on top of the
+    // heuristic. The override key is the visible (un-dotted) basename
+    // of the top-level subfolder — same shape `listRoms` writes when
+    // the user clicks "Treat as ROM" / "Treat as folder of ROMs"
+    // from a top-level row. `resolveClassification` collapses
+    // unknown→atomic, so the matcher always sees a definite call.
+    const heuristic = classifyFolder({ files: sub.files, dirs: sub.dirs });
+    const visibleSubName = dirIsHidden ? d.slice(1) : d;
+    const override = getFolderOverride(overrides, coreId, visibleSubName);
+    const classification = resolveClassification(heuristic, override);
     if (classification === 'container') {
       // Container folder: contribute the recursive file count. Falls
       // back to immediate file + dir count when the client didn't
