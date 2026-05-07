@@ -1864,6 +1864,10 @@ describe('matchRbfsToGamesDirs — diagnostics collector (PR #11 prep)', () => {
   });
 
   it('emits a recursive-count record per top-level entry walked', () => {
+    // Round 5: classifyFolder now requires the many-same-ext signal
+    // (5+ files of one extension) to flip a cart-shape folder to
+    // container. Real NEOGEO `1 World A-Z/` holds 30+ .zip files,
+    // so the fixture mirrors that shape.
     const diag = new InMemoryDiagnosticsCollector();
     matchRbfsToGamesDirs({
       rbfs: [],
@@ -1875,7 +1879,14 @@ describe('matchRbfsToGamesDirs — diagnostics collector (PR #11 prep)', () => {
           subFolders: [
             {
               name: '1 World A-Z',
-              files: ['mslug.zip', 'kof97.zip'],
+              files: [
+                'mslug.zip',
+                'kof97.zip',
+                'samsho.zip',
+                'lastblade2.zip',
+                'garou.zip',
+                'mslug3.zip',
+              ],
               dirs: [],
               recursiveFileCount: 30,
             },

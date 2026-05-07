@@ -741,7 +741,8 @@ describe('RealMisterClient', () => {
       //   - top-level files (NES roms + a .zip)
       //   - a Saturn-shape disc folder (.cue+.bin → folder-atomic)
       //   - a hidden folder (dot-prefix preserved as `hidden`)
-      //   - a NEOGEO-shape container (.zip carts → folder-container)
+      //   - a NEOGEO-shape container (5+ .zip carts → many-same →
+      //     folder-container post-round-5)
       //   - depth-3 size contributions (the 1.7GB track in Panzer
       //     Dragoon adds to the parent folder's total)
       mocks.execCommand.mockResolvedValueOnce(
@@ -759,10 +760,17 @@ describe('RealMisterClient', () => {
             'd\t.Hidden Disc Game\t0',
             'f\t.Hidden Disc Game/HDG.cue\t512',
             'f\t.Hidden Disc Game/HDG.bin\t125828608',
-            // NEOGEO-shape container.
+            // NEOGEO-shape container: 6 .zip files of one extension
+            // trip the many-same rule. Round 5: cart-ext alone
+            // classifies atomic, so a NEOGEO-shape needs the count
+            // signal to flip to container.
             'd\t1 World A-Z\t0',
-            'f\t1 World A-Z/mslug.zip\t26214400',
-            'f\t1 World A-Z/kof97.zip\t26214400',
+            'f\t1 World A-Z/mslug.zip\t10485760',
+            'f\t1 World A-Z/kof97.zip\t10485760',
+            'f\t1 World A-Z/samsho.zip\t10485760',
+            'f\t1 World A-Z/lastblade2.zip\t10485760',
+            'f\t1 World A-Z/garou.zip\t5242880',
+            'f\t1 World A-Z/mslug3.zip\t5242880',
             '',
           ].join('\n'),
         ),
@@ -911,12 +919,22 @@ describe('RealMisterClient', () => {
       expect(roms).toEqual([]);
     });
 
-    it('handles X68000 shape — 600 folders × 1-3 files — within the fork budget (PR #11 round 4)', async () => {
+    it('handles X68000 shape — 600 single-game folders — within the fork budget and classifies atomic (PR #11 round 4 / round 5)', async () => {
       // Live test: clicking X68000 (649 folders, 2018 files) hung
       // for 10s and timed out pre-Round-4 because the per-folder
       // shell loop ran ~1300 subprocess invocations on busybox.
-      // Round 4 collapses the script to one find. This regression
-      // pins the fork budget AND the shape correctness.
+      // Round 4 collapses the script to one find. Round 5 fixes the
+      // classification so each folder reads as one game (atomic),
+      // not a drillable container — the user complained that
+      // clicking a folder produced a useless extra step into a
+      // single .zip file.
+      //
+      // This regression pins:
+      //   - fork budget (1 invocation)
+      //   - all 600 folders classify atomic (real X68000 shape:
+      //     `<game>/<game>.zip` with optional companion files,
+      //     no subdirs)
+      //   - per-folder size sum across the file payload
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -927,15 +945,15 @@ describe('RealMisterClient', () => {
         const folder = `Game ${String(i).padStart(3, '0')}`;
         // Top-level folder.
         lines.push(`d\t${folder}\t0`);
-        // Folder ROM payload: one .zip + occasionally a manual.
+        // Folder ROM payload: one .zip + occasionally a manual or
+        // readme companion. NO subdirs — that's the real X68000
+        // shape.
         lines.push(`f\t${folder}/${folder}.zip\t40960`);
         if (i % 3 === 0) {
           lines.push(`f\t${folder}/manual.txt\t8192`);
         }
         if (i % 7 === 0) {
-          // Occasionally a depth-3 nested file (multi-disk dump).
-          lines.push(`d\t${folder}/Disks\t0`);
-          lines.push(`f\t${folder}/Disks/disk2.dim\t720896`);
+          lines.push(`f\t${folder}/readme.md\t2048`);
         }
       }
       lines.push('');
@@ -945,17 +963,19 @@ describe('RealMisterClient', () => {
 
       // All 600 folders surface as Rom entries.
       expect(roms).toHaveLength(folderCount);
-      // Every folder is a container (`.zip` files trigger the cart
-      // rule in classifyFolder).
-      const containers = roms.filter((r) => r.kind === 'folder-container');
-      expect(containers).toHaveLength(folderCount);
-      // None classify as discs.
+      // PR #11 round 5: every X68000 folder classifies atomic. The
+      // cart-ext rule fires in classifyFolder, no subdirs / no
+      // many-same to flip the call.
       const atomics = roms.filter((r) => r.kind === 'folder-atomic');
-      expect(atomics).toHaveLength(0);
-      // Folder size sums all descendant files (including depth-3).
+      expect(atomics).toHaveLength(folderCount);
+      // None classify as containers — drilling into an X68000
+      // folder shows nothing the cores list doesn't already say.
+      const containers = roms.filter((r) => r.kind === 'folder-container');
+      expect(containers).toHaveLength(0);
+      // Folder size sums every descendant file. Game 000 has the
+      // .zip, the manual (i % 3 === 0), and the readme (i % 7 === 0).
       const game000 = roms.find((r) => r.filename === 'Game 000');
-      // Game 000: i=0 → has manual.txt AND nested disk2.dim.
-      expect(game000?.sizeBytes).toBe(40960 + 8192 + 720896);
+      expect(game000?.sizeBytes).toBe(40960 + 8192 + 2048);
 
       // Fork budget: at most one execCommand call per listRoms.
       expect(mocks.execCommand).toHaveBeenCalledTimes(1);

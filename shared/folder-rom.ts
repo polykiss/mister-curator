@@ -40,16 +40,22 @@ const DISC_EXTENSIONS: ReadonlySet<string> = new Set([
 const TRACK_PATTERN = /\btrack\s*\d+/i;
 
 /**
- * Cartridge / archive / single-medium extensions. Used as a *fallback*
- * signal — if the folder has no disc-shape evidence but does have
- * files with recognisable single-cartridge names, we infer container.
+ * Cartridge / archive / single-medium extensions. PR #11 round 5: a
+ * folder containing a cart-shape file with no other container evidence
+ * (no subdirs, fewer than `SAME_EXTENSION_THRESHOLD` files of one
+ * extension) classifies as **atomic** — the folder *is* one game. This
+ * matches the X68000 shape (`<game-name>/<game>.zip`, optional manual
+ * companion file) which is the dominant single-game-folder layout on
+ * real MiSTers; before this round, every such folder rendered as a
+ * drillable container, forcing a useless extra click to reach the .zip.
  *
- * The list is broad on purpose: false positives (a folder of `.zip`s
- * mistakenly classified container) are recoverable via right-click
- * "Treat as atomic"; false negatives (a folder of `.neo` files that
- * we refuse to drill into) leave the user stuck with no way down. The
- * "many similar files" rule below is the catch-all for extensions we
- * haven't enumerated yet.
+ * Container detection now relies on stronger signals: subdirectories
+ * (organisational tree like `_/Region/Game/`) or many same-extension
+ * files (NEOGEO's `1 World A-Z/` with 30+ `.zip` files). False
+ * positives — a folder with multiple distinct cart-format files we
+ * misclassify as a single game — are recoverable via the row-menu
+ * "Treat as container" override, the same way pre-round-5 false
+ * positives in the other direction were.
  */
 const CART_EXTENSIONS: ReadonlySet<string> = new Set([
   // Cartridge ROMs (originally enumerated)
@@ -117,30 +123,36 @@ const SAME_EXTENSION_THRESHOLD = 5;
 
 /**
  * Content-based classifier. Pure: feed it the files / dirs listing for
- * a folder, get back the call. Rule order matters:
+ * a folder, get back the call. Rule order matters; PR #11 round 5
+ * reorders the rules so the X68000 single-game-folder shape
+ * (`<game>/<game>.zip`) classifies atomic instead of container:
  *
  *   1. Disc markers / track patterns → atomic (a `.cue` folder full of
  *      `.bin`s is the Saturn shape; the disc rule wins so the `.bin`s
- *      don't drag us into the cart-ext branch).
- *   2. Known cart / archive extension → container.
- *   3. Many files share a single extension → container. Catches the
- *      long tail of formats we haven't enumerated (`.neo` was the
- *      regression that motivated this rule).
- *   4. Has subdirectories → container (likely an organisational tree).
+ *      don't drag us into a different branch).
+ *   2. Has subdirectories → container (likely an organisational tree;
+ *      the user expects to drill in).
+ *   3. Many files share a single extension → container. Catches NEOGEO
+ *      (30+ `.zip` files in `1 World A-Z/`) and the long tail of
+ *      formats we haven't enumerated (`.neo` was the original
+ *      motivator).
+ *   4. Known cart / archive extension → atomic. The folder is one
+ *      game whose ROM is a single archive/cart file; companion files
+ *      (manuals, art) sit alongside.
  *   5. Otherwise → unknown (resolves to atomic for safety).
  */
 export function classifyFolder(contents: FolderContents): FolderClassification {
   if (hasDiscMarker(contents.files) || hasTrackPattern(contents.files)) {
     return 'atomic';
   }
-  if (hasCartExtension(contents.files)) {
+  if (contents.dirs.length > 0) {
     return 'container';
   }
   if (hasManySameExtension(contents.files)) {
     return 'container';
   }
-  if (contents.dirs.length > 0) {
-    return 'container';
+  if (hasCartExtension(contents.files)) {
+    return 'atomic';
   }
   return 'unknown';
 }
