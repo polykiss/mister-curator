@@ -160,3 +160,81 @@ export function isAutoDetectedSystemFile(
   }
   return false;
 }
+
+/**
+ * Convenience wrapper — true iff `name` is an auto-detected system
+ * folder name (Palettes, Overlays, Filters, old). Used by the
+ * recursive-walk filter below to short-circuit on any ancestor
+ * segment.
+ */
+export function isAutoDetectedSystemFolder(name: string): boolean {
+  return isAutoDetectedSystemFile({ filename: name, kind: 'folder' });
+}
+
+export interface ShouldCountAsRomInput {
+  /**
+   * Path relative to the games dir (forward-slash separated). Either
+   * a single segment (`"mslug.zip"`, `"Overlays"`) or a multi-segment
+   * nested path (`"Overlays/grav-bezel.png"`, `"1 World A-Z/mslug.zip"`).
+   * Leading-dot segments — both at the leaf and at any ancestor —
+   * are accepted; the matcher uses the same path shape regardless of
+   * whether the games dir itself is dot-prefixed.
+   */
+  readonly relPath: string;
+  readonly isDirectory: boolean;
+  /** Visible (un-dotted) games-dir basename. Used for user-mark lookup. */
+  readonly coreId: string;
+  readonly marks?: SystemFilesMarks;
+}
+
+/**
+ * Single-source-of-truth for "should this file or folder count as a
+ * ROM?". Used by both the cores-list recursive walk AND the
+ * `listRoms` filter — before this helper existed, the two paths
+ * applied different rules and disagreed (Vectrex's `Overlays/`
+ * counted as ~90 ROMs in the cores list while the user's drill-in
+ * showed 0). PR #11 round 2 unifies them: both call this function,
+ * both get the same answer.
+ *
+ * Rules (in order):
+ *
+ *   1. Any ancestor segment that's an auto-detected system folder
+ *      OR a user-marked-system entry disqualifies the entire path.
+ *      A file inside `Overlays/` is excluded even if its own name
+ *      doesn't match any system rule.
+ *   2. For directory leaves, the leaf must not itself be a system
+ *      folder (the auto-detector list) and must not be user-marked.
+ *   3. For file leaves, the leaf must not be auto-detected as a
+ *      BIOS / config / boot file and must not be user-marked.
+ *
+ * Leading dots on segments are kept in `coreId` lookups (the marks
+ * file stores the user's mark verbatim, dots and all). Auto-
+ * detection strips leading dots internally before matching against
+ * the heuristic lists.
+ */
+export function shouldCountAsRom(input: ShouldCountAsRomInput): boolean {
+  const segments = input.relPath.split('/').filter((s) => s !== '');
+  if (segments.length === 0) return false;
+
+  const marks = input.marks;
+  const isMarkedHere = (basename: string): boolean =>
+    marks ? isMarked(marks, input.coreId, basename) : false;
+
+  // Walk ancestors first — any system-folder ancestor poisons the
+  // whole path.
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const seg = segments[i]!;
+    if (isAutoDetectedSystemFolder(seg)) return false;
+    if (isMarkedHere(seg)) return false;
+  }
+
+  const leaf = segments[segments.length - 1]!;
+  if (input.isDirectory) {
+    if (isAutoDetectedSystemFolder(leaf)) return false;
+    if (isMarkedHere(leaf)) return false;
+    return true;
+  }
+  if (isAutoDetectedSystemFile({ filename: leaf, kind: 'file' })) return false;
+  if (isMarkedHere(leaf)) return false;
+  return true;
+}

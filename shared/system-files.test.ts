@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { isAutoDetectedSystemFile, isSystemFile } from '@shared/system-files';
+import {
+  isAutoDetectedSystemFile,
+  isAutoDetectedSystemFolder,
+  isSystemFile,
+  shouldCountAsRom,
+} from '@shared/system-files';
 import type { SystemFilesMarks } from '@shared/types';
 
 const f = (filename: string): { filename: string; kind: 'file' } => ({
@@ -239,5 +244,133 @@ describe('isAutoDetectedSystemFile (auto layer in isolation)', () => {
     expect(isAutoDetectedSystemFile(f('mslug.zip'))).toBe(false);
     expect(isAutoDetectedSystemFile(f('pal.act'))).toBe(false);
     expect(isAutoDetectedSystemFile(d('Panzer Dragoon (USA) (1S)'))).toBe(false);
+  });
+});
+
+describe('isAutoDetectedSystemFolder', () => {
+  it('flags the four documented system folders', () => {
+    expect(isAutoDetectedSystemFolder('Palettes')).toBe(true);
+    expect(isAutoDetectedSystemFolder('Overlays')).toBe(true);
+    expect(isAutoDetectedSystemFolder('Filters')).toBe(true);
+    expect(isAutoDetectedSystemFolder('old')).toBe(true);
+  });
+
+  it('is case-insensitive', () => {
+    expect(isAutoDetectedSystemFolder('OVERLAYS')).toBe(true);
+    expect(isAutoDetectedSystemFolder('overlays')).toBe(true);
+  });
+
+  it('strips a leading dot before matching', () => {
+    expect(isAutoDetectedSystemFolder('.Palettes')).toBe(true);
+  });
+
+  it('returns false for non-system folders', () => {
+    expect(isAutoDetectedSystemFolder('1 World A-Z')).toBe(false);
+    expect(isAutoDetectedSystemFolder('Game Folder')).toBe(false);
+    expect(isAutoDetectedSystemFolder('overlays.bak')).toBe(false);
+  });
+});
+
+describe('shouldCountAsRom — unified filter for matcher + listRoms', () => {
+  it('counts a regular top-level file', () => {
+    expect(
+      shouldCountAsRom({
+        relPath: 'mslug.zip',
+        isDirectory: false,
+        coreId: 'NEOGEO',
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a top-level system file (BIOS)', () => {
+    expect(
+      shouldCountAsRom({
+        relPath: 'boot.rom',
+        isDirectory: false,
+        coreId: 'NEOGEO',
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects a top-level system folder (Vectrex/Overlays)', () => {
+    expect(
+      shouldCountAsRom({
+        relPath: 'Overlays',
+        isDirectory: true,
+        coreId: 'VECTREX',
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects ANY file inside a system-folder ancestor (Vectrex/Overlays/grav-bezel.png)', () => {
+    // The Vectrex bug: pre-Round-2-of-PR-#11, the recursive walk
+    // counted ~90 PNG files inside `Overlays/` because the walk
+    // didn't apply the system-folder filter to nested files.
+    // shouldCountAsRom now poisons any path with a system ancestor.
+    expect(
+      shouldCountAsRom({
+        relPath: 'Overlays/grav-bezel.png',
+        isDirectory: false,
+        coreId: 'VECTREX',
+      }),
+    ).toBe(false);
+  });
+
+  it('counts a regular file inside a non-system ancestor (NEOGEO/1 World A-Z/mslug.zip)', () => {
+    expect(
+      shouldCountAsRom({
+        relPath: '1 World A-Z/mslug.zip',
+        isDirectory: false,
+        coreId: 'NEOGEO',
+      }),
+    ).toBe(true);
+  });
+
+  it('counts a sub-directory if its ancestors are user-content', () => {
+    expect(
+      shouldCountAsRom({
+        relPath: '1 World A-Z',
+        isDirectory: true,
+        coreId: 'NEOGEO',
+      }),
+    ).toBe(true);
+  });
+
+  it('honors a user-mark at the leaf level', () => {
+    const marks: SystemFilesMarks = {
+      schemaVersion: 1,
+      marked: [{ coreId: 'C64', filename: 'pal.act', markedAt: '2026-05-08' }],
+    };
+    expect(
+      shouldCountAsRom({
+        relPath: 'pal.act',
+        isDirectory: false,
+        coreId: 'C64',
+        marks,
+      }),
+    ).toBe(false);
+  });
+
+  it('honors a user-mark on an ancestor segment', () => {
+    const marks: SystemFilesMarks = {
+      schemaVersion: 1,
+      marked: [
+        { coreId: 'Atari800', filename: '_resources', markedAt: '2026-05-08' },
+      ],
+    };
+    expect(
+      shouldCountAsRom({
+        relPath: '_resources/some-file.bin',
+        isDirectory: false,
+        coreId: 'Atari800',
+        marks,
+      }),
+    ).toBe(false);
+  });
+
+  it('returns false for an empty path', () => {
+    expect(
+      shouldCountAsRom({ relPath: '', isDirectory: false, coreId: 'X' }),
+    ).toBe(false);
   });
 });
