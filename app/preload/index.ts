@@ -57,10 +57,13 @@ const api: MisterApi = {
     invoke<ConnectResult>(IPC_CHANNELS.connect, profileId),
   disconnect: () => invoke<void>(IPC_CHANNELS.disconnect),
   getConnectionStatus: () => invoke<ConnectionStatus>(IPC_CHANNELS.getConnectionStatus),
-  listAllCoresWithFiles: () =>
-    invoke<CoreEntry[]>(IPC_CHANNELS.listAllCoresWithFiles),
-  listRoms: (coreId: string, subPath?: string) =>
-    invoke<Rom[]>(IPC_CHANNELS.listRoms, coreId, subPath),
+  listAllCoresWithFiles: (options?: { readonly forceRefresh?: boolean }) =>
+    invoke<CoreEntry[]>(IPC_CHANNELS.listAllCoresWithFiles, options),
+  listRoms: (
+    coreId: string,
+    subPath?: string,
+    options?: { readonly forceRefresh?: boolean },
+  ) => invoke<Rom[]>(IPC_CHANNELS.listRoms, coreId, subPath, options),
   setRomVisibility: (
     coreId: string,
     filename: string,
@@ -154,6 +157,7 @@ const api: MisterApi = {
       folderPath,
       classification,
     ),
+  clearCache: () => invoke<void>(IPC_CHANNELS.clearCache),
 };
 
 contextBridge.exposeInMainWorld('mister', api);

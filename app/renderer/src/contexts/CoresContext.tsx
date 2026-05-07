@@ -204,8 +204,12 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       setRomsLoading((prev) => ({ ...prev, [key]: true }));
       try {
         const label = subPath === '' ? coreId : `${coreId}/${subPath}`;
+        // refetchRoms is the post-mutation refresh path — always
+        // bypass the cache here so we observe the fresh device state.
+        // The lazy load path (`ensureRoms` below) leaves the cache
+        // engaged so cold drills are fast.
         const fresh = await runWithStatus(`Loading ROMs in ${label}…`, () =>
-          window.mister.listRoms(coreId, subPath),
+          window.mister.listRoms(coreId, subPath, { forceRefresh: true }),
         );
         setRomsByCore((prev) => ({ ...prev, [key]: fresh }));
       } finally {
@@ -232,8 +236,13 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
         // fails, which is the safe default.
         setLedgerCoreIds(new Set());
       }
+      // Refresh button intent: blow past any local-disk cache and
+      // walk the device. Without `forceRefresh: true` PR #12 would
+      // serve a cached snapshot on a witness-match — fine on first
+      // load but defeats the user clicking Refresh because they
+      // suspect the cache is stale.
       const next = await runWithStatus('Scanning cores…', () =>
-        window.mister.listAllCoresWithFiles(),
+        window.mister.listAllCoresWithFiles({ forceRefresh: true }),
       );
       setCores(next);
       setRomsByCore({});

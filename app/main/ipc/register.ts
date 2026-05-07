@@ -68,11 +68,17 @@ export function registerIpcHandlers(
 
   handle(IPC_CHANNELS.getConnectionStatus, () => manager.getStatus());
 
-  handle(IPC_CHANNELS.listAllCoresWithFiles, () => manager.listAllCoresWithFiles());
+  handle<[{ readonly forceRefresh?: boolean } | undefined], unknown>(
+    IPC_CHANNELS.listAllCoresWithFiles,
+    (options) => manager.listAllCoresWithFiles(options ?? {}),
+  );
 
-  handle<[string, string | undefined], unknown>(
+  handle<
+    [string, string | undefined, { readonly forceRefresh?: boolean } | undefined],
+    unknown
+  >(
     IPC_CHANNELS.listRoms,
-    (coreId, subPath) => manager.listRoms(coreId, subPath),
+    (coreId, subPath, options) => manager.listRoms(coreId, subPath, options ?? {}),
   );
 
   handle<[string, string, boolean, string | undefined], void>(
@@ -142,6 +148,10 @@ export function registerIpcHandlers(
       folderPath,
       classification ?? undefined,
     ),
+  );
+
+  handle<[], void>(IPC_CHANNELS.clearCache, () =>
+    manager.clearCacheForCurrentHost(),
   );
 
   ipcMain.handle(

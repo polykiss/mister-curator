@@ -13,6 +13,7 @@ import {
   vi,
 } from 'vitest';
 
+import { CacheManager } from '@app/main/cache/cache-manager';
 import { FakeMisterClient } from '@app/main/clients/fake-mister-client';
 import { ConnectionManager } from '@app/main/ipc/connection-manager';
 import type { ProfileStore } from '@app/main/storage/profile-store';
@@ -54,17 +55,22 @@ function makeStubStore(): ProfileStore {
   } as unknown as ProfileStore;
 }
 
-describe('ConnectionManager — hide / show + ledger bookkeeping', () => {
+describe('ConnectionManager — PR #12 disk cache', () => {
   let workDir: string;
+  let cacheDir: string;
+  let perTestCacheDir: string;
   let client: FakeMisterClient;
+  let cache: CacheManager;
   let manager: ConnectionManager;
 
   beforeAll(async () => {
-    workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-test-'));
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-cache-test-'));
+    cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-cache-test-cache-'));
   });
 
   afterAll(async () => {
     await fs.rm(workDir, { recursive: true, force: true });
+    await fs.rm(cacheDir, { recursive: true, force: true });
   });
 
   beforeEach(async () => {
@@ -74,7 +80,195 @@ describe('ConnectionManager — hide / show + ledger bookkeeping', () => {
       latencyMs: 0,
     });
     await client.reset();
-    manager = new ConnectionManager(client, makeStubStore());
+    perTestCacheDir = await fs.mkdtemp(path.join(cacheDir, 'run-'));
+    cache = new CacheManager(perTestCacheDir);
+    manager = new ConnectionManager(client, makeStubStore(), cache);
+  });
+
+  it('cold connect populates the cache; warm reconnect serves it without a network walk', async () => {
+    // Cold connect: cache is empty, so the manager performs the
+    // listAllCoresWithFiles walk lazily on first call.
+    await manager.connect(profile.id);
+    const firstList = await manager.listAllCoresWithFiles();
+    expect(firstList.length).toBeGreaterThan(0);
+    // Cache file now exists at <cacheDir>/<host>/cores.json.
+    const cacheFile = path.join(perTestCacheDir, '127.0.0.1', 'cores.json');
+    const cached = JSON.parse(await fs.readFile(cacheFile, 'utf-8'));
+    expect(cached.version).toBe(1);
+    expect(cached.host).toBe('127.0.0.1');
+    expect(cached.data.length).toBe(firstList.length);
+
+    // Warm reconnect: spy on the network walk method. Connecting and
+    // calling listAllCoresWithFiles must not trigger it.
+    await manager.disconnect();
+    const networkSpy = vi.spyOn(client, 'listAllCoresWithFiles');
+    await manager.connect(profile.id);
+    const warmList = await manager.listAllCoresWithFiles();
+    expect(networkSpy).not.toHaveBeenCalled();
+    expect(warmList).toEqual(firstList);
+    networkSpy.mockRestore();
+  });
+
+  it('an out-of-band mutation (mtime change) invalidates the cache and triggers a fresh walk', async () => {
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles(); // populate cache
+    await manager.disconnect();
+
+    // Bump games/ mtime explicitly. Plain fs operations within the
+    // same wall-clock second produce identical floor-to-second
+    // mtimes, which would falsely look like a cache hit. utimes
+    // sidesteps the resolution issue by setting a deterministic
+    // future mtime on the parent dir.
+    const future = new Date(Date.now() + 60_000);
+    await fs.utimes(path.join(workDir, 'games'), future, future);
+
+    const networkSpy = vi.spyOn(client, 'listAllCoresWithFiles');
+    await manager.connect(profile.id);
+    // A network call IS expected here (cache witnesses don't match).
+    await manager.listAllCoresWithFiles();
+    expect(networkSpy).toHaveBeenCalled();
+    networkSpy.mockRestore();
+  });
+
+  it('listAllCoresWithFiles({ forceRefresh: true }) bypasses the cache and rewrites it', async () => {
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+
+    const networkSpy = vi.spyOn(client, 'listAllCoresWithFiles');
+    await manager.listAllCoresWithFiles({ forceRefresh: true });
+    expect(networkSpy).toHaveBeenCalledTimes(1);
+    networkSpy.mockRestore();
+  });
+
+  it('hideCore write-through keeps the cache warm on the next connect', async () => {
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+    await manager.hideCore('NES');
+    await manager.disconnect();
+
+    // Reconnect — the write-through stat'd new witnesses post-hide,
+    // so the cache should still be valid and the next read should
+    // not hit the network.
+    const networkSpy = vi.spyOn(client, 'listAllCoresWithFiles');
+    await manager.connect(profile.id);
+    const cores = await manager.listAllCoresWithFiles();
+    expect(networkSpy).not.toHaveBeenCalled();
+    // And the cached row reflects the post-hide state (gamesDirHidden=true).
+    expect(cores.find((c) => c.id === 'NES')?.gamesDirHidden).toBe(true);
+    networkSpy.mockRestore();
+  });
+
+  it('setRomVisibility invalidates the affected core’s roms cache', async () => {
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+    await manager.listRoms('NES'); // populate roms cache for NES
+
+    const cacheFile = path.join(perTestCacheDir, '127.0.0.1', 'roms', 'NES.json');
+    await fs.access(cacheFile); // exists
+
+    // Find a real ROM filename to flip.
+    const roms = await manager.listRoms('NES');
+    const target = roms.find((r) => r.kind === 'file' && !r.hidden);
+    expect(target).toBeDefined();
+    if (!target) return;
+
+    await manager.setRomVisibility('NES', target.filename, true);
+
+    // Cache file for NES should be gone (invalidate-on-mutation).
+    await expect(fs.access(cacheFile)).rejects.toThrow();
+  });
+
+  it('addSystemFileMark invalidates BOTH cores and that core’s roms cache', async () => {
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+    await manager.listRoms('NES');
+
+    const coresCachePath = path.join(perTestCacheDir, '127.0.0.1', 'cores.json');
+    const romsCachePath = path.join(perTestCacheDir, '127.0.0.1', 'roms', 'NES.json');
+    await fs.access(coresCachePath);
+    await fs.access(romsCachePath);
+
+    await manager.addSystemFileMark('NES', 'noise.bios');
+
+    // cores.json gone — counts may have shifted.
+    await expect(fs.access(coresCachePath)).rejects.toThrow();
+    // NES roms cache gone — system flags may have shifted.
+    await expect(fs.access(romsCachePath)).rejects.toThrow();
+  });
+
+  it('clearCacheForCurrentHost wipes the entire host cache directory', async () => {
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+    await manager.listRoms('NES');
+
+    const hostDir = path.join(perTestCacheDir, '127.0.0.1');
+    await fs.access(hostDir); // exists
+
+    await manager.clearCacheForCurrentHost();
+
+    await expect(fs.access(hostDir)).rejects.toThrow();
+  });
+
+  it('listRoms cache hit on identical witnesses, miss on changed mtime', async () => {
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+    const first = await manager.listRoms('NES');
+    expect(first.length).toBeGreaterThan(0);
+
+    // Second call with no mutation: cache hit. listRoms-on-client
+    // should not be called.
+    const networkSpy = vi.spyOn(client, 'listRoms');
+    const second = await manager.listRoms('NES');
+    expect(networkSpy).not.toHaveBeenCalled();
+    expect(second).toEqual(first);
+    networkSpy.mockRestore();
+
+    // Now bump games/NES mtime via utimes. (Plain rename within
+    // the same wall-clock second can leave the second-resolution
+    // mtime unchanged.)
+    const future = new Date(Date.now() + 60_000);
+    await fs.utimes(path.join(workDir, 'games', 'NES'), future, future);
+
+    // Cache witness for /media/fat/games/NES no longer matches → miss.
+    const networkSpy2 = vi.spyOn(client, 'listRoms');
+    await manager.listRoms('NES');
+    expect(networkSpy2).toHaveBeenCalled();
+    networkSpy2.mockRestore();
+  });
+});
+
+describe('ConnectionManager — hide / show + ledger bookkeeping', () => {
+  let workDir: string;
+  let cacheDir: string;
+  let client: FakeMisterClient;
+  let manager: ConnectionManager;
+
+  beforeAll(async () => {
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-test-'));
+    cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-cache-'));
+  });
+
+  afterAll(async () => {
+    await fs.rm(workDir, { recursive: true, force: true });
+    await fs.rm(cacheDir, { recursive: true, force: true });
+  });
+
+  beforeEach(async () => {
+    client = new FakeMisterClient({
+      rootPath: workDir,
+      pristineRootPath: fixturesDir,
+      latencyMs: 0,
+    });
+    await client.reset();
+    // Fresh cache dir per test so a prior test's cache file can't
+    // bleed in and turn a "would have hit the network" assertion
+    // into a cache-hit false positive.
+    const perTestCacheDir = await fs.mkdtemp(path.join(cacheDir, 'run-'));
+    manager = new ConnectionManager(
+      client,
+      makeStubStore(),
+      new CacheManager(perTestCacheDir),
+    );
     await manager.connect(profile.id);
   });
 
@@ -174,7 +368,12 @@ describe('ConnectionManager — mid-session disconnect + auto-retry', () => {
       latencyMs: 0,
     });
     await client.reset();
-    manager = new ConnectionManager(client, makeStubStore());
+    const perTestCacheDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-retry-cache-'));
+    manager = new ConnectionManager(
+      client,
+      makeStubStore(),
+      new CacheManager(perTestCacheDir),
+    );
     events = [];
     manager.onConnectionEvent((e) => events.push(e));
     await manager.connect(profile.id);

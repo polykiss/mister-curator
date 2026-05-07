@@ -4,6 +4,10 @@ import {
   type ConnectionEvent,
 } from '@shared/connection';
 import {
+  CORES_CACHE_WITNESS_PATHS,
+  romsCacheWitnessPath,
+} from '@shared/constants';
+import {
   applyCoreVisibilityChange,
   computeAutoReapplyChanges,
   isCoreHidden,
@@ -11,6 +15,7 @@ import {
 } from '@shared/core-matching';
 import {
   EMPTY_LEDGER,
+  healLedger,
   ledgerEqual,
   withCoreHidden,
   withCoreShown,
@@ -27,6 +32,7 @@ import type {
 } from '@shared/mister-client';
 import { EMPTY_FOLDER_CLASSIFICATIONS } from '@shared/folder-classifications';
 import { EMPTY_SYSTEM_FILES_MARKS } from '@shared/system-files-marks';
+import { witnessesMatch } from '@app/main/cache/cache-types';
 import type {
   ConnectionStatus,
   CoreEntry,
@@ -39,6 +45,7 @@ import type {
   SystemFilesMarks,
 } from '@shared/types';
 
+import type { CacheManager } from '@app/main/cache/cache-manager';
 import type { ProfileStore } from '@app/main/storage/profile-store';
 
 type StatusListener = (status: ConnectionStatus) => void;
@@ -125,10 +132,18 @@ export class ConnectionManager {
    */
   private folderClassificationsCache: FolderClassifications =
     EMPTY_FOLDER_CLASSIFICATIONS;
+  /**
+   * Host of the active connection — used to key the on-disk cache
+   * (PR #12). Captured on connect alongside `currentProfileId` so a
+   * write-through after a hide/show targets the right host's cache
+   * even if the profile has been edited since.
+   */
+  private currentHost: string | null = null;
 
   constructor(
     private readonly client: IMisterClient,
     private readonly store: ProfileStore,
+    private readonly cache: CacheManager,
   ) {}
 
   getStatus(): ConnectionStatus {
@@ -178,6 +193,7 @@ export class ConnectionManager {
     this.ledgerCache = EMPTY_LEDGER;
     this.systemFilesMarksCache = EMPTY_SYSTEM_FILES_MARKS;
     this.folderClassificationsCache = EMPTY_FOLDER_CLASSIFICATIONS;
+    this.currentHost = null;
 
     // Connecting-elapsed ticker. Fires every second while the connect
     // is in flight; the renderer uses these to drive the delayed-
@@ -215,14 +231,49 @@ export class ConnectionManager {
         },
       );
 
-      // Prime the ledger cache. readHideLedger self-heals as a side
-      // effect — drops stale `_hidden` etc. entries and rewrites.
-      this.ledgerCache = await this.client.readHideLedger();
-      // Prime the system-files marks cache. Cheap (small JSON file) and
-      // we want the cores list to reflect marks immediately.
-      this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
-      this.folderClassificationsCache =
-        await this.client.readFolderClassifications();
+      // PR #12 prime: one SSH command returns ledger + marks +
+      // classifications + cores-cache witnesses. Replaces three
+      // sequential reads with one round trip — load-bearing for the
+      // <1s warm-connect target.
+      const prime = await this.client.primeConnect(CORES_CACHE_WITNESS_PATHS);
+      this.ledgerCache = prime.ledger;
+      this.systemFilesMarksCache = prime.marks;
+      this.folderClassificationsCache = prime.classifications;
+      this.currentHost = profile.host;
+
+      // PR #12 cache lookup. On hit we skip the 7s walk entirely.
+      // On miss/stale, the cache stays cold until the first explicit
+      // listAllCoresWithFiles call.
+      const cached = await this.cache.getCoresCache(profile.host);
+      if (cached !== null && witnessesMatch(cached.witnesses, prime.witnesses)) {
+        this.coresCache = [...cached.data];
+      } else if (cached !== null) {
+        // Stale — drop it so the next listAllCoresWithFiles writes a
+        // fresh entry instead of layering on top.
+        await this.cache.invalidateCoresCache(profile.host).catch(() => {
+          /* swallow */
+        });
+      }
+
+      // Ledger self-heal — was inside `client.readHideLedger`; moved
+      // here so we can use cached cores when the cache hits, avoiding
+      // an extra listAllCoresWithFiles walk during heal.
+      if (this.ledgerCache.hiddenCores.length > 0) {
+        const coresForHeal =
+          this.coresCache.length > 0
+            ? this.coresCache
+            : await this.fetchAndCacheCores();
+        const healed = healLedger(this.ledgerCache, coresForHeal);
+        if (!ledgerEqual(this.ledgerCache, healed)) {
+          const dropped =
+            this.ledgerCache.hiddenCores.length - healed.hiddenCores.length;
+          console.log(
+            `Ledger self-healed: dropped ${String(dropped)} stale entries.`,
+          );
+          await this.client.writeHideLedger(healed);
+          this.ledgerCache = healed;
+        }
+      }
 
       let reappliedCount = 0;
       if (profile.autoReapplyHides === true) {
@@ -252,6 +303,7 @@ export class ConnectionManager {
       await this.client.disconnect();
     } finally {
       this.currentProfileId = null;
+      this.currentHost = null;
       this.coresCache = [];
       this.ledgerCache = EMPTY_LEDGER;
       this.systemFilesMarksCache = EMPTY_SYSTEM_FILES_MARKS;
@@ -260,12 +312,65 @@ export class ConnectionManager {
     }
   }
 
-  async listAllCoresWithFiles(): Promise<CoreEntry[]> {
+  /**
+   * The cores list as the renderer sees it. Hits the in-memory cache
+   * (populated by either the on-connect cache lookup or a previous
+   * fetch). On a true miss falls through to `fetchAndCacheCores`,
+   * which runs the SSH walk and writes the result to disk.
+   *
+   * `forceRefresh` bypasses both the in-memory cache and the on-disk
+   * cache, walks the network, then writes the fresh result to disk
+   * — wired to the renderer's "Refresh" button so the user always
+   * has an escape hatch from a stuck cache.
+   */
+  async listAllCoresWithFiles(
+    options: { readonly forceRefresh?: boolean } = {},
+  ): Promise<CoreEntry[]> {
     this.assertConnected();
+    if (options.forceRefresh) {
+      if (this.currentHost !== null) {
+        await this.cache.invalidateCoresCache(this.currentHost).catch(() => {
+          /* swallow — the disk cache being out of sync isn't fatal */
+        });
+      }
+      return this.fetchAndCacheCores();
+    }
+    if (this.coresCache.length > 0) {
+      return this.coresCache;
+    }
+    return this.fetchAndCacheCores();
+  }
+
+  /**
+   * Network fetch path for `listAllCoresWithFiles`. Walks the device,
+   * stats the cores witnesses, writes both to the on-disk cache, and
+   * updates `coresCache` in memory.
+   *
+   * Witnesses are stat'd AFTER the fetch so they reflect the device
+   * state at or after the data was generated. If a write happened
+   * during the walk, the post-fetch stat captures it and the cache
+   * will invalidate on next validate (one extra refetch, never stale
+   * data served).
+   */
+  private async fetchAndCacheCores(): Promise<CoreEntry[]> {
     const cores = await this.client.listAllCoresWithFiles(
       this.systemFilesMarksCache,
     );
     this.coresCache = cores;
+    if (this.currentHost !== null) {
+      try {
+        const witnesses = await this.client.statWitnesses(
+          CORES_CACHE_WITNESS_PATHS,
+        );
+        await this.cache.setCoresCache(this.currentHost, cores, witnesses);
+      } catch {
+        // Stat or write failure → drop the cache so the next session
+        // refetches rather than serves something we can't validate.
+        await this.cache.invalidateCoresCache(this.currentHost).catch(() => {
+          /* swallow */
+        });
+      }
+    }
     return cores;
   }
 
@@ -293,6 +398,7 @@ export class ConnectionManager {
     this.assertConnected();
     await this.client.addSystemFileMark(coreId, filename);
     this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
+    await this.invalidateAfterMarksChange(coreId);
     return this.systemFilesMarksCache;
   }
 
@@ -303,6 +409,7 @@ export class ConnectionManager {
     this.assertConnected();
     await this.client.removeSystemFileMark(coreId, filename);
     this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
+    await this.invalidateAfterMarksChange(coreId);
     return this.systemFilesMarksCache;
   }
 
@@ -313,23 +420,110 @@ export class ConnectionManager {
     this.assertConnected();
     await this.client.setSystemFileMarks(coreId, changes);
     this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
+    await this.invalidateAfterMarksChange(coreId);
     return this.systemFilesMarksCache;
   }
 
-  async listRoms(coreId: string, subPath = ''): Promise<Rom[]> {
+  /**
+   * Marks changes shift romCount (in the cores list) and the system-
+   * flag flag inside Rom[] (for the listRoms list of `coreId`). Both
+   * cache files are out-of-date until a fresh fetch — invalidate.
+   * Cheaper alternatives (delta-update each cache file) are possible
+   * but error-prone; v0 invalidates and refetches lazily.
+   */
+  private async invalidateAfterMarksChange(coreId: string): Promise<void> {
+    if (this.currentHost === null) return;
+    this.coresCache = [];
+    await Promise.all([
+      this.cache.invalidateCoresCache(this.currentHost),
+      this.cache.invalidateRomsCache(this.currentHost, coreId),
+    ]).catch(() => {
+      /* best-effort */
+    });
+  }
+
+  /**
+   * Lists the ROM-shaped entries at `<coreId>/<subPath>`. PR #12:
+   * cache-first via the on-disk roms cache, validated against the
+   * one-path mtime witness (`/media/fat/games/<onDiskBasename>` for
+   * the top level, plus `/<subPath>` for drills).
+   *
+   * `forceRefresh` skips the cache and writes a fresh entry — wired
+   * to the renderer's Refresh button.
+   */
+  async listRoms(
+    coreId: string,
+    subPath = '',
+    options: { readonly forceRefresh?: boolean } = {},
+  ): Promise<Rom[]> {
     this.assertConnected();
     const dirBase = this.resolveOnDiskGamesDirBasename(coreId);
-    const roms = await this.client.listRoms(
+    const witnessPath = romsCacheWitnessPath(dirBase, subPath);
+
+    if (!options.forceRefresh && this.currentHost !== null) {
+      const slot = await this.cache.getRomsCache(this.currentHost, coreId, subPath);
+      if (slot !== null) {
+        // Stat the single witness in one round trip and compare. The
+        // stat itself is ~50ms — a worthwhile trade against the
+        // multi-second walk of a large core's games dir (X68000:
+        // ~600 folders, was 7s pre-cache).
+        try {
+          const fresh = await this.client.statWitnesses([witnessPath]);
+          if (witnessesMatch(slot.witnesses, fresh)) {
+            return [...slot.data];
+          }
+        } catch {
+          // Witness stat failure → fall through to network fetch.
+        }
+      }
+    }
+
+    return this.fetchAndCacheRoms(coreId, dirBase, subPath, witnessPath);
+  }
+
+  /**
+   * Network fetch + cache write path for listRoms. Stat-after-fetch
+   * mirrors the cores-cache write path: witnesses recorded with the
+   * data reflect the post-fetch device state, so a write during the
+   * walk surfaces as a cache miss next time, never as stale data.
+   */
+  private async fetchAndCacheRoms(
+    coreId: string,
+    dirBase: string,
+    subPath: string,
+    witnessPath: string,
+  ): Promise<Rom[]> {
+    const fetched = await this.client.listRoms(
       dirBase,
       subPath,
       this.folderClassificationsCache,
     );
-    if (dirBase === coreId) return roms;
     // Translate the on-disk basename back to the canonical coreId so
     // the renderer's view stays casing/dot agnostic. The on-disk path
     // (`rom.path`) stays as the actual on-disk path so renames target
     // the right file.
-    return roms.map((r) => ({ ...r, coreId }));
+    const roms =
+      dirBase === coreId ? fetched : fetched.map((r) => ({ ...r, coreId }));
+
+    if (this.currentHost !== null) {
+      try {
+        const witnesses = await this.client.statWitnesses([witnessPath]);
+        await this.cache.setRomsCache(
+          this.currentHost,
+          coreId,
+          subPath,
+          roms,
+          witnesses,
+        );
+      } catch {
+        await this.cache
+          .invalidateRomsCache(this.currentHost, coreId)
+          .catch(() => {
+            /* swallow */
+          });
+      }
+    }
+    return roms;
   }
 
   async setRomVisibility(
@@ -341,6 +535,10 @@ export class ConnectionManager {
     this.assertConnected();
     const dirBase = this.resolveOnDiskGamesDirBasename(coreId);
     await this.client.setRomVisibility(dirBase, filename, hidden, subPath);
+    // ROM rename changes the games dir's mtime → roms cache for this
+    // core is invalidated. We don't try to delta-update Rom[] in
+    // place; simpler and safer to drop and refetch on next browse.
+    await this.invalidateRomsAfterMutation(coreId);
   }
 
   async setBulkRomVisibility(
@@ -350,7 +548,21 @@ export class ConnectionManager {
   ): Promise<BulkRomResult> {
     this.assertConnected();
     const dirBase = this.resolveOnDiskGamesDirBasename(coreId);
-    return this.client.setBulkRomVisibility(dirBase, changes, subPath);
+    const result = await this.client.setBulkRomVisibility(dirBase, changes, subPath);
+    // Invalidate even on partial failure — a non-empty `succeeded`
+    // means at least one rename committed and the cache is stale.
+    if (result.succeeded.length > 0 || result.failed.length > 0) {
+      await this.invalidateRomsAfterMutation(coreId);
+    }
+    return result;
+  }
+
+  /** Drop the on-disk roms cache for `coreId`. Best-effort. */
+  private async invalidateRomsAfterMutation(coreId: string): Promise<void> {
+    if (this.currentHost === null) return;
+    await this.cache.invalidateRomsCache(this.currentHost, coreId).catch(() => {
+      /* swallow */
+    });
   }
 
   /**
@@ -400,6 +612,14 @@ export class ConnectionManager {
     }
     this.folderClassificationsCache =
       await this.client.readFolderClassifications();
+    // Folder-classification changes flip Rom.kind (container ↔ atomic)
+    // for the affected core's listRoms output. cores cache is
+    // unaffected (kind isn't part of CoreEntry).
+    if (this.currentHost !== null) {
+      await this.cache.invalidateRomsCache(this.currentHost, coreId).catch(() => {
+        /* swallow */
+      });
+    }
     return this.folderClassificationsCache;
   }
 
@@ -412,6 +632,7 @@ export class ConnectionManager {
     await this.client.hideCore(core);
     await this.recordHide(core);
     this.applyCachedVisibilityFlip(core.id, true);
+    await this.writeThroughAfterCoreMutation(coreId);
   }
 
   async showCore(coreId: string): Promise<void> {
@@ -428,6 +649,37 @@ export class ConnectionManager {
     await this.client.showCore(core);
     await this.recordShow(core);
     this.applyCachedVisibilityFlip(core.id, false);
+    await this.writeThroughAfterCoreMutation(coreId);
+  }
+
+  /**
+   * After a successful single-core hide/show: re-stat cores witnesses,
+   * write the delta-updated `coresCache` back to disk, and drop the
+   * roms cache for the affected core (its games dir was renamed,
+   * so any cached top-level/sub-path slots key on a stale on-disk
+   * basename).
+   *
+   * Best-effort: any failure invalidates the cores cache so the next
+   * session refetches rather than serving stale.
+   */
+  private async writeThroughAfterCoreMutation(coreId: string): Promise<void> {
+    if (this.currentHost === null) return;
+    try {
+      const witnesses = await this.client.statWitnesses(CORES_CACHE_WITNESS_PATHS);
+      await this.cache.setCoresCache(
+        this.currentHost,
+        this.coresCache,
+        witnesses,
+      );
+      await this.cache.invalidateRomsCache(this.currentHost, coreId);
+    } catch {
+      await this.cache.invalidateCoresCache(this.currentHost).catch(() => {
+        /* swallow */
+      });
+      await this.cache.invalidateRomsCache(this.currentHost, coreId).catch(() => {
+        /* swallow */
+      });
+    }
   }
 
   /**
@@ -521,16 +773,51 @@ export class ConnectionManager {
       }
     }
 
+    // PR #12 cache write-through. One stat batch covers every
+    // succeeded core's witnesses (the cores cache uses the 5 shared
+    // category/games-dir paths). Per-core roms cache files are
+    // dropped one-by-one — their on-disk basenames just changed.
+    if (this.currentHost !== null && succeededIds.size > 0) {
+      try {
+        const witnesses = await this.client.statWitnesses(CORES_CACHE_WITNESS_PATHS);
+        await this.cache.setCoresCache(
+          this.currentHost,
+          this.coresCache,
+          witnesses,
+        );
+        await Promise.all(
+          [...succeededIds].map((id) =>
+            this.cache.invalidateRomsCache(this.currentHost as string, id),
+          ),
+        );
+      } catch {
+        await this.cache.invalidateCoresCache(this.currentHost).catch(() => {
+          /* swallow */
+        });
+      }
+    }
+
     return { succeeded: result.succeeded, failed };
+  }
+
+  /**
+   * Wipes the entire on-disk cache for the current host. Wired to the
+   * "Clear cache" hidden command (no UI surface yet, v0). Safe to call
+   * when disconnected — does nothing.
+   */
+  async clearCacheForCurrentHost(): Promise<void> {
+    if (this.currentHost === null) return;
+    await this.cache.clearHost(this.currentHost);
+    this.coresCache = [];
   }
 
   private async runAutoReapply(): Promise<number> {
     if (this.ledgerCache.hiddenCores.length === 0) return 0;
 
-    const cores = await this.client.listAllCoresWithFiles(
-      this.systemFilesMarksCache,
-    );
-    this.coresCache = cores;
+    // Use the cache-aware path so a warm-connect reapply doesn't pay
+    // the 7s walk twice. `listAllCoresWithFiles` returns cached data
+    // when valid; only fetches on miss.
+    const cores = await this.listAllCoresWithFiles();
 
     const changes = computeAutoReapplyChanges(this.ledgerCache, cores);
     if (changes.length === 0) return 0;
@@ -547,10 +834,10 @@ export class ConnectionManager {
 
     const result = await this.client.setBulkCoreVisibility(resolved);
 
-    // Refresh the cache so subsequent hideCore lookups see the new state.
-    this.coresCache = await this.client.listAllCoresWithFiles(
-      this.systemFilesMarksCache,
-    );
+    // After bulk renames the cores list is stale. Force a fresh
+    // refetch so subsequent hideCore lookups see post-rename rbfPaths
+    // — and write-through the new state to the on-disk cache.
+    await this.listAllCoresWithFiles({ forceRefresh: true });
 
     return result.succeeded.length;
   }
@@ -706,11 +993,24 @@ export class ConnectionManager {
           },
         );
         this.currentProfileId = profileId;
+        this.currentHost = profile.host;
         try {
-          this.ledgerCache = await this.client.readHideLedger();
-          this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
-          this.folderClassificationsCache =
-            await this.client.readFolderClassifications();
+          // Reuse the same prime path as a fresh connect — keeps the
+          // reconnect cost on the same <1s budget as the initial
+          // connect. On a cache hit we skip the cores walk entirely.
+          const prime = await this.client.primeConnect(CORES_CACHE_WITNESS_PATHS);
+          this.ledgerCache = prime.ledger;
+          this.systemFilesMarksCache = prime.marks;
+          this.folderClassificationsCache = prime.classifications;
+          const cached = await this.cache.getCoresCache(profile.host);
+          if (
+            cached !== null &&
+            witnessesMatch(cached.witnesses, prime.witnesses)
+          ) {
+            this.coresCache = [...cached.data];
+          } else {
+            this.coresCache = [];
+          }
         } catch {
           // Cache priming is best-effort during reconnect; the next
           // explicit refresh will catch anything we missed.
