@@ -11,6 +11,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
+import type { FolderClassificationUpdateWire } from '@shared/preload-api';
 import { isAutoDetectedSystemFile, isSystemFile } from '@shared/system-files';
 import type { CoreEntry, Rom } from '@shared/types';
 
@@ -75,6 +76,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     removeSystemFileMark,
     setSystemFileMarks,
     setFolderClassification,
+    setFolderClassifications,
   } = useCores();
   const { status } = useConnection();
   // Mid-session disconnect / pre-reconnect state — every mutating
@@ -228,6 +230,17 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
       (r) => selected.has(r.filename) && isUserMarked(core.id, r.filename),
     );
   }, [roms, selected, core.id, isUserMarked]);
+
+  // PR #13: bulk-classification candidates — only folder rows count.
+  // The bulk-action buttons fire `setFolderClassifications` with the
+  // visible relative path of each selected folder. Files in the
+  // selection are ignored (they don't have a classification).
+  const selectedFolderRows = useMemo(() => {
+    if (!roms) return [];
+    return roms.filter(
+      (r) => selected.has(r.filename) && r.kind !== 'file',
+    );
+  }, [roms, selected]);
 
   const onToggleSelect = (filename: string, checked: boolean): void => {
     setSelected((prev) => {
@@ -427,6 +440,41 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     }
   };
 
+  /**
+   * PR #13: bulk classification action. Maps each selected folder row
+   * to a `(folderPath, value)` update and fires the batched IPC. The
+   * manager applies all updates against fresh-from-server snapshots
+   * and writes each file at most once — a 600-folder X68000 sweep is
+   * two device writes.
+   */
+  const onBulkClassify = async (
+    value: 'atomic' | 'container' | 'system',
+  ): Promise<void> => {
+    const targets = selectedFolderRows;
+    if (targets.length === 0) return;
+    const updates: FolderClassificationUpdateWire[] = targets.map((r) => ({
+      folderPath: visibleFolderPath(r),
+      value,
+    }));
+    try {
+      await setFolderClassifications(core.id, updates);
+      const verb =
+        value === 'atomic'
+          ? 'Treating as ROM'
+          : value === 'container'
+            ? 'Treating as folder of ROMs'
+            : 'Marking as system';
+      toast.success(
+        `${verb}: ${String(targets.length)} folder${targets.length === 1 ? '' : 's'}`,
+      );
+      setSelected(new Set());
+    } catch (err) {
+      toast.error('Could not update folder classifications', {
+        description: err instanceof Error ? err.message : 'Unexpected error.',
+      });
+    }
+  };
+
   const onUnmarkSystem = async (rom: Rom): Promise<void> => {
     try {
       await removeSystemFileMark(core.id, rom.filename);
@@ -452,26 +500,37 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     }
   };
 
+  /**
+   * Compute the override key for a folder row. PR #11 round 5 contract:
+   * the visible (un-dotted) relative path inside the games dir. Same
+   * shape `listRoms` uses to look the override up, so a later
+   * hide/unhide of the folder doesn't orphan its classification.
+   */
+  function visibleFolderPath(rom: Rom): string {
+    return (
+      (subPath === '' ? '' : `${subPath}/`) +
+      (rom.hidden ? rom.filename.slice(1) : rom.filename)
+    );
+  }
+
   const onSetClassification = async (
     rom: Rom,
-    classification: 'container' | 'atomic' | null,
+    value: 'container' | 'atomic' | 'system' | null,
   ): Promise<void> => {
-    // The override key is the visible (un-dotted) relative path —
-    // matches how `listRoms` builds the lookup so a hide/unhide later
-    // doesn't break the override.
-    const visibleRelPath =
-      (subPath === '' ? '' : `${subPath}/`) +
-      (rom.hidden ? rom.filename.slice(1) : rom.filename);
     try {
-      await setFolderClassification(core.id, visibleRelPath, classification, {
+      await setFolderClassification(core.id, visibleFolderPath(rom), value, {
         coreId: core.id,
         subPath,
       });
-      toast.success(
-        classification === null
+      const verb =
+        value === null
           ? `Reset classification for ${rom.displayName}`
-          : `Treating ${rom.displayName} as ${classification}`,
-      );
+          : value === 'system'
+            ? `Treating ${rom.displayName} as system`
+            : value === 'atomic'
+              ? `Treating ${rom.displayName} as ROM`
+              : `Treating ${rom.displayName} as folder of ROMs`;
+      toast.success(verb);
     } catch (err) {
       toast.error('Could not update folder classification', {
         description: err instanceof Error ? err.message : 'Unexpected error.',
@@ -482,34 +541,52 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   function buildMenuItems(rom: Rom): readonly RomRowMenuItem[] {
     const items: RomRowMenuItem[] = [];
 
-    // Folder rows get classification overrides — the user can pin a
-    // specific folder to container/atomic against the auto-detector.
-    // Classification overrides write to an on-MiSTer marks file, so
-    // they're gated on a live connection just like system-file marks.
     if (rom.kind !== 'file') {
-      const isContainer = rom.kind === 'folder-container';
+      // Folder rows: tri-state classification picker (PR #13). Three
+      // mutually-exclusive options with a checkmark on the active
+      // one. The dispatch under the hood routes to either
+      // folder-classifications.json or system-files.json depending on
+      // the choice — the renderer doesn't see the storage split.
+      //
+      // "Active" rules:
+      //   - System-marked → "Treat as system" wins (overrides kind).
+      //   - Else: rom.kind already reflects atomic/container after the
+      //     manager applied the classifyFolder + override resolution,
+      //     so we read it directly.
+      const isMarkedSystem = isUserMarked(core.id, rom.filename);
+      const isAtomic = !isMarkedSystem && rom.kind === 'folder-atomic';
+      const isContainer = !isMarkedSystem && rom.kind === 'folder-container';
       items.push({
-        label: isContainer ? 'Treat as atomic (one game)' : 'Treat as container (drill in)',
-        onSelect: () =>
-          void onSetClassification(rom, isContainer ? 'atomic' : 'container'),
+        label: 'Treat as ROM',
+        checked: isAtomic,
+        onSelect: () => void onSetClassification(rom, 'atomic'),
         disabled: !canMutate,
         title: canMutate
-          ? 'Override the auto-detector for this folder. Persists in the on-MiSTer marks file.'
+          ? 'The folder is one game. No drill-in; hide and selection treat it as a single entry.'
           : DISCONNECTED_TOOLTIP,
       });
       items.push({
-        label: 'Reset to auto-detected',
-        onSelect: () => void onSetClassification(rom, null),
+        label: 'Treat as folder of ROMs',
+        checked: isContainer,
+        onSelect: () => void onSetClassification(rom, 'container'),
         disabled: !canMutate,
         title: canMutate
-          ? 'Drop the user override and let the heuristic classify this folder.'
+          ? 'The folder groups multiple games. Click drills in.'
           : DISCONNECTED_TOOLTIP,
       });
+      items.push({
+        label: 'Treat as system',
+        checked: isMarkedSystem,
+        onSelect: () => void onSetClassification(rom, 'system'),
+        disabled: !canMutate,
+        title: canMutate
+          ? "Hide this folder from the normal view. Reveal via the 'Show system files' toggle."
+          : DISCONNECTED_TOOLTIP,
+      });
+      return items;
     }
 
-    // System-file mark items — auto-detected files cannot be unmarked
-    // (the heuristic decides every connection). The disabled item
-    // surfaces this without hiding the option.
+    // File rows keep the pre-PR-13 mark/unmark menu.
     const auto = isAutoDetectedSystemFile({
       filename: rom.filename,
       kind: romKindForSystemCheck(rom.kind),
@@ -684,6 +761,50 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             }
           >
             Unmark system ({unmarkableSelected.length})
+          </Button>
+          {/* PR #13: bulk classification actions. Visible only when
+              the selection contains at least one folder row — files
+              don't have a classification axis. The three buttons
+              mirror the row-menu's tri-state and route through the
+              batched setFolderClassifications IPC. */}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void onBulkClassify('atomic')}
+            disabled={!canMutate || selectedFolderRows.length === 0}
+            title={
+              canMutate
+                ? 'Treat the selected folders as single ROMs (no drill-in).'
+                : DISCONNECTED_TOOLTIP
+            }
+          >
+            Treat as ROM ({selectedFolderRows.length})
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void onBulkClassify('container')}
+            disabled={!canMutate || selectedFolderRows.length === 0}
+            title={
+              canMutate
+                ? 'Treat the selected folders as containers (drill-in shows their contents).'
+                : DISCONNECTED_TOOLTIP
+            }
+          >
+            Treat as folder ({selectedFolderRows.length})
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void onBulkClassify('system')}
+            disabled={!canMutate || selectedFolderRows.length === 0}
+            title={
+              canMutate
+                ? "Hide the selected folders from the normal view. Reveal via 'Show system files'."
+                : DISCONNECTED_TOOLTIP
+            }
+          >
+            Treat as system ({selectedFolderRows.length})
           </Button>
         </div>
         <div className="flex flex-wrap gap-4 text-body-sm text-fg-body">

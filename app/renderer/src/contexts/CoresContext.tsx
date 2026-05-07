@@ -14,6 +14,10 @@ import type {
   BulkRomResult,
   SystemFileMarkChange,
 } from '@shared/mister-client';
+import type {
+  FolderClassificationUpdateWire,
+  FolderRowClassification,
+} from '@shared/preload-api';
 import { EMPTY_SYSTEM_FILES_MARKS, isMarked } from '@shared/system-files-marks';
 import type {
   CoreEntry,
@@ -113,17 +117,36 @@ interface CoresContextValue {
     changes: readonly SystemFileMarkChange[],
   ) => Promise<void>;
   /**
-   * Override (or remove an override of) a folder ROM's classification.
-   * `'container'` makes it drillable, `'atomic'` makes it a leaf,
-   * `null` clears any user override and lets the auto-detector decide.
+   * Tri-state per-folder classification dispatch (PR #13).
+   *   - `'container'` makes the folder drillable.
+   *   - `'atomic'` makes it a single ROM (no drill-in).
+   *   - `'system'` filters it from normal view (toggleable via the
+   *     ROMs pane "Show system files" control).
+   *   - `null` clears any override and lets the auto-detector decide.
+   *
+   * The dispatch updates both `folder-classifications.json` and
+   * `system-files.json` as needed (storage split is invisible to
+   * callers — see `ConnectionManager.setFolderClassification`).
    * After the call the affected ROM list is refetched so the UI picks
-   * up the new `kind`.
+   * up the new `kind`, and the cores list re-renders with the
+   * updated `recursiveRomCount`.
    */
   readonly setFolderClassification: (
     coreId: string,
     folderPath: string,
-    classification: 'container' | 'atomic' | null,
+    value: FolderRowClassification | null,
     refreshAt?: { coreId: string; subPath: string },
+  ) => Promise<void>;
+  /**
+   * Batched form of `setFolderClassification` for the bulk-action
+   * toolbar. The renderer collects selected folder rows, builds a
+   * `(folderPath, value)` array, and fires a single IPC. Used so
+   * "Treat all 600 X68000 folders as ROM" is two device writes
+   * rather than 1200.
+   */
+  readonly setFolderClassifications: (
+    coreId: string,
+    updates: readonly FolderClassificationUpdateWire[],
   ) => Promise<void>;
 }
 
@@ -628,31 +651,81 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     async (
       coreId: string,
       folderPath: string,
-      classification: 'container' | 'atomic' | null,
+      value: FolderRowClassification | null,
       refreshAt?: { coreId: string; subPath: string },
     ): Promise<void> => {
+      let result;
       try {
-        await window.mister.setFolderClassification(
+        result = await window.mister.setFolderClassification(
           coreId,
           folderPath,
-          classification,
+          value,
         );
       } catch (err) {
         throw err instanceof Error ? err : new Error(String(err));
       }
+      // PR #13: the dispatch may have touched BOTH stores. Pull the
+      // fresh systemFilesMarks snapshot from the response so the
+      // checkmark in any future row-menu open reflects the new state
+      // immediately.
+      setSystemFilesMarks(result.systemFilesMarks);
       // Refetch the affected ROM list so the user sees the new kind.
       // Default: refresh top-level of `coreId` (which contains the
       // folder whose classification just changed).
       const target = refreshAt ?? { coreId, subPath: '' };
       try {
-        const fresh = await window.mister.listRoms(target.coreId, target.subPath);
+        const [freshRoms, freshCores] = await Promise.all([
+          window.mister.listRoms(target.coreId, target.subPath),
+          // recursiveRomCount changed too — refetch the cores list so
+          // the cores pane reflects the new count without a full Refresh.
+          window.mister.listAllCoresWithFiles(),
+        ]);
         const key = romsKey(target.coreId, target.subPath);
-        setRomsByCore((prev) => ({ ...prev, [key]: fresh }));
+        setRomsByCore((prev) => ({ ...prev, [key]: freshRoms }));
+        setCores(freshCores);
+      } catch {
+        /* best-effort — next normal refresh fixes it */
+      }
+    },
+    [],
+  );
+
+  const setFolderClassifications = useCallback(
+    async (
+      coreId: string,
+      updates: readonly FolderClassificationUpdateWire[],
+    ): Promise<void> => {
+      if (updates.length === 0) return;
+      const verb =
+        updates[0]?.value === null
+          ? 'Resetting'
+          : updates[0]?.value === 'system'
+            ? 'Marking as system'
+            : updates[0]?.value === 'atomic'
+              ? 'Treating as ROM'
+              : 'Treating as folder';
+      const status = `${verb} ${String(updates.length)} folder${updates.length === 1 ? '' : 's'}…`;
+      let result;
+      try {
+        result = await runWithStatus(status, () =>
+          window.mister.setFolderClassifications(coreId, updates),
+        );
+      } catch (err) {
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+      setSystemFilesMarks(result.systemFilesMarks);
+      try {
+        const [freshRoms, freshCores] = await Promise.all([
+          window.mister.listRoms(coreId),
+          window.mister.listAllCoresWithFiles(),
+        ]);
+        setRomsByCore((prev) => ({ ...prev, [coreId]: freshRoms }));
+        setCores(freshCores);
       } catch {
         /* best-effort */
       }
     },
-    [],
+    [runWithStatus],
   );
 
   const setSystemFileMarks = useCallback(
@@ -794,6 +867,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       removeSystemFileMark,
       setSystemFileMarks,
       setFolderClassification,
+      setFolderClassifications,
     }),
     [
       cores,
@@ -820,6 +894,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       removeSystemFileMark,
       setSystemFileMarks,
       setFolderClassification,
+      setFolderClassifications,
     ],
   );
 

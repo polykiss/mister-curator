@@ -1,3 +1,4 @@
+import { Check } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 import type { JSX } from 'react';
 
@@ -16,6 +17,14 @@ export interface RomRowMenuItem {
   readonly disabled?: boolean;
   readonly title?: string;
   readonly destructive?: boolean;
+  /**
+   * When true, render a check glyph next to the label. PR #13: drives
+   * the tri-state folder-classification picker so the user can tell
+   * at a glance which value (atomic / container / system) is currently
+   * active. Items without `checked` reserve no leading space — the
+   * existing single-state items lay out unchanged.
+   */
+  readonly checked?: boolean;
 }
 
 export interface RomRowMenuProps {
@@ -51,6 +60,13 @@ export function RomRowMenu(props: RomRowMenuProps): JSX.Element {
   const left = Math.min(props.x, window.innerWidth - 256);
   const top = Math.min(props.y, window.innerHeight - 80);
 
+  // PR #13: when ANY item in this menu is a checkmark-aware item
+  // (`checked` is defined), reserve a leading icon column on EVERY
+  // item so labels align across the menu. Single-state menus (no
+  // `checked` anywhere) keep their pre-PR-13 layout — no reserved
+  // column, no visual change.
+  const hasCheckmarkSlot = props.items.some((i) => i.checked !== undefined);
+
   return (
     <div
       ref={ref}
@@ -63,6 +79,7 @@ export function RomRowMenu(props: RomRowMenuProps): JSX.Element {
           key={i}
           type="button"
           role="menuitem"
+          aria-checked={item.checked ?? undefined}
           disabled={item.disabled}
           onClick={() => {
             if (item.disabled) return;
@@ -79,6 +96,16 @@ export function RomRowMenu(props: RomRowMenuProps): JSX.Element {
                 : 'text-fg-body hover:bg-elevated hover:text-fg')
           }
         >
+          {hasCheckmarkSlot ? (
+            <span
+              aria-hidden
+              className="mr-2 inline-flex w-4 shrink-0 items-center justify-center"
+            >
+              {item.checked ? (
+                <Check className="size-3.5" strokeWidth={2} />
+              ) : null}
+            </span>
+          ) : null}
           {item.label}
         </button>
       ))}
