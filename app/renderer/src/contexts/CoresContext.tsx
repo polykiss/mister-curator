@@ -15,10 +15,15 @@ import type {
   SystemFileMarkChange,
 } from '@shared/mister-client';
 import { EMPTY_SYSTEM_FILES_MARKS, isMarked } from '@shared/system-files-marks';
-import type { CoreEntry, Rom, SystemFilesMarks } from '@shared/types';
+import type {
+  CoreEntry,
+  Rom,
+  SystemFilesMarks,
+} from '@shared/types';
 
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import { useOperationStatus } from '@app/renderer/src/contexts/OperationStatusContext';
+import { shouldFetchCoresOnEffect } from '@app/renderer/src/lib/cores-fetch-gate';
 import {
   applyBulkVisibilityChange,
   applyVisibilityChange,
@@ -594,11 +599,32 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   }, [status]);
 
   // Load cores on entering the connected state.
+  //
+  // Round 4 hotfix: the `!coresError` guard prevents a tight retry
+  // loop that surfaced when the first `listAllCoresWithFiles` call
+  // fails. Without it, the sequence was:
+  //   1. status flips to 'connected' → effect fires refresh
+  //   2. refresh: setCoresLoading(true) → re-render, guard skips
+  //   3. IPC call fails (real-MiSTer perf timeout — see Round 4
+  //      shell hotfix)
+  //   4. catch sets coresError, finally sets coresLoading(false)
+  //   5. coresLoading dep flips → effect re-evaluates. Status hasn't
+  //      yet flipped to 'disconnected' on the renderer side (the
+  //      IPC status event lags the rejected promise by a tick), so
+  //      the effect SAW status='connected' + cores=null +
+  //      !coresLoading and re-fired refresh — hundreds of times
+  //      until the status event finally arrived.
+  //
+  // With `!coresError`, a failed refresh latches the gate. The
+  // disconnect-reset effect clears coresError when status leaves
+  // 'connected', so the next 'connected' transition (e.g. after
+  // auto-retry success) un-latches the gate and a single refresh
+  // fires.
   useEffect(() => {
-    if (status === 'connected' && cores === null && !coresLoading) {
+    if (shouldFetchCoresOnEffect(status, cores, coresLoading, coresError)) {
       void refresh();
     }
-  }, [status, cores, coresLoading, refresh]);
+  }, [status, cores, coresLoading, coresError, refresh]);
 
   const selectCore = useCallback((coreId: string | null) => {
     setSelectedCoreId(coreId);

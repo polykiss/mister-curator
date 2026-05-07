@@ -1098,15 +1098,21 @@ function buildListAllCoresScript(): string {
 
   // Per-entry emission: one G line announcing the games dir, then
   // GF/GD per top-level file/dir, plus SE per immediate child of each
-  // top-level subfolder and SR with the recursive file totals. The
-  // matcher applies `isSystemFile` for the top-level filter and
-  // walks SE/SR data to compute `recursiveRomCount` (Round 3 / Issue
-  // 5). Folder-shaped ROMs (Saturn/MegaCD discs) come through as GD
-  // lines and are NEVER filtered out as system content.
+  // top-level subfolder. SR (recursive totals) is computed in a
+  // SEPARATE bulk pass below — see `recursivePass`. The matcher
+  // applies `isSystemFile` for the top-level filter and walks SE/SR
+  // data to compute `recursiveRomCount` (Round 3 / Issue 5). Folder-
+  // shaped ROMs (Saturn/MegaCD discs) come through as GD lines and
+  // are NEVER filtered out as system content.
   //
   // The case-insensitive globbing (`* .[!.]*` covers BOTH visible AND
   // dot-prefixed dirs) is what surfaces externally-hidden games dirs
   // like `.ATARI7800` so the matcher can flag them — see Issue 4.
+  //
+  // The structural pass uses pure shell builtins: `printf`, `[`, the
+  // `${var##pattern}` substring stripper, and glob expansion. None of
+  // these fork on busybox, so a real MiSTer with 870 top-level dirs
+  // walks in well under a second.
   const gamesScript = [
     `if [ -d ${shellQuote(MISTER_GAMES_DIR)} ]; then`,
     `  cd ${shellQuote(MISTER_GAMES_DIR)}`,
@@ -1121,7 +1127,9 @@ function buildListAllCoresScript(): string {
     '      elif [ -d "$entry" ]; then',
     `        printf 'GD\\t%s\\t%s\\n' "$d" "$name"`,
     // Walk one level deeper so the matcher can classify this folder
-    // (atomic vs container) and pick a recursive count.
+    // (atomic vs container) — but stop at immediate children. The
+    // recursive count comes from the bulk find pass, not from a
+    // per-folder fork.
     '        for sub in "$entry"/* "$entry"/.[!.]*; do',
     '          [ -e "$sub" ] || continue',
     '          subname="${sub##*/}"',
@@ -1131,18 +1139,54 @@ function buildListAllCoresScript(): string {
     `            printf 'SE\\t%s\\t%s\\td\\t%s\\n' "$d" "$name" "$subname"`,
     '          fi',
     '        done',
-    // Recursive totals: total files anywhere beneath this folder
-    // (used as an approximation for container-folder ROM counts) and
-    // the dot-prefixed subset. `find -type f` is cheap enough on the
-    // device — even a 10000-file mame folder finishes in well under a
-    // second on the DE10-Nano. The grep for hidden files relies on
-    // any path component starting with `.` — same rule as listRoms.
-    '        sr_total=$(find "$entry" -type f 2>/dev/null | wc -l)',
-    '        sr_hidden=$(find "$entry" -type f -name ".*" 2>/dev/null | wc -l)',
-    `        printf 'SR\\t%s\\t%s\\t%s\\t%s\\n' "$d" "$name" "$sr_total" "$sr_hidden"`,
     '      fi',
     '    done',
     '  done',
+    'fi',
+  ].join('\n');
+
+  // Bulk recursive-count pass for SR lines. Round 4 hotfix:
+  // PR #10 round 3 ran TWO `find` subprocesses per top-level
+  // games-dir subfolder. On a real MiSTer with hundreds of folder
+  // ROMs (Saturn discs, MegaCD games, NEOGEO containers, MegaDrive
+  // regions, X68000 dump tree…) that ballooned into 200+ forks and
+  // the SSH op timed out at 10 s. A single `find` over the whole
+  // games tree runs in ~2 s; piping the output through awk gives us
+  // per-(top-level-dir, top-level-subfolder) totals in one pass.
+  //
+  //   `find -mindepth 3 -type f` skips:
+  //     - the games-dir layer (depth 1 below games/)
+  //     - top-level files of each games dir (depth 2; those are GF
+  //       lines and don't contribute to a SUBFOLDER's count)
+  //   and includes:
+  //     - every regular file at depth 3+ (i.e. anywhere under a
+  //       top-level subfolder), which is exactly what
+  //       `recursiveFileCount` represents.
+  //
+  // `recursiveHiddenFileCount` mirrors the original semantics —
+  // count files whose own basename starts with `.`. Files inside a
+  // dot-prefixed parent dir don't count toward the hidden subset
+  // (the matcher applies a separate "whole container is hidden"
+  // rule on top per shared/core-matching.ts).
+  //
+  // SUBSEP is awk's default key separator (\034); using it avoids
+  // collisions with tab / slash / dot chars in real folder names.
+  const recursivePass = [
+    `if [ -d ${shellQuote(MISTER_GAMES_DIR)} ]; then`,
+    `  find ${shellQuote(MISTER_GAMES_DIR)} -mindepth 3 -type f -printf '%P\\n' 2>/dev/null | awk -F/ '`,
+    '    NF >= 3 && $1 != "" && $2 != "" {',
+    '      key = $1 SUBSEP $2',
+    '      total[key]++',
+    '      if (substr($NF, 1, 1) == ".") hidden_count[key]++',
+    '    }',
+    '    END {',
+    '      for (k in total) {',
+    '        h = (k in hidden_count) ? hidden_count[k] : 0',
+    '        split(k, parts, SUBSEP)',
+    `        printf "SR\\t%s\\t%s\\t%d\\t%d\\n", parts[1], parts[2], total[k], h`,
+    '      }',
+    '    }',
+    "  '",
     'fi',
   ].join('\n');
 
@@ -1157,7 +1201,7 @@ function buildListAllCoresScript(): string {
     `fi`,
   ].join('\n');
 
-  return `set -e\n${dirsScript}\n${gamesScript}\n${arcadeProbeScript}\n`;
+  return `set -e\n${dirsScript}\n${gamesScript}\n${recursivePass}\n${arcadeProbeScript}\n`;
 }
 
 /**

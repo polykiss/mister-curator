@@ -471,13 +471,60 @@ describe('RealMisterClient', () => {
       // The games-dir loop iterates both visible and dot-prefixed
       // entries — the same pattern the matching shell script uses.
       expect(script).toMatch(/cd '\/media\/fat\/games'\s+for d in \* \.\[!\.]\*/);
-      // The G/GD/GF/SE/SR header tags are all emitted from the same
+      // The G/GD/GF/SE structural tags all come from the same shell
       // loop so a hidden games dir gets the same treatment as a
       // visible one.
       expect(script).toContain(`printf 'G\\t%s\\n' "$d"`);
       expect(script).toContain(`printf 'GD\\t%s\\t%s\\n' "$d" "$name"`);
       expect(script).toContain(`printf 'SE\\t%s\\t%s\\tf\\t%s\\n'`);
-      expect(script).toContain(`printf 'SR\\t%s\\t%s\\t%s\\t%s\\n'`);
+      // SR (recursive totals) is emitted by a separate one-shot
+      // find/awk pipeline, not by the per-folder loop. See the
+      // Round 4 perf hotfix below for why.
+      expect(script).toContain(`printf "SR\\t%s\\t%s\\t%d\\t%d\\n"`);
+    });
+
+    it('computes SR via a single bulk find/awk pass (Round 4 perf hotfix)', async () => {
+      // Round 3 ran TWO `find` subprocesses per top-level subfolder
+      // (`sr_total=$(find ...)` + `sr_hidden=$(find ...)`). On a real
+      // MiSTer with hundreds of folder ROMs that meant 200+ forks and
+      // a 30-60s walk that overran the 10s SSH op timeout. Round 4
+      // replaces it with one find + one awk over the entire games
+      // tree. This test asserts the new shape is in place and the
+      // old per-folder forks are gone.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.listAllCoresWithFiles();
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+
+      // The bulk pass: one `find /media/fat/games -mindepth 3 -type f`
+      // piped through awk that aggregates by (top-level dir,
+      // top-level subfolder). The whole tree walks once.
+      expect(script).toMatch(
+        /find '\/media\/fat\/games' -mindepth 3 -type f -printf '%P\\n'/,
+      );
+      expect(script).toContain('| awk -F/');
+      // Awk emits SR lines with the same shape the matcher parser
+      // expects: parent / subname / total / hidden.
+      expect(script).toContain(`printf "SR\\t%s\\t%s\\t%d\\t%d\\n"`);
+
+      // The old per-folder forks are gone — no `sr_total=$(find ...)`
+      // or `sr_hidden=$(find ...)` substitution left in the script.
+      expect(script).not.toContain('sr_total=$(find');
+      expect(script).not.toContain('sr_hidden=$(find');
+
+      // Total subprocess fork budget for the whole list pass:
+      // - up to 5-8 forks for the dirsScript (one find per
+      //   folder-shape candidate under each category dir + grep)
+      // - exactly one find/awk pipe for the recursive pass
+      // The bulk find should appear exactly once in the script.
+      const findRecursive = script.match(
+        /find '\/media\/fat\/games' -mindepth 3/g,
+      );
+      expect(findRecursive).toHaveLength(1);
     });
 
     it('parses an externally-hidden games dir (visible rbf + .ATARI7800) as romCount=0', async () => {
