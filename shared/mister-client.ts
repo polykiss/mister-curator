@@ -1,3 +1,4 @@
+import type { WitnessMtimes } from '@shared/prime-parse';
 import type {
   CoreEntry,
   FolderClassifications,
@@ -7,6 +8,24 @@ import type {
   Rom,
   SystemFilesMarks,
 } from '@shared/types';
+
+/**
+ * Output of `primeConnect` — the data the ConnectionManager needs in
+ * one round trip on a fresh session. Mirrors what the pre-PR-#12 code
+ * fetched in three sequential SSH calls.
+ */
+export interface PrimeConnectResult {
+  readonly ledger: HideLedger;
+  readonly marks: SystemFilesMarks;
+  readonly classifications: FolderClassifications;
+  /**
+   * Mtime epoch per cores-cache witness path. The caller compares
+   * these against `cores.json`'s recorded witnesses to decide hit /
+   * stale. Missing-on-device paths report mtime 0 — `witnessesMatch`
+   * already treats 0 as a mismatch.
+   */
+  readonly witnesses: WitnessMtimes;
+}
 
 export type MisterSecret =
   | { readonly type: 'key'; readonly privateKey: string }
@@ -239,6 +258,26 @@ export interface IMisterClient {
   setFolderClassification(
     override: FolderClassificationOverride | { coreId: string; folderPath: string; classification: undefined },
   ): Promise<void>;
+
+  /**
+   * PR #12 connect-time prime. One SSH round trip that returns the
+   * three small JSON files (ledger / marks / classifications) AND a
+   * batch of cores-cache witness mtimes. Replaces three sequential
+   * `cat`s + a stat call with a single command — load-bearing for the
+   * <1s warm-connect performance contract.
+   */
+  primeConnect(coresWitnessPaths: readonly string[]): Promise<PrimeConnectResult>;
+
+  /**
+   * Stat the supplied absolute paths and return mtime epochs in one
+   * shell round trip. Used by the listRoms cache (one path per call:
+   * `/media/fat/games/<coreId>` or a sub-path) and by write-through
+   * post-mutation refreshes.
+   *
+   * Paths that don't exist on the device map to mtime 0; the caller
+   * treats that as a mismatch via `witnessesMatch`.
+   */
+  statWitnesses(paths: readonly string[]): Promise<WitnessMtimes>;
 }
 
 /**

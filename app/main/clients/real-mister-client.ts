@@ -52,6 +52,13 @@ import {
   withMark,
   withoutMark,
 } from '@shared/system-files-marks';
+import {
+  buildPrimeScript,
+  buildWitnessScript,
+  parsePrimeOutput,
+  parseWitnessOutput,
+  type WitnessMtimes,
+} from '@shared/prime-parse';
 import { MisterConnectionError } from '@shared/types';
 import type {
   CoreCategory,
@@ -70,6 +77,7 @@ import type {
   CoreVisibilityChange,
   IMisterClient,
   MisterSecret,
+  PrimeConnectResult,
   RomVisibilityChange,
   SystemFileMarkChange,
 } from '@shared/mister-client';
@@ -1089,6 +1097,78 @@ export class RealMisterClient implements IMisterClient {
     }
     if (next === current) return;
     await this.writeFolderClassifications(next);
+  }
+
+  /**
+   * PR #12 connect-time prime. One SSH command that emits the three
+   * small JSON files (ledger, marks, classifications) plus mtime
+   * witnesses for the cores cache. Replaces three sequential `cat`s
+   * + a stat call with a single round trip — the warm-connect path
+   * needs to come in under 1s on a normal LAN.
+   *
+   * Reads only — never writes. The ledger self-heal stays in
+   * `ConnectionManager` so it can use cached cores when the cache
+   * hits, avoiding the otherwise-mandatory listAllCoresWithFiles
+   * walk during heal.
+   */
+  async primeConnect(
+    coresWitnessPaths: readonly string[],
+  ): Promise<PrimeConnectResult> {
+    this.assertConnected();
+    const script = buildPrimeScript({
+      ledgerPath: MISTER_LEDGER_PATH,
+      marksPath: MISTER_SYSTEM_FILES_PATH,
+      classificationsPath: MISTER_FOLDER_CLASSIFICATIONS_PATH,
+      coresWitnessPaths,
+    });
+    const result = await this.runSshOp(() => this.ssh.execCommand(script));
+    if (result.code !== 0) {
+      throw new Error(
+        `Failed to prime connection: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+      );
+    }
+    const parsed = parsePrimeOutput(result.stdout);
+    if (parsed === null) {
+      throw new Error(
+        'Prime output did not match the expected shape — refusing to ' +
+          'use it (the connect path will fall back to per-file reads).',
+      );
+    }
+    return {
+      ledger: parseLedger(parsed.ledgerJson),
+      marks: parseSystemFilesMarks(parsed.marksJson),
+      classifications: parseFolderClassifications(parsed.classificationsJson),
+      witnesses: parsed.witnesses,
+    };
+  }
+
+  /**
+   * Stat a batch of absolute paths in one SSH round trip. Used by the
+   * listRoms cache (one path per call) and write-through refreshes
+   * (the witnesses we recorded for cores.json need to be re-stat'd
+   * after we mutate the device).
+   */
+  async statWitnesses(paths: readonly string[]): Promise<WitnessMtimes> {
+    this.assertConnected();
+    if (paths.length === 0) return {};
+    const script = buildWitnessScript(paths);
+    const result = await this.runSshOp(() => this.ssh.execCommand(script));
+    // A non-zero exit here is rare (the script tolerates per-path
+    // stat failures internally) but possible on full-disk / fork-fail
+    // edge cases. Throw rather than return a partial map so the
+    // caller treats this as "couldn't validate" → cache miss.
+    if (result.code !== 0) {
+      throw new Error(
+        `Failed to stat witnesses: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+      );
+    }
+    const parsed = parseWitnessOutput(result.stdout);
+    if (parsed === null) {
+      throw new Error(
+        'Witness output did not match the expected shape (likely truncated).',
+      );
+    }
+    return parsed;
   }
 
   private async writeFolderClassifications(

@@ -62,9 +62,11 @@ import type {
   CoreVisibilityChange,
   IMisterClient,
   MisterSecret,
+  PrimeConnectResult,
   RomVisibilityChange,
   SystemFileMarkChange,
 } from '@shared/mister-client';
+import type { WitnessMtimes } from '@shared/prime-parse';
 
 export interface FakeMisterClientOptions {
   /** Working root that simulates `/media/fat/` on the device. */
@@ -612,6 +614,66 @@ export class FakeMisterClient implements IMisterClient {
     const tmp = `${localPath}.tmp`;
     await fs.writeFile(tmp, json, 'utf-8');
     await fs.rename(tmp, localPath);
+  }
+
+  /**
+   * PR #12 prime — composes the existing read methods plus a stat
+   * batch. The fake client doesn't have an SSH layer to optimise so
+   * the implementation just calls each method independently; tests
+   * that assert "the connect path makes one round trip" use the
+   * RealMisterClient mock where that constraint actually matters.
+   */
+  async primeConnect(
+    coresWitnessPaths: readonly string[],
+  ): Promise<PrimeConnectResult> {
+    this.assertConnected();
+    const [ledger, marks, classifications, witnesses] = await Promise.all([
+      this.readHideLedgerRaw(),
+      this.readSystemFilesMarks(),
+      this.readFolderClassifications(),
+      this.statWitnesses(coresWitnessPaths),
+    ]);
+    return { ledger, marks, classifications, witnesses };
+  }
+
+  async statWitnesses(paths: readonly string[]): Promise<WitnessMtimes> {
+    this.assertConnected();
+    if (paths.length === 0) return {};
+    const out: Record<string, number> = {};
+    for (const p of paths) {
+      const local = this.toLocal(p);
+      try {
+        const st = await fs.stat(local);
+        // Match the device-side `stat -c '%Y'` semantics: epoch
+        // seconds, integer. fs.Stats.mtimeMs is milliseconds.
+        out[p] = Math.floor(st.mtimeMs / 1000);
+      } catch (err) {
+        if (isNodeError(err) && err.code === 'ENOENT') {
+          out[p] = 0;
+          continue;
+        }
+        throw err;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The PR #12 prime path needs a self-heal-free ledger read so the
+   * manager can run heal once with cached cores. `readHideLedger`
+   * still self-heals for legacy callers; this raw variant is private
+   * to the prime call.
+   */
+  private async readHideLedgerRaw(): Promise<HideLedger> {
+    await this.delay();
+    const localPath = this.toLocal(MISTER_LEDGER_PATH);
+    try {
+      const text = await fs.readFile(localPath, 'utf-8');
+      return parseLedger(text);
+    } catch (err) {
+      if (isNodeError(err) && err.code === 'ENOENT') return parseLedger('');
+      throw err;
+    }
   }
 
   private async writeSystemFilesMarks(marks: SystemFilesMarks): Promise<void> {

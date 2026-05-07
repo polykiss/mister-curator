@@ -2112,4 +2112,148 @@ describe('RealMisterClient', () => {
       }
     });
   });
+
+  describe('primeConnect / statWitnesses (PR #12 cache layer)', () => {
+    function buildPrimeStdout(args: {
+      readonly ledger?: string;
+      readonly marks?: string;
+      readonly classifications?: string;
+      readonly witnesses: ReadonlyArray<{ readonly path: string; readonly mtime: number }>;
+    }): string {
+      const enc = (s: string): string =>
+        s === '' ? '' : Buffer.from(s, 'utf-8').toString('base64');
+      const lines = [
+        'LEDGER',
+        enc(args.ledger ?? ''),
+        'MARKS',
+        enc(args.marks ?? ''),
+        'CLASSIFICATIONS',
+        enc(args.classifications ?? ''),
+        'WITNESSES',
+        ...args.witnesses.map((w) => `${String(w.mtime)} ${w.path}`),
+        'END',
+        '',
+      ];
+      return lines.join('\n');
+    }
+
+    it('primeConnect issues exactly one execCommand and parses ledger / marks / witnesses', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          buildPrimeStdout({
+            ledger: '{"schemaVersion":1,"hiddenCores":[]}',
+            marks: '{"schemaVersion":1,"marked":[]}',
+            classifications: '{"schemaVersion":1,"overrides":[]}',
+            witnesses: [
+              { path: '/media/fat/_Console', mtime: 1700000001 },
+              { path: '/media/fat/games', mtime: 1700000010 },
+            ],
+          }),
+        ),
+      );
+
+      const result = await client.primeConnect([
+        '/media/fat/_Console',
+        '/media/fat/games',
+      ]);
+
+      // PR #12 perf contract: prime is one round trip — that's the
+      // whole point of merging ledger + marks + classifications +
+      // witnesses into a single shell. Bumping this number means
+      // we've regressed warm connect time on slow links.
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      expect(result.ledger.hiddenCores).toEqual([]);
+      expect(result.marks.marked).toEqual([]);
+      expect(result.classifications.overrides).toEqual([]);
+      expect(result.witnesses['/media/fat/_Console']).toBe(1700000001);
+      expect(result.witnesses['/media/fat/games']).toBe(1700000010);
+      // The script body: contains the section labels and the witness
+      // stat command. Defensive — guards against a future refactor
+      // accidentally splitting prime into multiple round trips.
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain(`echo 'LEDGER'`);
+      expect(script).toContain(`echo 'MARKS'`);
+      expect(script).toContain(`echo 'CLASSIFICATIONS'`);
+      expect(script).toContain(`echo 'WITNESSES'`);
+      expect(script).toContain(`stat -c '%Y %n'`);
+    });
+
+    it('statWitnesses issues exactly one execCommand and parses the WITNESSES block', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'WITNESSES',
+            '1700000005 /media/fat/games/X68000',
+            'END',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const result = await client.statWitnesses(['/media/fat/games/X68000']);
+
+      // The cache layer's listRoms validation hot path: must be 1
+      // SSH op per cache check. Anything more would defeat the
+      // <500ms warm-connect goal on cores like X68000.
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      expect(result).toEqual({ '/media/fat/games/X68000': 1700000005 });
+    });
+
+    it('statWitnesses returns empty without calling SSH when given an empty path list', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      const result = await client.statWitnesses([]);
+      expect(result).toEqual({});
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+
+    it('primeConnect throws when the prime output is truncated (treated by caller as cache miss)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      // Missing END marker — likely truncation on a flaky link.
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk('LEDGER\n\nMARKS\n\nCLASSIFICATIONS\n\nWITNESSES\n'),
+      );
+
+      await expect(
+        client.primeConnect(['/media/fat/games']),
+      ).rejects.toThrow(/expected shape/);
+    });
+
+    it('primeConnect records mtime 0 for paths the device has lost (cache treats as mismatch)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          buildPrimeStdout({
+            witnesses: [
+              { path: '/media/fat/_Vanished', mtime: 0 },
+              { path: '/media/fat/games', mtime: 1700000010 },
+            ],
+          }),
+        ),
+      );
+
+      const result = await client.primeConnect([
+        '/media/fat/_Vanished',
+        '/media/fat/games',
+      ]);
+      expect(result.witnesses['/media/fat/_Vanished']).toBe(0);
+      expect(result.witnesses['/media/fat/games']).toBe(1700000010);
+    });
+  });
 });
