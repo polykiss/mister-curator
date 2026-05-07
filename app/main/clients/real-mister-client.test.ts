@@ -546,7 +546,8 @@ describe('RealMisterClient', () => {
       );
 
       const cores = await client.listAllCoresWithFiles();
-      const atari = cores.find((c) => c.id === 'Atari7800');
+      // PR #11 round 2: games-dir name wins as the display id.
+      const atari = cores.find((c) => c.id === 'ATARI7800');
       expect(atari).toBeDefined();
       expect(atari?.gamesDirHidden).toBe(true);
       expect(atari?.gamesDirName).toBe('ATARI7800');
