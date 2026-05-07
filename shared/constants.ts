@@ -12,8 +12,18 @@ export const MISTER_FOLDER_CLASSIFICATIONS_PATH =
 
 /**
  * Core category dirs under `/media/fat/`. The hide-core feature only
- * operates on the first four — `_Arcade/` is enumerated so the UI can
- * show arcade cores as read-only, but it is never written to.
+ * operates on the first four — `_Arcade/` is enumerated so the UI
+ * can show arcade cores as read-only, but it is never written to.
+ *
+ * `_Console (autoboot)/` (note: literal space + parentheses) is
+ * intentionally NOT enumerated. The .mgl files inside —
+ * "SEGA 32X.mgl", "Sony PlayStation.mgl", "Nintendo 64.mgl", etc. —
+ * are firmware autoboot shortcuts that launch existing cores
+ * (S32X.rbf, PSX.rbf, N64.rbf) at boot. They are NOT independent
+ * cores. PR #11 round 2 enumerated them and surfaced 10 phantom
+ * rows whose names ("Sony PlayStation", "Nintendo 64") didn't
+ * canonicalise to anything matching the user's actual games dirs
+ * ("PSX", "N64"). Round 3 drops them.
  */
 export const MISTER_CATEGORY_DIRS: readonly {
   readonly category: CoreCategory;

@@ -4,6 +4,7 @@ import type { CoreEntry, HideLedger } from '@shared/types';
 
 import {
   ARCADE_PLACEHOLDER_ID,
+  canonicalize,
   computeAutoReapplyChanges,
   computeCoreRenames,
   dottedPath,
@@ -16,6 +17,7 @@ import {
   pathBasename,
   undottedPath,
 } from '@shared/core-matching';
+import { InMemoryDiagnosticsCollector } from '@shared/diag';
 
 describe('extractCorePrefix', () => {
   it('strips a trailing 8-digit date suffix', () => {
@@ -113,6 +115,55 @@ describe('pathBasename / pathDirname / dottedPath / undottedPath', () => {
 
   it('round-trips dotted/undotted', () => {
     expect(undottedPath(dottedPath('/x/y/z.rbf'))).toBe('/x/y/z.rbf');
+  });
+});
+
+describe('canonicalize', () => {
+  it('lowercases and strips every non-alphanumeric character', () => {
+    expect(canonicalize('Atari 2600')).toBe('atari2600');
+    expect(canonicalize('Atari2600')).toBe('atari2600');
+    expect(canonicalize('Game Gear')).toBe('gamegear');
+    expect(canonicalize('GameGear')).toBe('gamegear');
+    expect(canonicalize('Pocket Challenge V2')).toBe('pocketchallengev2');
+    expect(canonicalize('PocketChallengeV2')).toBe('pocketchallengev2');
+    expect(canonicalize('Mega Duck')).toBe('megaduck');
+    expect(canonicalize('Sord M5')).toBe('sordm5');
+    expect(canonicalize('SordM5')).toBe('sordm5');
+    expect(canonicalize('Super_Vision_8000')).toBe('supervision8000');
+    expect(canonicalize('SuperVision8000')).toBe('supervision8000');
+    expect(canonicalize('TI-99_4A')).toBe('ti994a');
+    expect(canonicalize('Ti994a')).toBe('ti994a');
+    expect(canonicalize('WonderSwan Color')).toBe('wonderswancolor');
+    expect(canonicalize('WonderSwanColor')).toBe('wonderswancolor');
+    expect(canonicalize('CD-i')).toBe('cdi');
+    expect(canonicalize('CDi')).toBe('cdi');
+    expect(canonicalize('Amstrad PCW')).toBe('amstradpcw');
+    expect(canonicalize('Amstrad-PCW')).toBe('amstradpcw');
+  });
+
+  it('does NOT match real semantic synonyms — that would need a hardcoded table', () => {
+    // GBC and GameboyColor are the same console but the rbf
+    // prefixes / games-dir names are genuinely different. Canonical
+    // form respects that — synonyms are out of scope.
+    expect(canonicalize('GBC')).toBe('gbc');
+    expect(canonicalize('GameboyColor')).toBe('gameboycolor');
+    expect(canonicalize('GBC')).not.toBe(canonicalize('GameboyColor'));
+    // Same for Coleco / ColecoVision and NeoGeo-CD / NeoGeoCD.
+    expect(canonicalize('Coleco')).not.toBe(canonicalize('ColecoVision'));
+    // (NeoGeo-CD canonicalises to "neogeocd" — same as "NeoGeoCD".)
+    expect(canonicalize('NeoGeo-CD')).toBe(canonicalize('NeoGeoCD'));
+  });
+
+  it('returns empty string for empty input or all-punctuation input', () => {
+    expect(canonicalize('')).toBe('');
+    expect(canonicalize('---')).toBe('');
+    expect(canonicalize('   ')).toBe('');
+  });
+
+  it('preserves digits', () => {
+    expect(canonicalize('NES')).toBe('nes');
+    expect(canonicalize('S32X')).toBe('s32x');
+    expect(canonicalize('PC8801')).toBe('pc8801');
   });
 });
 
@@ -551,10 +602,17 @@ describe('matchRbfsToGamesDirs', () => {
       // games dir is `.APOGEE` (visible name "APOGEE") but the user
       // marked the file under coreId "Apogee" (canonical form). The
       // case-insensitive lookup ensures the mark applies anyway.
+      // (PR #11 round 2: include a non-marked sibling so the orphan
+      // filter doesn't drop the entry — the test is asserting on
+      // marks lookup, not orphan handling.)
       const result = matchRbfsToGamesDirs({
         rbfs: [],
         gamesDirs: [
-          { rawName: '.APOGEE', files: ['random_data.bin'], dirs: [] },
+          {
+            rawName: '.APOGEE',
+            files: ['random_data.bin', 'mygame.bin'],
+            dirs: [],
+          },
         ],
         systemFilesMarks: {
           schemaVersion: 1,
@@ -564,7 +622,8 @@ describe('matchRbfsToGamesDirs', () => {
         },
       });
       const apogee = result.find((c) => c.id === 'APOGEE');
-      expect(apogee?.romCount).toBe(0);
+      // marked file dropped (random_data.bin), unmarked file kept (mygame.bin).
+      expect(apogee?.romCount).toBe(1);
     });
 
     it('a hidden user-marked file is excluded from hiddenCount as well', () => {
@@ -586,11 +645,21 @@ describe('matchRbfsToGamesDirs', () => {
     });
 
     it('does not bleed across cores when filenames overlap', () => {
+      // PR #11 round 2: each games dir needs SOMETHING countable
+      // beyond the marked file so the orphan filter doesn't drop it.
       const result = matchRbfsToGamesDirs({
         rbfs: [],
         gamesDirs: [
-          { rawName: 'C64', files: ['shared.rom'], dirs: [] },
-          { rawName: 'NES', files: ['shared.rom'], dirs: [] },
+          {
+            rawName: 'C64',
+            files: ['shared.rom', 'c64-only.d64'],
+            dirs: [],
+          },
+          {
+            rawName: 'NES',
+            files: ['shared.rom', 'nes-only.nes'],
+            dirs: [],
+          },
         ],
         systemFilesMarks: {
           schemaVersion: 1,
@@ -599,8 +668,10 @@ describe('matchRbfsToGamesDirs', () => {
           ],
         },
       });
-      expect(result.find((c) => c.id === 'C64')?.romCount).toBe(0);
-      expect(result.find((c) => c.id === 'NES')?.romCount).toBe(1);
+      // C64 marked: shared.rom dropped, c64-only.d64 kept → 1.
+      expect(result.find((c) => c.id === 'C64')?.romCount).toBe(1);
+      // NES not marked: both files kept → 2.
+      expect(result.find((c) => c.id === 'NES')?.romCount).toBe(2);
     });
   });
 
@@ -642,8 +713,13 @@ describe('matchRbfsToGamesDirs', () => {
 
       const atari = result.find((c) => c.id.toLowerCase() === 'atari7800');
       expect(atari).toBeDefined();
-      // Canonical id from the rbf wins.
-      expect(atari?.id).toBe('Atari7800');
+      // PR #11 round 2: games-dir name wins as the display id when
+      // both an rbf and a games dir exist for the same canonical key
+      // (Round 5 spec: "named whichever the games dir was"). The
+      // rbf's smarter casing is forgotten in favor of the on-disk
+      // basename — operations target gamesDirName, which is the same
+      // string anyway.
+      expect(atari?.id).toBe('ATARI7800');
       // On-disk basename (visible form) is preserved so renames
       // target /media/fat/games/.ATARI7800.
       expect(atari?.gamesDirName).toBe('ATARI7800');
@@ -672,7 +748,7 @@ describe('matchRbfsToGamesDirs', () => {
         ],
       });
       const gb2p = result.find((c) => c.id.toLowerCase() === 'gameboy2p');
-      expect(gb2p?.id).toBe('Gameboy2P');
+      expect(gb2p?.id).toBe('GAMEBOY2P');
       expect(gb2p?.gamesDirHidden).toBe(true);
       expect(gb2p?.gamesDirName).toBe('GAMEBOY2P');
       expect(gb2p?.romCount).toBe(2);
@@ -694,7 +770,7 @@ describe('matchRbfsToGamesDirs', () => {
         ],
       });
       const v = result.find((c) => c.id.toLowerCase() === 'vectrex');
-      expect(v?.id).toBe('Vectrex');
+      expect(v?.id).toBe('VECTREX');
       expect(v?.gamesDirName).toBe('VECTREX');
       expect(v?.romCount).toBe(1);
       expect(isCoreHidden(v!)).toBe(true);
@@ -715,7 +791,7 @@ describe('matchRbfsToGamesDirs', () => {
         ],
       });
       const a = result.find((c) => c.id.toLowerCase() === 'altair8800');
-      expect(a?.id).toBe('Altair8800');
+      expect(a?.id).toBe('ALTAIR8800');
       expect(a?.category).toBe('Computer');
       expect(a?.romCount).toBe(1);
       expect(isCoreHidden(a!)).toBe(true);
@@ -734,7 +810,7 @@ describe('matchRbfsToGamesDirs', () => {
         gamesDirs: [{ rawName: '.MEMTEST', files: ['data.bin'], dirs: [] }],
       });
       const m = result.find((c) => c.id.toLowerCase() === 'memtest');
-      expect(m?.id).toBe('memtest');
+      expect(m?.id).toBe('MEMTEST');
       expect(m?.category).toBe('Utility');
       expect(m?.romCount).toBe(1);
       expect(isCoreHidden(m!)).toBe(true);
@@ -758,10 +834,13 @@ describe('matchRbfsToGamesDirs', () => {
       expect(isCoreHidden(c!)).toBe(false);
     });
 
-    it('rbf with both visible AND hidden case-mismatched games dirs: visible wins', () => {
-      // Highly unusual: rbf "Foo" + games/foo (visible) + games/.FOO
-      // (hidden). The dedupe picks the visible games dir as canonical
-      // and merges the rbf paths; the merged entry reads as visible.
+    it('rbf with both visible AND hidden case-mismatched games dirs: last-write wins', () => {
+      // Unusual: rbf "Foo" + games/foo (visible) + games/.FOO (hidden).
+      // PR #11 round 2 keys by canonical form. All three share the
+      // canonical "foo" key. Whichever games dir is processed second
+      // overrides the gamesDirHidden flag — the on-disk reality is
+      // ambiguous (both exist) so the matcher reports whichever the
+      // shell pass enumerated last. The user can clean up via SSH.
       const result = matchRbfsToGamesDirs({
         rbfs: [
           {
@@ -776,10 +855,11 @@ describe('matchRbfsToGamesDirs', () => {
           { rawName: '.FOO', files: ['leftover.bin'], dirs: [] },
         ],
       });
-      const foo = result.find((c) => c.id.toLowerCase() === 'foo');
-      expect(foo).toBeDefined();
-      expect(foo?.gamesDirHidden).toBe(false);
-      expect(isCoreHidden(foo!)).toBe(false);
+      const foos = result.filter((c) => c.id.toLowerCase() === 'foo');
+      expect(foos).toHaveLength(1);
+      // Last write (.FOO) wins.
+      expect(foos[0]?.gamesDirHidden).toBe(true);
+      expect(foos[0]?.gamesDirName).toBe('FOO');
     });
 
     it('rbf with only visible mismatched-case games dir matches case-insensitively', () => {
@@ -1001,8 +1081,20 @@ describe('matchRbfsToGamesDirs', () => {
     });
 
     it('empty container folder counts 0 inside (recursive = 0)', () => {
+      // PR #11 round 2: a games dir with romCount > 0 but
+      // recursive = 0 used to be kept; now it's filtered by the
+      // orphan rule (no rbf, no countable content). Add an rbf so
+      // the entry survives the filter and the recursive count
+      // assertion can run.
       const result = matchRbfsToGamesDirs({
-        rbfs: [],
+        rbfs: [
+          {
+            category: 'Console',
+            filename: 'Empty_20260101.rbf',
+            fullPath: '/media/fat/_Console/Empty_20260101.rbf',
+            isFolder: false,
+          },
+        ],
         gamesDirs: [
           {
             rawName: 'Empty',
@@ -1039,8 +1131,336 @@ describe('matchRbfsToGamesDirs', () => {
     });
   });
 
-  describe('case-duplicate dedupe', () => {
-    it('keeps the visible entry when one sibling is hidden (visible+hidden)', () => {
+  describe('coreId / on-disk-path invariant (PR #11 round 3 / Bug 1)', () => {
+    // Hard invariant: every CoreEntry's `id` must equal the on-disk
+    // games-dir basename when a games dir exists, OR the rbf prefix
+    // otherwise. Operational paths (listRoms, setRomVisibility,
+    // hideCore) join `<coreId>` to the games-dir prefix; if `id`
+    // drifts from the basename, listRoms targets a non-existent
+    // directory and silently returns empty.
+    //
+    // The user-reported X68000 bug from Round 2 live testing
+    // motivated this round: the cores list showed 649 folders and
+    // ~2014 ROMs but clicking gave nothing. Adding the explicit
+    // enforcement here prevents the regression from hiding behind
+    // future matcher refactors.
+
+    it('Atari 2600 (.mgl) + Atari2600 (games dir) → id = "Atari2600"', () => {
+      // The diagnostic showed `.Atari 2600.mgl` and `games/Atari2600/`
+      // both on disk. Pre-Round-2 they were two phantom rows. Round 2
+      // collapses them via canonical form. Round 3 enforces that the
+      // merged entry's id is the games-dir basename so listRoms
+      // targets the right path.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: '.Atari 2600.mgl',
+            fullPath: '/media/fat/_Console/.Atari 2600.mgl',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [
+          { rawName: 'Atari2600', files: ['Combat.bin'], dirs: [] },
+        ],
+      });
+      const atari = result.find(
+        (c) => canonicalize(c.id) === 'atari2600',
+      );
+      expect(atari).toBeDefined();
+      // The on-disk basename — NOT "Atari 2600" (the mgl prefix).
+      expect(atari?.id).toBe('Atari2600');
+      expect(atari?.gamesDirName).toBe('Atari2600');
+      // The two MUST agree; resolveOnDiskGamesDirBasename relies on it.
+      expect(atari?.id).toBe(atari?.gamesDirName);
+    });
+
+    it('Atari2600 (games dir first) + Atari 2600 (.mgl second) → id = "Atari2600"', () => {
+      // Order independence: the invariant holds regardless of
+      // whether the games-dir or the rbf is processed first.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: '.Atari 2600.mgl',
+            fullPath: '/media/fat/_Console/.Atari 2600.mgl',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [
+          { rawName: 'Atari2600', files: ['Combat.bin'], dirs: [] },
+        ],
+      });
+      const atari = result.find(
+        (c) => canonicalize(c.id) === 'atari2600',
+      );
+      expect(atari?.id).toBe('Atari2600');
+    });
+
+    it('VECTREX hidden games dir → id = "VECTREX" (Round 5 hidden support)', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: 'Vectrex_20240524.rbf',
+            fullPath: '/media/fat/_Console/Vectrex_20240524.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [
+          { rawName: '.VECTREX', files: ['game.vec'], dirs: [] },
+        ],
+      });
+      const vec = result.find((c) => canonicalize(c.id) === 'vectrex');
+      expect(vec?.id).toBe('VECTREX');
+      expect(vec?.gamesDirName).toBe('VECTREX');
+      expect(vec?.gamesDirHidden).toBe(true);
+    });
+
+    it('rbf-only core (no games dir) → id = rbf prefix', () => {
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: 'SMS_20240115.rbf',
+            fullPath: '/media/fat/_Console/SMS_20240115.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [],
+      });
+      const sms = result.find((c) => c.id === 'SMS');
+      expect(sms).toBeDefined();
+      expect(sms?.gamesDirExists).toBe(false);
+      // id = rbf prefix; gamesDirName is undefined.
+      expect(sms?.id).toBe('SMS');
+      expect(sms?.gamesDirName).toBeUndefined();
+    });
+
+    it('hard invariant — every CoreEntry honors the rule', () => {
+      // Exercise multiple shapes in one pass so the invariant runs
+      // against each: rbf+games-dir (canonical-merged), rbf-only,
+      // games-dir-only, hidden games dir, X68000-shape (literal
+      // match).
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: '.Atari 2600.mgl',
+            fullPath: '/media/fat/_Console/.Atari 2600.mgl',
+            isFolder: false,
+          },
+          {
+            category: 'Console',
+            filename: 'NES_20240115.rbf',
+            fullPath: '/media/fat/_Console/NES_20240115.rbf',
+            isFolder: false,
+          },
+          {
+            category: 'Console',
+            filename: 'SMS_20240115.rbf',
+            fullPath: '/media/fat/_Console/SMS_20240115.rbf',
+            isFolder: false,
+          },
+          {
+            category: 'Computer',
+            filename: 'X68000_20240524.rbf',
+            fullPath: '/media/fat/_Computer/X68000_20240524.rbf',
+            isFolder: false,
+          },
+          {
+            category: 'Console',
+            filename: 'Vectrex_20240524.rbf',
+            fullPath: '/media/fat/_Console/Vectrex_20240524.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [
+          { rawName: 'Atari2600', files: ['Combat.bin'], dirs: [] },
+          { rawName: 'NES', files: ['Mario.nes'], dirs: [] },
+          { rawName: 'mame', files: ['romzip.zip'], dirs: [] }, // games-dir-only
+          { rawName: 'X68000', files: ['boot3.vhd', 'real.bin'], dirs: [] },
+          { rawName: '.VECTREX', files: ['game.vec'], dirs: [] }, // hidden
+        ],
+      });
+
+      for (const c of result) {
+        if (c.category === 'Arcade') continue; // placeholder is special
+        if (c.gamesDirExists) {
+          expect(c.gamesDirName).toBeDefined();
+          expect(c.id).toBe(c.gamesDirName);
+        } else {
+          // rbf-only: id is non-empty.
+          expect(c.id.length).toBeGreaterThan(0);
+          expect(c.gamesDirName).toBeUndefined();
+        }
+      }
+
+      // Spot-check a few of the documented cases.
+      expect(result.find((c) => c.id === 'Atari2600')).toBeDefined();
+      expect(result.find((c) => c.id === 'NES')).toBeDefined();
+      expect(result.find((c) => c.id === 'mame')).toBeDefined();
+      expect(result.find((c) => c.id === 'X68000')).toBeDefined();
+      expect(result.find((c) => c.id === 'VECTREX')).toBeDefined();
+      expect(result.find((c) => c.id === 'SMS')).toBeDefined();
+    });
+  });
+
+  describe('phantom-duplicate regression (PR #11 round 2)', () => {
+    // The diagnostic run against the user's MiSTer (PR #11 round 1)
+    // surfaced ten canonical-form duplicates. Each pair has both
+    // representations on disk: the rbf/mgl uses one casing /
+    // punctuation, the games dir uses another. Canonical-form
+    // merging in Round 2 collapses each pair to a single CoreEntry.
+    it.each([
+      ['.Atari 2600.mgl', 'Atari2600'],
+      ['.Game Gear.mgl', 'GameGear'],
+      ['.Mega Duck.mgl', 'MegaDuck'],
+      ['.Pocket Challenge V2.mgl', 'PocketChallengeV2'],
+      ['WonderSwan Color.mgl', 'WonderSwanColor'],
+      ['.CDi_20250626.rbf', 'CD-i'],
+      ['.SordM5_20250903.rbf', 'Sord M5'],
+      ['Super_Vision_8000_20250622.rbf', 'SuperVision8000'],
+    ])(
+      'merges %s with games-dir %s into one CoreEntry',
+      (rbfFilename, gamesDir) => {
+        const result = matchRbfsToGamesDirs({
+          rbfs: [
+            {
+              category: 'Console',
+              filename: rbfFilename,
+              fullPath: `/media/fat/_Console/${rbfFilename}`,
+              isFolder: false,
+            },
+          ],
+          gamesDirs: [
+            { rawName: gamesDir, files: ['game.bin'], dirs: [] },
+          ],
+        });
+        // Pre-Round-2: this would have been TWO entries (the rbf
+        // prefix and the games-dir name canonicalised differently
+        // under lowercase-only matching). Round 2: ONE entry.
+        const matches = result.filter(
+          (c) => canonicalize(c.id) === canonicalize(gamesDir),
+        );
+        expect(matches).toHaveLength(1);
+        // Games-dir name wins as the display id.
+        expect(matches[0]?.id).toBe(gamesDir);
+        // Both sides present on the merged entry.
+        expect(matches[0]?.rbfPaths).toEqual([
+          `/media/fat/_Console/${rbfFilename}`,
+        ]);
+        expect(matches[0]?.gamesDirExists).toBe(true);
+        expect(matches[0]?.gamesDirName).toBe(gamesDir);
+      },
+    );
+
+    it('does NOT collapse semantic synonyms — GBC and GameboyColor stay separate', () => {
+      // The user's MiSTer has BOTH .GameboyColor.mgl AND a games dir
+      // called "GBC". They're the same console, but synonyms are out
+      // of scope (require a hardcoded table that would be brittle).
+      // Canonical-form matching respects the on-disk reality: two
+      // distinct names → two distinct cores.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: '.GameboyColor.mgl',
+            fullPath: '/media/fat/_Console/.GameboyColor.mgl',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [{ rawName: 'GBC', files: ['game.gbc'], dirs: [] }],
+      });
+      expect(
+        result.find((c) => canonicalize(c.id) === 'gameboycolor'),
+      ).toBeDefined();
+      expect(
+        result.find((c) => canonicalize(c.id) === 'gbc'),
+      ).toBeDefined();
+    });
+  });
+
+  describe('orphan filter (PR #11 round 2 / Change 4)', () => {
+    it('keeps games-dir-only cores with countable content', () => {
+      // mame on a real MiSTer: hundreds of arcade ROMs in a games
+      // dir but no `mame.rbf`. Should appear as a core (the user
+      // can hide it, browse it).
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          { rawName: 'mame', files: Array.from({ length: 50 }, (_, i) => `g${String(i)}.zip`), dirs: [] },
+        ],
+      });
+      const mame = result.find((c) => c.id === 'mame');
+      expect(mame).toBeDefined();
+      expect(mame?.romCount).toBe(50);
+    });
+
+    it('drops empty games-dir-only cores', () => {
+      // Real-MiSTer leftovers: `games/Adam/`, `games/PC8801/`,
+      // `games/NeoGeo-CD/` — all empty. Pre-Round-2 these showed
+      // up as 0-count rows. Now they're filtered.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          { rawName: 'Adam', files: [], dirs: [] },
+          { rawName: 'PC8801', files: [], dirs: [] },
+        ],
+      });
+      expect(result.find((c) => c.id === 'Adam')).toBeUndefined();
+      expect(result.find((c) => c.id === 'PC8801')).toBeUndefined();
+    });
+
+    it('drops a games-dir whose only entries are system folders', () => {
+      // Vectrex shape: `games/VECTREX/Overlays/` is the only
+      // top-level entry, and Overlays is a system folder.
+      // shouldCountAsRom drops Overlays at the top level →
+      // romCount = 0 → orphan filter drops the whole core.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [],
+        gamesDirs: [
+          {
+            rawName: 'VECTREX',
+            files: [],
+            dirs: ['Overlays'],
+            subFolders: [
+              {
+                name: 'Overlays',
+                files: ['a.png', 'b.png'],
+                dirs: [],
+                recursiveFileCount: 90,
+              },
+            ],
+          },
+        ],
+      });
+      expect(result.find((c) => c.id === 'VECTREX')).toBeUndefined();
+    });
+
+    it('keeps an rbf-only core regardless of count (it is launchable)', () => {
+      // SMS without a games dir: the user might have only just
+      // installed the rbf and hasn't copied any ROMs yet. Shows in
+      // the cores list as a 0-count row so the user can hide it.
+      const result = matchRbfsToGamesDirs({
+        rbfs: [
+          {
+            category: 'Console',
+            filename: 'SMS_20240115.rbf',
+            fullPath: '/media/fat/_Console/SMS_20240115.rbf',
+            isFolder: false,
+          },
+        ],
+        gamesDirs: [],
+      });
+      const sms = result.find((c) => c.id === 'SMS');
+      expect(sms).toBeDefined();
+      expect(sms?.romCount).toBe(0);
+    });
+  });
+
+  describe('canonical-form merging (PR #11 round 2)', () => {
+    it('case-mismatched siblings collapse to one entry; games-dir name wins', () => {
       // The exact shape from the real-MiSTer snapshot:
       //   _Console/Vectrex_20240524.rbf   (visible canonical .rbf)
       //   games/.VECTREX                  (hidden games dir, different case)
@@ -1059,19 +1479,21 @@ describe('matchRbfsToGamesDirs', () => {
       const matches = result.filter((c) => c.id.toLowerCase() === 'vectrex');
       expect(matches).toHaveLength(1);
       const merged = matches[0]!;
-      // The visible rbf entry survives — its id (canonical case) wins.
-      expect(merged.id).toBe('Vectrex');
-      // ...but the case-mismatched games dir name is preserved so
-      // operations target the on-disk basename.
+      // Round 2: games-dir name wins as the display id.
+      expect(merged.id).toBe('VECTREX');
+      // The on-disk basename is preserved.
       expect(merged.gamesDirExists).toBe(true);
       expect(merged.gamesDirHidden).toBe(true);
       expect(merged.gamesDirName).toBe('VECTREX');
       expect(merged.rbfPaths).toEqual(['/media/fat/_Console/Vectrex_20240524.rbf']);
     });
 
-    it('drops the entire group when every case-sibling is hidden (both hidden)', () => {
-      // Real MiSTer: `_Computer/.Apogee_*.rbf` next to `games/.APOGEE`.
-      // Both hidden → MiSTer leftover, drop both.
+    it('keeps an all-hidden case-mismatched pair as one hidden entry', () => {
+      // PR #11 round 2: pre-existing rule was "drop the whole group
+      // when every sibling is hidden" (treat as MiSTer leftover).
+      // The Round 5 two-state model invalidated that — hidden cores
+      // with rbfs are now first-class (the user can unhide them with
+      // one click). The matcher keeps one merged hidden entry.
       const result = matchRbfsToGamesDirs({
         rbfs: [
           {
@@ -1083,7 +1505,13 @@ describe('matchRbfsToGamesDirs', () => {
         ],
         gamesDirs: [{ rawName: '.APOGEE', files: [], dirs: [] }],
       });
-      expect(result.find((c) => c.id.toLowerCase() === 'apogee')).toBeUndefined();
+      const apogee = result.find((c) => c.id.toLowerCase() === 'apogee');
+      expect(apogee).toBeDefined();
+      expect(apogee?.gamesDirHidden).toBe(true);
+      expect(apogee?.rbfPaths).toEqual([
+        '/media/fat/_Computer/.Apogee_20240502.rbf',
+      ]);
+      expect(isCoreHidden(apogee!)).toBe(true);
     });
 
     it('keeps a single hidden entry when there are no case siblings', () => {
@@ -1104,8 +1532,9 @@ describe('matchRbfsToGamesDirs', () => {
 
     it('preserves the gamesDirName when the case differs from the rbf prefix', () => {
       // `_Computer/SAMCoupe_20240421.rbf` (visible) + `games/.SAMCOUPE`
-      // (hidden) — visible wins, gamesDirName preserves the `SAMCOUPE`
-      // case so a future hide hits the right path.
+      // (hidden). PR #11 round 2: games-dir name wins as id; the
+      // gamesDirName field still records the on-disk basename so
+      // renames target the right path.
       const result = matchRbfsToGamesDirs({
         rbfs: [
           {
@@ -1118,7 +1547,8 @@ describe('matchRbfsToGamesDirs', () => {
         gamesDirs: [{ rawName: '.SAMCOUPE', files: [], dirs: [] }],
       });
       const merged = result.find((c) => c.id.toLowerCase() === 'samcoupe');
-      expect(merged?.id).toBe('SAMCoupe');
+      // Games-dir name wins as the display id.
+      expect(merged?.id).toBe('SAMCOUPE');
       expect(merged?.gamesDirName).toBe('SAMCOUPE');
     });
   });
@@ -1354,6 +1784,195 @@ describe('computeCoreRenames', () => {
     expect(renames).toEqual([
       { from: '/media/fat/games/.APOGEE', to: '/media/fat/games/APOGEE' },
     ]);
+  });
+});
+
+describe('matchRbfsToGamesDirs — diagnostics collector (PR #11 prep)', () => {
+  it('emits an rbf record per RawRbfInput, with extractedPrefix', () => {
+    const diag = new InMemoryDiagnosticsCollector();
+    matchRbfsToGamesDirs({
+      rbfs: [
+        {
+          category: 'Console',
+          filename: 'NES_20240115.rbf',
+          fullPath: '/media/fat/_Console/NES_20240115.rbf',
+          isFolder: false,
+        },
+        {
+          category: 'Console',
+          filename: 'Game Gear.mgl',
+          fullPath: '/media/fat/_Console/Game Gear.mgl',
+          isFolder: false,
+        },
+      ],
+      gamesDirs: [],
+      diagnostics: diag,
+    });
+    const rbfRecords = diag.byKind('rbf');
+    expect(rbfRecords).toHaveLength(2);
+    expect(rbfRecords[0]?.extractedPrefix).toBe('NES');
+    expect(rbfRecords[1]?.extractedPrefix).toBe('Game Gear');
+    expect(rbfRecords[1]?.type).toBe('file');
+  });
+
+  it('emits a games-dir record per RawGamesDirInput with hidden flag', () => {
+    const diag = new InMemoryDiagnosticsCollector();
+    matchRbfsToGamesDirs({
+      rbfs: [],
+      gamesDirs: [
+        { rawName: 'NES', files: ['a.nes', 'b.nes'], dirs: [] },
+        { rawName: '.HIDDEN', files: [], dirs: [] },
+      ],
+      diagnostics: diag,
+    });
+    const recs = diag.byKind('games-dir');
+    expect(recs).toHaveLength(2);
+    expect(recs[0]?.visibleName).toBe('NES');
+    expect(recs[0]?.isHidden).toBe(false);
+    expect(recs[1]?.visibleName).toBe('HIDDEN');
+    expect(recs[1]?.isHidden).toBe(true);
+  });
+
+  it('emits a system-filter record per file/dir, distinguishing auto vs user-mark', () => {
+    const diag = new InMemoryDiagnosticsCollector();
+    matchRbfsToGamesDirs({
+      rbfs: [],
+      gamesDirs: [
+        {
+          rawName: 'NEOGEO',
+          files: ['mslug.zip', 'boot.rom'],
+          dirs: ['1 World A-Z', 'Overlays'],
+        },
+      ],
+      diagnostics: diag,
+    });
+    const filterRecs = diag.byKind('system-filter');
+    const byPath = new Map(filterRecs.map((r) => [r.path, r]));
+    // boot.rom is auto-detected as system; mslug.zip is not.
+    expect(byPath.get('boot.rom')?.isAutoSystem).toBe(true);
+    expect(byPath.get('boot.rom')?.decision).toBe('filtered');
+    expect(byPath.get('mslug.zip')?.isAutoSystem).toBe(false);
+    expect(byPath.get('mslug.zip')?.decision).toBe('kept');
+    // PR #11 round 2: Overlays IS auto-detected as a system folder
+    // and `shouldCountAsRom` (the unified filter) drops it. The
+    // pre-Round-2 cores-list filter only honored user-marks for
+    // dirs, so Overlays leaked through; that was the Vectrex bug.
+    // Now both code paths agree and Overlays comes back filtered.
+    expect(byPath.get('Overlays')?.entryType).toBe('dir');
+    expect(byPath.get('Overlays')?.isAutoSystem).toBe(true);
+    expect(byPath.get('Overlays')?.decision).toBe('filtered');
+  });
+
+  it('emits a recursive-count record per top-level entry walked', () => {
+    // Round 5: classifyFolder now requires the many-same-ext signal
+    // (5+ files of one extension) to flip a cart-shape folder to
+    // container. Real NEOGEO `1 World A-Z/` holds 30+ .zip files,
+    // so the fixture mirrors that shape.
+    const diag = new InMemoryDiagnosticsCollector();
+    matchRbfsToGamesDirs({
+      rbfs: [],
+      gamesDirs: [
+        {
+          rawName: 'NEOGEO',
+          files: [],
+          dirs: ['1 World A-Z'],
+          subFolders: [
+            {
+              name: '1 World A-Z',
+              files: [
+                'mslug.zip',
+                'kof97.zip',
+                'samsho.zip',
+                'lastblade2.zip',
+                'garou.zip',
+                'mslug3.zip',
+              ],
+              dirs: [],
+              recursiveFileCount: 30,
+            },
+          ],
+        },
+      ],
+      diagnostics: diag,
+    });
+    const recs = diag.byKind('recursive-count');
+    expect(recs).toHaveLength(1);
+    expect(recs[0]?.coreId).toBe('NEOGEO');
+    expect(recs[0]?.classification).toBe('container');
+    expect(recs[0]?.contributesCount).toBe(30);
+  });
+
+  it('emits a match-attempt record per canonical-key bucket', () => {
+    // PR #11 round 2: the lowerKey is now the canonical form
+    // (lowercase + non-alphanum stripped) rather than just lower-
+    // case, so case-AND-punctuation-mismatched siblings collapse
+    // (Atari 2600 vs Atari2600). The merged.outcome is `'merged'`
+    // when both an rbf and a games dir contribute.
+    const diag = new InMemoryDiagnosticsCollector();
+    matchRbfsToGamesDirs({
+      rbfs: [
+        {
+          category: 'Computer',
+          filename: 'Apogee_20240502.rbf',
+          fullPath: '/media/fat/_Computer/Apogee_20240502.rbf',
+          isFolder: false,
+        },
+      ],
+      gamesDirs: [{ rawName: 'APOGEE', files: ['game.bin'], dirs: [] }],
+      diagnostics: diag,
+    });
+    const matchRecs = diag.byKind('match-attempt');
+    const merged = matchRecs.find((r) => r.outcome === 'merged');
+    expect(merged).toBeDefined();
+    expect(merged?.lowerKey).toBe('apogee');
+    // Both the rbf prefix ("Apogee") and the games-dir name ("APOGEE")
+    // contributed to this canonical bucket.
+    expect([...(merged?.groupIds ?? [])].sort()).toEqual(['APOGEE', 'Apogee']);
+  });
+
+  it('emits a core-entry record per finalized CoreEntry', () => {
+    const diag = new InMemoryDiagnosticsCollector();
+    matchRbfsToGamesDirs({
+      rbfs: [
+        {
+          category: 'Console',
+          filename: 'NES_20240115.rbf',
+          fullPath: '/media/fat/_Console/NES_20240115.rbf',
+          isFolder: false,
+        },
+      ],
+      gamesDirs: [{ rawName: 'NES', files: ['a.nes'], dirs: [] }],
+      diagnostics: diag,
+    });
+    const cores = diag.byKind('core-entry');
+    expect(cores).toHaveLength(1);
+    expect(cores[0]?.coreId).toBe('NES');
+    expect(cores[0]?.romCount).toBe(1);
+    expect(cores[0]?.hasAnyVisibleRbf).toBe(true);
+    expect(cores[0]?.rbfPaths).toEqual([
+      '/media/fat/_Console/NES_20240115.rbf',
+    ]);
+  });
+
+  it('does not change matcher output when diagnostics is supplied', () => {
+    // Bug-prevention: any future emit that accidentally mutates
+    // matcher state would break this. The matcher with and without
+    // a collector must produce structurally identical results.
+    const input = {
+      rbfs: [
+        {
+          category: 'Console' as const,
+          filename: 'NES_20240115.rbf',
+          fullPath: '/media/fat/_Console/NES_20240115.rbf',
+          isFolder: false,
+        },
+      ],
+      gamesDirs: [{ rawName: 'NES', files: ['a.nes', '.b.nes'], dirs: [] }],
+    };
+    const without = matchRbfsToGamesDirs(input);
+    const diag = new InMemoryDiagnosticsCollector();
+    const withDiag = matchRbfsToGamesDirs({ ...input, diagnostics: diag });
+    expect(withDiag).toEqual(without);
   });
 });
 

@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 
 import {
   classifyFolder,
-  classifyFromFlags,
   resolveClassification,
   type FolderContents,
 } from '@shared/folder-rom';
@@ -56,17 +55,58 @@ describe('classifyFolder — disc / atomic shape', () => {
 
 describe('classifyFolder — container shape', () => {
   // NEOGEO-shaped organisational folder: many cartridge .zips, no
-  // disc markers.
+  // disc markers. Round 5: 5+ same-extension files trip the long-tail
+  // many-same rule, which is now the *only* signal that flips a
+  // cart-format folder to container (the cart-ext rule itself
+  // classifies atomic post-round-5 — the X68000 single-game shape).
   const neoGeoSubfolder: FolderContents = {
-    files: ['mslug.zip', 'kof97.zip', 'samsho.zip', 'lastblade2.zip'],
+    files: [
+      'mslug.zip',
+      'kof97.zip',
+      'samsho.zip',
+      'lastblade2.zip',
+      'garou.zip',
+      'mslug3.zip',
+    ],
     dirs: [],
   };
 
-  it('returns container when only cart-shape extensions present', () => {
+  it('returns container for the NEOGEO shape (6+ cart files of one extension)', () => {
     expect(classifyFolder(neoGeoSubfolder)).toBe('container');
   });
 
-  it('returns container for any of the cart extensions', () => {
+  it('returns container when there are subdirectories (likely a tree of games)', () => {
+    expect(classifyFolder({ files: [], dirs: ['Region A', 'Region B'] })).toBe(
+      'container',
+    );
+  });
+
+  it('subdirs win over a single cart-format file', () => {
+    // PR #11 round 5: a folder with both a cart file AND subdirs is a
+    // container — the subdir signal is stronger than the
+    // single-game-folder cart shape.
+    expect(
+      classifyFolder({ files: ['main.zip'], dirs: ['Extras'] }),
+    ).toBe('container');
+  });
+});
+
+describe('classifyFolder — X68000 single-game-folder shape (PR #11 round 5)', () => {
+  // Real X68000 shape: `<game-name>/<game>.zip` with no subdirs and
+  // optionally a manual or readme alongside. Each folder IS one game;
+  // drilling in produces a useless extra click. The cart-ext rule
+  // classifies these atomic post-round-5.
+  it('returns atomic for one .zip alone', () => {
+    expect(classifyFolder({ files: ['Castlevania.zip'], dirs: [] })).toBe('atomic');
+  });
+
+  it('returns atomic for a .zip plus a manual companion', () => {
+    expect(
+      classifyFolder({ files: ['Castlevania.zip', 'manual.txt'], dirs: [] }),
+    ).toBe('atomic');
+  });
+
+  it('returns atomic for a single file at any of the cart extensions', () => {
     for (const ext of [
       '.zip',
       '.7z',
@@ -88,15 +128,18 @@ describe('classifyFolder — container shape', () => {
       '.a26',
     ]) {
       expect(classifyFolder({ files: [`game${ext}`], dirs: [] })).toBe(
-        'container',
+        'atomic',
       );
     }
   });
 
-  it('returns container when there are subdirectories (likely a tree of games)', () => {
-    expect(classifyFolder({ files: [], dirs: ['Region A', 'Region B'] })).toBe(
-      'container',
-    );
+  it('returns atomic for 4 cart files of one extension (under the many-same threshold)', () => {
+    // Edge case: a small folder with multiple cart files but fewer
+    // than SAME_EXTENSION_THRESHOLD (5). The cart-ext rule fires →
+    // atomic. False positives are recoverable via the row-menu
+    // "Treat as container" override.
+    const files = ['a.zip', 'b.zip', 'c.zip', 'd.zip'];
+    expect(classifyFolder({ files, dirs: [] })).toBe('atomic');
   });
 });
 
@@ -112,10 +155,14 @@ describe('classifyFolder — unknown shape', () => {
   });
 });
 
-describe('classifyFolder — round 9 extension list expansion', () => {
+describe('classifyFolder — round 9 extension list expansion (round 5 atomic flip)', () => {
   // Each newly-added extension gets at least one assertion. The
   // names match real MiSTer cores so a regression on any of them
   // would be caught immediately.
+  //
+  // Round 5: a single file with a cart-format extension classifies
+  // atomic (the X68000 / Atari / WonderSwan shape — the folder *is*
+  // one game). Container detection moved to subdirs / many-same-ext.
   const KNOWN_EXTENSION_CASES: readonly { ext: string; name: string }[] = [
     { ext: 'neo', name: 'NeoGeo native cart' },
     { ext: 'j64', name: 'Atari Jaguar (.j64)' },
@@ -146,10 +193,10 @@ describe('classifyFolder — round 9 extension list expansion', () => {
   ];
 
   for (const { ext, name } of KNOWN_EXTENSION_CASES) {
-    it(`treats a folder containing a single .${ext} file (${name}) as container`, () => {
+    it(`treats a folder containing a single .${ext} file (${name}) as atomic`, () => {
       expect(
         classifyFolder({ files: [`Sample Game.${ext}`], dirs: [] }),
-      ).toBe('container');
+      ).toBe('atomic');
     });
   }
 });
@@ -196,12 +243,11 @@ describe('classifyFolder — round 9 many-similar-files rule', () => {
   });
 
   it('matches extensions case-insensitively when counting', () => {
-    // Mixed case still counts as the same extension family.
+    // Mixed case still counts as the same extension family. Round 5:
+    // 5 .neo files trip the many-same rule (cart-ext alone would
+    // classify atomic post-round-5; many-same is the signal that
+    // overrides it for the 5+ NEOGEO-style shape).
     const files = ['a.NEO', 'b.neo', 'c.Neo', 'd.NEO', 'e.neo'];
-    // .neo is in the known list, so the cart-ext rule fires first;
-    // either way the result is container — but the case-insensitivity
-    // matters for unknown extensions where the catch-all is the only
-    // signal. Construct one of those too:
     expect(classifyFolder({ files, dirs: [] })).toBe('container');
 
     const unknownMixed = ['a.QQQ', 'b.qqq', 'c.Qqq', 'd.QqQ', 'e.qqq'];
@@ -225,81 +271,6 @@ describe('classifyFolder — round 9 many-similar-files rule', () => {
     // not fire. They go through to the dirs check / unknown.
     const files = ['readme', 'notes', 'license', 'changelog', 'authors'];
     expect(classifyFolder({ files, dirs: [] })).toBe('unknown');
-  });
-});
-
-describe('classifyFromFlags', () => {
-  it('mirrors the content-based classifier on representative inputs', () => {
-    // Saturn: hasDisc=1
-    expect(
-      classifyFromFlags({
-        hasDisc: true,
-        hasTrack: false,
-        hasCart: true,
-        hasManySameExt: false,
-        hasSubdir: false,
-      }),
-    ).toBe('atomic');
-    // NEOGEO subfolder: hasCart=1
-    expect(
-      classifyFromFlags({
-        hasDisc: false,
-        hasTrack: false,
-        hasCart: true,
-        hasManySameExt: false,
-        hasSubdir: false,
-      }),
-    ).toBe('container');
-    // Just subdirs (likely organisational tree)
-    expect(
-      classifyFromFlags({
-        hasDisc: false,
-        hasTrack: false,
-        hasCart: false,
-        hasManySameExt: false,
-        hasSubdir: true,
-      }),
-    ).toBe('container');
-    // Empty / unrecognisable
-    expect(
-      classifyFromFlags({
-        hasDisc: false,
-        hasTrack: false,
-        hasCart: false,
-        hasManySameExt: false,
-        hasSubdir: false,
-      }),
-    ).toBe('unknown');
-  });
-
-  it('returns container when hasManySameExt fires (long-tail rule)', () => {
-    // Round 9 catch-all: even when no recognised cart extension is
-    // present, a folder with many files of one extension is treated
-    // as a container. The shell-side scan computes this flag.
-    expect(
-      classifyFromFlags({
-        hasDisc: false,
-        hasTrack: false,
-        hasCart: false,
-        hasManySameExt: true,
-        hasSubdir: false,
-      }),
-    ).toBe('container');
-  });
-
-  it('disc evidence still wins over hasManySameExt', () => {
-    // A Saturn-shape folder (`.cue` + many `.bin`s) sets hasDisc=1
-    // and hasManySameExt=1 on the device. The disc rule must remain
-    // higher-precedence so we never treat a disc folder as drillable.
-    expect(
-      classifyFromFlags({
-        hasDisc: true,
-        hasTrack: false,
-        hasCart: false,
-        hasManySameExt: true,
-        hasSubdir: false,
-      }),
-    ).toBe('atomic');
   });
 });
 

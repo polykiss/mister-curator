@@ -12,6 +12,8 @@ import {
 } from '@shared/constants';
 import {
   computeCoreRenames,
+  extractCorePrefix,
+  isCoreFile,
   isRealCore,
   matchRbfsToGamesDirs,
   type CoreRename,
@@ -19,6 +21,12 @@ import {
   type RawRbfInput,
   type RawSubFolderInput,
 } from '@shared/core-matching';
+import { shouldCountAsRom } from '@shared/system-files';
+import {
+  InMemoryDiagnosticsCollector,
+  type DiagRecord,
+  type DiagReport,
+} from '@shared/diag';
 import { displayRomName } from '@shared/display';
 import {
   EMPTY_FOLDER_CLASSIFICATIONS,
@@ -29,7 +37,7 @@ import {
   withFolderOverride,
   withoutFolderOverride,
 } from '@shared/folder-classifications';
-import { classifyFromFlags, resolveClassification } from '@shared/folder-rom';
+import { classifyFolder, resolveClassification } from '@shared/folder-rom';
 import {
   healLedger,
   ledgerEqual,
@@ -248,6 +256,13 @@ export class RealMisterClient implements IMisterClient {
     }
 
     const rbfs: RawRbfInput[] = [];
+    // Tracks folder-shaped core dirs we've already emitted an rbf
+    // record for — deduplicates the case where multiple rbf/mgl
+    // versions sit inside the same folder-shaped core (e.g.
+    // `_Computer/AO486/AO486_20240115.rbf` and
+    // `_Computer/AO486/AO486_20231215.rbf` both surface
+    // `_Computer/AO486` as the core dir).
+    const folderCoreDirs = new Set<string>();
     // Aggregate per-games-dir entries from the GF / GD lines so the
     // matcher can apply the system-file filter to derive romCount.
     interface DirBuilder {
@@ -296,20 +311,42 @@ export class RealMisterClient implements IMisterClient {
         // on the device. Triggers the synthetic Arcade placeholder row
         // regardless of the directory's contents.
         arcadeDirExists = true;
-      } else if (tag === 'R' && parts.length >= 4) {
+      } else if (tag === 'P' && parts.length >= 3) {
+        // P-line: rbf/mgl found by the per-category find. Format:
+        //   P\t<category>\t<fullPath>
+        // fullPath starts with one of the configured category dirs.
+        // Top-level files (`<catDir>/<filename>`) become file rbfs.
+        // Files at depth 2 (`<catDir>/<folder>/<rbf>`) collapse to a
+        // single folder-shaped rbf record per parent dir.
         const categoryName = parts[1] ?? '';
-        const kind = parts[2] ?? '';
-        const filename = parts.slice(3).join('\t');
+        const fullPath = parts.slice(2).join('\t');
         const category = parseCategory(categoryName);
         if (!category) continue;
-        const dirForCategory = MISTER_CATEGORY_DIRS.find((c) => c.category === category)?.dir;
-        if (dirForCategory === undefined) continue;
-        rbfs.push({
-          category,
-          filename,
-          fullPath: `${dirForCategory}/${filename}`,
-          isFolder: kind === 'dir',
-        });
+        const catDir = MISTER_CATEGORY_DIRS.find(
+          (c) => c.category === category && fullPath.startsWith(`${c.dir}/`),
+        )?.dir;
+        if (catDir === undefined) continue;
+        const rel = fullPath.slice(catDir.length + 1);
+        const slash = rel.indexOf('/');
+        if (slash < 0) {
+          rbfs.push({
+            category,
+            filename: rel,
+            fullPath,
+            isFolder: false,
+          });
+        } else {
+          const folder = rel.slice(0, slash);
+          const folderFullPath = `${catDir}/${folder}`;
+          if (folderCoreDirs.has(folderFullPath)) continue;
+          folderCoreDirs.add(folderFullPath);
+          rbfs.push({
+            category,
+            filename: folder,
+            fullPath: folderFullPath,
+            isFolder: true,
+          });
+        }
       } else if (tag === 'G' && parts.length >= 2) {
         // Games-dir announcement. Initialises the bucket so empty
         // dirs (no GF/GD lines following) still appear in the matcher
@@ -336,17 +373,41 @@ export class RealMisterClient implements IMisterClient {
         const sub = ensureSubFolder(ensureDirBuilder(parent), subName);
         if (kind === 'f') sub.files.push(basename);
         else if (kind === 'd') sub.dirs.push(basename);
-      } else if (tag === 'SR' && parts.length >= 5) {
-        // Subfolder recursive totals: parent, subname, total file
-        // count, hidden-file count (anywhere beneath).
-        const parent = parts[1] ?? '';
-        const subName = parts[2] ?? '';
-        const total = Number.parseInt(parts[3] ?? '0', 10);
-        const hidden = Number.parseInt(parts[4] ?? '0', 10);
-        if (parent === '' || subName === '') continue;
-        const sub = ensureSubFolder(ensureDirBuilder(parent), subName);
-        if (!Number.isNaN(total)) sub.recursiveFileCount = total;
-        if (!Number.isNaN(hidden)) sub.recursiveHiddenFileCount = hidden;
+      } else if (tag === 'F' && parts.length >= 2) {
+        // Recursive-file line: %P relative to /media/fat/games.
+        // Format: F\t<topLevelDir>/<subFolder>/<...rest>. We
+        // aggregate per (topLevelDir, subFolder), filtering each
+        // file via shouldCountAsRom — same function `listRoms`
+        // calls, so the two paths can't drift apart.
+        const rel = parts.slice(1).join('\t');
+        const segs = rel.split('/');
+        if (segs.length < 3) continue;
+        const topLevelDir = segs[0]!;
+        const subName = segs[1]!;
+        const visibleTop = topLevelDir.startsWith('.')
+          ? topLevelDir.slice(1)
+          : topLevelDir;
+        // relPath relative to the games dir for shouldCountAsRom:
+        // segments AFTER the topLevelDir. Vectrex/Overlays/x.png
+        // becomes "Overlays/x.png" with coreId="Vectrex".
+        const relInGamesDir = segs.slice(1).join('/');
+        if (
+          !shouldCountAsRom({
+            relPath: relInGamesDir,
+            isDirectory: false,
+            coreId: visibleTop,
+            marks: systemFilesMarks,
+          })
+        ) {
+          continue;
+        }
+        const sub = ensureSubFolder(ensureDirBuilder(topLevelDir), subName);
+        sub.recursiveFileCount = (sub.recursiveFileCount ?? 0) + 1;
+        const leaf = segs[segs.length - 1]!;
+        if (leaf.startsWith('.')) {
+          sub.recursiveHiddenFileCount =
+            (sub.recursiveHiddenFileCount ?? 0) + 1;
+        }
       }
     }
     const gamesDirs: RawGamesDirInput[] = Array.from(
@@ -374,6 +435,109 @@ export class RealMisterClient implements IMisterClient {
     });
   }
 
+  /**
+   * Collect a structured diagnostic report — one record per matcher
+   * decision plus a discovery pass that enumerates directories the
+   * normal code path would skip.
+   *
+   * Read-only, pure observation. Calls the same `buildListAllCoresScript`
+   * the production path uses (so what the matcher sees is exactly what
+   * the live cores list saw) plus a separate discovery script that
+   * lists every _* dir under /media/fat and any rbf/mgl at the fat
+   * root. The matcher itself runs with an `InMemoryDiagnosticsCollector`
+   * so every rbf, games-dir, system-filter check, recursive-count walk
+   * step, and dedupe group is captured in the returned report.
+   *
+   * Diagnostic mode only — used by `scripts/diag-real-client.ts`. Not
+   * exposed on the IPC bridge.
+   */
+  async collectDiagnosticReport(connectionInfo: {
+    readonly host: string;
+    readonly port: number;
+    readonly username: string;
+  }): Promise<DiagReport> {
+    this.assertConnected();
+
+    const collector = new InMemoryDiagnosticsCollector();
+    const startedAtMs = Date.now();
+    const startedAt = new Date(startedAtMs).toISOString();
+
+    // Pass 1: the production list-all-cores script. Same shell as the
+    // live cores list — so any drift between this report and the
+    // on-screen list is downstream of parsing or matcher logic.
+    const listScript = buildListAllCoresScript();
+    const listStartMs = Date.now();
+    const listResult = await this.runSshOp(() =>
+      this.ssh.execCommand(listScript),
+    );
+    const listElapsed = Date.now() - listStartMs;
+    collector.emit({
+      kind: 'shell-raw',
+      source: 'list-all-cores',
+      stdout: listResult.stdout,
+      stderr: listResult.stderr,
+      exitCode: listResult.code ?? 0,
+      elapsedMs: listElapsed,
+    });
+    if (listResult.code !== 0) {
+      throw new Error(
+        `Failed to list cores during diagnostics: ${
+          listResult.stderr.trim() || `exit code ${String(listResult.code)}`
+        }`,
+      );
+    }
+
+    const { rbfs, gamesDirs, arcadeDirExists } =
+      parseListAllCoresShellOutput(listResult.stdout);
+
+    // Pass 2: the discovery script. Enumerates ALL _* dirs (catches
+    // _Console (autoboot)/ which the production loop misses), the
+    // _Console/._hidden/ stash, and any rbf/mgl at /media/fat root
+    // (e.g. menu.rbf). One DiscoveryRecord per find.
+    const discoveryScript = buildDiscoveryScript();
+    const discoveryStartMs = Date.now();
+    const discoveryResult = await this.runSshOp(() =>
+      this.ssh.execCommand(discoveryScript),
+    );
+    const discoveryElapsed = Date.now() - discoveryStartMs;
+    collector.emit({
+      kind: 'shell-raw',
+      source: 'discovery',
+      stdout: discoveryResult.stdout,
+      stderr: discoveryResult.stderr,
+      exitCode: discoveryResult.code ?? 0,
+      elapsedMs: discoveryElapsed,
+    });
+    parseDiscoveryShellOutput(discoveryResult.stdout, collector);
+
+    // Pass 3: re-run the matcher with the collector active. Same
+    // input as the production path, so the records reflect the
+    // exact decisions the live cores list saw.
+    const cores = matchRbfsToGamesDirs({
+      rbfs,
+      gamesDirs,
+      arcadeDirExists,
+      diagnostics: collector,
+    });
+
+    const elapsedMs = Date.now() - startedAtMs;
+    const records: readonly DiagRecord[] = collector.toArray();
+    return {
+      header: {
+        version: 1,
+        mister: { ...connectionInfo },
+        startedAt,
+        elapsedMs,
+        // Two ssh.execCommand calls; each command's internal shell
+        // forks vary by device shape (the regular pass forks per
+        // category dir for the find-rbf check).
+        subprocessForks: 2,
+      },
+      records,
+      cores,
+    };
+  }
+
   async listRoms(
     coreId: string,
     subPath = '',
@@ -389,64 +553,35 @@ export class RealMisterClient implements IMisterClient {
         : `${MISTER_GAMES_DIR}/${coreId}/${subPath}`;
     const relPrefix = subPath === '' ? '' : `${subPath}/`;
 
-    // Single batched script that emits per-entry rows. For folders we
-    // also emit four classification flags (disc / track / cart / sub-
-    // dir) computed by a single case-statement scan over their direct
-    // contents — keeps classification on the device but the *decision*
-    // in JS so we can layer user overrides without re-deploying the
-    // shell.
+    // PR #11 round 4: one find pass, JS aggregation. The pre-Round-4
+    // shell ran `du -sb` + a case-statement scan per immediate
+    // sub-folder; on cores like X68000 (649 folders × ~3 files each)
+    // that was 1300+ subprocess invocations on busybox and tripped
+    // the 10s SSH op deadline. Now: a single `find` with maxdepth=3
+    // emits raw `<type>\t<relpath>\t<size>` lines and JS does the
+    // aggregation + classification using `classifyFolder` directly
+    // (the same function the FakeMisterClient + shared tests use).
     //
-    // Lines:
-    //   F\t<filename>\t<size>
-    //   D\t<dirname>\t<size>\t<has_disc>\t<has_track>\t<has_cart>\t<has_many_same_ext>\t<has_subdir>
+    // Output line format: `<%y>\t<%P>\t<%s>` where
+    //   %y → 'f' (file) or 'd' (directory)
+    //   %P → path relative to the find starting point (no leading
+    //         './'; busybox find supports this idiom — already in
+    //         production use in `listAllCoresWithFiles` and the
+    //         discovery script).
+    //   %s → size in bytes.
     //
-    // The cart extension list intentionally tracks the JS one — see
-    // CART_EXTENSIONS in shared/folder-rom.ts for the source of truth.
-    // The `has_many_same_ext` flag fires when at least 5 files in the
-    // folder share the same (case-insensitive) extension; it catches
-    // the long tail of formats we haven't enumerated yet.
+    // maxdepth=3 keeps the output bounded and covers the realistic
+    // depth of folder ROMs (top-level entry, direct children for
+    // classification, grandchildren for size accuracy on multi-disc
+    // dumps like Saturn `Game/Disc 1/file.bin`). Files at depth 4+
+    // do not contribute to folder size; we accept that tradeoff to
+    // bound stdout volume on cores with very deep trees.
+    //
+    // Subprocess budget: 1 fork for `find`. The `[` test and `echo`
+    // are shell builtins on busybox ash. Total per-call: 1 fork.
     const script = [
-      `cd ${shellQuote(targetDir)} 2>/dev/null || { echo MISSING_DIR; exit 1; }`,
-      `find . -mindepth 1 -maxdepth 1 -type f -printf 'F\\t%f\\t%s\\n' 2>/dev/null || true`,
-      // For each immediate dir: collect a recursive byte total (du -sb)
-      // AND a flag scan of its top level.
-      'for d in */ .[!.]*/; do',
-      '  [ -d "$d" ] || continue',
-      '  d="${d%/}"',
-      '  size=$(du -sb -- "$d" 2>/dev/null | awk \'{print $1; exit}\')',
-      '  [ -z "$size" ] && size=0',
-      '  has_disc=0; has_track=0; has_cart=0; has_subdir=0',
-      '  for child in "$d"/* "$d"/.[!.]*; do',
-      '    [ -e "$child" ] || continue',
-      '    base="${child##*/}"',
-      '    if [ -d "$child" ]; then has_subdir=1; continue; fi',
-      '    case "$base" in',
-      '      *.cue|*.CUE|*.gdi|*.GDI|*.iso|*.ISO|*.chd|*.CHD) has_disc=1 ;;',
-      '    esac',
-      '    case "$base" in',
-      '      *Track\\ *|*track\\ *|*Track[0-9]*|*track[0-9]*) has_track=1 ;;',
-      '    esac',
-      '    case "$base" in',
-      '      *.zip|*.ZIP|*.7z|*.7Z|*.rar|*.RAR|*.sfc|*.SFC|*.smc|*.SMC|*.nes|*.NES|*.gba|*.GBA|*.gb|*.GB|*.gbc|*.GBC|*.md|*.MD|*.gen|*.GEN|*.pce|*.PCE|*.lnx|*.LNX|*.col|*.COL|*.gg|*.GG|*.sms|*.SMS|*.a78|*.A78|*.a26|*.A26|*.bin|*.BIN|*.neo|*.NEO|*.j64|*.J64|*.jag|*.JAG|*.32x|*.32X|*.int|*.INT|*.vec|*.VEC|*.ws|*.WS|*.wsc|*.WSC|*.tap|*.TAP|*.tzx|*.TZX|*.dsk|*.DSK|*.cdt|*.CDT|*.cas|*.CAS|*.cdi|*.CDI|*.adf|*.ADF|*.adz|*.ADZ|*.hdf|*.HDF|*.st|*.ST|*.msa|*.MSA|*.uef|*.UEF|*.cdx|*.CDX|*.bbc|*.BBC) has_cart=1 ;;',
-      '    esac',
-      '  done',
-      // Many-similar-files flag. Two passes over the children would be
-      // wasteful for a 10000-file mame folder, so we let the awk
-      // pipeline short-circuit at the threshold: print '1' as soon as
-      // any ext crosses the line, then exit.
-      '  has_many_same_ext=$(',
-      '    for child in "$d"/* "$d"/.[!.]*; do',
-      '      [ -e "$child" ] || continue',
-      '      [ -d "$child" ] && continue',
-      '      base="${child##*/}"',
-      '      case "$base" in',
-      '        *.*) printf \'%s\\n\' "${base##*.}" ;;',
-      '      esac',
-      `    done | tr 'A-Z' 'a-z' | sort | uniq -c | awk 'BEGIN{m=0} { if ($1>m) { m=$1; if (m>=5) { print 1; exit } } } END { if (m<5) print 0 }'`,
-      '  )',
-      '  [ -z "$has_many_same_ext" ] && has_many_same_ext=0',
-      '  printf "D\\t%s\\t%s\\t%d\\t%d\\t%d\\t%d\\t%d\\n" "$d" "$size" "$has_disc" "$has_track" "$has_cart" "$has_many_same_ext" "$has_subdir"',
-      'done',
+      `[ -d ${shellQuote(targetDir)} ] || { echo MISSING_DIR; exit 1; }`,
+      `find ${shellQuote(targetDir)} -mindepth 1 -maxdepth 3 -printf '%y\\t%P\\t%s\\n' 2>/dev/null`,
     ].join('\n');
 
     const result = await this.runSshOp(() => this.ssh.execCommand(script));
@@ -454,62 +589,100 @@ export class RealMisterClient implements IMisterClient {
       throw new Error(`Unknown core: ${coreId}`);
     }
 
-    const roms: Rom[] = [];
+    interface FolderAcc {
+      readonly name: string;
+      sizeBytes: number;
+      readonly directFiles: string[];
+      readonly directDirs: string[];
+    }
+    const topLevelFiles: { name: string; sizeBytes: number }[] = [];
+    const folderAccs = new Map<string, FolderAcc>();
+    const ensureFolderAcc = (name: string): FolderAcc => {
+      let acc = folderAccs.get(name);
+      if (acc === undefined) {
+        acc = { name, sizeBytes: 0, directFiles: [], directDirs: [] };
+        folderAccs.set(name, acc);
+      }
+      return acc;
+    };
+
     for (const line of result.stdout.split('\n')) {
       if (line === '' || line === 'MISSING_DIR') continue;
       const parts = line.split('\t');
-      const tag = parts[0];
-      if (tag === 'F' && parts.length >= 3) {
-        const filename = parts[1] ?? '';
-        const sizeBytes = Number.parseInt(parts[2] ?? '0', 10);
-        if (filename === '' || Number.isNaN(sizeBytes)) continue;
-        const hidden = filename.startsWith('.');
-        const visibleBase = hidden ? filename.slice(1) : filename;
-        const relativePath = `${relPrefix}${filename}`;
-        roms.push({
-          coreId,
-          filename,
-          displayName: displayRomName(visibleBase),
-          sizeBytes,
-          hidden,
-          path: `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`,
-          kind: 'file',
-          relativePath,
-        });
-      } else if (tag === 'D' && parts.length >= 8) {
-        const filename = parts[1] ?? '';
-        const sizeBytes = Number.parseInt(parts[2] ?? '0', 10);
-        if (filename === '' || Number.isNaN(sizeBytes)) continue;
-        const hidden = filename.startsWith('.');
-        const visibleBase = hidden ? filename.slice(1) : filename;
-        const flags = {
-          hasDisc: parts[3] === '1',
-          hasTrack: parts[4] === '1',
-          hasCart: parts[5] === '1',
-          hasManySameExt: parts[6] === '1',
-          hasSubdir: parts[7] === '1',
-        };
-        const relativePath = `${relPrefix}${filename}`;
-        const visibleRelPath = `${relPrefix}${visibleBase}`;
-        const heuristic = classifyFromFlags(flags);
-        const override = getFolderOverride(
-          folderClassifications,
-          coreId,
-          visibleRelPath,
-        );
-        const classification = resolveClassification(heuristic, override);
-        roms.push({
-          coreId,
-          filename,
-          displayName: displayRomName(visibleBase),
-          sizeBytes,
-          hidden,
-          path: `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`,
-          kind:
-            classification === 'container' ? 'folder-container' : 'folder-atomic',
-          relativePath,
-        });
+      if (parts.length < 3) continue;
+      const type = parts[0];
+      const relPath = parts[1] ?? '';
+      const sizeBytes = Number.parseInt(parts[2] ?? '0', 10);
+      if (relPath === '' || Number.isNaN(sizeBytes)) continue;
+      if (type !== 'f' && type !== 'd') continue;
+
+      const segments = relPath.split('/');
+      if (segments.length === 1) {
+        // Top-level entry.
+        const name = segments[0]!;
+        if (type === 'f') {
+          topLevelFiles.push({ name, sizeBytes });
+        } else {
+          ensureFolderAcc(name);
+        }
+      } else {
+        // Descendant of a top-level folder. Top is segments[0].
+        const top = segments[0]!;
+        const acc = ensureFolderAcc(top);
+        if (type === 'f') acc.sizeBytes += sizeBytes;
+        // Direct children of the top-level folder feed classifyFolder.
+        // segments.length === 2 means the entry sits exactly one level
+        // below the top folder.
+        if (segments.length === 2) {
+          const childName = segments[1]!;
+          if (type === 'f') acc.directFiles.push(childName);
+          else acc.directDirs.push(childName);
+        }
       }
+    }
+
+    const roms: Rom[] = [];
+    for (const f of topLevelFiles) {
+      const hidden = f.name.startsWith('.');
+      const visibleBase = hidden ? f.name.slice(1) : f.name;
+      const relativePath = `${relPrefix}${f.name}`;
+      roms.push({
+        coreId,
+        filename: f.name,
+        displayName: displayRomName(visibleBase),
+        sizeBytes: f.sizeBytes,
+        hidden,
+        path: `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`,
+        kind: 'file',
+        relativePath,
+      });
+    }
+    for (const acc of folderAccs.values()) {
+      const hidden = acc.name.startsWith('.');
+      const visibleBase = hidden ? acc.name.slice(1) : acc.name;
+      const relativePath = `${relPrefix}${acc.name}`;
+      const visibleRelPath = `${relPrefix}${visibleBase}`;
+      const heuristic = classifyFolder({
+        files: acc.directFiles,
+        dirs: acc.directDirs,
+      });
+      const override = getFolderOverride(
+        folderClassifications,
+        coreId,
+        visibleRelPath,
+      );
+      const classification = resolveClassification(heuristic, override);
+      roms.push({
+        coreId,
+        filename: acc.name,
+        displayName: displayRomName(visibleBase),
+        sizeBytes: acc.sizeBytes,
+        hidden,
+        path: `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`,
+        kind:
+          classification === 'container' ? 'folder-container' : 'folder-atomic',
+        relativePath,
+      });
     }
 
     roms.sort((a, b) => a.displayName.localeCompare(b.displayName));
@@ -1071,27 +1244,42 @@ export class RealMisterClient implements IMisterClient {
 }
 
 function buildListAllCoresScript(): string {
-  // Both `.rbf` (compiled FPGA cores) and `.mgl` (XML pointer cores)
-  // count as cores. A subdirectory under a category dir is only treated
-  // as a folder-shaped core when it contains at least one such file
-  // directly inside — otherwise it's a user-created organizational
-  // folder (e.g. `_alternatives`) and we ignore it.
+  // PR #11 round 2 / Change 1: one `find` per category dir does the
+  // entire structural enumeration. Replaces the per-entry shell loop
+  // that ran a second find inside each top-level subdir to check for
+  // folder-shaped cores — that pattern (a) had a per-folder fork
+  // cost we couldn't afford, and (b) treated `_Console/._hidden/` as
+  // a folder-shaped core because the dir contained rbfs (it's the
+  // firmware's stash; we MUST NOT enumerate inside it).
+  //
+  // The new shape:
+  //
+  //   find "$catDir" -mindepth 1 -maxdepth 2 \
+  //     \( -type d -name '.*' -prune \) -o \
+  //     \( -type f \( -iname '*.rbf' -o -iname '*.mgl' \) -printf '%p\n' \)
+  //
+  // The `-prune` clause skips any DIRECTORY whose name starts with
+  // a dot — `._hidden`, `._foo`, etc. Top-level dot-prefixed FILES
+  // (`.Atari 2600.mgl`, `.Game Gear.mgl`) are user-hidden cores and
+  // the prune doesn't touch them.
+  //
+  // Output: one line per rbf/mgl, full path. Top-level files print
+  // as `<catDir>/<filename>`; folder-shaped cores print as
+  // `<catDir>/<folder>/<rbf>`. JS picks the parent on slash and
+  // dedupes folder-shaped emission.
+  //
+  // The R record format: `R\t<category>\t<file|dir>\t<fullPath>`.
+  // Including the full path lets the matcher disambiguate when two
+  // category dirs share a category — e.g. `_Console` and
+  // `_Console (autoboot)` both have category=Console; the rbf in
+  // either dir resolves to the right `fullPath`.
   const dirsScript = MISTER_CATEGORY_DIRS.map(({ category, dir }) => {
     return [
       `if [ -d ${shellQuote(dir)} ]; then`,
-      `  cd ${shellQuote(dir)}`,
-      '  for entry in * .[!.]*; do',
-      '    [ -e "$entry" ] || continue',
-      '    if [ -d "$entry" ]; then',
-      `      if find "$entry" -maxdepth 1 -type f \\( -iname '*.rbf' -o -iname '*.mgl' \\) 2>/dev/null | grep -q .; then`,
-      `        printf 'R\\t${category}\\tdir\\t%s\\n' "$entry"`,
-      '      fi',
-      '    elif [ -f "$entry" ]; then',
-      '      case "$entry" in',
-      `        *.rbf|*.RBF|*.mgl|*.MGL) printf 'R\\t${category}\\tfile\\t%s\\n' "$entry" ;;`,
-      '      esac',
-      '    fi',
-      '  done',
+      `  find ${shellQuote(dir)} -mindepth 1 -maxdepth 2 \\`,
+      `    \\( -type d -name '.*' -prune \\) -o \\`,
+      `    \\( -type f \\( -iname '*.rbf' -o -iname '*.mgl' \\) -printf 'P\\t${category}\\t%p\\n' \\) \\`,
+      `    2>/dev/null`,
       'fi',
     ].join('\n');
   }).join('\n');
@@ -1145,14 +1333,17 @@ function buildListAllCoresScript(): string {
     'fi',
   ].join('\n');
 
-  // Bulk recursive-count pass for SR lines. Round 4 hotfix:
-  // PR #10 round 3 ran TWO `find` subprocesses per top-level
-  // games-dir subfolder. On a real MiSTer with hundreds of folder
-  // ROMs (Saturn discs, MegaCD games, NEOGEO containers, MegaDrive
-  // regions, X68000 dump tree…) that ballooned into 200+ forks and
-  // the SSH op timed out at 10 s. A single `find` over the whole
-  // games tree runs in ~2 s; piping the output through awk gives us
-  // per-(top-level-dir, top-level-subfolder) totals in one pass.
+  // Bulk recursive-file emission. PR #11 round 2 / Change 3:
+  // the previous awk aggregation pre-computed per-(top, subfolder)
+  // counts on the device, but it had no notion of system folders.
+  // Files inside `Vectrex/Overlays/` were counted toward
+  // recursiveRomCount even though `listRoms` correctly suppressed
+  // them — the cores list and the drill-in disagreed.
+  //
+  // Round 2 emits raw `F\t%P` lines (one per file), and the JS
+  // parser aggregates per (top, subfolder) WITH `shouldCountAsRom`
+  // applied. Both code paths (cores-list count and listRoms) use
+  // the same filter, so they can never drift apart.
   //
   //   `find -mindepth 3 -type f` skips:
   //     - the games-dir layer (depth 1 below games/)
@@ -1160,33 +1351,15 @@ function buildListAllCoresScript(): string {
   //       lines and don't contribute to a SUBFOLDER's count)
   //   and includes:
   //     - every regular file at depth 3+ (i.e. anywhere under a
-  //       top-level subfolder), which is exactly what
-  //       `recursiveFileCount` represents.
+  //       top-level subfolder), which is exactly the candidate set
+  //       for the recursive count.
   //
-  // `recursiveHiddenFileCount` mirrors the original semantics —
-  // count files whose own basename starts with `.`. Files inside a
-  // dot-prefixed parent dir don't count toward the hidden subset
-  // (the matcher applies a separate "whole container is hidden"
-  // rule on top per shared/core-matching.ts).
-  //
-  // SUBSEP is awk's default key separator (\034); using it avoids
-  // collisions with tab / slash / dot chars in real folder names.
+  // Performance: ~6,400 files on the user's MiSTer = ~200KB of
+  // stdout. The single find runs in 2-3 seconds; the JS aggregation
+  // is O(files) and microseconds per call.
   const recursivePass = [
     `if [ -d ${shellQuote(MISTER_GAMES_DIR)} ]; then`,
-    `  find ${shellQuote(MISTER_GAMES_DIR)} -mindepth 3 -type f -printf '%P\\n' 2>/dev/null | awk -F/ '`,
-    '    NF >= 3 && $1 != "" && $2 != "" {',
-    '      key = $1 SUBSEP $2',
-    '      total[key]++',
-    '      if (substr($NF, 1, 1) == ".") hidden_count[key]++',
-    '    }',
-    '    END {',
-    '      for (k in total) {',
-    '        h = (k in hidden_count) ? hidden_count[k] : 0',
-    '        split(k, parts, SUBSEP)',
-    `        printf "SR\\t%s\\t%s\\t%d\\t%d\\n", parts[1], parts[2], total[k], h`,
-    '      }',
-    '    }',
-    "  '",
+    `  find ${shellQuote(MISTER_GAMES_DIR)} -mindepth 3 -type f -printf 'F\\t%P\\n' 2>/dev/null`,
     'fi',
   ].join('\n');
 
@@ -1245,6 +1418,288 @@ function parseCategory(name: string): CoreCategory | null {
     'Arcade',
   ]);
   return valid.has(name as CoreCategory) ? (name as CoreCategory) : null;
+}
+
+/**
+ * Parses the stdout of `buildListAllCoresScript()` into the matcher
+ * input shape. Mirrors the inline parser in `listAllCoresWithFiles`
+ * verbatim; pulled out as a top-level helper so the diagnostic path
+ * can reuse it without forking the production parsing logic.
+ *
+ * Diagnostic-only: do not call this from new production code without
+ * confirming the inline parser stays bug-compatible.
+ */
+function parseListAllCoresShellOutput(stdout: string): {
+  readonly rbfs: readonly RawRbfInput[];
+  readonly gamesDirs: readonly RawGamesDirInput[];
+  readonly arcadeDirExists: boolean;
+} {
+  const rbfs: RawRbfInput[] = [];
+  const folderCoreDirs = new Set<string>();
+  interface DirBuilder {
+    files: string[];
+    dirs: string[];
+    subFolders: Map<string, MutableSubFolderBuilder>;
+  }
+  interface MutableSubFolderBuilder {
+    name: string;
+    files: string[];
+    dirs: string[];
+    recursiveFileCount?: number;
+    recursiveHiddenFileCount?: number;
+  }
+  const gamesDirsBuilder = new Map<string, DirBuilder>();
+  const ensureDirBuilder = (rawName: string): DirBuilder => {
+    let bucket = gamesDirsBuilder.get(rawName);
+    if (!bucket) {
+      bucket = { files: [], dirs: [], subFolders: new Map() };
+      gamesDirsBuilder.set(rawName, bucket);
+    }
+    return bucket;
+  };
+  const ensureSubFolder = (
+    bucket: DirBuilder,
+    subName: string,
+  ): MutableSubFolderBuilder => {
+    let sub = bucket.subFolders.get(subName);
+    if (!sub) {
+      sub = { name: subName, files: [], dirs: [] };
+      bucket.subFolders.set(subName, sub);
+    }
+    return sub;
+  };
+
+  let arcadeDirExists = false;
+  for (const line of stdout.split('\n')) {
+    if (line === '') continue;
+    const parts = line.split('\t');
+    const tag = parts[0];
+    if (tag === 'A') {
+      arcadeDirExists = true;
+    } else if (tag === 'P' && parts.length >= 3) {
+      const categoryName = parts[1] ?? '';
+      const fullPath = parts.slice(2).join('\t');
+      const category = parseCategory(categoryName);
+      if (!category) continue;
+      const catDir = MISTER_CATEGORY_DIRS.find(
+        (c) => c.category === category && fullPath.startsWith(`${c.dir}/`),
+      )?.dir;
+      if (catDir === undefined) continue;
+      const rel = fullPath.slice(catDir.length + 1);
+      const slash = rel.indexOf('/');
+      if (slash < 0) {
+        rbfs.push({
+          category,
+          filename: rel,
+          fullPath,
+          isFolder: false,
+        });
+      } else {
+        const folder = rel.slice(0, slash);
+        const folderFullPath = `${catDir}/${folder}`;
+        if (folderCoreDirs.has(folderFullPath)) continue;
+        folderCoreDirs.add(folderFullPath);
+        rbfs.push({
+          category,
+          filename: folder,
+          fullPath: folderFullPath,
+          isFolder: true,
+        });
+      }
+    } else if (tag === 'G' && parts.length >= 2) {
+      const rawName = parts[1] ?? '';
+      if (rawName !== '') ensureDirBuilder(rawName);
+    } else if (tag === 'GF' && parts.length >= 3) {
+      const rawName = parts[1] ?? '';
+      const filename = parts.slice(2).join('\t');
+      ensureDirBuilder(rawName).files.push(filename);
+    } else if (tag === 'GD' && parts.length >= 3) {
+      const rawName = parts[1] ?? '';
+      const dirname = parts.slice(2).join('\t');
+      ensureDirBuilder(rawName).dirs.push(dirname);
+    } else if (tag === 'SE' && parts.length >= 5) {
+      const parent = parts[1] ?? '';
+      const subName = parts[2] ?? '';
+      const kind = parts[3] ?? '';
+      const basename = parts.slice(4).join('\t');
+      if (parent === '' || subName === '' || basename === '') continue;
+      const sub = ensureSubFolder(ensureDirBuilder(parent), subName);
+      if (kind === 'f') sub.files.push(basename);
+      else if (kind === 'd') sub.dirs.push(basename);
+    } else if (tag === 'F' && parts.length >= 2) {
+      // Diagnostic helper aggregates without marks (the diag CLI
+      // doesn't have the renderer's user-marks cache); the result
+      // matches what the production path produces for all paths
+      // that are NOT user-marked.
+      const rel = parts.slice(1).join('\t');
+      const segs = rel.split('/');
+      if (segs.length < 3) continue;
+      const topLevelDir = segs[0]!;
+      const subName = segs[1]!;
+      const visibleTop = topLevelDir.startsWith('.')
+        ? topLevelDir.slice(1)
+        : topLevelDir;
+      const relInGamesDir = segs.slice(1).join('/');
+      if (
+        !shouldCountAsRom({
+          relPath: relInGamesDir,
+          isDirectory: false,
+          coreId: visibleTop,
+        })
+      ) {
+        continue;
+      }
+      const sub = ensureSubFolder(ensureDirBuilder(topLevelDir), subName);
+      sub.recursiveFileCount = (sub.recursiveFileCount ?? 0) + 1;
+      const leaf = segs[segs.length - 1]!;
+      if (leaf.startsWith('.')) {
+        sub.recursiveHiddenFileCount =
+          (sub.recursiveHiddenFileCount ?? 0) + 1;
+      }
+    }
+  }
+
+  const gamesDirs: RawGamesDirInput[] = Array.from(
+    gamesDirsBuilder,
+    ([rawName, b]): RawGamesDirInput => {
+      const subFolders: RawSubFolderInput[] = Array.from(
+        b.subFolders.values(),
+        (s) => ({
+          name: s.name,
+          files: s.files,
+          dirs: s.dirs,
+          recursiveFileCount: s.recursiveFileCount,
+          recursiveHiddenFileCount: s.recursiveHiddenFileCount,
+        }),
+      );
+      return { rawName, files: b.files, dirs: b.dirs, subFolders };
+    },
+  );
+
+  return { rbfs, gamesDirs, arcadeDirExists };
+}
+
+/**
+ * Discovery shell pass — enumerates every directory under
+ * /media/fat that could plausibly hold rbf or mgl cores plus any
+ * rbf/mgl files at /media/fat root itself.
+ *
+ * Output line shapes (TAB-separated):
+ *   TOP\t<type>\t<name>           one per top-level entry at /media/fat
+ *                                  (type = d|f, the GNU `find -printf %y`)
+ *   FILE\t<categoryDir>\t<rel>    one per rbf/mgl found inside any _*
+ *                                  category dir (recursive, includes
+ *                                  dot-prefixed paths)
+ *   HIDDEN\t<type>\t<name>        one per entry inside _Console/._hidden
+ *                                  (the firmware's stash that the
+ *                                  production loop does not enumerate)
+ *
+ * Read-only — never writes, never modifies. Safe to run repeatedly.
+ */
+function buildDiscoveryScript(): string {
+  return [
+    // 1. Every top-level entry at /media/fat — surfaces _* dirs (incl
+    //    `_Console (autoboot)`) and any rbf/mgl at root (menu.rbf).
+    `if [ -d ${shellQuote('/media/fat')} ]; then`,
+    `  find ${shellQuote('/media/fat')} -maxdepth 1 -mindepth 1 -printf 'TOP\\t%y\\t%P\\n' 2>/dev/null`,
+    'fi',
+    // 2. Recursive find of rbf/mgl inside every _* dir — captures
+    //    files in _Console (autoboot)/ AND the contents of any
+    //    dot-prefixed subdir like _Console/._hidden/.
+    'for d in /media/fat/_*; do',
+    '  [ -d "$d" ] || continue',
+    '  base="${d##*/}"',
+    `  find "$d" -type f \\( -iname '*.rbf' -o -iname '*.mgl' \\) -printf "FILE\\t\${base}\\t%P\\n" 2>/dev/null`,
+    'done',
+    // 3. Explicit listing of _Console/._hidden — the find above
+    //    would catch the rbf/mgl files inside, but a flat listing
+    //    here also captures any non-core files / nested subdirs the
+    //    user may want to see.
+    `if [ -d ${shellQuote('/media/fat/_Console/._hidden')} ]; then`,
+    `  for entry in ${shellQuote('/media/fat/_Console/._hidden')}/* ${shellQuote('/media/fat/_Console/._hidden')}/.[!.]*; do`,
+    '    [ -e "$entry" ] || continue',
+    '    base="${entry##*/}"',
+    '    if [ -f "$entry" ]; then',
+    `      printf 'HIDDEN\\tfile\\t%s\\n' "$base"`,
+    '    elif [ -d "$entry" ]; then',
+    `      printf 'HIDDEN\\tdir\\t%s\\n' "$base"`,
+    '    fi',
+    '  done',
+    'fi',
+  ].join('\n');
+}
+
+/**
+ * Parse the discovery shell output into DiscoveryRecords on the
+ * collector. Each line yields exactly one record.
+ */
+function parseDiscoveryShellOutput(
+  stdout: string,
+  collector: InMemoryDiagnosticsCollector,
+): void {
+  for (const line of stdout.split('\n')) {
+    if (line === '') continue;
+    const parts = line.split('\t');
+    const tag = parts[0];
+    if (tag === 'TOP' && parts.length >= 3) {
+      const typeChar = parts[1] ?? '';
+      const name = parts.slice(2).join('\t');
+      const entryType: 'file' | 'dir' = typeChar === 'd' ? 'dir' : 'file';
+      const path = `/media/fat/${name}`;
+      let note: string;
+      if (entryType === 'dir' && name.startsWith('_')) {
+        note = 'category-like dir at /media/fat root';
+      } else if (entryType === 'file' && isCoreFile(name)) {
+        note = 'rbf/mgl at /media/fat root';
+      } else if (entryType === 'dir') {
+        note = 'top-level dir at /media/fat (informational)';
+      } else {
+        note = 'top-level file at /media/fat (informational)';
+      }
+      const extractedPrefix =
+        entryType === 'file' && isCoreFile(name)
+          ? extractCorePrefix(name)
+          : undefined;
+      collector.emit({
+        kind: 'discovery',
+        path,
+        entryType,
+        note,
+        extractedPrefix,
+      });
+    } else if (tag === 'FILE' && parts.length >= 3) {
+      const categoryDir = parts[1] ?? '';
+      const rel = parts.slice(2).join('\t');
+      const path = `/media/fat/${categoryDir}/${rel}`;
+      const baseName = rel.includes('/') ? rel.slice(rel.lastIndexOf('/') + 1) : rel;
+      const extractedPrefix = isCoreFile(baseName)
+        ? extractCorePrefix(baseName)
+        : undefined;
+      collector.emit({
+        kind: 'discovery',
+        path,
+        entryType: 'file',
+        note: `rbf/mgl found under ${categoryDir}`,
+        extractedPrefix,
+      });
+    } else if (tag === 'HIDDEN' && parts.length >= 3) {
+      const typeChar = parts[1] ?? '';
+      const name = parts.slice(2).join('\t');
+      const entryType: 'file' | 'dir' = typeChar === 'dir' ? 'dir' : 'file';
+      const path = `/media/fat/_Console/._hidden/${name}`;
+      const extractedPrefix =
+        entryType === 'file' && isCoreFile(name)
+          ? extractCorePrefix(name)
+          : undefined;
+      collector.emit({
+        kind: 'discovery',
+        path,
+        entryType,
+        note: 'inside _Console/._hidden — the firmware stash',
+        extractedPrefix,
+      });
+    }
+  }
 }
 
 function assertSafeSegment(label: string, value: string): void {

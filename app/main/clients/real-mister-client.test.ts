@@ -293,7 +293,7 @@ describe('RealMisterClient', () => {
   });
 
   describe('listAllCoresWithFiles', () => {
-    it('parses R-tagged rbf entries and G-tagged games-dir entries into CoreEntry[]', async () => {
+    it('parses P-tagged rbf entries and G-tagged games-dir entries into CoreEntry[]', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -309,18 +309,23 @@ describe('RealMisterClient', () => {
       for (let i = 0; i < 7; i += 1) snesGames.push(`GF\tSNES\tgame${String(i)}.sfc`);
       for (let i = 0; i < 2; i += 1) snesGames.push(`GF\tSNES\t.hidden${String(i)}.sfc`);
 
+      // PR #11 round 2 / Change 1: P-line records carry the FULL
+      // path emitted by `find` so the parser can disambiguate
+      // folder-shaped cores (e.g. `_Computer/AO486/AO486.rbf` at
+      // depth 2) from flat ones (`_Console/NES.rbf` at depth 1).
+      // The parser dedupes folder-shaped cores by parent dir.
       const stdout = [
-        'R\tConsole\tfile\tNES_20240115.rbf',
-        'R\tConsole\tfile\tNES_20231215.rbf',
-        'R\tConsole\tfile\tSNES_20240115.rbf',
-        'R\tConsole\tfile\tSMS_20240115.rbf',
-        'R\tConsole\tfile\tGame Gear.mgl',
-        'R\tConsole\tfile\tAtari 2600.mgl',
-        'R\tConsole\tfile\tMega Duck.mgl',
-        'R\tComputer\tdir\tAO486',
-        'R\tComputer\tfile\tAtari800_20240220.rbf',
-        'R\tArcade\tfile\tGalaga_20240115.rbf',
-        'R\tArcade\tfile\tPacman_20240310.rbf',
+        'P\tConsole\t/media/fat/_Console/NES_20240115.rbf',
+        'P\tConsole\t/media/fat/_Console/NES_20231215.rbf',
+        'P\tConsole\t/media/fat/_Console/SNES_20240115.rbf',
+        'P\tConsole\t/media/fat/_Console/SMS_20240115.rbf',
+        'P\tConsole\t/media/fat/_Console/Game Gear.mgl',
+        'P\tConsole\t/media/fat/_Console/Atari 2600.mgl',
+        'P\tConsole\t/media/fat/_Console/Mega Duck.mgl',
+        'P\tComputer\t/media/fat/_Computer/AO486/AO486_20240115.rbf',
+        'P\tComputer\t/media/fat/_Computer/Atari800_20240220.rbf',
+        'P\tArcade\t/media/fat/_Arcade/Galaga_20240115.rbf',
+        'P\tArcade\t/media/fat/_Arcade/Pacman_20240310.rbf',
         'G\tNES',
         ...nesGames,
         'G\tSNES',
@@ -398,11 +403,23 @@ describe('RealMisterClient', () => {
       await client.listAllCoresWithFiles();
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
-      // The case branch for files matches both extensions, both cases.
-      expect(script).toContain('*.rbf|*.RBF|*.mgl|*.MGL');
+      // The find clause matches both extensions, both cases.
+      expect(script).toMatch(/-iname '\*\.rbf'/);
+      expect(script).toMatch(/-iname '\*\.mgl'/);
     });
 
-    it('emits a shell script that gates folder-shaped cores on rbf/mgl content', async () => {
+    it('emits a shell script that prunes dot subdirs and skips _Console (autoboot)', async () => {
+      // PR #11 round 3 / Bug 2: the autoboot dir holds firmware
+      // shortcuts ("Sony PlayStation.mgl" etc.) that reference
+      // existing cores under canonical-mismatched names. They
+      // surfaced as 10 phantom rows post-Round-2 because nothing
+      // in the user's games dirs canonicalised to "sonyplaystation"
+      // or "nintendo64". Round 3 drops the dir from
+      // MISTER_CATEGORY_DIRS so the shell never enumerates it.
+      //
+      // The dot-prefixed subdir prune (Round 2 / Change 1) stays:
+      // `_Console/._hidden/` would otherwise leak as a phantom
+      // folder-shaped core.
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -411,11 +428,15 @@ describe('RealMisterClient', () => {
       await client.listAllCoresWithFiles();
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
-      // The folder branch uses find -iname for both extensions before
-      // emitting an R-line, so user-created folders without a .rbf or
-      // .mgl inside (e.g. _alternatives, _Organized) are skipped.
-      expect(script).toMatch(/find ".*?".*-iname '\*\.rbf'/);
-      expect(script).toMatch(/-iname '\*\.mgl'/);
+      // One find per category dir with -mindepth 1 -maxdepth 2.
+      expect(script).toMatch(/find '\/media\/fat\/_Console' -mindepth 1 -maxdepth 2/);
+      expect(script).toMatch(/find '\/media\/fat\/_Computer' -mindepth 1 -maxdepth 2/);
+      // The prune clause skips dot-prefixed subdirs.
+      expect(script).toContain(`-type d -name '.*' -prune`);
+      // Output format: one line per rbf/mgl with full path.
+      expect(script).toMatch(/-printf 'P\\t.*?\\t%p\\n'/);
+      // Round 3: autoboot dir is intentionally NOT enumerated.
+      expect(script).not.toContain('_Console (autoboot)');
     });
 
     it('emits an arcade-dir probe so the placeholder appears whenever _Arcade exists', async () => {
@@ -454,12 +475,12 @@ describe('RealMisterClient', () => {
       expect(arcade?.name).toBe('Arcade');
     });
 
-    it('emits a games-dir glob that picks up dot-prefixed (hidden) and case-mismatched dirs', async () => {
-      // Round 3 / Issue 4 bug fix: the shell loop had to enumerate
-      // BOTH visible and dot-prefixed games dirs so the matcher can
-      // surface externally-hidden cores like `.ATARI7800`. The glob
-      // pattern `* .[!.]*` covers both buckets in one pass while
-      // still skipping `.` and `..`.
+    it('emits a games-dir glob that picks up dot-prefixed (hidden) games dirs', async () => {
+      // The shell loop enumerates BOTH visible and dot-prefixed
+      // games dirs so the matcher can surface previously-hidden
+      // cores like `.ATARI7800`. The glob pattern `* .[!.]*`
+      // covers both buckets in one pass while still skipping
+      // `.` and `..`.
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -468,29 +489,20 @@ describe('RealMisterClient', () => {
       await client.listAllCoresWithFiles();
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
-      // The games-dir loop iterates both visible and dot-prefixed
-      // entries — the same pattern the matching shell script uses.
       expect(script).toMatch(/cd '\/media\/fat\/games'\s+for d in \* \.\[!\.]\*/);
-      // The G/GD/GF/SE structural tags all come from the same shell
-      // loop so a hidden games dir gets the same treatment as a
-      // visible one.
       expect(script).toContain(`printf 'G\\t%s\\n' "$d"`);
       expect(script).toContain(`printf 'GD\\t%s\\t%s\\n' "$d" "$name"`);
       expect(script).toContain(`printf 'SE\\t%s\\t%s\\tf\\t%s\\n'`);
-      // SR (recursive totals) is emitted by a separate one-shot
-      // find/awk pipeline, not by the per-folder loop. See the
-      // Round 4 perf hotfix below for why.
-      expect(script).toContain(`printf "SR\\t%s\\t%s\\t%d\\t%d\\n"`);
     });
 
-    it('computes SR via a single bulk find/awk pass (Round 4 perf hotfix)', async () => {
-      // Round 3 ran TWO `find` subprocesses per top-level subfolder
-      // (`sr_total=$(find ...)` + `sr_hidden=$(find ...)`). On a real
-      // MiSTer with hundreds of folder ROMs that meant 200+ forks and
-      // a 30-60s walk that overran the 10s SSH op timeout. Round 4
-      // replaces it with one find + one awk over the entire games
-      // tree. This test asserts the new shape is in place and the
-      // old per-folder forks are gone.
+    it('emits raw F-line file paths for the recursive walk (PR #11 round 2)', async () => {
+      // Pre-Round-2 the shell pre-aggregated per (top, sub) totals
+      // via awk. That had no notion of system folders, so files
+      // inside `Vectrex/Overlays/` were counted toward
+      // recursiveRomCount even though listRoms suppressed them.
+      // Round 2 emits raw F-lines and aggregates in JS with the
+      // same `shouldCountAsRom` filter listRoms uses, so the two
+      // paths can never disagree.
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -500,31 +512,127 @@ describe('RealMisterClient', () => {
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
 
-      // The bulk pass: one `find /media/fat/games -mindepth 3 -type f`
-      // piped through awk that aggregates by (top-level dir,
-      // top-level subfolder). The whole tree walks once.
+      // One `find` over the whole games tree; emits per-file
+      // lines tagged 'F\t<%P>'. JS does the filtering and
+      // aggregation.
       expect(script).toMatch(
-        /find '\/media\/fat\/games' -mindepth 3 -type f -printf '%P\\n'/,
+        /find '\/media\/fat\/games' -mindepth 3 -type f -printf 'F\\t%P\\n'/,
       );
-      expect(script).toContain('| awk -F/');
-      // Awk emits SR lines with the same shape the matcher parser
-      // expects: parent / subname / total / hidden.
-      expect(script).toContain(`printf "SR\\t%s\\t%s\\t%d\\t%d\\n"`);
-
-      // The old per-folder forks are gone — no `sr_total=$(find ...)`
-      // or `sr_hidden=$(find ...)` substitution left in the script.
+      // The old awk pre-aggregation is gone.
+      expect(script).not.toContain('| awk -F/');
+      expect(script).not.toContain(`printf "SR\\t%s\\t%s`);
+      // No per-folder forks (`sr_total=$(find …)`).
       expect(script).not.toContain('sr_total=$(find');
       expect(script).not.toContain('sr_hidden=$(find');
-
-      // Total subprocess fork budget for the whole list pass:
-      // - up to 5-8 forks for the dirsScript (one find per
-      //   folder-shape candidate under each category dir + grep)
-      // - exactly one find/awk pipe for the recursive pass
-      // The bulk find should appear exactly once in the script.
+      // Single bulk find — counted exactly once in the recursive
+      // pass.
       const findRecursive = script.match(
         /find '\/media\/fat\/games' -mindepth 3/g,
       );
       expect(findRecursive).toHaveLength(1);
+    });
+
+    it('matches the diagnostic-observed real-MiSTer shape (PR #11 round 3 regression)', async () => {
+      // Mini-snapshot of the user's real MiSTer that exhibits the
+      // bugs the diagnostic surfaced. After Round 2 + Round 3:
+      //   - No `_hidden` synthetic core (the shell prune drops
+      //     `_Console/._hidden/` from enumeration).
+      //   - No duplicate row when an mgl name canonicalises to a
+      //     games-dir basename — `.Atari 2600.mgl` + `Atari2600/`
+      //     collapse to one row whose id is `Atari2600` (Bug 1
+      //     hard invariant: id === gamesDirBasename).
+      //   - Vectrex `Overlays/` filtered (shouldCountAsRom drops
+      //     ancestor system folders) → recursiveRomCount = 0.
+      //   - Empty orphan `games/Adam/` dropped (orphan filter).
+      //   - No `_Console (autoboot)/` enumeration: autoboot is
+      //     intentionally NOT in MISTER_CATEGORY_DIRS (Round 3
+      //     Bug 2). The shell would not emit a P-line for it; the
+      //     stdout fixture mirrors that.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      // Build a stdout that mimics the real shape.
+      const lines: string[] = [
+        // _Console rbfs (visible). Note: no autoboot P-line — the
+        // shell does not enumerate `_Console (autoboot)/` post-Round 3.
+        'P\tConsole\t/media/fat/_Console/Vectrex_20240524.rbf',
+        'P\tConsole\t/media/fat/_Console/.Atari 2600.mgl',
+        // Games-dir announcements
+        'G\tVECTREX',
+        'GD\tVECTREX\tOverlays',
+        'G\tAtari2600',
+        'GF\tAtari2600\tCombat.bin',
+        'G\tAdam', // empty
+        'A',
+      ];
+      // Vectrex/Overlays has 90 image files — pre-Round-2 those
+      // counted; now they don't.
+      for (let i = 0; i < 90; i += 1) {
+        lines.push(`F\tVECTREX/Overlays/grav-bezel-${String(i)}.png`);
+      }
+      mocks.execCommand.mockResolvedValueOnce(execOk([...lines, ''].join('\n')));
+
+      const cores = await client.listAllCoresWithFiles();
+      const ids = cores.map((c) => c.id);
+
+      // No phantom `_hidden` core (the shell prune killed it).
+      expect(ids).not.toContain('_hidden');
+      // No duplicate Atari 2600 / Atari2600 — they collapse to one
+      // and the id is the on-disk games-dir basename (Bug 1).
+      const atariRows = cores.filter(
+        (c) => c.id.toLowerCase().replace(/[^a-z0-9]/g, '') === 'atari2600',
+      );
+      expect(atariRows).toHaveLength(1);
+      expect(atariRows[0]?.id).toBe('Atari2600');
+      // Empty orphan dropped.
+      expect(ids).not.toContain('Adam');
+      // Round 3 Bug 2: no autoboot phantom row. None of the
+      // autoboot mgl names should surface as standalone cores.
+      expect(ids).not.toContain('SEGA 32X');
+      expect(ids).not.toContain('Sony PlayStation');
+      expect(ids).not.toContain('Nintendo 64');
+      // Vectrex's Overlays filtered → 0 ROMs (cores-list count
+      // matches what listRoms would return).
+      const vectrex = cores.find((c) => c.id === 'VECTREX');
+      expect(vectrex?.romCount).toBe(0);
+      expect(vectrex?.recursiveRomCount).toBe(0);
+    });
+
+    it('aggregates F-lines through shouldCountAsRom — Vectrex/Overlays excluded', async () => {
+      // Regression: pre-Round-2, this shape contributed 90 to the
+      // recursive count. The unified filter now drops every file
+      // under `Overlays/` so the matcher's recursiveRomCount and
+      // listRoms agree on 0.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      const fLines: string[] = [];
+      for (let i = 0; i < 90; i += 1) {
+        fLines.push(`F\tVECTREX/Overlays/grav-bezel-${String(i)}.png`);
+      }
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'P\tConsole\t/media/fat/_Console/Vectrex_20240524.rbf',
+            'G\tVECTREX',
+            'GD\tVECTREX\tOverlays',
+            ...fLines,
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const cores = await client.listAllCoresWithFiles();
+      // Vectrex's only top-level entry is `Overlays/`, which is a
+      // system folder. shouldCountAsRom drops it at the top level
+      // → romCount = 0. The orphan filter would normally drop the
+      // entire core (no rbf-only path remains for the entry to
+      // exist as a core), but Vectrex has the rbf, so the core
+      // survives with `0` ROMs.
+      const vectrex = cores.find((c) => c.id === 'VECTREX');
+      expect(vectrex).toBeDefined();
+      expect(vectrex?.romCount).toBe(0);
+      expect(vectrex?.recursiveRomCount).toBe(0);
     });
 
     it('parses a case-mismatched dot-prefixed games dir as a hidden core (Round 5)', async () => {
@@ -546,7 +654,8 @@ describe('RealMisterClient', () => {
       );
 
       const cores = await client.listAllCoresWithFiles();
-      const atari = cores.find((c) => c.id === 'Atari7800');
+      // PR #11 round 2: games-dir name wins as the display id.
+      const atari = cores.find((c) => c.id === 'ATARI7800');
       expect(atari).toBeDefined();
       expect(atari?.gamesDirHidden).toBe(true);
       expect(atari?.gamesDirName).toBe('ATARI7800');
@@ -593,26 +702,75 @@ describe('RealMisterClient', () => {
   });
 
   describe('listRoms', () => {
-    it('parses files + folder classification flags into Rom entries', async () => {
+    it('targets the games-dir basename via the coreId argument (PR #11 round 3 / Bug 1)', async () => {
+      // The matcher's invariant guarantees CoreEntry.id === on-disk
+      // basename when a games dir exists. listRoms uses that id
+      // directly to build `/media/fat/games/<id>/`. This test pins
+      // the contract: callers can pass the matcher-supplied id and
+      // get the right path, even when the original mgl/rbf prefix
+      // had spaces or punctuation that canonicalize away.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      // The matcher would have collapsed `.Atari 2600.mgl` and
+      // `games/Atari2600/` into one CoreEntry with id="Atari2600".
+      // Calling listRoms with that id must hit /media/fat/games/Atari2600/.
+      await client.listRoms('Atari2600');
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      // Round 4: the existence check + find both target the
+      // games-dir path. The script no longer cd's first.
+      expect(script).toContain(`[ -d '/media/fat/games/Atari2600' ]`);
+      expect(script).toContain(`find '/media/fat/games/Atari2600'`);
+      // And critically — it does NOT target the rbf-prefix variant.
+      expect(script).not.toContain('Atari 2600');
+    });
+
+    it('parses raw find output into Rom entries with classified folders (PR #11 round 4)', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
 
-      // listRoms emits per-folder classification flags. Round 9 added
-      // a fifth flag (hasManySameExt) between hasCart and hasSubdir:
-      //   F\t<name>\t<size>
-      //   D\t<name>\t<size>\t<has_disc>\t<has_track>\t<has_cart>\t<has_many_same_ext>\t<has_subdir>
-      // The Saturn-shape disc folder has hasDisc=1 → folder-atomic.
-      // The NEOGEO-shape `1 World A-Z` has hasCart=1 → folder-container.
+      // Round 4: shell emits raw `<type>\t<%P>\t<size>` lines from
+      // a single find. JS aggregates by top-level segment and runs
+      // `classifyFolder` over the direct-child files+dirs.
+      //
+      // This fixture covers:
+      //   - top-level files (NES roms + a .zip)
+      //   - a Saturn-shape disc folder (.cue+.bin → folder-atomic)
+      //   - a hidden folder (dot-prefix preserved as `hidden`)
+      //   - a NEOGEO-shape container (5+ .zip carts → many-same →
+      //     folder-container post-round-5)
+      //   - depth-3 size contributions (the 1.7GB track in Panzer
+      //     Dragoon adds to the parent folder's total)
       mocks.execCommand.mockResolvedValueOnce(
         execOk(
           [
-            'F\t.Action 52 (USA) (Unl).nes\t131072',
-            'F\tCastlevania (USA, Europe).nes\t131072',
-            'F\tCastlevania.zip\t40960',
-            'D\tPanzer Dragoon Saga (USA)\t1958295552\t1\t0\t0\t1\t0',
-            'D\t.Hidden Disc Game\t125829120\t1\t0\t0\t1\t0',
-            'D\t1 World A-Z\t52428800\t0\t0\t1\t0\t0',
+            // Top-level files at depth 1.
+            'f\t.Action 52 (USA) (Unl).nes\t131072',
+            'f\tCastlevania (USA, Europe).nes\t131072',
+            'f\tCastlevania.zip\t40960',
+            // Saturn-shape disc folder.
+            'd\tPanzer Dragoon Saga (USA)\t0',
+            'f\tPanzer Dragoon Saga (USA)/PDS.cue\t512',
+            'f\tPanzer Dragoon Saga (USA)/PDS (Track 01).bin\t1958295040',
+            // Hidden disc folder.
+            'd\t.Hidden Disc Game\t0',
+            'f\t.Hidden Disc Game/HDG.cue\t512',
+            'f\t.Hidden Disc Game/HDG.bin\t125828608',
+            // NEOGEO-shape container: 6 .zip files of one extension
+            // trip the many-same rule. Round 5: cart-ext alone
+            // classifies atomic, so a NEOGEO-shape needs the count
+            // signal to flip to container.
+            'd\t1 World A-Z\t0',
+            'f\t1 World A-Z/mslug.zip\t10485760',
+            'f\t1 World A-Z/kof97.zip\t10485760',
+            'f\t1 World A-Z/samsho.zip\t10485760',
+            'f\t1 World A-Z/lastblade2.zip\t10485760',
+            'f\t1 World A-Z/garou.zip\t5242880',
+            'f\t1 World A-Z/mslug3.zip\t5242880',
             '',
           ].join('\n'),
         ),
@@ -640,6 +798,7 @@ describe('RealMisterClient', () => {
       const discFolder = roms.find((r) => r.filename === 'Panzer Dragoon Saga (USA)');
       expect(discFolder?.kind).toBe('folder-atomic');
       expect(discFolder?.hidden).toBe(false);
+      // Folder size is the sum of all descendant file sizes.
       expect(discFolder?.sizeBytes).toBe(1958295552);
       expect(discFolder?.path).toBe('/media/fat/games/NES/Panzer Dragoon Saga (USA)');
 
@@ -650,31 +809,40 @@ describe('RealMisterClient', () => {
 
       const containerFolder = roms.find((r) => r.filename === '1 World A-Z');
       expect(containerFolder?.kind).toBe('folder-container');
+      expect(containerFolder?.sizeBytes).toBe(52428800);
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
-      expect(script).toContain(`cd '/media/fat/games/NES'`);
-      // The new shell emits four classification flags per folder.
-      expect(script).toContain('has_disc');
-      expect(script).toContain('has_track');
-      expect(script).toContain('has_cart');
-      expect(script).toContain('has_many_same_ext');
-      expect(script).toContain('has_subdir');
-      // Round 9 expansion: .neo and friends now match the cart case.
-      expect(script).toContain('*.neo');
+      // Round 4: existence check + single find with -printf.
+      expect(script).toContain(`[ -d '/media/fat/games/NES' ]`);
+      expect(script).toContain(
+        `find '/media/fat/games/NES' -mindepth 1 -maxdepth 3 -printf '%y\\t%P\\t%s\\n'`,
+      );
+      // Classification flag plumbing (has_disc / has_cart / etc.) is
+      // gone — `classifyFolder` runs in JS now.
+      expect(script).not.toContain('has_disc');
+      expect(script).not.toContain('du -sb');
     });
 
-    it('classifies a folder with hasManySameExt=1 as folder-container', async () => {
-      // Round 9 long-tail rule: even when the cart-extension case
-      // doesn't match, the device-side scan flips hasManySameExt and
-      // we treat the folder as drillable.
+    it('classifies a folder via the hasManySameExtension long-tail rule (Round 9 / Round 4 reroute)', async () => {
+      // Round 9: even when no recognised cart extension is present,
+      // a folder with 5+ files of one extension is treated as
+      // drillable. Round 4 moved this check into `classifyFolder`,
+      // fed by the raw direct-child filenames the find pass emits.
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
       mocks.execCommand.mockResolvedValueOnce(
         execOk(
           [
-            // disc=0, track=0, cart=0, manySameExt=1, subdir=0
-            'D\tFutureFormat Collection\t10240\t0\t0\t0\t1\t0',
+            'd\tFutureFormat Collection\t0',
+            // Five files sharing `.fmt` — none of these are in the
+            // CART_EXTENSIONS list, so only the long-tail rule can
+            // flip the classification.
+            'f\tFutureFormat Collection/a.fmt\t1024',
+            'f\tFutureFormat Collection/b.fmt\t1024',
+            'f\tFutureFormat Collection/c.fmt\t1024',
+            'f\tFutureFormat Collection/d.fmt\t1024',
+            'f\tFutureFormat Collection/e.fmt\t1024',
             '',
           ].join('\n'),
         ),
@@ -692,8 +860,8 @@ describe('RealMisterClient', () => {
       mocks.execCommand.mockResolvedValueOnce(
         execOk(
           [
-            'F\tmslug.zip\t1024',
-            'F\tkof97.zip\t2048',
+            'f\tmslug.zip\t1024',
+            'f\tkof97.zip\t2048',
             '',
           ].join('\n'),
         ),
@@ -708,7 +876,7 @@ describe('RealMisterClient', () => {
       expect(roms[0]?.path).toBe('/media/fat/games/NEOGEO/1 World A-Z/kof97.zip');
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
-      expect(script).toContain(`cd '/media/fat/games/NEOGEO/1 World A-Z'`);
+      expect(script).toContain(`find '/media/fat/games/NEOGEO/1 World A-Z'`);
     });
 
     it('rejects subPaths that try to climb out of the core dir', async () => {
@@ -736,6 +904,161 @@ describe('RealMisterClient', () => {
       mocks.execCommand.mockResolvedValueOnce(execFail(1, 'No such file or directory'));
 
       await expect(client.listRoms('TurboGrafx')).rejects.toThrow(/Unknown core/);
+    });
+
+    it('returns [] for an empty core directory', async () => {
+      // The find pass emits no lines when the dir is empty. The
+      // existence check passes (`[ -d ... ]` is true), so we get
+      // exit code 0 with empty stdout.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      const roms = await client.listRoms('Empty');
+      expect(roms).toEqual([]);
+    });
+
+    it('handles X68000 shape — 600 single-game folders — within the fork budget and classifies atomic (PR #11 round 4 / round 5)', async () => {
+      // Live test: clicking X68000 (649 folders, 2018 files) hung
+      // for 10s and timed out pre-Round-4 because the per-folder
+      // shell loop ran ~1300 subprocess invocations on busybox.
+      // Round 4 collapses the script to one find. Round 5 fixes the
+      // classification so each folder reads as one game (atomic),
+      // not a drillable container — the user complained that
+      // clicking a folder produced a useless extra step into a
+      // single .zip file.
+      //
+      // This regression pins:
+      //   - fork budget (1 invocation)
+      //   - all 600 folders classify atomic (real X68000 shape:
+      //     `<game>/<game>.zip` with optional companion files,
+      //     no subdirs)
+      //   - per-folder size sum across the file payload
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      const lines: string[] = [];
+      const folderCount = 600;
+      for (let i = 0; i < folderCount; i += 1) {
+        const folder = `Game ${String(i).padStart(3, '0')}`;
+        // Top-level folder.
+        lines.push(`d\t${folder}\t0`);
+        // Folder ROM payload: one .zip + occasionally a manual or
+        // readme companion. NO subdirs — that's the real X68000
+        // shape.
+        lines.push(`f\t${folder}/${folder}.zip\t40960`);
+        if (i % 3 === 0) {
+          lines.push(`f\t${folder}/manual.txt\t8192`);
+        }
+        if (i % 7 === 0) {
+          lines.push(`f\t${folder}/readme.md\t2048`);
+        }
+      }
+      lines.push('');
+      mocks.execCommand.mockResolvedValueOnce(execOk(lines.join('\n')));
+
+      const roms = await client.listRoms('X68000');
+
+      // All 600 folders surface as Rom entries.
+      expect(roms).toHaveLength(folderCount);
+      // PR #11 round 5: every X68000 folder classifies atomic. The
+      // cart-ext rule fires in classifyFolder, no subdirs / no
+      // many-same to flip the call.
+      const atomics = roms.filter((r) => r.kind === 'folder-atomic');
+      expect(atomics).toHaveLength(folderCount);
+      // None classify as containers — drilling into an X68000
+      // folder shows nothing the cores list doesn't already say.
+      const containers = roms.filter((r) => r.kind === 'folder-container');
+      expect(containers).toHaveLength(0);
+      // Folder size sums every descendant file. Game 000 has the
+      // .zip, the manual (i % 3 === 0), and the readme (i % 7 === 0).
+      const game000 = roms.find((r) => r.filename === 'Game 000');
+      expect(game000?.sizeBytes).toBe(40960 + 8192 + 2048);
+
+      // Fork budget: at most one execCommand call per listRoms.
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      // The script body must invoke `find` at most once. Anything
+      // more (e.g. the pre-Round-4 per-folder `du -sb` loop) blows
+      // the 10s SSH op budget on busybox.
+      const findInvocations = script.match(/(^|\s)find\s/g) ?? [];
+      expect(findInvocations.length).toBe(1);
+      // No du / awk / per-folder loops survive Round 4.
+      expect(script).not.toContain('du -sb');
+      expect(script).not.toContain('for d in');
+      expect(script).not.toContain('uniq -c');
+    });
+
+    it('classifies Saturn / MegaCD folders as atomic from disc markers', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            // .cue + .bin shape (Saturn).
+            'd\tNights into Dreams (USA)\t0',
+            'f\tNights into Dreams (USA)/nid.cue\t512',
+            'f\tNights into Dreams (USA)/nid (Track 01).bin\t748314624',
+            // .iso shape (single-track CD-ROM).
+            'd\tDaytona USA (USA)\t0',
+            'f\tDaytona USA (USA)/daytona.iso\t536870912',
+            // Multi-track without .cue (track filename pattern).
+            'd\tBurning Rangers (USA)\t0',
+            'f\tBurning Rangers (USA)/Track 01.bin\t536870912',
+            'f\tBurning Rangers (USA)/Track 02.bin\t536870912',
+            // .gdi (Dreamcast).
+            'd\tShenmue (USA)\t0',
+            'f\tShenmue (USA)/shenmue.gdi\t512',
+            'f\tShenmue (USA)/shenmue.bin\t748314624',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('Saturn');
+
+      const cue = roms.find((r) => r.filename === 'Nights into Dreams (USA)');
+      expect(cue?.kind).toBe('folder-atomic');
+      const iso = roms.find((r) => r.filename === 'Daytona USA (USA)');
+      expect(iso?.kind).toBe('folder-atomic');
+      const trackOnly = roms.find((r) => r.filename === 'Burning Rangers (USA)');
+      // No .cue, but track-pattern filenames trip the atomic rule.
+      expect(trackOnly?.kind).toBe('folder-atomic');
+      const gdi = roms.find((r) => r.filename === 'Shenmue (USA)');
+      expect(gdi?.kind).toBe('folder-atomic');
+    });
+
+    it('preserves both top-level files and folders in a mixed games dir', async () => {
+      // Some cores' games dirs hold both bare-file ROMs and folder
+      // ROMs side by side (e.g. a NES core where most ROMs are flat
+      // .nes files but a few games are stored in folders for
+      // overlays/companion files).
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'f\tFlat ROM 1.nes\t40960',
+            'f\tFlat ROM 2.nes\t40960',
+            'd\tFolder ROM\t0',
+            'f\tFolder ROM/main.nes\t40960',
+            'f\tFolder ROM/cover.png\t8192',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('Mixed');
+      expect(roms).toHaveLength(3);
+      const files = roms.filter((r) => r.kind === 'file');
+      expect(files).toHaveLength(2);
+      const folders = roms.filter((r) => r.kind.startsWith('folder-'));
+      expect(folders).toHaveLength(1);
+      expect(folders[0]?.sizeBytes).toBe(40960 + 8192);
     });
   });
 

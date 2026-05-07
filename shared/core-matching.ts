@@ -1,6 +1,11 @@
 import { MISTER_GAMES_DIR } from '@shared/constants';
+import { emit, type DiagnosticsCollector } from '@shared/diag';
 import { classifyFolder } from '@shared/folder-rom';
-import { isSystemFile } from '@shared/system-files';
+import {
+  isAutoDetectedSystemFile,
+  isAutoDetectedSystemFolder,
+  shouldCountAsRom,
+} from '@shared/system-files';
 import { isMarked } from '@shared/system-files-marks';
 import type {
   CoreCategory,
@@ -51,6 +56,36 @@ export function extractCorePrefix(filename: string): string {
 export function isCoreFile(filename: string): boolean {
   const lower = filename.toLowerCase();
   return lower.endsWith('.rbf') || lower.endsWith('.mgl');
+}
+
+/**
+ * Reduce a name (rbf prefix or games-dir basename) to its canonical
+ * form by lowercasing and stripping every non-alphanumeric character.
+ * This is what the matcher uses as the key when joining rbfs to games
+ * dirs — `"Atari 2600"`, `"Atari2600"`, and `".Atari 2600.mgl"` (after
+ * extractCorePrefix) all canonicalise to `"atari2600"` and merge into
+ * one CoreEntry.
+ *
+ * Examples:
+ *   "Atari 2600"               -> "atari2600"
+ *   "Atari2600"                -> "atari2600"   (matches above)
+ *   "Game Gear"                -> "gamegear"
+ *   "GameGear"                 -> "gamegear"    (matches above)
+ *   "Pocket Challenge V2"      -> "pocketchallengev2"
+ *   "Mega Duck"                -> "megaduck"
+ *   "Sord M5"                  -> "sordm5"
+ *   "Super_Vision_8000"        -> "supervision8000"
+ *   "WonderSwan Color"         -> "wonderswancolor"
+ *   "TI-99_4A"                 -> "ti994a"
+ *   "GBC"                      -> "gbc"          (does NOT match
+ *                                                  "GameboyColor"
+ *                                                  -> "gameboycolor"
+ *                                                  — synonyms are out
+ *                                                  of scope; users can
+ *                                                  consolidate manually)
+ */
+export function canonicalize(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
 /**
@@ -140,6 +175,14 @@ export interface MatchInput {
    * folders.
    */
   readonly systemFilesMarks?: SystemFilesMarks;
+  /**
+   * Optional observer for the matcher's internal decisions. When set,
+   * the matcher emits one record per rbf, games dir, system-file
+   * filter check, recursive-count walk step, dedupe group, and final
+   * core entry. The matcher's LOGIC is unchanged — diagnostics are
+   * pure side-channel observation for PR #11. Off in production.
+   */
+  readonly diagnostics?: DiagnosticsCollector;
 }
 
 interface MutableCoreEntry {
@@ -158,36 +201,72 @@ interface MutableCoreEntry {
 
 /**
  * Joins enumerated rbf entries (across all category dirs) with games-dir
- * entries to produce one CoreEntry per coreId. Pure function — all
+ * entries to produce one CoreEntry per logical core. Pure function — all
  * filesystem I/O happens upstream.
  *
- * Joining rules:
- *   - Multiple rbfs with the same prefix collapse to one CoreEntry with
- *     all paths in `rbfPaths` (older versions sitting alongside newer).
+ * Joining rules (PR #11 round 2):
+ *   - Both rbf prefix and games-dir basename are reduced to a canonical
+ *     form via `canonicalize()` (lowercase + strip non-alphanumerics)
+ *     and that form is the dedupe key. `"Atari 2600"`, `"Atari2600"`,
+ *     and `"Atari-2600"` all canonicalise to `"atari2600"` and merge.
+ *     This replaces the old "literal id, post-pass dedupe by lowercase"
+ *     scheme that left `Atari 2600` and `Atari2600` as two phantom
+ *     entries on the user's MiSTer.
+ *   - When BOTH a games dir and an rbf exist for the same canonical
+ *     key, the games-dir basename wins as the display id (Round 5
+ *     spec: "named whichever the games dir was"). The rbf prefix's
+ *     casing is forgotten; the operational `gamesDirName` already
+ *     preserves the on-disk basename for renames.
+ *   - Multiple rbfs with the same canonical key collapse to one
+ *     CoreEntry with all paths in `rbfPaths` (older versions sitting
+ *     alongside newer).
  *   - A games dir with no matching rbf produces a CoreEntry with
- *     `category: 'Unknown'` and empty `rbfPaths` — still hideable.
+ *     `category: 'Unknown'` — kept ONLY when it has countable ROMs
+ *     (orphan filter, Round 2 Change 4).
  *   - An rbf with no matching games dir produces a CoreEntry with
- *     `gamesDirExists: false` and `romCount: 0` — still hideable.
- *   - When an rbf prefix collides across categories (rare in practice),
- *     the first-seen non-arcade category wins. Arcade cores stay as
- *     'Arcade' so the UI can disable hide on them.
+ *     `gamesDirExists: false` and `romCount: 0` — always kept; the
+ *     core is still launchable from the MiSTer menu and the user
+ *     might want to hide it.
+ *   - When an rbf prefix collides across categories (rare in
+ *     practice), the first-seen non-arcade category wins. Arcade
+ *     cores stay as 'Arcade' so the UI can disable hide on them.
+ *
+ * `shouldCountAsRom` is the single source of truth for which entries
+ * count toward `romCount` and `recursiveRomCount`. Both this matcher
+ * AND `RealMisterClient.listRoms` call the same function so the two
+ * paths can never disagree (the Vectrex/Overlays mystery from PR #11
+ * round 1).
  */
 export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
-  const byId = new Map<string, MutableCoreEntry>();
+  const diag = input.diagnostics;
+  const marks = input.systemFilesMarks;
+  const byKey = new Map<string, MutableCoreEntry>();
 
   for (const rbf of input.rbfs) {
     const prefix = extractCorePrefix(rbf.filename);
-    if (prefix === '') continue;
+    emit(diag, {
+      kind: 'rbf',
+      category: rbf.category,
+      type: rbf.isFolder ? 'dir' : 'file',
+      filename: rbf.filename,
+      fullPath: rbf.fullPath,
+      extractedPrefix: prefix,
+      hasLeadingDot: rbf.filename.startsWith('.'),
+    });
+    const key = canonicalize(prefix);
+    if (prefix === '' || key === '') continue;
 
-    const existing = byId.get(prefix);
+    const existing = byKey.get(key);
     if (existing) {
-      existing.rbfPaths.push(rbf.fullPath);
+      if (!existing.rbfPaths.includes(rbf.fullPath)) {
+        existing.rbfPaths.push(rbf.fullPath);
+      }
       // Prefer non-arcade category if a later rbf gives us a better match.
       if (existing.category === 'Arcade' && rbf.category !== 'Arcade') {
         existing.category = rbf.category;
       }
     } else {
-      byId.set(prefix, {
+      byKey.set(key, {
         id: prefix,
         name: prefix,
         romCount: 0,
@@ -205,35 +284,70 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
   for (const gd of input.gamesDirs) {
     const isHidden = gd.rawName.startsWith('.');
     const visibleName = isHidden ? gd.rawName.slice(1) : gd.rawName;
-    if (visibleName === '') continue;
+    emit(diag, {
+      kind: 'games-dir',
+      rawName: gd.rawName,
+      visibleName,
+      isHidden,
+      fileCount: gd.files.length,
+      dirCount: gd.dirs.length,
+    });
+    const key = canonicalize(visibleName);
+    if (visibleName === '' || key === '') continue;
 
-    // System files (BIOSes, .xml/.ini configs, BIOS-suffix images) are
-    // excluded from the count so a core with only a BIOS still qualifies
-    // as "empty" for the "Hide empty cores" sweep. Folders are never
-    // *auto*-filtered — the folder is the unit, regardless of contents
-    // (Saturn-style disc cores) — but the user-marks layer DOES apply
-    // to folders, so a user who explicitly marks `Palettes/` as system
-    // gets it out of their counts.
-    const marks = input.systemFilesMarks;
-    const isMarkedHere = (filename: string): boolean =>
-      marks ? isMarked(marks, visibleName, filename) : false;
-    const nonSystemFiles = gd.files.filter(
-      (f) =>
-        !isSystemFile({ filename: f, kind: 'file' }, { marks, coreId: visibleName }),
-    );
-    const nonSystemDirs = gd.dirs.filter((d) => !isMarkedHere(d));
-    const romCount = nonSystemFiles.length + nonSystemDirs.length;
+    // Single-source-of-truth filter: shouldCountAsRom decides whether
+    // each top-level entry contributes to the cores-list count.
+    // Same function listRoms uses, so the two paths can't drift apart.
+    const filteredFiles = gd.files.filter((f) => {
+      const counted = shouldCountAsRom({
+        relPath: f,
+        isDirectory: false,
+        coreId: visibleName,
+        marks,
+      });
+      emit(diag, {
+        kind: 'system-filter',
+        coreId: visibleName,
+        path: f,
+        entryType: 'file',
+        isAutoSystem: isAutoDetectedSystemFile({ filename: f, kind: 'file' }),
+        isMarkedSystem: marks ? isMarked(marks, visibleName, f) : false,
+        decision: counted ? 'kept' : 'filtered',
+      });
+      return counted;
+    });
+    const filteredDirs = gd.dirs.filter((d) => {
+      const counted = shouldCountAsRom({
+        relPath: d,
+        isDirectory: true,
+        coreId: visibleName,
+        marks,
+      });
+      emit(diag, {
+        kind: 'system-filter',
+        coreId: visibleName,
+        path: d,
+        entryType: 'dir',
+        isAutoSystem: isAutoDetectedSystemFolder(d),
+        isMarkedSystem: marks ? isMarked(marks, visibleName, d) : false,
+        decision: counted ? 'kept' : 'filtered',
+      });
+      return counted;
+    });
+    const romCount = filteredFiles.length + filteredDirs.length;
     const hiddenCount =
-      nonSystemFiles.filter((f) => f.startsWith('.')).length +
-      nonSystemDirs.filter((d) => d.startsWith('.')).length;
+      filteredFiles.filter((f) => f.startsWith('.')).length +
+      filteredDirs.filter((d) => d.startsWith('.')).length;
 
     const { recursiveRomCount, recursiveHiddenCount } = computeRecursiveRomCount(
-      nonSystemFiles,
-      nonSystemDirs,
+      filteredFiles,
+      filteredDirs,
       gd.subFolders,
+      visibleName,
+      diag,
     );
 
-    const existing = byId.get(visibleName);
+    const existing = byKey.get(key);
     if (existing) {
       existing.gamesDirExists = true;
       existing.gamesDirHidden = isHidden;
@@ -242,8 +356,15 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
       existing.hiddenCount = hiddenCount;
       existing.recursiveRomCount = recursiveRomCount;
       existing.recursiveHiddenCount = recursiveHiddenCount;
+      // Games-dir name wins as display id when both an rbf and a
+      // games dir exist for the same canonical key — Round 5
+      // spec: "named whichever the games dir was". The rbf prefix's
+      // case (e.g. "Vectrex") is forgotten in favor of the on-disk
+      // basename (e.g. "VECTREX"). Operations target gamesDirName.
+      existing.id = visibleName;
+      existing.name = visibleName;
     } else {
-      byId.set(visibleName, {
+      byKey.set(key, {
         id: visibleName,
         name: visibleName,
         romCount,
@@ -259,7 +380,53 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     }
   }
 
-  const allRaw: CoreEntry[] = Array.from(byId.values()).map((e) => ({
+  // Match-attempt records: one per canonical-key bucket, showing
+  // how rbfs and games dirs lined up. `kept-singleton` = either a
+  // rbf-only or a games-dir-only entry (no merge); `merged` = both
+  // sides contributed.
+  for (const [k, entry] of byKey.entries()) {
+    const hasRbf = entry.rbfPaths.length > 0;
+    const hasGamesDir = entry.gamesDirExists;
+    const groupIds = [
+      ...entry.rbfPaths.map((p) => extractCorePrefix(pathBasename(p))),
+      ...(hasGamesDir && entry.gamesDirName ? [entry.gamesDirName] : []),
+    ];
+    const dedupedGroupIds = Array.from(new Set(groupIds));
+    emit(diag, {
+      kind: 'match-attempt',
+      key: entry.id,
+      lowerKey: k,
+      groupSize: dedupedGroupIds.length,
+      groupIds: dedupedGroupIds,
+      outcome:
+        hasRbf && hasGamesDir
+          ? 'merged'
+          : 'kept-singleton',
+      winnerId: hasRbf && hasGamesDir ? entry.id : undefined,
+    });
+  }
+
+  // Hard invariant (PR #11 round 3 / Bug 1): every CoreEntry's `id`
+  // MUST be the on-disk games-dir basename when a games dir exists,
+  // and MUST be the rbf prefix otherwise. Operational paths
+  // (`listRoms`, `setRomVisibility`, `hideCore`) join `<coreId>` to
+  // the games-dir prefix; if `id` drifts from the on-disk basename,
+  // those paths target a non-existent directory and silently return
+  // empty.
+  //
+  // The games-dir loop already overrides `id = visibleName` whenever
+  // it processes a games dir, but defensive enforcement here makes
+  // the invariant unconditional and survives future edits to either
+  // loop. The rbf-only branch has nothing to enforce — `id = prefix`
+  // is set at insertion and never reassigned.
+  for (const e of byKey.values()) {
+    if (e.gamesDirExists && e.gamesDirName !== undefined) {
+      e.id = e.gamesDirName;
+      e.name = e.gamesDirName;
+    }
+  }
+
+  const allRaw: CoreEntry[] = Array.from(byKey.values()).map((e) => ({
     id: e.id,
     name: e.name,
     romCount: e.romCount,
@@ -273,11 +440,20 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     gamesDirName: e.gamesDirName,
   }));
 
-  // Dedupe by lowercase id. Real MiSTers carry case-mismatched siblings —
-  // e.g. `_Computer/.Apogee_*.rbf` next to `games/.APOGEE`. Both refer to
-  // the same logical core; we collapse them and remember the on-disk
-  // `gamesDirName` so renames target the correct path.
-  const all = dedupeByLowercaseId(allRaw);
+  // Orphan filter (Round 2 Change 4): a games-dir-only core (no
+  // matching rbf) is kept only when it has countable ROMs after the
+  // shouldCountAsRom filter. Real-MiSTer cleanup: drops stale empty
+  // leftovers like `games/Adam/`, `games/PC8801/` that have no
+  // installed content and would otherwise show up as `0`-count rows.
+  // Cores with at least one rbf are ALWAYS kept (they're launchable
+  // from the MiSTer menu, hide-able through this app).
+  const filtered = allRaw.filter((c) => {
+    if (c.category === 'Arcade') return true;
+    if (c.rbfPaths.length > 0) return true;
+    if (!c.gamesDirExists) return false;
+    const recursive = c.recursiveRomCount ?? c.romCount;
+    return c.romCount > 0 && recursive > 0;
+  });
 
   // Collapse arcade into a single placeholder row. Arcade is out of scope
   // for the hide feature (per AGENTS.md), but users still expect to see
@@ -285,8 +461,8 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
   // device has an `_Arcade/` directory at all — most real MiSTers populate
   // it with `.mra` files, not `.rbf` / `.mgl`, so we can't infer presence
   // from the rbfs list.
-  const nonArcade = all.filter((c) => c.category !== 'Arcade');
-  const arcadeFromRbfs = all.some((c) => c.category === 'Arcade');
+  const nonArcade = filtered.filter((c) => c.category !== 'Arcade');
+  const arcadeFromRbfs = filtered.some((c) => c.category === 'Arcade');
   if (input.arcadeDirExists === true || arcadeFromRbfs) {
     nonArcade.push({
       id: ARCADE_PLACEHOLDER_ID,
@@ -301,123 +477,33 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
   }
 
   nonArcade.sort((a, b) => a.id.localeCompare(b.id, 'en-US', { sensitivity: 'base' }));
+
+  for (const c of nonArcade) {
+    const hasAnyVisibleRbf = c.rbfPaths.some(
+      (p) => !pathBasename(p).startsWith('.'),
+    );
+    emit(diag, {
+      kind: 'core-entry',
+      coreId: c.id,
+      name: c.name,
+      category: c.category,
+      romCount: c.romCount,
+      hiddenCount: c.hiddenCount,
+      recursiveRomCount: c.recursiveRomCount,
+      recursiveHiddenCount: c.recursiveHiddenCount,
+      gamesDirExists: c.gamesDirExists,
+      gamesDirHidden: c.gamesDirHidden,
+      gamesDirName: c.gamesDirName,
+      hasAnyVisibleRbf,
+      rbfPaths: c.rbfPaths,
+    });
+  }
+
   return nonArcade;
 }
 
 export function isArcadePlaceholder(core: CoreEntry): boolean {
   return core.id === ARCADE_PLACEHOLDER_ID;
-}
-
-/**
- * Collapse case-duplicate CoreEntries (e.g. `Apogee` from a `.rbf` and
- * `APOGEE` from a games dir) into one logical entry per lowercase id.
- *
- * Rules (from the closeout spec):
- *   - One visible + (any number of) hidden → the visible one wins. Fields
- *     from the hidden sibling that the visible one lacks are merged in
- *     (notably `gamesDirName` for the case-mismatch case).
- *   - Multiple visible (rare) → canonical one wins. We pick the entry
- *     that has a games dir over one that doesn't, then tie-break
- *     alphabetically. Same merge.
- *   - Multiple hidden (no visible) → MiSTer's leftover internal state.
- *     Drop the entire group.
- *   - Single entry → keep as-is.
- *
- * The result preserves operational paths: `gamesDirName` is the exact
- * on-disk basename of the games dir (preserving its case), `rbfPaths`
- * are the exact on-disk paths from the rbf entries.
- */
-function dedupeByLowercaseId(entries: readonly CoreEntry[]): CoreEntry[] {
-  const groups = new Map<string, CoreEntry[]>();
-  for (const e of entries) {
-    if (e.category === 'Arcade') {
-      // Arcade entries are collapsed downstream into the placeholder;
-      // skip the case-dedupe step for them.
-      const key = `__arcade__:${e.id}`;
-      const existing = groups.get(key);
-      if (existing) existing.push(e);
-      else groups.set(key, [e]);
-      continue;
-    }
-    const key = e.id.toLowerCase();
-    const existing = groups.get(key);
-    if (existing) existing.push(e);
-    else groups.set(key, [e]);
-  }
-
-  const out: CoreEntry[] = [];
-  for (const group of groups.values()) {
-    if (group.length === 1) {
-      out.push(group[0]!);
-      continue;
-    }
-
-    const visible = group.filter((c) => !isCoreHidden(c));
-
-    if (visible.length === 0) {
-      // All siblings are hidden. Per spec, treat as MiSTer leftover and
-      // drop the whole group.
-      continue;
-    }
-
-    // Pick a winner from the visible side: prefer one that has a games
-    // dir (more useful), then alphabetical first.
-    const sorted = [...visible].sort((a, b) => {
-      if (a.gamesDirExists !== b.gamesDirExists) {
-        return a.gamesDirExists ? -1 : 1;
-      }
-      return a.id.localeCompare(b.id, 'en-US');
-    });
-    const winner = sorted[0]!;
-    const losers = group.filter((c) => c !== winner);
-    out.push(mergeAliases(winner, losers));
-  }
-
-  return out;
-}
-
-/**
- * Merge fields from `losers` (case-duplicate siblings) into `winner` so
- * operations on the winner reach the right paths. `gamesDirName` from
- * the loser is preserved when the winner doesn't have a games dir of
- * its own; `rbfPaths` are unioned (de-duplicated by string equality).
- */
-function mergeAliases(winner: CoreEntry, losers: readonly CoreEntry[]): CoreEntry {
-  let gamesDirExists = winner.gamesDirExists;
-  let gamesDirHidden = winner.gamesDirHidden;
-  let gamesDirName = winner.gamesDirName;
-  let romCount = winner.romCount;
-  let hiddenCount = winner.hiddenCount;
-  let recursiveRomCount = winner.recursiveRomCount;
-  let recursiveHiddenCount = winner.recursiveHiddenCount;
-  const rbfPaths = [...winner.rbfPaths];
-
-  for (const loser of losers) {
-    for (const p of loser.rbfPaths) {
-      if (!rbfPaths.includes(p)) rbfPaths.push(p);
-    }
-    if (!gamesDirExists && loser.gamesDirExists) {
-      gamesDirExists = true;
-      gamesDirHidden = loser.gamesDirHidden;
-      gamesDirName = loser.gamesDirName;
-      romCount = loser.romCount;
-      hiddenCount = loser.hiddenCount;
-      recursiveRomCount = loser.recursiveRomCount;
-      recursiveHiddenCount = loser.recursiveHiddenCount;
-    }
-  }
-
-  return {
-    ...winner,
-    rbfPaths,
-    gamesDirExists,
-    gamesDirHidden,
-    gamesDirName,
-    romCount,
-    hiddenCount,
-    recursiveRomCount,
-    recursiveHiddenCount,
-  };
 }
 
 /**
@@ -610,13 +696,25 @@ function computeRecursiveRomCount(
   topLevelFiles: readonly string[],
   topLevelDirs: readonly string[],
   subFolders: readonly RawSubFolderInput[] | undefined,
+  coreId: string,
+  diag: DiagnosticsCollector | undefined,
 ): { recursiveRomCount: number; recursiveHiddenCount: number } {
   let total = 0;
   let totalHidden = 0;
 
   for (const f of topLevelFiles) {
     total += 1;
-    if (f.startsWith('.')) totalHidden += 1;
+    const hidden = f.startsWith('.') ? 1 : 0;
+    if (hidden) totalHidden += 1;
+    emit(diag, {
+      kind: 'recursive-count',
+      coreId,
+      topLevelEntry: f,
+      entryType: 'file',
+      contributesCount: 1,
+      contributesHiddenCount: hidden,
+      reason: 'top-level file counts as 1',
+    });
   }
 
   if (!subFolders) {
@@ -624,7 +722,18 @@ function computeRecursiveRomCount(
     // pre-Round-3 behavior). Keeps legacy unit tests passing.
     for (const d of topLevelDirs) {
       total += 1;
-      if (d.startsWith('.')) totalHidden += 1;
+      const hidden = d.startsWith('.') ? 1 : 0;
+      if (hidden) totalHidden += 1;
+      emit(diag, {
+        kind: 'recursive-count',
+        coreId,
+        topLevelEntry: d,
+        entryType: 'folder',
+        classification: 'no-info',
+        contributesCount: 1,
+        contributesHiddenCount: hidden,
+        reason: 'no subFolders payload — fall back to atomic (1)',
+      });
     }
     return { recursiveRomCount: total, recursiveHiddenCount: totalHidden };
   }
@@ -636,7 +745,18 @@ function computeRecursiveRomCount(
     if (!sub) {
       // Subfolder info missing — fall back to atomic (1).
       total += 1;
+      const hidden = dirIsHidden ? 1 : 0;
       if (dirIsHidden) totalHidden += 1;
+      emit(diag, {
+        kind: 'recursive-count',
+        coreId,
+        topLevelEntry: d,
+        entryType: 'folder',
+        classification: 'no-info',
+        contributesCount: 1,
+        contributesHiddenCount: hidden,
+        reason: 'subFolder bucket missing — fall back to atomic (1)',
+      });
       continue;
     }
     // Classify using just this subfolder's immediate contents — the
@@ -652,17 +772,45 @@ function computeRecursiveRomCount(
         sub.recursiveFileCount ?? sub.files.length + sub.dirs.length;
       const recursiveHidden = sub.recursiveHiddenFileCount ?? 0;
       total += recursive;
+      let hiddenContribution: number;
+      let reason: string;
       if (dirIsHidden) {
         // The whole container is hidden — every ROM under it is
         // effectively hidden too.
         totalHidden += recursive;
+        hiddenContribution = recursive;
+        reason =
+          'container; whole subfolder dot-prefixed → all recursive files hidden';
       } else {
         totalHidden += recursiveHidden;
+        hiddenContribution = recursiveHidden;
+        reason = 'container; recursive file count from subFolder.recursiveFileCount';
       }
+      emit(diag, {
+        kind: 'recursive-count',
+        coreId,
+        topLevelEntry: d,
+        entryType: 'folder',
+        classification: 'container',
+        contributesCount: recursive,
+        contributesHiddenCount: hiddenContribution,
+        reason,
+      });
     } else {
       // Atomic or unknown — folder IS one ROM.
       total += 1;
+      const hidden = dirIsHidden ? 1 : 0;
       if (dirIsHidden) totalHidden += 1;
+      emit(diag, {
+        kind: 'recursive-count',
+        coreId,
+        topLevelEntry: d,
+        entryType: 'folder',
+        classification,
+        contributesCount: 1,
+        contributesHiddenCount: hidden,
+        reason: `${classification} folder counts as 1`,
+      });
     }
   }
 
