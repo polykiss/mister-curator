@@ -219,41 +219,71 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     [runWithStatus],
   );
 
-  const refresh = useCallback(async () => {
-    setCoresLoading(true);
-    setCoresError(null);
-    try {
-      // Marks first — counts in the cores list depend on them.
-      const marks = await window.mister.listSystemFileMarks();
-      setSystemFilesMarks(marks);
-      // Ledger snapshot — used by the "Unhide all" UI to scope its
-      // target list. Single-core hide/show paths don't read this.
+  /**
+   * Internal cores-list load. Two callers, two intents:
+   *
+   *   - `loadCores({ forceRefresh: false })` from the post-connect
+   *     `useEffect` below. Allows the PR #12 disk cache to hit on
+   *     warm reconnect — the manager validates witnesses and serves
+   *     cached cores when they match, which is the whole point of
+   *     the cache.
+   *   - `loadCores({ forceRefresh: true })` from the public `refresh`
+   *     wrapper used by the BrowserScreen Refresh button. The user
+   *     clicked Refresh because they suspect the cache is stale;
+   *     bypass it and walk the device.
+   *
+   * Round 1 of PR #12 hardcoded `forceRefresh: true` on the only
+   * load path, which made every reconnect produce
+   * cache.invalidate + cache.write instead of the expected
+   * cache.hit. Round 2 splits the intent: the boolean now flows
+   * from the caller.
+   */
+  const loadCores = useCallback(
+    async ({ forceRefresh }: { readonly forceRefresh: boolean }) => {
+      setCoresLoading(true);
+      setCoresError(null);
       try {
-        const ids = await window.mister.listLedgerCoreIds();
-        setLedgerCoreIds(new Set(ids));
-      } catch {
-        // Best-effort; the bulk-unhide button stays disabled if this
-        // fails, which is the safe default.
-        setLedgerCoreIds(new Set());
+        // Marks first — counts in the cores list depend on them.
+        const marks = await window.mister.listSystemFileMarks();
+        setSystemFilesMarks(marks);
+        // Ledger snapshot — used by the "Unhide all" UI to scope its
+        // target list. Single-core hide/show paths don't read this.
+        try {
+          const ids = await window.mister.listLedgerCoreIds();
+          setLedgerCoreIds(new Set(ids));
+        } catch {
+          // Best-effort; the bulk-unhide button stays disabled if this
+          // fails, which is the safe default.
+          setLedgerCoreIds(new Set());
+        }
+        const next = await runWithStatus('Scanning cores…', () =>
+          window.mister.listAllCoresWithFiles({ forceRefresh }),
+        );
+        setCores(next);
+        setRomsByCore({});
+        setRomsLoading({});
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'Failed to load cores.';
+        setCoresError(message);
+      } finally {
+        setCoresLoading(false);
       }
-      // Refresh button intent: blow past any local-disk cache and
-      // walk the device. Without `forceRefresh: true` PR #12 would
-      // serve a cached snapshot on a witness-match — fine on first
-      // load but defeats the user clicking Refresh because they
-      // suspect the cache is stale.
-      const next = await runWithStatus('Scanning cores…', () =>
-        window.mister.listAllCoresWithFiles({ forceRefresh: true }),
-      );
-      setCores(next);
-      setRomsByCore({});
-      setRomsLoading({});
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load cores.';
-      setCoresError(message);
-    } finally {
-      setCoresLoading(false);
-    }
-  }, [runWithStatus]);
+    },
+    [runWithStatus],
+  );
+
+  /**
+   * Public Refresh-button entry point. Exposed on the CoresContext
+   * value so any UI control wired to "user wants fresh data" calls
+   * this — the contract is "always cache-bypass". Currently only
+   * BrowserScreen's Refresh button consumes it; new callers should
+   * audit whether they actually want bypass or the lazy-load path.
+   */
+  const refresh = useCallback(
+    () => loadCores({ forceRefresh: true }),
+    [loadCores],
+  );
 
   const ensureRoms = useCallback(
     async (coreId: string, subPath = '') => {
@@ -719,9 +749,15 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   // fires.
   useEffect(() => {
     if (shouldFetchCoresOnEffect(status, cores, coresLoading, coresError)) {
-      void refresh();
+      // PR #12 round 2: post-connect load is cache-friendly. The disk
+      // cache validates against on-device witnesses; on a warm
+      // reconnect after the user has been here before, the manager
+      // serves the cached snapshot in <1s. Without this split, every
+      // reconnect went through the Refresh-button branch and walked
+      // the device unnecessarily.
+      void loadCores({ forceRefresh: false });
     }
-  }, [status, cores, coresLoading, coresError, refresh]);
+  }, [status, cores, coresLoading, coresError, loadCores]);
 
   const selectCore = useCallback((coreId: string | null) => {
     setSelectedCoreId(coreId);

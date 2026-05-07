@@ -2118,7 +2118,7 @@ describe('RealMisterClient', () => {
       readonly ledger?: string;
       readonly marks?: string;
       readonly classifications?: string;
-      readonly witnesses: ReadonlyArray<{ readonly path: string; readonly mtime: number }>;
+      readonly witnesses: readonly { readonly path: string; readonly mtime: number }[];
     }): string {
       const enc = (s: string): string =>
         s === '' ? '' : Buffer.from(s, 'utf-8').toString('base64');
