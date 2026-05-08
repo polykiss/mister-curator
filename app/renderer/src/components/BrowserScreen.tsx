@@ -14,12 +14,12 @@ import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
 import { useResizablePaneWidth } from '@app/renderer/src/lib/use-resizable-pane';
 
-// Round 5: cores pane min bumped from 200 → 320. Below 320px the
-// "9 folders · ~300 ROMs" breakdown cell wraps and the right-edge
-// density+eye stack starts crowding the row name; the live
-// screenshot caught it. Default initial width stays at 280, but the
-// resizable divider clamps to 320 so a user can't drag past where
-// the layout breaks.
+// Round 5: cores pane min bumped from 200 → 320. Below 320px the row
+// content wraps and the right-edge density+eye stack starts crowding
+// the row name; the live screenshot caught it. PR #14 simplified the
+// count to a single number, so the multi-cell breakdown that
+// originally drove the 320 floor is gone — but the floor stays put
+// because the long core names still need the room.
 const CORES_PANE_DEFAULT_WIDTH = 320;
 const CORES_PANE_MIN_WIDTH = 320;
 const ROMS_PANE_MIN_WIDTH = 300;

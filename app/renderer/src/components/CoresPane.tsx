@@ -439,43 +439,31 @@ function densityValueFor(core: CoreEntry): number {
 }
 
 /**
- * Cores-list count summary. When the recursive ROM count exceeds the
- * top-level item count (i.e. the core has at least one container
- * folder that the matcher walked into), we surface BOTH numbers:
+ * Cores-list count summary. PR #14: one number — total countable
+ * ROMs across the games dir. Whether the count comes from top-level
+ * files, atomic folders (each = 1 ROM), or container folders (the
+ * matcher's recursive walk), it all rolls up into `recursiveRomCount`
+ * which is what gets shown.
  *
- *   "9 folders · ~300 ROMs"
+ * Why no "X folders · ~Y ROMs" breakdown anymore: the prior label was
+ * misleading. `romCount` is "non-system top-level entries" (files +
+ * folders combined) so saying "32 folders" when most are files was
+ * wrong. The mental model also broke down on cores with mixed atomic
+ * + container subfolders (NEOGEO had 9 top-levels but only some were
+ * containers; the breakdown labeled all 9 as "folders").
  *
- * The folder count is `romCount` (top-level entries after the system-
- * file filter); the ROM total is the recursive-walk approximation.
- * The `~` is intentional — recursive counts can over- or under-count
- * (non-standard ROM extensions, atomic folders nested inside
- * containers, etc.). Single-number form is used when the two agree.
- *
- * Round 5 simplified the model: every non-arcade core renders this
- * summary, even cores without a games dir (they show `0`). No special
- * "no games dir" label, no "hidden externally" label.
+ * The `recursiveRomCount` field already exists on CoreEntry and
+ * already does the right rollup — this surface just stops mixing it
+ * with `romCount`. The matcher's walk depth is bounded so very deep
+ * trees may undercount; the "~" prefix is dropped because for the
+ * common case (atomic-only cores) the count is exact, and over- /
+ * under-counting on the long tail is below the user's noise floor.
  */
 function CoreCountSummary({ core }: { readonly core: CoreEntry }): JSX.Element {
-  const recursive = core.recursiveRomCount;
-  const hasBreakdown =
-    recursive !== undefined && recursive !== core.romCount && core.romCount > 0;
-  if (hasBreakdown) {
-    return (
-      <>
-        <span className="min-w-[2.5rem] text-right">{core.romCount}</span>
-        <span className="font-sans text-fg-disabled">folders ·</span>
-        <span>~{recursive}</span>
-        <span className="font-sans text-fg-disabled">ROMs</span>
-        {core.hiddenCount > 0 ? (
-          <span className="text-fg-disabled">({core.hiddenCount} hidden)</span>
-        ) : null}
-      </>
-    );
-  }
-  const single = recursive ?? core.romCount;
+  const count = core.recursiveRomCount ?? core.romCount;
   return (
     <>
-      <span className="min-w-[2.5rem] text-right">{single}</span>
+      <span className="min-w-[2.5rem] text-right">{count}</span>
       {core.hiddenCount > 0 ? (
         <span className="text-fg-disabled">({core.hiddenCount} hidden)</span>
       ) : null}

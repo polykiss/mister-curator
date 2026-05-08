@@ -980,7 +980,9 @@ describe('matchRbfsToGamesDirs', () => {
       const neogeo = result.find((c) => c.id === 'NEOGEO');
       // Top-level: 9 (subfolders, BIOSes filtered out).
       expect(neogeo?.romCount).toBe(9);
-      // Recursive: 9 × 30 = 270 (matches "9 folders · ~270 ROMs").
+      // Recursive: 9 × 30 = 270. PR #14: cores-list shows this as a
+      // single "270" (the breakdown was dropped because mixing top-
+      // level entry count with recursive-rom count was misleading).
       expect(neogeo?.recursiveRomCount).toBe(270);
     });
 
