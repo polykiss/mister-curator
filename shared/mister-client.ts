@@ -278,6 +278,28 @@ export interface IMisterClient {
    * treats that as a mismatch via `witnessesMatch`.
    */
   statWitnesses(paths: readonly string[]): Promise<WitnessMtimes>;
+
+  /**
+   * Compute md5sums for a batch of absolute file paths in one SSH
+   * round-trip. PR #15: feeds the metadata pipeline (HashService).
+   *
+   * Implementations should cap their internal batch size at ~100 paths
+   * to stay safely under argv limits across busybox shells; the caller
+   * (HashService) chunks larger inputs accordingly. The return order is
+   * NOT guaranteed to match the input order — match by `path`.
+   *
+   * Paths that don't exist or aren't regular files are silently
+   * dropped from the result (no entry returned). The caller decides
+   * whether a missing path is a problem.
+   */
+  md5sumPaths(paths: readonly string[]): Promise<readonly Md5SumResult[]>;
+}
+
+/** One per-file result from `md5sumPaths`. mtime is epoch seconds. */
+export interface Md5SumResult {
+  readonly path: string;
+  readonly hash: string;
+  readonly mtime: number;
 }
 
 /**

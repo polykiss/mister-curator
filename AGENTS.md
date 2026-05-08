@@ -123,6 +123,66 @@ Update it before changing consumers.
   mtime only changes on top-level renames), so the cores-list
   romCount can read stale until Refresh. Drilling into the affected
   core picks up the change correctly via the listRoms cache.
+- App-local metadata directory: `<userData>/metadata/` (PR #15).
+  Holds the ROM-hash + metadata + image caches that drive the box-art
+  / scoring UI in PR #16/#17. No on-device writes, no agent code;
+  safe to delete at any time.
+
+  Round 3 architecture: local-data-only. No upstream API
+  credentials, no rate limits.
+  - **OpenVGDB** — a SQLite snapshot (~50 MB) of the
+    https://github.com/OpenVGDB/OpenVGDB index, downloaded once on
+    first use. Maps md5 → name + system + year + genre + publisher
+    + developer + region. Distributed under the OpenVGDB project's
+    license; check `LICENSE` in that repo for the canonical terms.
+    Source: GitHub Releases (queried via the public unauthenticated
+    API at `https://api.github.com/repos/OpenVGDB/OpenVGDB/releases/latest`).
+    The release ships the SQLite inside a `.zip`; we extract it on
+    download with `jszip`. The release tag is recorded in
+    `openvgdb.version.json` next to the SQLite — once both files are
+    on disk and the schema is valid, subsequent calls skip the
+    network entirely. Manual delete of either file forces a re-fetch.
+  - **libretro-thumbnails** — community-curated PNG archive at
+    https://thumbnails.libretro.com/, organized per system. URL
+    builder lives in `app/main/metadata/libretro-thumbnails.ts`;
+    the system-name → directory map covers cartridge consoles
+    (NES / SNES / Genesis / Game Boy family / Atari / NEC PC
+    Engine / SNK Neo Geo / Vectrex / etc). Some MiSTer cores have
+    no libretro-thumbnails counterpart (X68000, DOS, Apogee, …) —
+    those return null from the builder. Image archive usage
+    follows the same conventions as RetroArch's own access.
+
+  Layout:
+  - `<host>/hashes.json` — md5 of every hashed ROM file, mtime-keyed.
+    File-only (kind: 'file') ROMs in v0; folder-atomic / folder-
+    container hashing (Saturn, MegaCD, X68000) is deferred — those
+    sources index disc images by hash inconsistently and need a
+    separate strategy.
+
+    For `.zip`-wrapped ROMs (case-insensitive), HashService hashes
+    the EXTRACTED inner content (`unzip -p <zip> | md5sum` on the
+    device), not the wrapper bytes — OpenVGDB indexes inner-file
+    hashes. mtime stays on the wrapper, so cache invalidation
+    follows the user's actions on the visible file. Limitation:
+    multi-file zips concatenate into a single hash that won't match
+    OpenVGDB and surface as "no match" cleanly. Other archive
+    formats (`.7z`, `.gz`, `.rar`) fall through to direct md5sum
+    and won't match OpenVGDB but won't error.
+  - `openvgdb.sqlite` — the downloaded SQLite snapshot.
+  - `by-hash/<XX>/<hash>.json` — RomMetadata records (matched OR a
+    `source: 'none'` sentinel cached for 30 days). Sharded by hash
+    prefix to keep one directory from hitting millions of files.
+    Schema is `version: 2` after the round-3 pivot — older v1 files
+    fail the parse guard and get silently rewritten on the next
+    lookup.
+  - `images/<XX>/<sha1>.bin` — full-size box art / screenshots.
+
+  PR #15 ships the foundation but no UI consumes it. Either upstream
+  source has no env-var to disable in v0; if needed, delete the
+  `openvgdb.sqlite` file or wipe the whole `metadata/` dir.
+
+  Verification tool: `npm run test:metadata` (no credentials
+  required; first run downloads the SQLite snapshot once).
 - On-MiSTer agent directory: `/tmp/mistercurator/`
 - On-MiSTer state directory: `/media/fat/.mistercurator/` — holds the
   small JSON state files the app persists across sessions:
@@ -175,8 +235,7 @@ flag it in the PR description. Don't quietly work around it.
 
 ## Out of scope for MVP (do not build until asked)
 
-- Audit engine, DAT file matching, ROM hashing
-- Box art, metadata scraping
+- Audit engine, DAT file matching
 - Favorites, playlists, collections
 - Save state or NVRAM backup
 - Cheat file management
@@ -184,5 +243,11 @@ flag it in the PR description. Don't quietly work around it.
 - Multi-MiSTer sync
 - Auto-updates
 
-These are real features on the roadmap, but MVP is connect + browse +
-hide/show + persist. Stay focused.
+ROM hashing and metadata scraping (box art, scoring) are now in
+scope as of PR #15 — the foundation lives in `app/main/metadata/`,
+no UI yet. Treat the four services there as stable; new metadata
+work composes against `MetadataOrchestrator`. The full UI
+(view-mode toggle, grid view, detail modal) lands in PR #16/#17.
+
+Everything else listed above remains roadmap-but-not-MVP. Stay
+focused.

@@ -1,6 +1,9 @@
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
+
+import JSZip from 'jszip';
 
 import {
   HIDEABLE_CATEGORIES,
@@ -61,6 +64,7 @@ import type {
   BulkRomResult,
   CoreVisibilityChange,
   IMisterClient,
+  Md5SumResult,
   MisterSecret,
   PrimeConnectResult,
   RomVisibilityChange,
@@ -658,6 +662,44 @@ export class FakeMisterClient implements IMisterClient {
     return out;
   }
 
+  async md5sumPaths(paths: readonly string[]): Promise<readonly Md5SumResult[]> {
+    this.assertConnected();
+    if (paths.length === 0) return [];
+    await this.delay();
+    const out: Md5SumResult[] = [];
+    for (const p of paths) {
+      const local = this.toLocal(p);
+      let st;
+      try {
+        st = await fs.stat(local);
+      } catch (err) {
+        // Mirror the real client's busybox loop: missing or non-file
+        // paths silently drop instead of throwing — the caller filters
+        // the result map for the paths it cares about.
+        if (isNodeError(err) && err.code === 'ENOENT') continue;
+        throw err;
+      }
+      if (!st.isFile()) continue;
+      // Round 6: mirror the device-side `unzip -p | md5sum` path so a
+      // fake-client integration test produces the same hash the real
+      // client would. .zip wrappers get the inner content hashed;
+      // anything else gets the raw bytes hashed. mtime is the
+      // wrapper's mtime in both cases — cache invalidation tracks the
+      // wrapper, not the inner file.
+      const lower = p.toLowerCase();
+      const hash = lower.endsWith('.zip')
+        ? await md5OfZipContents(local)
+        : md5OfBuffer(await fs.readFile(local));
+      if (hash === null) continue;
+      out.push({
+        path: p,
+        hash,
+        mtime: Math.floor(st.mtimeMs / 1000),
+      });
+    }
+    return out;
+  }
+
   /**
    * The PR #12 prime path needs a self-heal-free ledger read so the
    * manager can run heal once with cached cores. `readHideLedger`
@@ -856,6 +898,36 @@ export class FakeMisterClient implements IMisterClient {
 
 function isNodeError(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && 'code' in err;
+}
+
+function md5OfBuffer(buf: Buffer | Uint8Array): string {
+  return createHash('md5').update(buf).digest('hex');
+}
+
+/**
+ * Mirror the device-side `unzip -p <zip> | md5sum` pipeline. Reads
+ * every entry concatenated, in zip-listing order, and md5s the
+ * resulting stream. Matches what busybox `unzip -p` produces against
+ * the same archive.
+ *
+ * Returns null on a corrupt or unreadable archive — the caller drops
+ * the row, same as the device side does for `unzip -p` failures.
+ */
+async function md5OfZipContents(localPath: string): Promise<string | null> {
+  let zip: JSZip;
+  try {
+    const buf = await fs.readFile(localPath);
+    zip = await JSZip.loadAsync(buf);
+  } catch {
+    return null;
+  }
+  const hash = createHash('md5');
+  for (const entry of Object.values(zip.files)) {
+    if (entry.dir) continue;
+    const bytes = await entry.async('uint8array');
+    hash.update(bytes);
+  }
+  return hash.digest('hex');
 }
 
 /**

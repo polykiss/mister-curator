@@ -1,5 +1,10 @@
 import type { ConnectionEvent } from '@shared/connection';
 import type {
+  MetadataHint,
+  PrefetchProgress,
+  RomMetadata,
+} from '@shared/metadata-types';
+import type {
   BulkCoreProgress,
   BulkCoreResult,
   BulkRomResult,
@@ -41,7 +46,58 @@ export const IPC_CHANNELS = {
   listFolderClassifications: 'mister:listFolderClassifications',
   setFolderClassification: 'mister:setFolderClassification',
   connectionEvent: 'mister:connectionEvent',
+  // PR #15 — metadata pipeline. No UI consumer in this PR; the
+  // channels are wired so PR #16/#17 has a stable contract.
+  getRomMetadata: 'mister:getRomMetadata',
+  prefetchHashes: 'mister:prefetchHashes',
+  prefetchMetadata: 'mister:prefetchMetadata',
+  clearMetadataCache: 'mister:clearMetadataCache',
+  getBoxArtLocal: 'mister:getBoxArtLocal',
+  metadataPrefetchProgress: 'mister:metadataPrefetchProgress',
+  // Round 3 (OpenVGDB). The renderer prompts the user to download
+  // the ~50MB SQLite snapshot; main pulls it down + opens it.
+  ensureMetadataDatabase: 'mister:ensureMetadataDatabase',
+  metadataDatabaseProgress: 'mister:metadataDatabaseProgress',
 } as const;
+
+/** PR #15 prefetch progress kind. Discriminator for the wire event. */
+export type MetadataPrefetchKind = 'hash' | 'metadata';
+
+/**
+ * One progress tick from a long-running metadata prefetch. The
+ * `kind` discriminates "hashing the library" from "fetching metadata
+ * for the hashed library" — two phases of the same flow.
+ */
+export interface MetadataPrefetchEvent extends PrefetchProgress {
+  readonly operationId: string;
+  readonly kind: MetadataPrefetchKind;
+}
+
+/**
+ * Round 3: streaming progress from the OpenVGDB download. Mirrors
+ * the OpenVGDBProgressEvent shape but flattened for cross-process
+ * transmission so the renderer doesn't depend on the main-process
+ * type.
+ */
+export type MetadataDatabaseProgressEvent =
+  | { readonly kind: 'started' }
+  | {
+      readonly kind: 'downloading';
+      readonly bytesReceived: number;
+      readonly bytesTotal: number | null;
+    }
+  | { readonly kind: 'ready' }
+  | { readonly kind: 'error'; readonly message: string };
+
+/**
+ * Snapshot return value from `mister:ensureMetadataDatabase`. The
+ * renderer reads this synchronously and subscribes to the streaming
+ * progress channel for live updates.
+ */
+export interface MetadataDatabaseState {
+  readonly ready: boolean;
+  readonly downloadInProgress: boolean;
+}
 
 /**
  * Wire-side bulk progress event. The renderer uses `operationId` to
@@ -236,6 +292,73 @@ export interface MisterApi {
    * (no-op).
    */
   clearCache(): Promise<void>;
+  // ─── PR #15: metadata pipeline ────────────────────────────────────
+  /**
+   * Hash the supplied ROM path on the device, then look up its
+   * metadata via ScreenScraper (primary) and TheGamesDB (fallback).
+   * Returns null when no session is active, when the file isn't a
+   * regular file, or when both upstreams miss.
+   *
+   * No UI consumer in PR #15 — PR #16/#17 wires this in. The
+   * `coreId` argument is unused in v0 but reserved for per-core
+   * scoping in a follow-up.
+   */
+  getRomMetadata(
+    coreId: string,
+    romPath: string,
+    hint?: MetadataHint,
+  ): Promise<RomMetadata | null>;
+  /**
+   * Background hash job for the entire ROM library. Fires
+   * `metadataPrefetchProgress` events keyed by `operationId` so the
+   * renderer can scope progress to the call it triggered.
+   */
+  prefetchHashes(
+    allPaths: readonly string[],
+    options?: { readonly operationId?: string },
+  ): Promise<void>;
+  /**
+   * Background metadata fetch for already-hashed ROMs. Subject to
+   * the ScreenScraper rate limit, so a 2000-entry library prefetch
+   * takes ~30 minutes. Progress fires per-hash.
+   */
+  prefetchMetadata(
+    hashes: readonly string[],
+    options?: { readonly operationId?: string },
+  ): Promise<void>;
+  /** Wipe the metadata + image caches. Hash cache is independent. */
+  clearMetadataCache(): Promise<void>;
+  /**
+   * Resolve a remote box-art URL to a local file path, downloading
+   * lazily on first request. Returns null on fetch failure or when
+   * the URL is empty.
+   */
+  getBoxArtLocal(url: string): Promise<string | null>;
+  /**
+   * Subscribe to `metadataPrefetchProgress` events from
+   * `prefetchHashes` / `prefetchMetadata`. Returns an unsubscribe
+   * function. The renderer matches `operationId` to the call it
+   * triggered.
+   */
+  onMetadataPrefetchProgress(
+    handler: (event: MetadataPrefetchEvent) => void,
+  ): () => void;
+  /**
+   * Round 3: kick off (or check on) the OpenVGDB SQLite download.
+   * Returns immediately with the current state — the renderer
+   * subscribes to `onMetadataDatabaseProgress` for streaming updates
+   * and re-calls this method to learn when the download settles.
+   */
+  ensureMetadataDatabase(): Promise<MetadataDatabaseState>;
+  /**
+   * Subscribe to OpenVGDB download progress events. Fires `started`
+   * → `downloading*` → `ready` on success, or `error` on a failed
+   * attempt. The download itself runs once per session — repeated
+   * `ensureMetadataDatabase` calls are no-ops once `ready` fires.
+   */
+  onMetadataDatabaseProgress(
+    handler: (event: MetadataDatabaseProgressEvent) => void,
+  ): () => void;
 }
 
 const VALID_CONNECTION_ERROR_CODES: ReadonlySet<ConnectionErrorCode> = new Set([

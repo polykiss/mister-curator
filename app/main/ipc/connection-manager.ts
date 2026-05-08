@@ -154,6 +154,17 @@ export class ConnectionManager {
     return this.currentProfileId;
   }
 
+  /**
+   * PR #15: surface the active session (client + host) so the metadata
+   * orchestrator can run hashes against the same SSH connection
+   * everything else uses. Returns null when disconnected — the
+   * orchestrator treats that as "no work to do".
+   */
+  getActiveSession(): { readonly client: IMisterClient; readonly host: string } | null {
+    if (this.status !== 'connected' || this.currentHost === null) return null;
+    return { client: this.client, host: this.currentHost };
+  }
+
   onStatusChange(listener: StatusListener): () => void {
     this.listeners.add(listener);
     return () => {

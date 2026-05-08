@@ -9,6 +9,12 @@ import type { CacheEvent } from '@app/main/cache/cache-types';
 import { createMisterClient } from '@app/main/clients';
 import { ConnectionManager } from '@app/main/ipc/connection-manager';
 import { registerIpcHandlers } from '@app/main/ipc/register';
+import { HashService } from '@app/main/metadata/hash-service';
+import { ImageCache } from '@app/main/metadata/image-cache';
+import { LibretroThumbnailsFetcher } from '@app/main/metadata/libretro-thumbnails';
+import { MetadataOrchestrator } from '@app/main/metadata/metadata-orchestrator';
+import { MetadataService } from '@app/main/metadata/metadata-service';
+import { OpenVGDBService } from '@app/main/metadata/openvgdb-service';
 import { ProfileStore } from '@app/main/storage/profile-store';
 
 function resolveClientMode(): 'real' | 'fake' {
@@ -85,7 +91,82 @@ void app.whenReady().then(() => {
   });
   const manager = new ConnectionManager(client, profileStore, cache);
 
-  registerIpcHandlers(manager, profileStore);
+  // PR #15 round 3 metadata pipeline. All caches live under
+  // `<userData>/metadata/` so the user can wipe the lot with one rm.
+  // No credentials needed: OpenVGDB is a public SQLite snapshot and
+  // libretro-thumbnails is a public image archive.
+  const metadataRoot = path.join(app.getPath('userData'), 'metadata');
+  const hashService = new HashService(metadataRoot);
+  const openVgdb = new OpenVGDBService(metadataRoot);
+  const thumbnails = new LibretroThumbnailsFetcher();
+  const metadataService = new MetadataService(
+    metadataRoot,
+    openVgdb,
+    thumbnails,
+  );
+  const imageCache = new ImageCache(path.join(metadataRoot, 'images'));
+  const metadataOrchestrator = new MetadataOrchestrator(
+    hashService,
+    metadataService,
+    imageCache,
+    openVgdb,
+    () => manager.getActiveSession(),
+  );
+
+  // Aggregator for metadata-prefetch progress. The IPC handler calls
+  // this; we forward to every live BrowserWindow via webContents.send.
+  // (Same shape as `bulkCoreProgress` and `connectionStatusChanged`.)
+  const metadataPrefetchListeners = new Set<
+    (event: {
+      operationId: string;
+      kind: 'hash' | 'metadata';
+      done: number;
+      total: number;
+      currentPath?: string;
+    }) => void
+  >();
+  const emitMetadataProgress = (event: {
+    operationId: string;
+    kind: 'hash' | 'metadata';
+    done: number;
+    total: number;
+    currentPath?: string;
+  }): void => {
+    for (const fn of metadataPrefetchListeners) {
+      try {
+        fn(event);
+      } catch {
+        /* never let a window-listener error break a prefetch */
+      }
+    }
+  };
+
+  // Round 3: separate emitter for OpenVGDB download progress. Same
+  // fan-out shape as the prefetch one so PR #16's UI can model both
+  // the same way.
+  type DbEvent =
+    | { kind: 'started' }
+    | { kind: 'downloading'; bytesReceived: number; bytesTotal: number | null }
+    | { kind: 'ready' }
+    | { kind: 'error'; message: string };
+  const metadataDatabaseListeners = new Set<(event: DbEvent) => void>();
+  const emitMetadataDatabaseProgress = (event: DbEvent): void => {
+    for (const fn of metadataDatabaseListeners) {
+      try {
+        fn(event);
+      } catch {
+        /* swallow */
+      }
+    }
+  };
+
+  registerIpcHandlers(
+    manager,
+    profileStore,
+    metadataOrchestrator,
+    emitMetadataProgress,
+    emitMetadataDatabaseProgress,
+  );
 
   const window = createWindow();
 
@@ -102,6 +183,16 @@ void app.whenReady().then(() => {
   manager.onConnectionEvent((event) => {
     if (!window.isDestroyed()) {
       window.webContents.send(IPC_CHANNELS.connectionEvent, event);
+    }
+  });
+  metadataPrefetchListeners.add((event) => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.metadataPrefetchProgress, event);
+    }
+  });
+  metadataDatabaseListeners.add((event) => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.metadataDatabaseProgress, event);
     }
   });
 
@@ -121,6 +212,22 @@ void app.whenReady().then(() => {
       manager.onConnectionEvent((event) => {
         if (!newWindow.isDestroyed()) {
           newWindow.webContents.send(IPC_CHANNELS.connectionEvent, event);
+        }
+      });
+      metadataPrefetchListeners.add((event) => {
+        if (!newWindow.isDestroyed()) {
+          newWindow.webContents.send(
+            IPC_CHANNELS.metadataPrefetchProgress,
+            event,
+          );
+        }
+      });
+      metadataDatabaseListeners.add((event) => {
+        if (!newWindow.isDestroyed()) {
+          newWindow.webContents.send(
+            IPC_CHANNELS.metadataDatabaseProgress,
+            event,
+          );
         }
       });
     }

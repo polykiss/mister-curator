@@ -53,6 +53,10 @@ import {
   withoutMark,
 } from '@shared/system-files-marks';
 import {
+  buildMd5sumScript,
+  parseMd5sumOutput,
+} from '@shared/md5sum-script';
+import {
   buildPrimeScript,
   buildWitnessScript,
   parsePrimeOutput,
@@ -76,6 +80,7 @@ import type {
   BulkRomResult,
   CoreVisibilityChange,
   IMisterClient,
+  Md5SumResult,
   MisterSecret,
   PrimeConnectResult,
   RomVisibilityChange,
@@ -1169,6 +1174,29 @@ export class RealMisterClient implements IMisterClient {
       );
     }
     return parsed;
+  }
+
+  /**
+   * PR #15: md5 a batch of paths in one SSH round trip. The script
+   * returns hash + mtime per path; HashService composes these into the
+   * per-host cache and exposes them up to the metadata pipeline.
+   *
+   * Empty input short-circuits — no SSH call. A non-zero exit from the
+   * script throws (the loop tolerates per-file failures internally;
+   * a top-level non-zero typically means fork-exhaustion or a broken
+   * shell, neither of which we should silently paper over).
+   */
+  async md5sumPaths(paths: readonly string[]): Promise<readonly Md5SumResult[]> {
+    this.assertConnected();
+    if (paths.length === 0) return [];
+    const script = buildMd5sumScript(paths);
+    const result = await this.runSshOp(() => this.ssh.execCommand(script));
+    if (result.code !== 0) {
+      throw new Error(
+        `Failed to md5sum paths: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+      );
+    }
+    return parseMd5sumOutput(result.stdout);
   }
 
   private async writeFolderClassifications(
