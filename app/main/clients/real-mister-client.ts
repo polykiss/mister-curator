@@ -21,6 +21,7 @@ import {
   type RawRbfInput,
   type RawSubFolderInput,
 } from '@shared/core-matching';
+import { isOsMetadataDir, isOsMetadataFile } from '@shared/library-filter';
 import { shouldCountAsRom } from '@shared/system-files';
 import {
   InMemoryDiagnosticsCollector,
@@ -630,6 +631,25 @@ export class RealMisterClient implements IMisterClient {
       if (type !== 'f' && type !== 'd') continue;
 
       const segments = relPath.split('/');
+      // Issue #17 — drop OS metadata before any path enters the
+      // hash queue or surfaces to the renderer. `._sonic.zip`,
+      // `.DS_Store`, `Thumbs.db`, and friends are filesystem
+      // sidecars from cross-FS copies, not ROMs. Also poison entire
+      // subtrees rooted in `.AppleDouble/`, `$RECYCLE.BIN/`, etc.
+      let osJunk = false;
+      for (let i = 0; i < segments.length - 1; i += 1) {
+        if (isOsMetadataDir(segments[i]!)) {
+          osJunk = true;
+          break;
+        }
+      }
+      if (!osJunk) {
+        const leaf = segments[segments.length - 1]!;
+        if (type === 'd' && isOsMetadataDir(leaf)) osJunk = true;
+        else if (type === 'f' && isOsMetadataFile(leaf)) osJunk = true;
+      }
+      if (osJunk) continue;
+
       if (segments.length === 1) {
         // Top-level entry.
         const name = segments[0]!;

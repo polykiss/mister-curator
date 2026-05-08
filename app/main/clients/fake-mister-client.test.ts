@@ -140,6 +140,35 @@ describe('FakeMisterClient', () => {
     }
   });
 
+  it('filters OS metadata sidecars dropped into a games dir (issue #17)', async () => {
+    // Simulate a games dir copied from a Mac / Windows host: real
+    // ROMs alongside `._*` AppleDouble shadows, a `.DS_Store`, a
+    // `Thumbs.db`, plus a `.AppleDouble/` subdir of more shadows.
+    // None of the junk should appear in `listRoms`.
+    const before = await client.listRoms('NES');
+    const expectedCount = before.length;
+
+    const nesDir = path.join(workDir, 'games', 'NES');
+    await fs.writeFile(path.join(nesDir, '._castlevania.nes'), 'junk');
+    await fs.writeFile(path.join(nesDir, '.DS_Store'), 'junk');
+    await fs.writeFile(path.join(nesDir, 'Thumbs.db'), 'junk');
+    await fs.writeFile(path.join(nesDir, 'desktop.ini'), 'junk');
+    await fs.mkdir(path.join(nesDir, '.AppleDouble'), { recursive: true });
+    await fs.writeFile(
+      path.join(nesDir, '.AppleDouble', 'sonic.nes'),
+      'junk',
+    );
+
+    const after = await client.listRoms('NES');
+    expect(after.length).toBe(expectedCount);
+    const names = after.map((r) => r.filename);
+    expect(names).not.toContain('._castlevania.nes');
+    expect(names).not.toContain('.DS_Store');
+    expect(names).not.toContain('Thumbs.db');
+    expect(names).not.toContain('desktop.ini');
+    expect(names).not.toContain('.AppleDouble');
+  });
+
   it('throws a clear error when listing ROMs for an unknown core', async () => {
     await expect(client.listRoms('TurboGrafx')).rejects.toThrow(/Unknown core/);
   });

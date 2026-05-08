@@ -13,6 +13,7 @@
  * See docs/architecture.md for the rationale and snapshot reference.
  */
 
+import { isOsMetadataDir, isOsMetadataFile } from '@shared/library-filter';
 import { isMarked } from '@shared/system-files-marks';
 import type { SystemFilesMarks } from '@shared/types';
 
@@ -220,20 +221,25 @@ export function shouldCountAsRom(input: ShouldCountAsRomInput): boolean {
   const isMarkedHere = (basename: string): boolean =>
     marks ? isMarked(marks, input.coreId, basename) : false;
 
-  // Walk ancestors first — any system-folder ancestor poisons the
-  // whole path.
+  // Walk ancestors first — any system-folder OR OS-metadata-dir
+  // ancestor poisons the whole path. The OS-metadata-dir gate keeps
+  // files inside `.AppleDouble/` / `$RECYCLE.BIN/` / etc. out of the
+  // hash pipeline regardless of how they got onto the device.
   for (let i = 0; i < segments.length - 1; i += 1) {
     const seg = segments[i]!;
+    if (isOsMetadataDir(seg)) return false;
     if (isAutoDetectedSystemFolder(seg)) return false;
     if (isMarkedHere(seg)) return false;
   }
 
   const leaf = segments[segments.length - 1]!;
   if (input.isDirectory) {
+    if (isOsMetadataDir(leaf)) return false;
     if (isAutoDetectedSystemFolder(leaf)) return false;
     if (isMarkedHere(leaf)) return false;
     return true;
   }
+  if (isOsMetadataFile(leaf)) return false;
   if (isAutoDetectedSystemFile({ filename: leaf, kind: 'file' })) return false;
   if (isMarkedHere(leaf)) return false;
   return true;
