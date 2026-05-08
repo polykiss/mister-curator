@@ -128,8 +128,26 @@ Update it before changing consumers.
   / scoring UI in PR #16/#17. No on-device writes, no agent code;
   safe to delete at any time.
 
-  Round 3 architecture: local-data-only. No upstream API
-  credentials, no rate limits.
+  Source-priority chain (PR #16 round 2):
+    1. **ScreenScraper** (when credentialed) — the richest source.
+    2. **OpenVGDB + libretro-thumbnails** — credential-free fallback.
+    3. **`'none'` sentinel** — 30-day TTL on records neither matched.
+
+  - **ScreenScraper** — `https://api.screenscraper.fr/api2/jeuInfos.php`.
+    Multi-hash query (md5 + sha1 + crc + romnom + romtaille). Adds
+    fields OpenVGDB doesn't carry: descriptions, developer, ratings,
+    players, multiple art types. Required env vars:
+    - `SCREENSCRAPER_DEV_ID` — developer credential ID.
+    - `SCREENSCRAPER_DEV_PASSWORD` — developer credential password.
+
+    Optional env vars (unlock the higher member-tier quota):
+    - `SCREENSCRAPER_SSID` — user account ID.
+    - `SCREENSCRAPER_SSPASSWORD` — user account password.
+
+    Without dev creds the service stays `unavailable` and
+    MetadataService silently falls through to OpenVGDB+libretro.
+    Credentials never go in committed source — `.env.local` is
+    gitignored (see `.gitignore` for the full env-pattern).
   - **OpenVGDB** — a SQLite snapshot (~50 MB) of the
     https://github.com/OpenVGDB/OpenVGDB index, downloaded once on
     first use. Maps md5 → name + system + year + genre + publisher
@@ -172,17 +190,23 @@ Update it before changing consumers.
   - `by-hash/<XX>/<hash>.json` — RomMetadata records (matched OR a
     `source: 'none'` sentinel cached for 30 days). Sharded by hash
     prefix to keep one directory from hitting millions of files.
-    Schema is `version: 2` after the round-3 pivot — older v1 files
-    fail the parse guard and get silently rewritten on the next
-    lookup.
+    Schema is `version: 4` (PR #16 round 2 added SS-only fields:
+    players, rating, releaseDate; `source` carries 'screenscraper'
+    | 'openvgdb' | 'none'). Older versions fail the parse guard and
+    get silently rewritten on the next lookup — no migration step.
   - `images/<XX>/<sha1>.bin` — full-size box art / screenshots.
 
-  PR #15 ships the foundation but no UI consumes it. Either upstream
-  source has no env-var to disable in v0; if needed, delete the
-  `openvgdb.sqlite` file or wipe the whole `metadata/` dir.
+  PR #15 + #16 ship the foundation; no UI consumes it yet (PR #17).
+  Without ScreenScraper creds the OpenVGDB+libretro fallback runs
+  unchanged. Disable any source by deleting the relevant cache
+  files / unsetting the env vars; reset everything by `rm -rf`-ing
+  `<userData>/metadata/`.
 
-  Verification tool: `npm run test:metadata` (no credentials
-  required; first run downloads the SQLite snapshot once).
+  Verification tool: `npm run test:metadata`. Without SS env vars
+  it exercises the OpenVGDB+libretro path (no credentials required;
+  first run downloads the OpenVGDB SQLite once). With SS env vars
+  set it exercises the SS-primary path and prints `source: …` per
+  ROM.
 - On-MiSTer agent directory: `/tmp/mistercurator/`
 - On-MiSTer state directory: `/media/fat/.mistercurator/` — holds the
   small JSON state files the app persists across sessions:

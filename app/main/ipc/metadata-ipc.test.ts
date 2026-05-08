@@ -37,7 +37,7 @@ vi.mock('electron', () => ({
 const { registerIpcHandlers } = await import('@app/main/ipc/register');
 
 const SAMPLE_META: RomMetadata = {
-  version: 3,
+  version: 4,
   hash: 'a'.repeat(32),
   name: 'Super Mario World',
   system: 'Super Nintendo Entertainment System',
@@ -46,6 +46,9 @@ const SAMPLE_META: RomMetadata = {
   developer: 'Nintendo EAD',
   genre: 'Platform',
   description: 'Mario rescues the princess.',
+  players: null,
+  rating: null,
+  releaseDate: null,
   boxArtUrl: 'https://cdn/box.png',
   titleScreenUrl: null,
   screenshotUrl: null,

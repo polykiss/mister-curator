@@ -815,37 +815,38 @@ describe('FakeMisterClient', () => {
     });
   });
 
-  describe('md5sumPaths', () => {
-    it('returns hash + mtime per file, in the same order as input', async () => {
+  describe('hashPaths', () => {
+    it('returns md5 + sha1 + size + mtime per file', async () => {
       const targets = [
         '/media/fat/games/NES/Castlevania (USA, Europe).nes',
         '/media/fat/games/NES/Contra (USA).nes',
       ];
-      const result = await client.md5sumPaths(targets);
+      const result = await client.hashPaths(targets);
       expect(result).toHaveLength(2);
       for (const r of result) {
-        // 32-char lowercase hex.
-        expect(r.hash).toMatch(/^[0-9a-f]{32}$/);
+        expect(r.md5).toMatch(/^[0-9a-f]{32}$/);
+        expect(r.sha1).toMatch(/^[0-9a-f]{40}$/);
         expect(r.mtime).toBeGreaterThan(0);
+        expect(r.size).toBeGreaterThanOrEqual(0);
         expect(targets).toContain(r.path);
       }
-      // (We don't assert distinct hashes — the fixture ROMs are
-      // empty stubs and all md5 to d41d8cd98f00b204e9800998ecf8427e.)
     });
 
-    it('produces the canonical empty-string md5 for empty fixture files', async () => {
-      // Pinning the empty-string md5 here proves the FakeMisterClient
-      // is using the same algorithm busybox uses on the device — a
-      // mismatch would silently corrupt every cache entry, and a
-      // round-trip-only test wouldn't catch it.
-      const [r] = await client.md5sumPaths([
+    it('produces canonical empty-input md5 + sha1 for empty fixture files', async () => {
+      // Pin both algorithms — proves the FakeMisterClient uses the
+      // same hashing as busybox would on-device. A drift on either
+      // would silently corrupt every cache entry, and a round-trip-
+      // only test wouldn't catch it.
+      const [r] = await client.hashPaths([
         '/media/fat/games/NES/Castlevania (USA, Europe).nes',
       ]);
-      expect(r?.hash).toBe('d41d8cd98f00b204e9800998ecf8427e');
+      expect(r?.md5).toBe('d41d8cd98f00b204e9800998ecf8427e');
+      expect(r?.sha1).toBe('da39a3ee5e6b4b0d3255bfef95601890afd80709');
+      expect(r?.size).toBe(0);
     });
 
     it('drops paths that don\'t exist on the device', async () => {
-      const result = await client.md5sumPaths([
+      const result = await client.hashPaths([
         '/media/fat/games/NES/Castlevania (USA, Europe).nes',
         '/media/fat/games/NES/__no_such_file__.nes',
       ]);
@@ -856,7 +857,7 @@ describe('FakeMisterClient', () => {
     });
 
     it('returns an empty array for empty input', async () => {
-      expect(await client.md5sumPaths([])).toEqual([]);
+      expect(await client.hashPaths([])).toEqual([]);
     });
 
     it('throws when called before connect', async () => {
@@ -865,14 +866,13 @@ describe('FakeMisterClient', () => {
         pristineRootPath: fixturesDir,
         latencyMs: 0,
       });
-      await expect(disconnected.md5sumPaths(['/x'])).rejects.toThrow();
+      await expect(disconnected.hashPaths(['/x'])).rejects.toThrow();
     });
 
-    describe('round 6 — .zip extraction', () => {
-      // Live the same way the real-client script does: for `.zip`
-      // wrappers, hash the inner content rather than the archive
-      // bytes. OpenVGDB indexes the inner-file md5 so this is the
-      // only path that produces matchable hashes.
+    describe('round 6 / round 8 — .zip extraction', () => {
+      // .zip wrappers hash the inner content (mirrors the device-
+      // side `unzip -p | md5sum` pipeline). OpenVGDB indexes
+      // inner-file hashes; SS multi-hash takes both md5 + sha1.
       let zipDir: string;
 
       beforeEach(async () => {
@@ -880,62 +880,86 @@ describe('FakeMisterClient', () => {
         await fs.mkdir(zipDir, { recursive: true });
       });
 
-      it('hashes the inner file of a single-entry .zip, not the wrapper bytes', async () => {
-        const innerBytes = Buffer.from('PRG ROM bytes — round 6 fixture\n');
-        const innerHash = createHash('md5').update(innerBytes).digest('hex');
+      it('hashes the inner file of a single-entry .zip with both md5 and sha1', async () => {
+        const innerBytes = Buffer.from('PRG ROM bytes — round 2 fixture\n');
+        const innerMd5 = createHash('md5').update(innerBytes).digest('hex');
+        const innerSha1 = createHash('sha1').update(innerBytes).digest('hex');
         const zip = new JSZip();
         zip.file('test-rom.gba', innerBytes);
         const zipBytes = await zip.generateAsync({ type: 'nodebuffer' });
-        const wrapperHash = createHash('md5').update(zipBytes).digest('hex');
-        expect(innerHash).not.toBe(wrapperHash); // sanity check
+        const wrapperMd5 = createHash('md5').update(zipBytes).digest('hex');
+        expect(innerMd5).not.toBe(wrapperMd5); // sanity
 
         const localPath = path.join(zipDir, 'Test ROM.zip');
         await fs.writeFile(localPath, zipBytes);
         const logical = '/media/fat/games/GBA/Test ROM.zip';
 
-        const [r] = await client.md5sumPaths([logical]);
-        expect(r?.hash).toBe(innerHash);
-        expect(r?.hash).not.toBe(wrapperHash);
+        const [r] = await client.hashPaths([logical]);
+        expect(r?.md5).toBe(innerMd5);
+        expect(r?.sha1).toBe(innerSha1);
+        expect(r?.md5).not.toBe(wrapperMd5);
+        expect(r?.size).toBe(innerBytes.byteLength);
         expect(r?.path).toBe(logical);
+      });
+
+      it('reports the inner-content size for .zip wrappers, not the zip size', async () => {
+        // SS's romtaille expects the EXTRACTED ROM size. Pin that
+        // we report inner bytes rather than the wrapper's
+        // (which would be larger due to zip overhead).
+        const innerBytes = Buffer.alloc(1024, 0xab); // 1KB of 0xAB
+        const zip = new JSZip();
+        zip.file('rom.gba', innerBytes);
+        const zipBytes = await zip.generateAsync({ type: 'nodebuffer' });
+        // Zip overhead means the wrapper is bigger than the inner.
+        expect(zipBytes.byteLength).toBeGreaterThan(innerBytes.byteLength);
+
+        const localPath = path.join(zipDir, 'sized.zip');
+        await fs.writeFile(localPath, zipBytes);
+        const [r] = await client.hashPaths([
+          '/media/fat/games/GBA/sized.zip',
+        ]);
+        expect(r?.size).toBe(1024);
       });
 
       it('matches case-insensitively on the .ZIP extension', async () => {
         const innerBytes = Buffer.from('case-test bytes');
-        const innerHash = createHash('md5').update(innerBytes).digest('hex');
+        const innerMd5 = createHash('md5').update(innerBytes).digest('hex');
         const zip = new JSZip();
         zip.file('rom.smc', innerBytes);
         const zipBytes = await zip.generateAsync({ type: 'nodebuffer' });
         const localPath = path.join(zipDir, 'UPPERCASE.ZIP');
         await fs.writeFile(localPath, zipBytes);
 
-        const [r] = await client.md5sumPaths([
+        const [r] = await client.hashPaths([
           '/media/fat/games/GBA/UPPERCASE.ZIP',
         ]);
-        expect(r?.hash).toBe(innerHash);
+        expect(r?.md5).toBe(innerMd5);
       });
 
-      it('records wrapper mtime, not inner-file mtime, so cache invalidation tracks the wrapper', async () => {
+      it('records wrapper mtime, not inner-file mtime', async () => {
         const inner = Buffer.from('mtime-test');
         const zip = new JSZip();
         zip.file('rom.gba', inner);
         const zipBytes = await zip.generateAsync({ type: 'nodebuffer' });
         const localPath = path.join(zipDir, 'mtime.zip');
         await fs.writeFile(localPath, zipBytes);
-        // Stamp the wrapper with a known mtime; the inner entry's
-        // mtime in the zip header is unrelated.
         const wrapperEpoch = 1_700_000_000;
         await fs.utimes(localPath, wrapperEpoch, wrapperEpoch);
 
-        const [r] = await client.md5sumPaths([
+        const [r] = await client.hashPaths([
           '/media/fat/games/GBA/mtime.zip',
         ]);
         expect(r?.mtime).toBe(wrapperEpoch);
       });
 
-      it('multi-file zip: concatenates entries (matches `unzip -p`)', async () => {
+      it('multi-file zip: concatenates entries through both hashers', async () => {
         const a = Buffer.from('first entry');
         const b = Buffer.from('second entry');
-        const expectedHash = createHash('md5')
+        const expectedMd5 = createHash('md5')
+          .update(a)
+          .update(b)
+          .digest('hex');
+        const expectedSha1 = createHash('sha1')
           .update(a)
           .update(b)
           .digest('hex');
@@ -946,24 +970,20 @@ describe('FakeMisterClient', () => {
         const localPath = path.join(zipDir, 'multi.zip');
         await fs.writeFile(localPath, zipBytes);
 
-        const [r] = await client.md5sumPaths([
+        const [r] = await client.hashPaths([
           '/media/fat/games/GBA/multi.zip',
         ]);
-        // Multi-file zips produce a hash that won't match anything
-        // in OpenVGDB — by design. The metadata service handles the
-        // null lookup gracefully; we just verify here that the fake
-        // doesn't crash.
-        expect(r?.hash).toBe(expectedHash);
+        expect(r?.md5).toBe(expectedMd5);
+        expect(r?.sha1).toBe(expectedSha1);
+        expect(r?.size).toBe(a.byteLength + b.byteLength);
       });
 
       it('skips a corrupt zip rather than emitting a wrong hash', async () => {
         const localPath = path.join(zipDir, 'corrupt.zip');
         await fs.writeFile(localPath, Buffer.from([0xff, 0xff, 0x00, 0x00]));
-        const result = await client.md5sumPaths([
+        const result = await client.hashPaths([
           '/media/fat/games/GBA/corrupt.zip',
         ]);
-        // Same shape the device-side `unzip -p` failure surfaces:
-        // no entry returned for that path.
         expect(result).toHaveLength(0);
       });
     });

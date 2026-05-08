@@ -10,6 +10,12 @@ import type {
   OpenVGDBService,
 } from '@app/main/metadata/openvgdb-service';
 import { MetadataService } from '@app/main/metadata/metadata-service';
+import {
+  ScreenScraperAuthError,
+  type ScreenScraperGame,
+  type ScreenScraperLookupQuery,
+  type ScreenScraperService,
+} from '@app/main/metadata/screenscraper-service';
 import type { RomMetadata } from '@shared/metadata-types';
 
 const HASH = 'a'.repeat(32);
@@ -71,7 +77,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
 
   it('composes OpenVGDB facts with libretro thumbnail URLs on a hit', async () => {
     const m = makeMocks({ dbReturns: buildDbHit() });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     const result = await svc.getMetadata(HASH);
     expect(result).not.toBeNull();
     expect(result?.source).toBe('openvgdb');
@@ -102,7 +108,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
         romBaseName: 'Super Mario World (USA)',
       }),
     });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     const result = await svc.getMetadata(HASH);
     expect(result?.name).toBe('Super Mario World');
     expect(result?.boxArtUrl).toContain('Super%20Mario%20World%20(USA).png');
@@ -122,33 +128,33 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
         romBaseName: null,
       }),
     });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     const result = await svc.getMetadata(HASH);
     expect(result?.boxArtUrl).toContain('Some%20Game.png');
   });
 
-  it('writes a cache file in v3 shape', async () => {
+  it('writes a cache file in v4 shape', async () => {
     const m = makeMocks({ dbReturns: buildDbHit() });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     await svc.getMetadata(HASH);
 
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
     const onDisk = JSON.parse(await fs.readFile(path, 'utf-8')) as RomMetadata;
-    expect(onDisk.version).toBe(3);
+    expect(onDisk.version).toBe(4);
     expect(onDisk.source).toBe('openvgdb');
     expect(onDisk.system).toBe('Super Nintendo Entertainment System');
   });
 
   it('writes a "none" sentinel when the DB has no match', async () => {
     const m = makeMocks({ dbReturns: null });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     const result = await svc.getMetadata(HASH);
     expect(result).toBeNull();
 
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
     const onDisk = JSON.parse(await fs.readFile(path, 'utf-8')) as RomMetadata;
     expect(onDisk.source).toBe('none');
-    expect(onDisk.version).toBe(3);
+    expect(onDisk.version).toBe(4);
   });
 
   it('hit on a system not in the libretro map → null thumbnail URLs but full metadata', async () => {
@@ -158,7 +164,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
         name: 'Some Disk Game',
       }),
     });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     const result = await svc.getMetadata(HASH);
     expect(result).not.toBeNull();
     expect(result?.name).toBe('Some Disk Game');
@@ -169,7 +175,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
 
   it('cache hit: second call returns the same payload without hitting the DB', async () => {
     const m = makeMocks({ dbReturns: buildDbHit() });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     await svc.getMetadata(HASH);
     expect(m.dbCalls).toHaveLength(1);
 
@@ -180,11 +186,11 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
 
   it('cache survives across MetadataService instances (state lives on disk)', async () => {
     const m1 = makeMocks({ dbReturns: buildDbHit() });
-    const a = new MetadataService(dir, m1.openVgdb, m1.thumbnails);
+    const a = new MetadataService(dir, m1.openVgdb, m1.thumbnails, null);
     await a.getMetadata(HASH);
 
     const m2 = makeMocks({ dbReturns: null });
-    const b = new MetadataService(dir, m2.openVgdb, m2.thumbnails);
+    const b = new MetadataService(dir, m2.openVgdb, m2.thumbnails, null);
     const result = await b.getMetadata(HASH);
     expect(result?.name).toBe('Super Mario World');
     expect(m2.dbCalls).toHaveLength(0);
@@ -192,7 +198,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
 
   it('returns null on a cached sentinel without re-querying', async () => {
     const m = makeMocks({ dbReturns: null });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, {
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null, {
       now: () => Date.parse('2025-01-15T00:00:00Z'),
     });
 
@@ -206,7 +212,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
   it('re-queries after the 30-day sentinel TTL expires', async () => {
     const m = makeMocks({ dbReturns: null });
     let now = Date.parse('2025-01-15T00:00:00Z');
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, {
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null, {
       now: () => now,
     });
 
@@ -223,7 +229,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
     await fs.mkdir(join(dir, 'by-hash', HASH.slice(0, 2)), { recursive: true });
     const aged: RomMetadata = {
-      version: 3,
+      version: 4,
       hash: HASH,
       name: 'Vintage Game',
       system: 'NES',
@@ -232,6 +238,9 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       developer: null,
       genre: null,
       description: null,
+      players: null,
+      rating: null,
+      releaseDate: null,
       boxArtUrl: null,
       titleScreenUrl: null,
       screenshotUrl: null,
@@ -241,7 +250,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     await fs.writeFile(path, JSON.stringify(aged), 'utf-8');
 
     const m = makeMocks({ dbReturns: null });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     const result = await svc.getMetadata(HASH);
     expect(result?.name).toBe('Vintage Game');
     expect(m.dbCalls).toHaveLength(0);
@@ -257,16 +266,18 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       JSON.stringify({ version: 1, hash: HASH, name: 'old shape', source: 'screenscraper' }),
     );
     const m = makeMocks({ dbReturns: buildDbHit() });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     const result = await svc.getMetadata(HASH);
     expect(result?.name).toBe('Super Mario World');
     expect(result?.source).toBe('openvgdb');
   });
 
-  it('evicts v2 cache files on read so round-9 URLs replace round-4–8 ones', async () => {
+  it('evicts old-version cache files (v2/v3) so PR #16 round 2 records replace them', async () => {
     // Rounds 4–8 wrote v2 with libretro URLs that pointed at the
-    // underscored host path (which 404s). Round 9 bumped to v3; the
-    // parser now rejects v2 entries the same way it rejects v1.
+    // underscored host path (which 404s). Round 9 bumped to v3 to
+    // evict those. Round 2 of PR #16 bumps to v4 to make room for
+    // the SS-only fields and let users upgrading get richer data.
+    // The parser rejects anything that isn't the current version.
     const dirHash = HASH.slice(0, 2);
     await fs.mkdir(join(dir, 'by-hash', dirHash), { recursive: true });
     const stale = {
@@ -298,7 +309,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
         system: 'Sega Genesis/Mega Drive',
       }),
     });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     const result = await svc.getMetadata(HASH);
     // The replacement URL uses the spaced form.
     expect(result?.boxArtUrl).toContain(
@@ -315,14 +326,14 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       '{ this is not valid json',
     );
     const m = makeMocks({ dbReturns: buildDbHit({ name: 'Recovered' }) });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     const result = await svc.getMetadata(HASH);
     expect(result?.name).toBe('Recovered');
   });
 
   it('invalidate removes one entry; next call re-fetches', async () => {
     const m = makeMocks({ dbReturns: buildDbHit() });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     await svc.getMetadata(HASH);
     await svc.invalidate(HASH);
     await svc.getMetadata(HASH);
@@ -331,7 +342,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
 
   it('clearAll wipes the by-hash directory', async () => {
     const m = makeMocks({ dbReturns: buildDbHit() });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     await svc.getMetadata(HASH);
     await svc.clearAll();
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
@@ -341,7 +352,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
 
   it('shards by-hash files into 2-char prefix subdirs', async () => {
     const m = makeMocks({ dbReturns: buildDbHit() });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     await svc.getMetadata(HASH);
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
     await expect(fs.stat(path)).resolves.toBeDefined();
@@ -349,7 +360,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
 
   it('deduplicates concurrent getMetadata calls for the same hash', async () => {
     const m = makeMocks({ dbReturns: buildDbHit() });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     const [a, b] = await Promise.all([svc.getMetadata(HASH), svc.getMetadata(HASH)]);
     expect(a?.name).toBe(b?.name);
     expect(m.dbCalls).toHaveLength(1);
@@ -359,9 +370,259 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     const m = makeMocks({
       dbReturns: buildDbHit({ year: null }),
     });
-    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     const result = await svc.getMetadata(HASH);
     expect(result?.year).toBeNull();
     expect(result?.name).toBe('Super Mario World');
+  });
+
+  describe('round 2 — source priority chain (SS → OpenVGDB → none)', () => {
+    /** Stub a ScreenScraperService with a chosen status / response. */
+    function makeSS(opts: {
+      status?: 'available' | 'unavailable' | 'rate-limited' | 'quota-exceeded';
+      result?: ScreenScraperGame | null;
+      throws?: Error;
+    } = {}): {
+      svc: ScreenScraperService;
+      lookupCalls: ScreenScraperLookupQuery[];
+    } {
+      const lookupCalls: ScreenScraperLookupQuery[] = [];
+      const stub = {
+        getStatus: vi.fn(() => opts.status ?? 'available'),
+        lookup: vi.fn(async (q: ScreenScraperLookupQuery) => {
+          lookupCalls.push(q);
+          if (opts.throws !== undefined) throw opts.throws;
+          return opts.result ?? null;
+        }),
+      } as unknown as ScreenScraperService;
+      return { svc: stub, lookupCalls };
+    }
+
+    function buildSsHit(
+      overrides: Partial<ScreenScraperGame> = {},
+    ): ScreenScraperGame {
+      return {
+        id: 1234,
+        name: 'Super Mario World',
+        description: 'Mario rescues the princess.',
+        developer: 'Nintendo EAD',
+        publisher: 'Nintendo',
+        genres: ['Platform', 'Action'],
+        releaseDate: '1991-08-13',
+        rating: 9.5,
+        players: '1-2',
+        boxArtUrl: 'https://ss-cdn/box.png',
+        extra: {
+          box3DUrl: null,
+          marqueeUrl: null,
+          titleScreenUrl: 'https://ss-cdn/title.png',
+          snapUrl: 'https://ss-cdn/snap.png',
+          clearLogoUrl: null,
+          screenshots: [],
+        },
+        ...overrides,
+      };
+    }
+
+    const SS_HINT = {
+      systemId: 4,
+      md5: HASH,
+      sha1: 'b'.repeat(40),
+      crc32: 'deadbeef',
+      romName: 'Super Mario World (USA).sfc',
+      romSize: 524288,
+    };
+
+    it('SS match wins outright; OpenVGDB never queried', async () => {
+      const m = makeMocks({ dbReturns: buildDbHit() });
+      const ss = makeSS({ result: buildSsHit() });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result?.source).toBe('screenscraper');
+      expect(result?.name).toBe('Super Mario World');
+      expect(result?.boxArtUrl).toBe('https://ss-cdn/box.png');
+      expect(result?.players).toBe('1-2');
+      expect(result?.rating).toBe(9.5);
+      expect(result?.releaseDate).toBe('1991-08-13');
+      expect(result?.description).toBe('Mario rescues the princess.');
+      expect(m.dbCalls).toHaveLength(0);
+      expect(ss.lookupCalls).toHaveLength(1);
+    });
+
+    it('SS query carries every hash + romName + romSize from the hint', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ result: buildSsHit() });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(ss.lookupCalls[0]).toEqual({
+        systemId: 4,
+        md5: HASH,
+        sha1: 'b'.repeat(40),
+        crc32: 'deadbeef',
+        romName: 'Super Mario World (USA).sfc',
+        romSize: 524288,
+      });
+    });
+
+    it('SS no-match → fall through to OpenVGDB', async () => {
+      const m = makeMocks({ dbReturns: buildDbHit() });
+      const ss = makeSS({ result: null });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result?.source).toBe('openvgdb');
+      expect(m.dbCalls).toHaveLength(1);
+      expect(ss.lookupCalls).toHaveLength(1);
+    });
+
+    it('SS unavailable → silently skip; OpenVGDB queried', async () => {
+      const m = makeMocks({ dbReturns: buildDbHit() });
+      const ss = makeSS({ status: 'unavailable' });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result?.source).toBe('openvgdb');
+      // Crucially, SS.lookup wasn't called — getStatus gated it.
+      expect(ss.lookupCalls).toHaveLength(0);
+      expect(m.dbCalls).toHaveLength(1);
+    });
+
+    it('SS rate-limited → silently skip; OpenVGDB queried', async () => {
+      const m = makeMocks({ dbReturns: buildDbHit() });
+      const ss = makeSS({ status: 'rate-limited' });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result?.source).toBe('openvgdb');
+      expect(ss.lookupCalls).toHaveLength(0);
+    });
+
+    it('SS quota-exceeded → silently skip; OpenVGDB queried', async () => {
+      const m = makeMocks({ dbReturns: buildDbHit() });
+      const ss = makeSS({ status: 'quota-exceeded' });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result?.source).toBe('openvgdb');
+      expect(ss.lookupCalls).toHaveLength(0);
+    });
+
+    it('SS auth error caught and logged; falls through to OpenVGDB', async () => {
+      const m = makeMocks({ dbReturns: buildDbHit() });
+      const ss = makeSS({ throws: new ScreenScraperAuthError(403) });
+      const log = vi.fn();
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+        { logger: log },
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result?.source).toBe('openvgdb');
+      expect(log).toHaveBeenCalledWith(
+        expect.stringMatching(/auth failed/i),
+      );
+    });
+
+    it('without ssHint, SS is bypassed entirely (OpenVGDB-only path)', async () => {
+      const m = makeMocks({ dbReturns: buildDbHit() });
+      const ss = makeSS({ result: buildSsHit() });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      // No SS hint passed → service stays in OpenVGDB-first mode.
+      const result = await svc.getMetadata(HASH);
+      expect(result?.source).toBe('openvgdb');
+      expect(ss.lookupCalls).toHaveLength(0);
+    });
+
+    it('with screenScraper=null, SS hint is ignored', async () => {
+      const m = makeMocks({ dbReturns: buildDbHit() });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        null,
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result?.source).toBe('openvgdb');
+    });
+
+    it('SS-sourced cache survives a follow-up call (no re-query)', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ result: buildSsHit() });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      await svc.getMetadata(HASH, {}, SS_HINT);
+      const second = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(second?.source).toBe('screenscraper');
+      // SS lookup ran once, then cache served the second call.
+      expect(ss.lookupCalls).toHaveLength(1);
+    });
+
+    it('SS-sourced metadata exposes genres as comma-joined string', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({
+        result: buildSsHit({ genres: ['Platform', 'Action', 'Adventure'] }),
+      });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result?.genre).toBe('Platform, Action, Adventure');
+    });
+
+    it('SS-sourced metadata derives year from releaseDate', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({
+        result: buildSsHit({ releaseDate: '1991-08-13' }),
+      });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result?.year).toBe(1991);
+      expect(result?.releaseDate).toBe('1991-08-13');
+    });
   });
 });

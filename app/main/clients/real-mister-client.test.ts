@@ -2257,37 +2257,46 @@ describe('RealMisterClient', () => {
     });
   });
 
-  describe('md5sumPaths (PR #15 metadata foundation)', () => {
-    it('shell-quotes paths into a `set --` script and parses the result', async () => {
+  describe('hashPaths (PR #16 round 2 — md5 + sha1 + size)', () => {
+    it('shell-quotes paths into a `set --` script and parses the 5-tab result', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
+      const md5a = 'a'.repeat(32);
+      const md5b = 'b'.repeat(32);
+      const sha1a = 'c'.repeat(40);
+      const sha1b = 'd'.repeat(40);
       mocks.execCommand.mockResolvedValueOnce(
         execOk(
           [
-            "/media/fat/games/SNES/SMW.sfc\t" + 'a'.repeat(32) + '\t1700000000',
-            "/media/fat/games/SNES/Sonic.sfc\t" + 'b'.repeat(32) + '\t1700000100',
+            `/media/fat/games/SNES/SMW.sfc\t${md5a}\t${sha1a}\t524288\t1700000000`,
+            `/media/fat/games/SNES/Sonic.sfc\t${md5b}\t${sha1b}\t1048576\t1700000100`,
           ].join('\n') + '\n',
         ),
       );
-      const result = await client.md5sumPaths([
+      const result = await client.hashPaths([
         '/media/fat/games/SNES/SMW.sfc',
         '/media/fat/games/SNES/Sonic.sfc',
       ]);
       expect(result).toHaveLength(2);
-      expect(result[0]?.hash).toBe('a'.repeat(32));
+      expect(result[0]?.md5).toBe(md5a);
+      expect(result[0]?.sha1).toBe(sha1a);
+      expect(result[0]?.size).toBe(524288);
       expect(result[1]?.mtime).toBe(1700000100);
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
       expect(script).toContain("set -- '/media/fat/games/SNES/SMW.sfc'");
       expect(script).toContain('for f in "$@"');
+      // Sanity: the script computes both algorithms.
+      expect(script).toContain('md5sum');
+      expect(script).toContain('sha1sum');
     });
 
     it('returns [] for empty input without making an SSH call', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
-      const result = await client.md5sumPaths([]);
+      const result = await client.hashPaths([]);
       expect(result).toEqual([]);
       expect(mocks.execCommand).not.toHaveBeenCalled();
     });
@@ -2296,8 +2305,8 @@ describe('RealMisterClient', () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockResolvedValueOnce(execFail(2, 'shell broke'));
-      await expect(client.md5sumPaths(['/x'])).rejects.toThrow(
-        /Failed to md5sum paths/,
+      await expect(client.hashPaths(['/x'])).rejects.toThrow(
+        /Failed to hash paths/,
       );
     });
   });

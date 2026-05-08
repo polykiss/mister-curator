@@ -7,6 +7,12 @@ import type {
   OpenVGDBService,
 } from '@app/main/metadata/openvgdb-service';
 import {
+  ScreenScraperAuthError,
+  type ScreenScraperGame,
+  type ScreenScraperLookupQuery,
+  type ScreenScraperService,
+} from '@app/main/metadata/screenscraper-service';
+import {
   NO_MATCH_TTL_MS,
   ROM_METADATA_SCHEMA_VERSION,
   type MetadataHint,
@@ -18,43 +24,59 @@ export interface MetadataServiceOptions {
   readonly now?: () => number;
   /** Expiry for `source: 'none'` sentinels. */
   readonly noMatchTtlMs?: number;
+  /**
+   * Single-line warning sink for ScreenScraper auth failures and
+   * other diagnostics. Default: no log.
+   */
+  readonly logger?: (message: string) => void;
 }
 
 /**
- * Hash-keyed metadata pipeline (PR #15 round 3 pivot).
+ * Optional ScreenScraper query parameters threaded through from the
+ * orchestrator. Most are populated when the caller has hash data
+ * cached; `systemId` is resolved by an external mapper (OpenVGDB
+ * systemName → SS systemeid).
+ */
+export interface ScreenScraperHint {
+  readonly systemId: number;
+  readonly md5?: string;
+  readonly sha1?: string;
+  readonly crc32?: string;
+  readonly romName?: string;
+  readonly romSize?: number;
+}
+
+/**
+ * Hash-keyed metadata pipeline.
  *
- * Composition:
- *   1. OpenVGDBService — local SQLite lookup, hash → name + facts.
- *   2. LibretroThumbnailsFetcher — turns the matched name + system
- *      into PNG URLs (box art / title / snap).
+ * Source-priority chain (PR #16 round 2):
+ *   1. ScreenScraper if `available` AND a `screenScraperHint` was
+ *      threaded through (multi-hash query: md5 + sha1, optionally
+ *      romName / romSize / systemeid).
+ *   2. OpenVGDB + libretro thumbnails (existing PR #15 chain).
+ *   3. `'none'` sentinel cached for 30 days.
  *
- * Cache file layout (unchanged from rounds 1-2):
+ * SS match wins outright — its name, art, and SS-only fields are
+ * the cached record; OpenVGDB isn't consulted. SS legitimate
+ * no-match (or unavailable / rate-limited / quota-exceeded) falls
+ * through to OpenVGDB. SS auth failure latches the SS service for
+ * the session (the service handles that internally) and we fall
+ * through here.
+ *
+ * Cache file layout:
  *   <rootDir>/by-hash/<hash[0:2]>/<hash>.json
- *
- * The 2-char shard mirrors ImageCache and prevents one giant directory
- * once a sizable library is hashed.
- *
- * TTL policy:
- *   - matched metadata never expires. The OpenVGDB snapshot is
- *     immutable within a session; if we matched once, we'll match
- *     again. The user clears the cache via `clearAll`.
- *   - `'none'` sentinels expire after `noMatchTtlMs` (30 days). Past
- *     that, the next call re-tries — useful if the user has updated
- *     OpenVGDB to a newer snapshot in the interim.
- *
- * Concurrency: per-hash in-flight gate so two `getMetadata(h)` calls
- * issued in parallel don't double-hit OpenVGDB or double-write the
- * cache file.
  *
  * Schema-version note: cache files with a different
  * `ROM_METADATA_SCHEMA_VERSION` fail the parse guard and are treated
- * as a miss; the next call rewrites them in the current shape. No
- * migration step needed. Round 9 bumped v2 → v3 to evict
- * libretro-URL-encoding bugs cached during rounds 4–8.
+ * as a miss; the next call rewrites them in the current shape.
+ * Round 9 bumped v2 → v3 for libretro-URL fixes; round 2 of PR #16
+ * bumps v3 → v4 to evict OpenVGDB-only records when SS becomes
+ * available, so users upgrading get the richer SS-sourced data.
  */
 export class MetadataService {
   private readonly noMatchTtlMs: number;
   private readonly now: () => number;
+  private readonly logger: (message: string) => void;
   /** Per-hash in-flight gate. */
   private readonly inflight = new Map<string, Promise<RomMetadata | null>>();
 
@@ -62,31 +84,39 @@ export class MetadataService {
     private readonly rootDir: string,
     private readonly openVgdb: OpenVGDBService,
     private readonly thumbnails: LibretroThumbnailsFetcher,
+    private readonly screenScraper: ScreenScraperService | null,
     options: MetadataServiceOptions = {},
   ) {
     this.noMatchTtlMs = options.noMatchTtlMs ?? NO_MATCH_TTL_MS;
     this.now = options.now ?? Date.now;
+    this.logger = options.logger ?? ((): void => {
+      /* default: no log */
+    });
   }
 
   /**
-   * Returns metadata for a hash. Cache hit → immediate. Sentinel hit
-   * (within TTL) → null without re-querying. Cold miss / stale
-   * sentinel → OpenVGDB + libretro composition. Writes the result
-   * (including `source: 'none'` sentinel) to disk.
+   * Returns metadata for a hash, querying the source-priority chain.
    *
-   * The `hint` is currently unused — OpenVGDB is hash-keyed so the
-   * hash alone uniquely identifies the ROM. Reserved for future
-   * name-search fallback.
+   * Cache hit → immediate return. Sentinel hit (within TTL) → null
+   * without re-querying. Cold miss / stale sentinel → SS first
+   * (when hint supplied + service available), OpenVGDB fallback,
+   * sentinel write on neither.
+   *
+   * `hint` is reserved for future name-search; ignored today.
+   * `screenScraperHint` carries the multi-hash query data; supply
+   * it when SS access is desired (the orchestrator threads it in
+   * from HashService output).
    */
   async getMetadata(
     hash: string,
     hint: MetadataHint = {},
+    screenScraperHint?: ScreenScraperHint,
   ): Promise<RomMetadata | null> {
     void hint;
     const inflight = this.inflight.get(hash);
     if (inflight !== undefined) return inflight;
 
-    const promise = this.doGet(hash).finally(() => {
+    const promise = this.doGet(hash, screenScraperHint).finally(() => {
       this.inflight.delete(hash);
     });
     this.inflight.set(hash, promise);
@@ -95,7 +125,7 @@ export class MetadataService {
 
   /**
    * Drop one hash from the cache. The next `getMetadata` call will
-   * re-query the upstream.
+   * re-query the upstream chain.
    */
   async invalidate(hash: string): Promise<void> {
     const path = this.cachePath(hash);
@@ -122,38 +152,127 @@ export class MetadataService {
 
   // ─── internals ─────────────────────────────────────────────────────
 
-  private async doGet(hash: string): Promise<RomMetadata | null> {
+  private async doGet(
+    hash: string,
+    ssHint: ScreenScraperHint | undefined,
+  ): Promise<RomMetadata | null> {
     const cached = await this.readCache(hash);
     if (cached !== null && !this.isStaleSentinel(cached)) {
       return cached.source === 'none' ? null : cached;
     }
 
+    // Source priority 1: ScreenScraper.
+    if (this.screenScraper !== null && ssHint !== undefined) {
+      const status = this.screenScraper.getStatus();
+      if (status === 'available') {
+        const ssResult = await this.tryScreenScraper(hash, ssHint);
+        if (ssResult !== null) {
+          await this.writeCache(hash, ssResult);
+          return ssResult;
+        }
+        // SS returned null (legitimate no-match OR a transient
+        // failure that latched the service). Fall through to
+        // OpenVGDB — same outcome path as the SS-unavailable case.
+      }
+      // status is 'unavailable' / 'rate-limited' / 'quota-exceeded' →
+      // skip SS silently and let OpenVGDB try.
+    }
+
+    // Source priority 2: OpenVGDB + libretro thumbnails.
     const fromDb = await this.openVgdb.getMetadataByHash(hash);
     if (fromDb !== null) {
-      const composed = this.compose(hash, fromDb);
+      const composed = this.composeFromOpenVgdb(hash, fromDb);
       await this.writeCache(hash, composed);
       return composed;
     }
 
+    // Both sources missed — sentinel.
     const sentinel = this.buildSentinel(hash);
     await this.writeCache(hash, sentinel);
     return null;
   }
 
   /**
-   * Combine OpenVGDB facts with libretro thumbnail URLs. The
-   * thumbnail URLs may be null when the system isn't in the libretro
-   * map — that's fine; the renderer falls back to a placeholder.
-   *
-   * Round 8: thumbnail filenames key on `db.romBaseName` (the
-   * No-Intro DAT-style basename, e.g. "Sonic The Hedgehog 2 (World)")
-   * rather than `db.name` (the cleaner release title, e.g. "Sonic
-   * The Hedgehog 2"). libretro-thumbnails filenames carry the region
-   * annotation, so the title alone 404s. We fall back to `db.name`
-   * only when OpenVGDB has no `romExtensionlessFileName` for the
-   * row — better a probably-missing URL than no URL at all.
+   * Run a ScreenScraper lookup and map the result to RomMetadata.
+   * Catches `ScreenScraperAuthError` so the orchestrator's path
+   * doesn't throw — SS marks itself unavailable internally; we just
+   * log once and fall through.
    */
-  private compose(hash: string, db: OpenVGDBMetadata): RomMetadata {
+  private async tryScreenScraper(
+    hash: string,
+    ssHint: ScreenScraperHint,
+  ): Promise<RomMetadata | null> {
+    if (this.screenScraper === null) return null;
+    const query: ScreenScraperLookupQuery = {
+      systemId: ssHint.systemId,
+      md5: ssHint.md5,
+      sha1: ssHint.sha1,
+      crc32: ssHint.crc32,
+      romName: ssHint.romName,
+      romSize: ssHint.romSize,
+    };
+    let game: ScreenScraperGame | null;
+    try {
+      game = await this.screenScraper.lookup(query);
+    } catch (err) {
+      if (err instanceof ScreenScraperAuthError) {
+        this.logger(
+          `[MetadataService] ScreenScraper auth failed (HTTP ${String(err.status)}); falling through to OpenVGDB for the rest of the session.`,
+        );
+        return null;
+      }
+      throw err;
+    }
+    if (game === null) return null;
+    return this.composeFromScreenScraper(hash, game);
+  }
+
+  /**
+   * Compose RomMetadata from a ScreenScraper hit. SS provides the
+   * fullest set of fields — we use them directly for name, art, and
+   * the SS-only extras (`players`, `rating`, `releaseDate`).
+   *
+   * SS art is hosted on the SS CDN; the renderer will hit it through
+   * the existing ImageCache so the file ends up local same as
+   * libretro-sourced art does.
+   */
+  private composeFromScreenScraper(
+    hash: string,
+    game: ScreenScraperGame,
+  ): RomMetadata {
+    return {
+      version: ROM_METADATA_SCHEMA_VERSION,
+      hash,
+      name: game.name,
+      system: '', // SS doesn't return system name in jeuInfos response;
+      // round 2 keeps this empty when SS-sourced. The OpenVGDB system
+      // is what the orchestrator already knew (round-3 mapping); the
+      // renderer reads the system from the cores list, not RomMetadata.
+      year: parseYearFromDate(game.releaseDate),
+      publisher: game.publisher,
+      developer: game.developer,
+      genre: game.genres.length > 0 ? game.genres.join(', ') : null,
+      description: game.description,
+      players: game.players,
+      rating: game.rating,
+      releaseDate: game.releaseDate,
+      boxArtUrl: game.boxArtUrl,
+      titleScreenUrl: game.extra.titleScreenUrl,
+      screenshotUrl: game.extra.snapUrl,
+      source: 'screenscraper',
+      fetchedAt: new Date(this.now()).toISOString(),
+    };
+  }
+
+  /**
+   * Compose RomMetadata from an OpenVGDB hit + libretro thumbnail
+   * URLs. Same shape PR #15 round 9 produced; the SS-only fields
+   * (`players`, `rating`, `releaseDate`) stay null.
+   */
+  private composeFromOpenVgdb(
+    hash: string,
+    db: OpenVGDBMetadata,
+  ): RomMetadata {
     const fileBase = db.romBaseName ?? db.name;
     const boxArt = this.thumbnails.getBoxArtUrl(db.system, fileBase);
     const title = this.thumbnails.getTitleScreenUrl(db.system, fileBase);
@@ -168,6 +287,9 @@ export class MetadataService {
       developer: db.developer,
       genre: db.genre,
       description: db.description,
+      players: null,
+      rating: null,
+      releaseDate: null,
       boxArtUrl: boxArt,
       titleScreenUrl: title,
       screenshotUrl: snap,
@@ -187,6 +309,9 @@ export class MetadataService {
       developer: null,
       genre: null,
       description: null,
+      players: null,
+      rating: null,
+      releaseDate: null,
       boxArtUrl: null,
       titleScreenUrl: null,
       screenshotUrl: null,
@@ -240,6 +365,16 @@ export class MetadataService {
 
 // ─── helpers ────────────────────────────────────────────────────────
 
+function parseYearFromDate(text: string | null): number | null {
+  if (text === null) return null;
+  const m = /\b(\d{4})\b/.exec(text);
+  if (m === null) return null;
+  const y = Number.parseInt(m[1] ?? '', 10);
+  if (!Number.isFinite(y)) return null;
+  if (y < 1970 || y > 2100) return null;
+  return y;
+}
+
 function isNodeError(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && 'code' in err;
 }
@@ -253,6 +388,8 @@ function isRomMetadata(v: unknown): v is RomMetadata {
     typeof o.name === 'string' &&
     typeof o.system === 'string' &&
     typeof o.fetchedAt === 'string' &&
-    (o.source === 'openvgdb' || o.source === 'none')
+    (o.source === 'screenscraper' ||
+      o.source === 'openvgdb' ||
+      o.source === 'none')
   );
 }

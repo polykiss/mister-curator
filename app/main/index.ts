@@ -12,14 +12,89 @@ import { registerIpcHandlers } from '@app/main/ipc/register';
 import { HashService } from '@app/main/metadata/hash-service';
 import { ImageCache } from '@app/main/metadata/image-cache';
 import { LibretroThumbnailsFetcher } from '@app/main/metadata/libretro-thumbnails';
-import { MetadataOrchestrator } from '@app/main/metadata/metadata-orchestrator';
+import {
+  MetadataOrchestrator,
+  type SystemIdResolver,
+} from '@app/main/metadata/metadata-orchestrator';
 import { MetadataService } from '@app/main/metadata/metadata-service';
 import { OpenVGDBService } from '@app/main/metadata/openvgdb-service';
+import { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
 import { ProfileStore } from '@app/main/storage/profile-store';
 
 function resolveClientMode(): 'real' | 'fake' {
   return process.env['MISTERCURATOR_CLIENT_MODE'] === 'fake' ? 'fake' : 'real';
 }
+
+/**
+ * Map a MiSTer core id (the directory name under `/media/fat/games/`)
+ * to ScreenScraper's `systemeid`. PR #16 round 2 wires this through
+ * the orchestrator so SS hash queries carry the right system filter.
+ *
+ * IDs verified against the SS systemes list at
+ * `https://api.screenscraper.fr/api2/systemesListe.php`. The set
+ * below covers every cartridge core in the live test library plus
+ * a reasonable broader set; missing entries return null and SS
+ * lookup is bypassed for those cores (the OpenVGDB+libretro path
+ * still runs).
+ */
+const SCREENSCRAPER_SYSTEM_ID_BY_CORE_ID: ReadonlyMap<string, number> =
+  new Map([
+    // ─── Nintendo ────────────────────────────────────────────────────
+    ['NES', 3],
+    ['SNES', 4],
+    ['GAMEBOY', 9],
+    ['GAMEBOYCOLOR', 10],
+    ['GAMEBOYADVANCE', 12],
+    ['GBA', 12],
+    ['VIRTUALBOY', 11],
+    ['NINTENDO64', 14],
+    ['N64', 14],
+    // ─── Sega ────────────────────────────────────────────────────────
+    ['Genesis', 1],
+    ['MegaDrive', 1],
+    ['SMS', 2], // Master System
+    ['MasterSystem', 2],
+    ['GameGear', 21],
+    ['Sega32X', 19],
+    ['SegaCD', 20],
+    ['MegaCD', 20],
+    ['Saturn', 22],
+    ['SG1000', 109],
+    // ─── Atari ───────────────────────────────────────────────────────
+    ['Atari2600', 26],
+    ['Atari5200', 40],
+    ['Atari7800', 41],
+    ['AtariLynx', 28],
+    ['Lynx', 28],
+    // ─── NEC ─────────────────────────────────────────────────────────
+    ['TurboGrafx16', 31],
+    ['TGFX16', 31],
+    ['PCEngine', 31],
+    ['TGFX16-CD', 114],
+    ['PCEngineCD', 114],
+    // ─── SNK ─────────────────────────────────────────────────────────
+    ['NEOGEO', 142],
+    ['NeoGeo', 142],
+    ['NeoGeoPocket', 25],
+    ['NEOGEOPocket', 25],
+    ['NeoGeoPocketColor', 82],
+    // ─── Sony ────────────────────────────────────────────────────────
+    ['PSX', 57],
+    ['PlayStation', 57],
+    // ─── Misc ───────────────────────────────────────────────────────
+    ['ColecoVision', 48],
+    ['Coleco', 48],
+    ['Intellivision', 115],
+    ['Vectrex', 102],
+    ['WonderSwan', 45],
+    ['WonderSwanColor', 46],
+    ['Odyssey2', 104],
+  ]);
+
+const resolveScreenScraperSystemId: SystemIdResolver = ({ coreId }) => {
+  if (coreId === undefined) return null;
+  return SCREENSCRAPER_SYSTEM_ID_BY_CORE_ID.get(coreId) ?? null;
+};
 
 /**
  * Build the dev-time cache event logger. Off by default; enable with
@@ -91,18 +166,40 @@ void app.whenReady().then(() => {
   });
   const manager = new ConnectionManager(client, profileStore, cache);
 
-  // PR #15 round 3 metadata pipeline. All caches live under
-  // `<userData>/metadata/` so the user can wipe the lot with one rm.
-  // No credentials needed: OpenVGDB is a public SQLite snapshot and
-  // libretro-thumbnails is a public image archive.
+  // PR #15 round 3 + PR #16 round 2 metadata pipeline. All caches
+  // live under `<userData>/metadata/` so the user can wipe the lot
+  // with one rm.
+  //
+  // Round 2 added ScreenScraper as the primary source ahead of
+  // OpenVGDB + libretro. SS requires `SCREENSCRAPER_DEV_ID` and
+  // `SCREENSCRAPER_DEV_PASSWORD`; user creds (`SCREENSCRAPER_SSID` /
+  // `SCREENSCRAPER_SSPASSWORD`) are optional and unlock the higher
+  // member-tier quota. Without dev creds the service stays
+  // unavailable and MetadataService silently falls through to
+  // OpenVGDB + libretro (PR #15's existing chain).
   const metadataRoot = path.join(app.getPath('userData'), 'metadata');
   const hashService = new HashService(metadataRoot);
   const openVgdb = new OpenVGDBService(metadataRoot);
   const thumbnails = new LibretroThumbnailsFetcher();
+  const screenScraper = new ScreenScraperService({
+    devId: process.env['SCREENSCRAPER_DEV_ID'] ?? null,
+    devPassword: process.env['SCREENSCRAPER_DEV_PASSWORD'] ?? null,
+    ssid: process.env['SCREENSCRAPER_SSID'] ?? null,
+    sspassword: process.env['SCREENSCRAPER_SSPASSWORD'] ?? null,
+    logger: (msg) => {
+      console.warn(msg);
+    },
+  });
   const metadataService = new MetadataService(
     metadataRoot,
     openVgdb,
     thumbnails,
+    screenScraper,
+    {
+      logger: (msg) => {
+        console.warn(msg);
+      },
+    },
   );
   const imageCache = new ImageCache(path.join(metadataRoot, 'images'));
   const metadataOrchestrator = new MetadataOrchestrator(
@@ -110,6 +207,7 @@ void app.whenReady().then(() => {
     metadataService,
     imageCache,
     openVgdb,
+    resolveScreenScraperSystemId,
     () => manager.getActiveSession(),
   );
 

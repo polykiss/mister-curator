@@ -19,12 +19,20 @@
  *     work at the lower default-user tier.
  *
  * Status state machine:
- *   - `unavailable` — no creds OR a 401/403 was observed in the
- *     session (latched). Subsequent lookups never make a request.
- *   - `rate-limited` — 429 budget exhausted; a cooldown timer
- *     (`rateLimitCooldownMs`, default 5 min) gates the next live
- *     attempt. `getStatus()` lazily flips back to `available` once
- *     the timer elapses.
+ *   - `unavailable` — no creds, OR a 403 was observed (real auth
+ *     failure, latched), OR 426 (software blacklisted, latched).
+ *     Subsequent lookups never make a request.
+ *   - `rate-limited` — 429 retry budget exhausted, OR 401 budget
+ *     exhausted (SS returns 401 when CPU is saturated; the docs
+ *     spell this out — it's "API closed for non-members or inactive
+ *     members," NOT auth failure). `getStatus()` lazily flips back
+ *     to `available` once `rateLimitCooldownMs` (default 5 min)
+ *     elapses.
+ *   - `quota-exceeded` — 430 (daily scrape quota hit) or 431 (too
+ *     many KO scrapes today). Latched for the rest of the session;
+ *     re-checking would just re-poke the quota counter. Distinct
+ *     from `rate-limited` so the renderer can surface different
+ *     copy ("come back tomorrow" vs "wait a few minutes").
  *   - `available` — the default. Requests flow.
  *
  * Rate limit:
@@ -35,11 +43,24 @@
  *     (`TOTAL_429_BUDGET_MS`, 30s) — whichever trips first ends the
  *     attempt by entering the rate-limited cooldown.
  *
- * Retry-by-status:
- *   - 401 / 403       → throw `ScreenScraperAuthError`, latch
- *                       `unavailable`, no retry.
+ * Retry-by-status (PR #16 round 2 spec):
+ *   - 401             → server overloaded — retry like 429 (the docs
+ *                       call this "API closed when CPU > 60%"; it is
+ *                       NOT a real auth failure). After budget
+ *                       exhausted → `rate-limited` cooldown.
+ *   - 403             → real auth failure → throw
+ *                       `ScreenScraperAuthError`, latch `unavailable`.
  *   - 404             → null (legitimate no-match).
+ *   - 426             → software blacklisted — log loudly, latch
+ *                       `unavailable` with a distinct error message
+ *                       (this means MiSTerCurator's softname is
+ *                       blocked; we'd need to identify under a
+ *                       different label).
  *   - 429             → exp. backoff, then `rate-limited`.
+ *   - 430             → daily scrape quota hit → latch
+ *                       `quota-exceeded`.
+ *   - 431             → too many KO (failed) scrapes today → latch
+ *                       `quota-exceeded` with distinct log message.
  *   - 5xx             → exp. backoff, max 2 retries, then null.
  *   - network/timeout → max 1 retry, then null.
  *   - other 4xx       → null.
@@ -56,6 +77,14 @@ const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
 
 const MAX_429_RETRIES = 4;
 const MAX_5XX_RETRIES = 2;
+/**
+ * 401 means "API closed for non-members" (CPU >60% per SS docs), NOT
+ * an auth failure. Retry shape mirrors 5xx (small retry count with
+ * backoff); when exhausted we enter the rate-limited cooldown rather
+ * than nulling silently — the API genuinely needs time before the
+ * next attempt has a chance.
+ */
+const MAX_401_RETRIES = 2;
 const MAX_NETWORK_RETRIES = 1;
 const TOTAL_429_BUDGET_MS = 30_000;
 
@@ -73,7 +102,11 @@ const REGION_ORDER = ['us', 'wor', 'eu', 'jp', 'ss'] as const;
 /** Box-art media types in fallback order. */
 const BOX_ART_TYPES = ['box-2D', 'box-3D', 'wheel'] as const;
 
-export type ScreenScraperStatus = 'available' | 'unavailable' | 'rate-limited';
+export type ScreenScraperStatus =
+  | 'available'
+  | 'unavailable'
+  | 'rate-limited'
+  | 'quota-exceeded';
 
 /**
  * Thrown on HTTP 401/403. Latches the service to `unavailable` for
@@ -151,6 +184,13 @@ export interface ScreenScraperLookupQuery {
    * index. Pass the romFileName-with-extension when available.
    */
   readonly romName?: string;
+  /**
+   * Optional ROM size in bytes — SS's `romtaille`. Round 2 wires
+   * this through from HashService's cached extracted-content size.
+   * For .zip wrappers this is the inner size, NOT the wrapper —
+   * SS expects the actual ROM bytes count.
+   */
+  readonly romSize?: number;
 }
 
 export interface ScreenScraperServiceOptions {
@@ -200,8 +240,20 @@ export class ScreenScraperService {
   private readonly hasCredentials: boolean;
   private readonly logger: (message: string) => void;
 
-  /** Latched true after a 401/403; never returns to false. */
+  /** Latched true after a real auth failure (403); never resets. */
   private authFailed = false;
+  /**
+   * Latched true after HTTP 426 — SS has blacklisted this softname.
+   * No retry strategy can fix it; we'd need a code change to
+   * identify under a different name. Surfaces as `unavailable`.
+   */
+  private blacklisted = false;
+  /**
+   * Latched true after HTTP 430 (daily quota) or 431 (too many KO
+   * scrapes). Persists for the rest of the session — the quota
+   * counter is daily, and re-poking it doesn't help.
+   */
+  private quotaExceeded = false;
   /** Wall-clock at which the rate-limit cooldown ends, or null. */
   private rateLimitedUntil: number | null = null;
   /** Logged the "no creds" notice — suppress repeats. */
@@ -233,11 +285,15 @@ export class ScreenScraperService {
 
   /**
    * Current state. Lazily transitions out of `rate-limited` when the
-   * cooldown window has elapsed.
+   * cooldown window has elapsed. Latched states (`unavailable` due
+   * to authFailed/blacklisted; `quota-exceeded`) never transition
+   * back within a session.
    */
   getStatus(): ScreenScraperStatus {
     if (!this.hasCredentials) return 'unavailable';
     if (this.authFailed) return 'unavailable';
+    if (this.blacklisted) return 'unavailable';
+    if (this.quotaExceeded) return 'quota-exceeded';
     if (this.rateLimitedUntil !== null) {
       if (this.nowImpl() >= this.rateLimitedUntil) {
         this.rateLimitedUntil = null;
@@ -300,6 +356,7 @@ export class ScreenScraperService {
     query: ScreenScraperLookupQuery,
   ): Promise<ScreenScraperGame | null> {
     const url = this.buildUrl(query);
+    let attempts401 = 0;
     let attempts429 = 0;
     let attempts5xx = 0;
     let attemptsNetwork = 0;
@@ -316,29 +373,80 @@ export class ScreenScraperService {
         continue;
       }
 
-      if (res.status === 401 || res.status === 403) {
+      // 401: server-load saturation per SS docs ("API closed for
+      // non-members or inactive members" when CPU > 60%). NOT auth.
+      // Retry with backoff like 5xx; on exhaustion enter the
+      // rate-limited cooldown — the API genuinely needs time before
+      // the next attempt has a chance.
+      if (res.status === 401) {
+        if (attempts401 >= MAX_401_RETRIES) {
+          this.enterRateLimitedCooldown(
+            'API closed (HTTP 401, server-load saturation)',
+          );
+          return null;
+        }
+        await this.sleepImpl(this.backoffMs(attempts401));
+        attempts401 += 1;
+        continue;
+      }
+      // 403: real auth failure. Latch unavailable and surface a
+      // typed error so MetadataService can log + skip SS. No retry.
+      if (res.status === 403) {
         this.authFailed = true;
         this.logger(
-          `[ScreenScraper] auth failed (HTTP ${String(res.status)}); disabling for this session. ` +
+          '[ScreenScraper] auth failed (HTTP 403); disabling for this session. ' +
             'Verify SCREENSCRAPER_DEV_ID / SCREENSCRAPER_DEV_PASSWORD.',
         );
         throw new ScreenScraperAuthError(res.status);
       }
       if (res.status === 404) return null;
+      // 426: software blacklisted. Fatal config — only fixable by
+      // changing the softname identifier upstream. Latch unavailable
+      // with a distinct log line.
+      if (res.status === 426) {
+        this.blacklisted = true;
+        this.logger(
+          '[ScreenScraper] HTTP 426 — this software\'s softname is blacklisted. ' +
+            'Disabling for this session. The MiSTerCurator softname needs to be updated.',
+        );
+        return null;
+      }
       if (res.status === 429) {
         if (attempts429 >= MAX_429_RETRIES) {
-          this.enterRateLimitedCooldown();
+          this.enterRateLimitedCooldown('rate-limit (HTTP 429) budget exhausted');
           return null;
         }
         const backoff = this.backoffMs(attempts429);
         if (total429BackoffMs + backoff > TOTAL_429_BUDGET_MS) {
-          this.enterRateLimitedCooldown();
+          this.enterRateLimitedCooldown(
+            `rate-limit (HTTP 429) aggregate budget (${String(TOTAL_429_BUDGET_MS)}ms) exhausted`,
+          );
           return null;
         }
         await this.sleepImpl(backoff);
         total429BackoffMs += backoff;
         attempts429 += 1;
         continue;
+      }
+      // 430: daily scrape quota hit. 431: too many KO scrapes today
+      // (SS penalises clients that submit lots of unmatchable
+      // queries — keep poking and the timeout extends). Both latch
+      // `quota-exceeded` for the rest of the session; distinct log
+      // messages let ops tell them apart.
+      if (res.status === 430) {
+        this.quotaExceeded = true;
+        this.logger(
+          '[ScreenScraper] HTTP 430 — daily scrape quota exceeded. Disabled until next day.',
+        );
+        return null;
+      }
+      if (res.status === 431) {
+        this.quotaExceeded = true;
+        this.logger(
+          '[ScreenScraper] HTTP 431 — too many ROMs not recognised today. ' +
+            'Disabled to avoid further KO penalty.',
+        );
+        return null;
       }
       if (res.status >= 500) {
         if (attempts5xx >= MAX_5XX_RETRIES) return null;
@@ -358,10 +466,10 @@ export class ScreenScraperService {
     }
   }
 
-  private enterRateLimitedCooldown(): void {
+  private enterRateLimitedCooldown(reason: string): void {
     this.rateLimitedUntil = this.nowImpl() + this.rateLimitCooldownMs;
     this.logger(
-      `[ScreenScraper] rate-limit budget exhausted; cooling down for ${String(this.rateLimitCooldownMs)}ms.`,
+      `[ScreenScraper] ${reason}; cooling down for ${String(this.rateLimitCooldownMs)}ms.`,
     );
   }
 
@@ -392,6 +500,9 @@ export class ScreenScraperService {
     }
     if (query.romName !== undefined && query.romName.length > 0) {
       u.searchParams.set('romnom', query.romName);
+    }
+    if (query.romSize !== undefined && query.romSize > 0) {
+      u.searchParams.set('romtaille', String(query.romSize));
     }
     return u.toString();
   }

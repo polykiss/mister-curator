@@ -53,9 +53,9 @@ import {
   withoutMark,
 } from '@shared/system-files-marks';
 import {
-  buildMd5sumScript,
-  parseMd5sumOutput,
-} from '@shared/md5sum-script';
+  buildHashScript,
+  parseHashOutput,
+} from '@shared/hash-script';
 import {
   buildPrimeScript,
   buildWitnessScript,
@@ -79,8 +79,8 @@ import type {
   BulkCoreResult,
   BulkRomResult,
   CoreVisibilityChange,
+  HashRecord,
   IMisterClient,
-  Md5SumResult,
   MisterSecret,
   PrimeConnectResult,
   RomVisibilityChange,
@@ -1177,26 +1177,27 @@ export class RealMisterClient implements IMisterClient {
   }
 
   /**
-   * PR #15: md5 a batch of paths in one SSH round trip. The script
-   * returns hash + mtime per path; HashService composes these into the
-   * per-host cache and exposes them up to the metadata pipeline.
+   * PR #16 round 2: hash a batch of paths in one SSH round trip.
+   * Returns md5 + sha1 + size + mtime per path. HashService caches
+   * the lot; ScreenScraper takes md5+sha1 in one query for variant
+   * coverage.
    *
-   * Empty input short-circuits — no SSH call. A non-zero exit from the
-   * script throws (the loop tolerates per-file failures internally;
-   * a top-level non-zero typically means fork-exhaustion or a broken
-   * shell, neither of which we should silently paper over).
+   * Empty input short-circuits — no SSH call. A non-zero exit from
+   * the script throws (the loop tolerates per-file failures
+   * internally; a top-level non-zero means fork-exhaustion or a
+   * broken shell, neither worth silently papering over).
    */
-  async md5sumPaths(paths: readonly string[]): Promise<readonly Md5SumResult[]> {
+  async hashPaths(paths: readonly string[]): Promise<readonly HashRecord[]> {
     this.assertConnected();
     if (paths.length === 0) return [];
-    const script = buildMd5sumScript(paths);
+    const script = buildHashScript(paths);
     const result = await this.runSshOp(() => this.ssh.execCommand(script));
     if (result.code !== 0) {
       throw new Error(
-        `Failed to md5sum paths: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+        `Failed to hash paths: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
       );
     }
-    return parseMd5sumOutput(result.stdout);
+    return parseHashOutput(result.stdout);
   }
 
   private async writeFolderClassifications(

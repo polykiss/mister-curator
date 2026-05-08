@@ -231,6 +231,28 @@ describe('ScreenScraperService — request URL', () => {
     expect(url).toMatch(/romnom=Super\+Mario\+World\+%28USA%29\.sfc/);
   });
 
+  it('passes romtaille when romSize is supplied (round 2)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(SAMPLE_JEU));
+    const svc = makeService({ fetch: fetchMock as unknown as typeof fetch });
+    await svc.lookup({ ...SNES_QUERY, romSize: 524288 });
+    const url = fetchMock.mock.calls[0]?.[0] as string;
+    expect(url).toContain('romtaille=524288');
+  });
+
+  it('omits romtaille when romSize is undefined or zero', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(SAMPLE_JEU));
+    const svc = makeService({ fetch: fetchMock as unknown as typeof fetch });
+    await svc.lookup(SNES_QUERY); // no romSize
+    let url = fetchMock.mock.calls[0]?.[0] as string;
+    expect(url).not.toContain('romtaille=');
+
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValue(jsonResponse(SAMPLE_JEU));
+    await svc.lookup({ ...SNES_QUERY, romSize: 0 });
+    url = fetchMock.mock.calls[0]?.[0] as string;
+    expect(url).not.toContain('romtaille=');
+  });
+
   it('URL-encodes credentials with special characters', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(SAMPLE_JEU));
     const svc = makeService({
@@ -439,13 +461,22 @@ describe('ScreenScraperService — auth failure', () => {
     expect(svc.getStatus()).toBe('unavailable');
   });
 
-  it('throws on 401 just like 403', async () => {
+  it('does NOT throw on 401 — round 2 reclassified it as server-load', async () => {
+    // SS docs: 401 means "API closed for non-members or inactive
+    // members" when CPU is saturated (>60%). It's NOT auth failure.
+    // Real auth = 403 only. 401 retries like 5xx, then enters the
+    // rate-limited cooldown.
     const fetchMock = vi.fn().mockResolvedValue(emptyResponse(401));
-    const svc = makeService({ fetch: fetchMock as unknown as typeof fetch });
-    await expect(svc.lookup(SNES_QUERY)).rejects.toBeInstanceOf(
-      ScreenScraperAuthError,
-    );
-    expect(svc.getStatus()).toBe('unavailable');
+    const svc = makeService({
+      fetch: fetchMock as unknown as typeof fetch,
+      rateLimitCooldownMs: 1_000,
+    });
+    const result = await svc.lookup(SNES_QUERY);
+    expect(result).toBeNull();
+    // 401 doesn't latch unavailable.
+    expect(svc.getStatus()).not.toBe('unavailable');
+    // It does enter rate-limited so the next call short-circuits.
+    expect(svc.getStatus()).toBe('rate-limited');
   });
 
   it('AuthError carries the HTTP status', async () => {
@@ -581,6 +612,157 @@ describe('ScreenScraperService — rate limiting', () => {
     const svc = makeService({ fetch: fetchMock as unknown as typeof fetch });
     expect((await svc.lookup(SNES_QUERY))?.name).toBe('Super Mario World');
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  describe('round 2 — 401 retry-then-cooldown', () => {
+    it('401 retries with backoff (max 2), then 200 returns the response', async () => {
+      const sleeps: number[] = [];
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(emptyResponse(401))
+        .mockResolvedValueOnce(emptyResponse(401))
+        .mockResolvedValueOnce(jsonResponse(SAMPLE_JEU));
+      const svc = makeService({
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: (ms) => {
+          sleeps.push(ms);
+          return Promise.resolve();
+        },
+      });
+      const game = await svc.lookup(SNES_QUERY);
+      expect(game?.name).toBe('Super Mario World');
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      // Same exp ladder as 5xx: 1s, 2s.
+      expect(sleeps).toEqual([1000, 2000]);
+      expect(svc.getStatus()).toBe('available');
+    });
+
+    it('401 budget exhausted enters rate-limited cooldown (not unavailable)', async () => {
+      let now = 1_000_000;
+      const fetchMock = vi.fn().mockResolvedValue(emptyResponse(401));
+      const svc = makeService({
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: () => Promise.resolve(),
+        now: () => now,
+        rateLimitCooldownMs: 5_000,
+      });
+      expect(await svc.lookup(SNES_QUERY)).toBeNull();
+      expect(svc.getStatus()).toBe('rate-limited');
+      // Crucially, NOT permanently unavailable — 401 is server-load,
+      // not auth failure.
+      expect(svc.getStatus()).not.toBe('unavailable');
+
+      // Cooldown elapses → available again.
+      now += 6_000;
+      expect(svc.getStatus()).toBe('available');
+    });
+  });
+
+  describe('round 2 — HTTP 426 (blacklisted softname)', () => {
+    it('latches unavailable with a distinct log line, no retry', async () => {
+      const log = vi.fn();
+      const sleeps: number[] = [];
+      const fetchMock = vi.fn().mockResolvedValue(emptyResponse(426));
+      const svc = makeService({
+        fetch: fetchMock as unknown as typeof fetch,
+        logger: log,
+        sleep: (ms) => {
+          sleeps.push(ms);
+          return Promise.resolve();
+        },
+      });
+      expect(await svc.lookup(SNES_QUERY)).toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(sleeps).toEqual([]);
+      expect(svc.getStatus()).toBe('unavailable');
+      expect(log).toHaveBeenCalledWith(
+        expect.stringMatching(/HTTP 426/),
+      );
+      expect(log).toHaveBeenCalledWith(
+        expect.stringMatching(/blacklisted/i),
+      );
+    });
+
+    it('does NOT throw — 426 isn\'t auth-failure-shaped', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(emptyResponse(426));
+      const svc = makeService({ fetch: fetchMock as unknown as typeof fetch });
+      // No throw — caller gets null and status latches unavailable.
+      await expect(svc.lookup(SNES_QUERY)).resolves.toBeNull();
+    });
+
+    it('subsequent lookups after 426 short-circuit without fetching', async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(emptyResponse(426))
+        .mockResolvedValueOnce(jsonResponse(SAMPLE_JEU));
+      const svc = makeService({ fetch: fetchMock as unknown as typeof fetch });
+      await svc.lookup(SNES_QUERY);
+      expect(await svc.lookup(SNES_QUERY)).toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('round 2 — HTTP 430/431 (quota exceeded)', () => {
+    it('430 latches quota-exceeded with the daily-quota message', async () => {
+      const log = vi.fn();
+      const fetchMock = vi.fn().mockResolvedValue(emptyResponse(430));
+      const svc = makeService({
+        fetch: fetchMock as unknown as typeof fetch,
+        logger: log,
+      });
+      expect(await svc.lookup(SNES_QUERY)).toBeNull();
+      expect(svc.getStatus()).toBe('quota-exceeded');
+      expect(log).toHaveBeenCalledWith(
+        expect.stringMatching(/HTTP 430/),
+      );
+      expect(log).toHaveBeenCalledWith(
+        expect.stringMatching(/daily.*quota/i),
+      );
+    });
+
+    it('431 latches quota-exceeded with the KO-scrapes message', async () => {
+      const log = vi.fn();
+      const fetchMock = vi.fn().mockResolvedValue(emptyResponse(431));
+      const svc = makeService({
+        fetch: fetchMock as unknown as typeof fetch,
+        logger: log,
+      });
+      expect(await svc.lookup(SNES_QUERY)).toBeNull();
+      expect(svc.getStatus()).toBe('quota-exceeded');
+      expect(log).toHaveBeenCalledWith(
+        expect.stringMatching(/HTTP 431/),
+      );
+      expect(log).toHaveBeenCalledWith(
+        expect.stringMatching(/not recognised/i),
+      );
+    });
+
+    it('quota-exceeded is distinct from rate-limited (no cooldown elapse)', async () => {
+      let now = 1_000_000;
+      const fetchMock = vi.fn().mockResolvedValue(emptyResponse(430));
+      const svc = makeService({
+        fetch: fetchMock as unknown as typeof fetch,
+        now: () => now,
+        rateLimitCooldownMs: 1_000,
+      });
+      expect(await svc.lookup(SNES_QUERY)).toBeNull();
+      expect(svc.getStatus()).toBe('quota-exceeded');
+      // Even far in the future, quota-exceeded does NOT flip back to
+      // available — daily quotas are session-permanent.
+      now += 24 * 60 * 60 * 1000;
+      expect(svc.getStatus()).toBe('quota-exceeded');
+    });
+
+    it('subsequent lookups during quota-exceeded short-circuit', async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(emptyResponse(430))
+        .mockResolvedValueOnce(jsonResponse(SAMPLE_JEU));
+      const svc = makeService({ fetch: fetchMock as unknown as typeof fetch });
+      await svc.lookup(SNES_QUERY);
+      expect(await svc.lookup(SNES_QUERY)).toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

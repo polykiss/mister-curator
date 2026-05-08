@@ -38,6 +38,7 @@ import { ImageCache } from '@app/main/metadata/image-cache';
 import { LibretroThumbnailsFetcher } from '@app/main/metadata/libretro-thumbnails';
 import { MetadataService } from '@app/main/metadata/metadata-service';
 import { OpenVGDBService } from '@app/main/metadata/openvgdb-service';
+import { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
 import { MisterConnectionError } from '@shared/types';
 import type { MisterProfile, Rom } from '@shared/types';
 import type { IMisterClient, MisterSecret } from '@shared/mister-client';
@@ -144,6 +145,67 @@ async function findTargetRoms(client: IMisterClient): Promise<PickedRom[]> {
   return picked;
 }
 
+/**
+ * Mirror of `app/main/index.ts`'s SS system-id map — duplicated
+ * inline so the verification script can resolve `systemeid` without
+ * spinning up the full orchestrator. Add entries here when you add
+ * them to the production map.
+ */
+const SS_SYSTEM_ID_BY_CORE: ReadonlyMap<string, number> = new Map([
+  ['NES', 3],
+  ['SNES', 4],
+  ['GAMEBOY', 9],
+  ['GAMEBOYCOLOR', 10],
+  ['GAMEBOYADVANCE', 12],
+  ['GBA', 12],
+  ['VIRTUALBOY', 11],
+  ['NINTENDO64', 14],
+  ['N64', 14],
+  ['Genesis', 1],
+  ['MegaDrive', 1],
+  ['SMS', 2],
+  ['MasterSystem', 2],
+  ['GameGear', 21],
+  ['Sega32X', 19],
+  ['SegaCD', 20],
+  ['MegaCD', 20],
+  ['Saturn', 22],
+  ['SG1000', 109],
+  ['Atari2600', 26],
+  ['Atari5200', 40],
+  ['Atari7800', 41],
+  ['AtariLynx', 28],
+  ['Lynx', 28],
+  ['TurboGrafx16', 31],
+  ['TGFX16', 31],
+  ['PCEngine', 31],
+  ['TGFX16-CD', 114],
+  ['PCEngineCD', 114],
+  ['NEOGEO', 142],
+  ['NeoGeo', 142],
+  ['NeoGeoPocket', 25],
+  ['NEOGEOPocket', 25],
+  ['NeoGeoPocketColor', 82],
+  ['PSX', 57],
+  ['PlayStation', 57],
+  ['ColecoVision', 48],
+  ['Coleco', 48],
+  ['Intellivision', 115],
+  ['Vectrex', 102],
+  ['WonderSwan', 45],
+  ['WonderSwanColor', 46],
+  ['Odyssey2', 104],
+]);
+
+function ssSystemIdForCore(coreId: string): number | null {
+  return SS_SYSTEM_ID_BY_CORE.get(coreId) ?? null;
+}
+
+function basename(path: string): string {
+  const slash = path.lastIndexOf('/');
+  return slash < 0 ? path : path.slice(slash + 1);
+}
+
 interface ArtProbe {
   readonly status: number | null; // null on network failure
   readonly bytes: number | null; // from Content-Length, when present
@@ -204,11 +266,40 @@ async function main(): Promise<void> {
   };
   const secret: MisterSecret = { type: 'password', password };
 
+  const ssDevId = process.env['SCREENSCRAPER_DEV_ID'] ?? null;
+  const ssDevPw = process.env['SCREENSCRAPER_DEV_PASSWORD'] ?? null;
+  const ssCredsConfigured =
+    ssDevId !== null &&
+    ssDevId.length > 0 &&
+    ssDevPw !== null &&
+    ssDevPw.length > 0;
+  if (ssCredsConfigured) {
+    console.log('• ScreenScraper: dev credentials configured (primary source)');
+  } else {
+    console.log(
+      '• ScreenScraper: no creds — falling back to OpenVGDB+libretro only',
+    );
+  }
+  console.log('');
+
   const client = createMisterClient('real');
   const hashService = new HashService(cacheDir);
   const openVgdb = new OpenVGDBService(cacheDir);
   const thumbnails = new LibretroThumbnailsFetcher();
-  const metadataService = new MetadataService(cacheDir, openVgdb, thumbnails);
+  const screenScraper = new ScreenScraperService({
+    devId: ssDevId,
+    devPassword: ssDevPw,
+    ssid: process.env['SCREENSCRAPER_SSID'] ?? null,
+    sspassword: process.env['SCREENSCRAPER_SSPASSWORD'] ?? null,
+    logger: (m) => console.warn(m),
+  });
+  const metadataService = new MetadataService(
+    cacheDir,
+    openVgdb,
+    thumbnails,
+    screenScraper,
+    { logger: (m) => console.warn(m) },
+  );
   const imageCache = new ImageCache(join(cacheDir, 'images'));
 
   const warnings: string[] = [];
@@ -262,7 +353,9 @@ async function main(): Promise<void> {
     }
 
     let hashed = 0;
-    let matched = 0;
+    let matchedSS = 0;
+    let matchedOpenVgdb = 0;
+    let unmatched = 0;
     let boxArtVerified = 0;
     let boxArtDownloaded = 0;
 
@@ -270,20 +363,42 @@ async function main(): Promise<void> {
       console.log(`\n— ${rom.filename}`);
       void keyword;
 
-      // Hash.
+      // Hash (round 2: md5 + sha1 + size).
       const hashesT = await timed(() =>
         hashService.getHash(client, host, [rom.path]),
       );
-      const hash = hashesT.value.get(rom.path);
-      if (hash === undefined) {
-        console.log(`  ✗ md5 returned no entry (file not regular?)`);
+      const hashEntry = hashesT.value.get(rom.path);
+      if (hashEntry === undefined) {
+        console.log(`  ✗ hash returned no entry (file not regular?)`);
         continue;
       }
       hashed += 1;
-      console.log(`  md5         ${hash}  (${Math.round(hashesT.elapsedMs)}ms)`);
+      console.log(
+        `  md5         ${hashEntry.md5}  (${Math.round(hashesT.elapsedMs)}ms)`,
+      );
+      console.log(`  sha1        ${hashEntry.sha1}`);
+      console.log(`  size        ${String(hashEntry.size)} bytes`);
 
-      // Metadata lookup (cold).
-      const coldT = await timed(() => metadataService.getMetadata(hash));
+      // Build the SS hint from the cached hash entry + a system-id
+      // lookup. The orchestrator does this in production; the test
+      // script duplicates the resolver inline so the same code path
+      // exercises end-to-end without spinning up the orchestrator.
+      const systemId = ssSystemIdForCore(rom.coreId);
+      const ssHint =
+        systemId === null
+          ? undefined
+          : {
+              systemId,
+              md5: hashEntry.md5,
+              sha1: hashEntry.sha1,
+              romName: basename(rom.path),
+              romSize: hashEntry.size,
+            };
+
+      // Metadata lookup (cold). MetadataService takes (hash, hint, ssHint).
+      const coldT = await timed(() =>
+        metadataService.getMetadata(hashEntry.md5, {}, ssHint),
+      );
       const meta = coldT.value;
       if (coldT.elapsedMs > PERF_BUDGETS.metadataColdMs) {
         warnings.push(
@@ -293,21 +408,47 @@ async function main(): Promise<void> {
         );
       }
       if (meta === null || meta.source === 'none') {
-        console.log(`  ✗ no OpenVGDB match  (${Math.round(coldT.elapsedMs)}ms)`);
+        unmatched += 1;
+        console.log(`  ✗ no match  (${Math.round(coldT.elapsedMs)}ms)`);
         continue;
       }
-      matched += 1;
+      if (meta.source === 'screenscraper') {
+        matchedSS += 1;
+      } else {
+        matchedOpenVgdb += 1;
+      }
       console.log(
         `  source      ${meta.source}  (${Math.round(coldT.elapsedMs)}ms cold)`,
       );
       console.log(`  name        ${meta.name}`);
-      console.log(`  system      ${meta.system}`);
+      console.log(`  system      ${meta.system === '' ? '—' : meta.system}`);
       console.log(`  year        ${meta.year === null ? '—' : String(meta.year)}`);
       console.log(`  genre       ${meta.genre ?? '—'}`);
       console.log(`  publisher   ${meta.publisher ?? '—'}`);
+      // SS-only fields surface only when source is 'screenscraper'.
+      if (meta.source === 'screenscraper') {
+        if (meta.developer !== null) {
+          console.log(`  developer   ${meta.developer}`);
+        }
+        if (meta.players !== null) {
+          console.log(`  players     ${meta.players}`);
+        }
+        if (meta.rating !== null) {
+          console.log(`  rating      ${String(meta.rating)}/10`);
+        }
+        if (meta.description !== null) {
+          const blurb =
+            meta.description.length > 80
+              ? meta.description.slice(0, 80) + '…'
+              : meta.description;
+          console.log(`  description ${blurb}`);
+        }
+      }
 
       // Warm metadata fetch should be a cache hit.
-      const warmT = await timed(() => metadataService.getMetadata(hash));
+      const warmT = await timed(() =>
+        metadataService.getMetadata(hashEntry.md5, {}, ssHint),
+      );
       if (warmT.elapsedMs > PERF_BUDGETS.metadataWarmMs) {
         warnings.push(
           `metadata-warm over budget for ${rom.filename}: ${Math.round(
@@ -372,8 +513,11 @@ async function main(): Promise<void> {
     }
 
     console.log(
-      `\n✓ Summary: ${String(hashed)} hashed · ${String(matched)} matched in OpenVGDB · ` +
-        `${String(boxArtVerified)} box art URLs valid · ${String(boxArtDownloaded)} box art downloaded`,
+      `\n✓ Summary: ${String(hashed)} hashed · ` +
+        `${String(matchedSS)} via SS · ${String(matchedOpenVgdb)} via OpenVGDB · ` +
+        `${String(unmatched)} unmatched · ` +
+        `${String(boxArtVerified)} box art URLs valid · ` +
+        `${String(boxArtDownloaded)} box art downloaded`,
     );
 
     if (warnings.length > 0) {

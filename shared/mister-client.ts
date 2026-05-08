@@ -280,8 +280,9 @@ export interface IMisterClient {
   statWitnesses(paths: readonly string[]): Promise<WitnessMtimes>;
 
   /**
-   * Compute md5sums for a batch of absolute file paths in one SSH
-   * round-trip. PR #15: feeds the metadata pipeline (HashService).
+   * Compute md5 + sha1 + size for a batch of absolute file paths in
+   * one SSH round-trip. PR #16 round 2 expanded this from md5-only
+   * to multi-hash so ScreenScraper can match on either algorithm.
    *
    * Implementations should cap their internal batch size at ~100 paths
    * to stay safely under argv limits across busybox shells; the caller
@@ -291,14 +292,28 @@ export interface IMisterClient {
    * Paths that don't exist or aren't regular files are silently
    * dropped from the result (no entry returned). The caller decides
    * whether a missing path is a problem.
+   *
+   * `.zip`-wrapped paths get the inner content hashed (via `unzip -p`
+   * on-device) — the zip wrapper bytes never reach a hash. mtime is
+   * captured against the wrapper, not the inner file.
    */
-  md5sumPaths(paths: readonly string[]): Promise<readonly Md5SumResult[]>;
+  hashPaths(paths: readonly string[]): Promise<readonly HashRecord[]>;
 }
 
-/** One per-file result from `md5sumPaths`. mtime is epoch seconds. */
-export interface Md5SumResult {
+/**
+ * One per-file result from `hashPaths`.
+ *   - md5: 32-char lowercase hex
+ *   - sha1: 40-char lowercase hex
+ *   - size: bytes of the (extracted) ROM content; for .zip wrappers
+ *     this is the inner-file size, for direct files the wrapper size
+ *   - mtime: epoch seconds of the wrapper file (cache invalidation
+ *     key — what the user actually touches)
+ */
+export interface HashRecord {
   readonly path: string;
-  readonly hash: string;
+  readonly md5: string;
+  readonly sha1: string;
+  readonly size: number;
   readonly mtime: number;
 }
 
