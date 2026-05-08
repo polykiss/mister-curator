@@ -156,8 +156,9 @@ export class MetadataService {
     hash: string,
     ssHint: ScreenScraperHint | undefined,
   ): Promise<RomMetadata | null> {
+    const ssAvailable = this.canQueryScreenScraper(ssHint);
     const cached = await this.readCache(hash);
-    if (cached !== null && !this.isStaleSentinel(cached)) {
+    if (cached !== null && !this.shouldRefetchCached(cached, ssAvailable)) {
       return cached.source === 'none' ? null : cached;
     }
 
@@ -325,6 +326,54 @@ export class MetadataService {
     const fetchedAt = Date.parse(meta.fetchedAt);
     if (!Number.isFinite(fetchedAt)) return true;
     return this.now() - fetchedAt > this.noMatchTtlMs;
+  }
+
+  /**
+   * True iff a ScreenScraper query would actually run right now —
+   * service exists, status is `available`, AND the caller supplied
+   * the hint data we need. No hint = no cred-bearing data to send,
+   * even if the service is healthy.
+   */
+  private canQueryScreenScraper(
+    ssHint: ScreenScraperHint | undefined,
+  ): boolean {
+    if (this.screenScraper === null) return false;
+    if (ssHint === undefined) return false;
+    return this.screenScraper.getStatus() === 'available';
+  }
+
+  /**
+   * Round 3: a cached record from a lower-priority source should be
+   * treated as a miss when a higher-priority source is currently
+   * reachable. Priority: `'screenscraper' > 'openvgdb' > 'none'`.
+   *
+   * The four cases:
+   *   - cached SS  → always a hit (highest priority — never downgrade
+   *     to OpenVGDB even when SS becomes unavailable; we'd rather
+   *     serve stable SS data than degrade with later libretro art).
+   *   - cached OpenVGDB → re-fetch when SS is currently queryable,
+   *     because we'd prefer SS's richer data on this call.
+   *   - cached `'none'` sentinel → re-fetch when stale (existing 30-
+   *     day TTL) OR when SS just became queryable (lets the user's
+   *     newly-configured creds reach a previously-unmatched ROM
+   *     without manually clearing the cache).
+   *   - cached SS but service now unavailable → still hit (the
+   *     screenscraper-first arm above guards on availability before
+   *     issuing a request; with no SS available we'd fall through to
+   *     OpenVGDB anyway, and degrading from SS data to OpenVGDB
+   *     data on every read is worse than serving the SS data we have).
+   */
+  private shouldRefetchCached(
+    cached: RomMetadata,
+    ssAvailable: boolean,
+  ): boolean {
+    if (cached.source === 'screenscraper') return false;
+    if (cached.source === 'openvgdb') {
+      return ssAvailable;
+    }
+    // cached.source === 'none' (sentinel)
+    if (this.isStaleSentinel(cached)) return true;
+    return ssAvailable;
   }
 
   private async readCache(hash: string): Promise<RomMetadata | null> {

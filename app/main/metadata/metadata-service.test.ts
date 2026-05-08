@@ -625,4 +625,266 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       expect(result?.releaseDate).toBe('1991-08-13');
     });
   });
+
+  describe('round 3 — cache priority on source upgrade', () => {
+    /** Stub helpers — same shape as the round-2 SS describe block. */
+    function makeSS(opts: {
+      status?: 'available' | 'unavailable' | 'rate-limited' | 'quota-exceeded';
+      result?: ScreenScraperGame | null;
+    } = {}): {
+      svc: ScreenScraperService;
+      lookupCalls: ScreenScraperLookupQuery[];
+    } {
+      const lookupCalls: ScreenScraperLookupQuery[] = [];
+      const stub = {
+        getStatus: vi.fn(() => opts.status ?? 'available'),
+        lookup: vi.fn(async (q: ScreenScraperLookupQuery) => {
+          lookupCalls.push(q);
+          return opts.result ?? null;
+        }),
+      } as unknown as ScreenScraperService;
+      return { svc: stub, lookupCalls };
+    }
+
+    function buildSsHit(
+      overrides: Partial<ScreenScraperGame> = {},
+    ): ScreenScraperGame {
+      return {
+        id: 1234,
+        name: 'Super Mario World',
+        description: null,
+        developer: null,
+        publisher: null,
+        genres: [],
+        releaseDate: null,
+        rating: null,
+        players: null,
+        boxArtUrl: null,
+        extra: {
+          box3DUrl: null,
+          marqueeUrl: null,
+          titleScreenUrl: null,
+          snapUrl: null,
+          clearLogoUrl: null,
+          screenshots: [],
+        },
+        ...overrides,
+      };
+    }
+
+    const SS_HINT = {
+      systemId: 4,
+      md5: HASH,
+      sha1: 'b'.repeat(40),
+      crc32: undefined,
+      romName: 'Super Mario World (USA).sfc',
+      romSize: 524288,
+    };
+
+    /** Pre-populate a cache file with the given record. */
+    async function seedCache(meta: RomMetadata): Promise<void> {
+      const dirHash = HASH.slice(0, 2);
+      await fs.mkdir(join(dir, 'by-hash', dirHash), { recursive: true });
+      await fs.writeFile(
+        join(dir, 'by-hash', dirHash, `${HASH}.json`),
+        JSON.stringify(meta),
+      );
+    }
+
+    function ssCachedMeta(): RomMetadata {
+      return {
+        version: 4,
+        hash: HASH,
+        name: 'Super Mario World (cached SS)',
+        system: 'Super Nintendo Entertainment System',
+        year: 1991,
+        publisher: 'Nintendo',
+        developer: 'Nintendo EAD',
+        genre: 'Platform',
+        description: null,
+        players: '1',
+        rating: 9.5,
+        releaseDate: '1991-08-13',
+        boxArtUrl: 'https://ss-cdn/box.png',
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        source: 'screenscraper',
+        fetchedAt: new Date().toISOString(),
+      };
+    }
+
+    function openVgdbCachedMeta(): RomMetadata {
+      return {
+        version: 4,
+        hash: HASH,
+        name: 'Super Mario World (cached OpenVGDB)',
+        system: 'Super Nintendo Entertainment System',
+        year: 1991,
+        publisher: 'Nintendo',
+        developer: 'Nintendo EAD',
+        genre: 'Platform',
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: 'https://thumbnails.libretro/box.png',
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        source: 'openvgdb',
+        fetchedAt: new Date().toISOString(),
+      };
+    }
+
+    function noneCachedMeta(fetchedAt = new Date().toISOString()): RomMetadata {
+      return {
+        version: 4,
+        hash: HASH,
+        name: '(no match)',
+        system: '',
+        year: null,
+        publisher: null,
+        developer: null,
+        genre: null,
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: null,
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        source: 'none',
+        fetchedAt,
+      };
+    }
+
+    it('cached as openvgdb, SS becomes available → re-fetches and stores as screenscraper', async () => {
+      await seedCache(openVgdbCachedMeta());
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({
+        result: buildSsHit({ name: 'Super Mario World (fresh SS)' }),
+      });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result?.source).toBe('screenscraper');
+      expect(result?.name).toBe('Super Mario World (fresh SS)');
+      expect(ss.lookupCalls).toHaveLength(1);
+      // The on-disk record has been replaced.
+      const onDisk = JSON.parse(
+        await fs.readFile(
+          join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`),
+          'utf-8',
+        ),
+      ) as RomMetadata;
+      expect(onDisk.source).toBe('screenscraper');
+      expect(onDisk.name).toBe('Super Mario World (fresh SS)');
+    });
+
+    it('cached as screenscraper, SS still available → cache hit, no re-fetch', async () => {
+      await seedCache(ssCachedMeta());
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ result: buildSsHit() });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result?.source).toBe('screenscraper');
+      expect(result?.name).toBe('Super Mario World (cached SS)');
+      expect(ss.lookupCalls).toHaveLength(0);
+    });
+
+    it('cached as screenscraper, SS now unavailable → cache hit (no downgrade to OpenVGDB)', async () => {
+      // User had SS configured before; now removed creds. Cached
+      // SS-sourced data should keep serving — we'd rather show stable
+      // SS data than degrade to a fresh OpenVGDB record on every read.
+      await seedCache(ssCachedMeta());
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ status: 'unavailable' });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result?.source).toBe('screenscraper');
+      expect(result?.name).toBe('Super Mario World (cached SS)');
+      expect(ss.lookupCalls).toHaveLength(0);
+      expect(m.dbCalls).toHaveLength(0);
+    });
+
+    it('cached as none (sentinel), SS becomes available → re-fetches even within TTL', async () => {
+      // Sentinel was fresh — TTL hasn't elapsed — but a higher-priority
+      // source becoming available is its own re-fetch trigger. Lets a
+      // user who configures SS creds AFTER a cold OpenVGDB run pick up
+      // matches without manually clearing the cache.
+      await seedCache(noneCachedMeta()); // freshly written
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ result: buildSsHit() });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result?.source).toBe('screenscraper');
+      expect(ss.lookupCalls).toHaveLength(1);
+    });
+
+    it('cached as none (sentinel), SS still unavailable → null without re-fetch (existing TTL behavior)', async () => {
+      await seedCache(noneCachedMeta());
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ status: 'unavailable' });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result).toBeNull();
+      expect(ss.lookupCalls).toHaveLength(0);
+      expect(m.dbCalls).toHaveLength(0);
+    });
+
+    it('cached as openvgdb, no ssHint supplied → cache hit (orchestrator can\'t upgrade)', async () => {
+      // SS may be configured but we can't query without the
+      // hash + systemId payload. Don't pretend we can upgrade.
+      await seedCache(openVgdbCachedMeta());
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ result: buildSsHit() });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      const result = await svc.getMetadata(HASH, {} /* no ssHint */);
+      expect(result?.source).toBe('openvgdb');
+      expect(result?.name).toBe('Super Mario World (cached OpenVGDB)');
+      expect(ss.lookupCalls).toHaveLength(0);
+    });
+
+    it('cached as openvgdb, screenScraper=null on construction → cache hit (no upgrade path)', async () => {
+      await seedCache(openVgdbCachedMeta());
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        null,
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result?.source).toBe('openvgdb');
+      expect(result?.name).toBe('Super Mario World (cached OpenVGDB)');
+    });
+  });
 });
