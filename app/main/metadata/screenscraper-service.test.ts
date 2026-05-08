@@ -47,6 +47,11 @@ const SAMPLE_JEU = {
   response: {
     jeu: {
       id: 1234,
+      systeme: {
+        id: 4,
+        nom: 'Super Nintendo Entertainment System',
+        parentid: 0,
+      },
       noms: [
         { region: 'eu', text: 'Super Mario World (EU)' },
         { region: 'us', text: 'Super Mario World' },
@@ -272,6 +277,7 @@ describe('ScreenScraperService — response mapping', () => {
     expect(game).not.toBeNull();
     expect(game?.id).toBe(1234);
     expect(game?.name).toBe('Super Mario World');
+    expect(game?.system).toBe('Super Nintendo Entertainment System');
     expect(game?.developer).toBe('Nintendo EAD');
     expect(game?.publisher).toBe('Nintendo');
     expect(game?.players).toBe('1-2');
@@ -296,6 +302,36 @@ describe('ScreenScraperService — response mapping', () => {
     expect(parseScreenScraperResponse({ response: {} })).toBeNull();
     expect(parseScreenScraperResponse({})).toBeNull();
     expect(parseScreenScraperResponse(null)).toBeNull();
+  });
+
+  it('reads system from response.jeu.systeme.nom (round 4)', () => {
+    const game = parseScreenScraperResponse({
+      response: {
+        jeu: {
+          id: 1,
+          systeme: { id: 1, nom: 'Sega Mega Drive', parentid: 0 },
+          noms: [{ region: 'us', text: 'Sonic 2' }],
+        },
+      },
+    });
+    expect(game?.system).toBe('Sega Mega Drive');
+  });
+
+  it('returns system=null when systeme.nom is missing or empty', () => {
+    const noSysteme = parseScreenScraperResponse({
+      response: { jeu: { id: 1, noms: [{ region: 'us', text: 'X' }] } },
+    });
+    expect(noSysteme?.system).toBeNull();
+    const emptyNom = parseScreenScraperResponse({
+      response: {
+        jeu: {
+          id: 1,
+          systeme: { id: 1, nom: '', parentid: 0 },
+          noms: [{ region: 'us', text: 'X' }],
+        },
+      },
+    });
+    expect(emptyNom?.system).toBeNull();
   });
 
   it('returns null when jeu has no usable name in any region', () => {

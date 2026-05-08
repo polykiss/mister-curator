@@ -168,6 +168,13 @@ export interface ScreenScraperGame {
   readonly id: number;
   /** Region-preferred name. Falls back through REGION_ORDER. */
   readonly name: string;
+  /**
+   * Canonical SS system name (`response.jeu.systeme.nom`). Round 4
+   * sources the system label from the API response itself rather than
+   * a coreId→name table maintained in lockstep with SS — the response
+   * is the source of truth. Null when the response omits the field.
+   */
+  readonly system: string | null;
   readonly description: string | null;
   readonly developer: string | null;
   readonly publisher: string | null;
@@ -608,9 +615,11 @@ export function parseScreenScraperResponse(
   if (name === null) return null;
 
   const medias = j.medias;
+  const system = readSystemName(j.systeme);
   return {
     id,
     name,
+    system,
     description: pickSynopsis(j.synopsis),
     developer: readNestedText(j.developpeur),
     publisher: readNestedText(j.editeur),
@@ -681,6 +690,17 @@ function readNestedText(value: unknown): string | null {
   if (value === null || typeof value !== 'object') return null;
   const text = (value as Record<string, unknown>).text;
   return typeof text === 'string' && text.length > 0 ? text : null;
+}
+
+/**
+ * Read `response.jeu.systeme.nom` — SS's canonical system label. The
+ * field is a plain string (not a regional array like `noms`); shape
+ * is `{ id, nom, parentid }`. Null when missing or non-string.
+ */
+function readSystemName(value: unknown): string | null {
+  if (value === null || typeof value !== 'object') return null;
+  const nom = (value as Record<string, unknown>).nom;
+  return typeof nom === 'string' && nom.length > 0 ? nom : null;
 }
 
 function pickAllGenres(value: unknown): readonly string[] {

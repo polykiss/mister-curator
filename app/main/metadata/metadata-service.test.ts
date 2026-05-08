@@ -404,6 +404,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       return {
         id: 1234,
         name: 'Super Mario World',
+        system: 'Super Nintendo Entertainment System',
         description: 'Mario rescues the princess.',
         developer: 'Nintendo EAD',
         publisher: 'Nintendo',
@@ -426,7 +427,6 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
 
     const SS_HINT = {
       systemId: 4,
-      systemName: 'Super Nintendo Entertainment System',
       md5: HASH,
       sha1: 'b'.repeat(40),
       crc32: 'deadbeef',
@@ -626,9 +626,11 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       expect(result?.releaseDate).toBe('1991-08-13');
     });
 
-    it('SS-sourced metadata populates system from the hint (round 3)', async () => {
+    it('SS-sourced metadata populates system from the SS response (round 4)', async () => {
       const m = makeMocks({ dbReturns: null });
-      const ss = makeSS({ result: buildSsHit() });
+      const ss = makeSS({
+        result: buildSsHit({ system: 'Sega Mega Drive' }),
+      });
       const svc = new MetadataService(
         dir,
         m.openVgdb,
@@ -637,20 +639,21 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       );
       const result = await svc.getMetadata(HASH, {}, SS_HINT);
       expect(result?.source).toBe('screenscraper');
-      expect(result?.system).toBe('Super Nintendo Entertainment System');
+      // Comes straight from `game.system` (parsed from
+      // `response.jeu.systeme.nom`) — independent of any local map.
+      expect(result?.system).toBe('Sega Mega Drive');
     });
 
-    it('SS-sourced metadata falls back to empty system when hint omits systemName', async () => {
+    it('SS-sourced metadata falls back to empty system when SS response omits systeme.nom', async () => {
       const m = makeMocks({ dbReturns: null });
-      const ss = makeSS({ result: buildSsHit() });
+      const ss = makeSS({ result: buildSsHit({ system: null }) });
       const svc = new MetadataService(
         dir,
         m.openVgdb,
         m.thumbnails,
         ss.svc,
       );
-      const hintNoSystemName = { ...SS_HINT, systemName: undefined };
-      const result = await svc.getMetadata(HASH, {}, hintNoSystemName);
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
       expect(result?.source).toBe('screenscraper');
       expect(result?.system).toBe('');
     });
@@ -682,6 +685,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       return {
         id: 1234,
         name: 'Super Mario World',
+        system: 'Super Nintendo Entertainment System',
         description: null,
         developer: null,
         publisher: null,
@@ -704,7 +708,6 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
 
     const SS_HINT = {
       systemId: 4,
-      systemName: 'Super Nintendo Entertainment System',
       md5: HASH,
       sha1: 'b'.repeat(40),
       crc32: undefined,

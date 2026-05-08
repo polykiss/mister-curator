@@ -14,7 +14,7 @@ import { ImageCache } from '@app/main/metadata/image-cache';
 import { LibretroThumbnailsFetcher } from '@app/main/metadata/libretro-thumbnails';
 import {
   MetadataOrchestrator,
-  type SystemResolver,
+  type SystemIdResolver,
 } from '@app/main/metadata/metadata-orchestrator';
 import { MetadataService } from '@app/main/metadata/metadata-service';
 import { OpenVGDBService } from '@app/main/metadata/openvgdb-service';
@@ -27,84 +27,72 @@ function resolveClientMode(): 'real' | 'fake' {
 
 /**
  * Map a MiSTer core id (the directory name under `/media/fat/games/`)
- * to two facts the metadata pipeline needs:
- *   - `ssSystemId`: ScreenScraper's `systemeid` for hash-search.
- *   - `systemName`: the OpenVGDB-shaped display name for
- *     `RomMetadata.system` — kept identical to the strings OpenVGDB
- *     returns so SS-sourced and OpenVGDB-sourced records share a
- *     vocabulary the renderer can group on.
+ * to ScreenScraper's `systemeid`. The id is required for SS's jeuInfos
+ * hash-search; the canonical system *name* comes from the SS response
+ * (`response.jeu.systeme.nom`), so this map carries the id only.
  *
- * SS ids verified against the SS systemes list at
- * `https://api.screenscraper.fr/api2/systemesListe.php`. The set
- * below covers every cartridge core in the live test library plus a
- * reasonable broader set; missing entries return null and SS lookup
- * is bypassed for those cores (the OpenVGDB+libretro path still runs).
- *
- * System names mirror the pre-mapping keys in
- * `app/main/metadata/libretro-thumbnails.ts` so the same string flows
- * through both paths — keep the two in sync when adding cores.
+ * SS ids verified against `systemesListe.php`. The set below covers
+ * every cartridge core in the live test library plus a reasonable
+ * broader set; missing entries return null and SS lookup is bypassed
+ * for those cores (the OpenVGDB+libretro path still runs).
  */
-interface SystemInfo {
-  readonly ssSystemId: number;
-  readonly systemName: string;
-}
+const SCREENSCRAPER_SYSTEM_ID_BY_CORE_ID: ReadonlyMap<string, number> =
+  new Map([
+    // ─── Nintendo ────────────────────────────────────────────────────
+    ['NES', 3],
+    ['SNES', 4],
+    ['GAMEBOY', 9],
+    ['GAMEBOYCOLOR', 10],
+    ['GAMEBOYADVANCE', 12],
+    ['GBA', 12],
+    ['VIRTUALBOY', 11],
+    ['NINTENDO64', 14],
+    ['N64', 14],
+    // ─── Sega ────────────────────────────────────────────────────────
+    ['Genesis', 1],
+    ['MegaDrive', 1],
+    ['SMS', 2],
+    ['MasterSystem', 2],
+    ['GameGear', 21],
+    ['Sega32X', 19],
+    ['SegaCD', 20],
+    ['MegaCD', 20],
+    ['Saturn', 22],
+    ['SG1000', 109],
+    // ─── Atari ───────────────────────────────────────────────────────
+    ['Atari2600', 26],
+    ['Atari5200', 40],
+    ['Atari7800', 41],
+    ['AtariLynx', 28],
+    ['Lynx', 28],
+    // ─── NEC ─────────────────────────────────────────────────────────
+    ['TurboGrafx16', 31],
+    ['TGFX16', 31],
+    ['PCEngine', 31],
+    ['TGFX16-CD', 114],
+    ['PCEngineCD', 114],
+    // ─── SNK ─────────────────────────────────────────────────────────
+    ['NEOGEO', 142],
+    ['NeoGeo', 142],
+    ['NeoGeoPocket', 25],
+    ['NEOGEOPocket', 25],
+    ['NeoGeoPocketColor', 82],
+    // ─── Sony ────────────────────────────────────────────────────────
+    ['PSX', 57],
+    ['PlayStation', 57],
+    // ─── Misc ───────────────────────────────────────────────────────
+    ['ColecoVision', 48],
+    ['Coleco', 48],
+    ['Intellivision', 115],
+    ['Vectrex', 102],
+    ['WonderSwan', 45],
+    ['WonderSwanColor', 46],
+    ['Odyssey2', 104],
+  ]);
 
-const SYSTEM_BY_CORE_ID: ReadonlyMap<string, SystemInfo> = new Map([
-  // ─── Nintendo ────────────────────────────────────────────────────
-  ['NES', { ssSystemId: 3, systemName: 'Nintendo Entertainment System' }],
-  ['SNES', { ssSystemId: 4, systemName: 'Super Nintendo Entertainment System' }],
-  ['GAMEBOY', { ssSystemId: 9, systemName: 'Nintendo Game Boy' }],
-  ['GAMEBOYCOLOR', { ssSystemId: 10, systemName: 'Nintendo Game Boy Color' }],
-  ['GAMEBOYADVANCE', { ssSystemId: 12, systemName: 'Nintendo Game Boy Advance' }],
-  ['GBA', { ssSystemId: 12, systemName: 'Nintendo Game Boy Advance' }],
-  ['VIRTUALBOY', { ssSystemId: 11, systemName: 'Nintendo Virtual Boy' }],
-  ['NINTENDO64', { ssSystemId: 14, systemName: 'Nintendo 64' }],
-  ['N64', { ssSystemId: 14, systemName: 'Nintendo 64' }],
-  // ─── Sega ────────────────────────────────────────────────────────
-  ['Genesis', { ssSystemId: 1, systemName: 'Sega Genesis/Mega Drive' }],
-  ['MegaDrive', { ssSystemId: 1, systemName: 'Sega Genesis/Mega Drive' }],
-  ['SMS', { ssSystemId: 2, systemName: 'Sega Master System' }],
-  ['MasterSystem', { ssSystemId: 2, systemName: 'Sega Master System' }],
-  ['GameGear', { ssSystemId: 21, systemName: 'Sega Game Gear' }],
-  ['Sega32X', { ssSystemId: 19, systemName: 'Sega 32X' }],
-  ['SegaCD', { ssSystemId: 20, systemName: 'Sega CD' }],
-  ['MegaCD', { ssSystemId: 20, systemName: 'Sega CD' }],
-  ['Saturn', { ssSystemId: 22, systemName: 'Sega Saturn' }],
-  ['SG1000', { ssSystemId: 109, systemName: 'Sega SG-1000' }],
-  // ─── Atari ───────────────────────────────────────────────────────
-  ['Atari2600', { ssSystemId: 26, systemName: 'Atari 2600' }],
-  ['Atari5200', { ssSystemId: 40, systemName: 'Atari 5200' }],
-  ['Atari7800', { ssSystemId: 41, systemName: 'Atari 7800' }],
-  ['AtariLynx', { ssSystemId: 28, systemName: 'Atari Lynx' }],
-  ['Lynx', { ssSystemId: 28, systemName: 'Atari Lynx' }],
-  // ─── NEC ─────────────────────────────────────────────────────────
-  ['TurboGrafx16', { ssSystemId: 31, systemName: 'TurboGrafx-16' }],
-  ['TGFX16', { ssSystemId: 31, systemName: 'TurboGrafx-16' }],
-  ['PCEngine', { ssSystemId: 31, systemName: 'TurboGrafx-16' }],
-  ['TGFX16-CD', { ssSystemId: 114, systemName: 'TurboGrafx-CD' }],
-  ['PCEngineCD', { ssSystemId: 114, systemName: 'TurboGrafx-CD' }],
-  // ─── SNK ─────────────────────────────────────────────────────────
-  ['NEOGEO', { ssSystemId: 142, systemName: 'Neo Geo' }],
-  ['NeoGeo', { ssSystemId: 142, systemName: 'Neo Geo' }],
-  ['NeoGeoPocket', { ssSystemId: 25, systemName: 'Neo Geo Pocket' }],
-  ['NEOGEOPocket', { ssSystemId: 25, systemName: 'Neo Geo Pocket' }],
-  ['NeoGeoPocketColor', { ssSystemId: 82, systemName: 'Neo Geo Pocket Color' }],
-  // ─── Sony ────────────────────────────────────────────────────────
-  ['PSX', { ssSystemId: 57, systemName: 'Sony PlayStation' }],
-  ['PlayStation', { ssSystemId: 57, systemName: 'Sony PlayStation' }],
-  // ─── Misc ───────────────────────────────────────────────────────
-  ['ColecoVision', { ssSystemId: 48, systemName: 'ColecoVision' }],
-  ['Coleco', { ssSystemId: 48, systemName: 'ColecoVision' }],
-  ['Intellivision', { ssSystemId: 115, systemName: 'Intellivision' }],
-  ['Vectrex', { ssSystemId: 102, systemName: 'Vectrex' }],
-  ['WonderSwan', { ssSystemId: 45, systemName: 'WonderSwan' }],
-  ['WonderSwanColor', { ssSystemId: 46, systemName: 'WonderSwan Color' }],
-  ['Odyssey2', { ssSystemId: 104, systemName: 'Odyssey 2' }],
-]);
-
-const resolveSystem: SystemResolver = ({ coreId }) => {
+const resolveScreenScraperSystemId: SystemIdResolver = ({ coreId }) => {
   if (coreId === undefined) return null;
-  return SYSTEM_BY_CORE_ID.get(coreId) ?? null;
+  return SCREENSCRAPER_SYSTEM_ID_BY_CORE_ID.get(coreId) ?? null;
 };
 
 /**
@@ -218,7 +206,7 @@ void app.whenReady().then(() => {
     metadataService,
     imageCache,
     openVgdb,
-    resolveSystem,
+    resolveScreenScraperSystemId,
     () => manager.getActiveSession(),
   );
 

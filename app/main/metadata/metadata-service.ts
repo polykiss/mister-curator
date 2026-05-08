@@ -35,13 +35,13 @@ export interface MetadataServiceOptions {
  * Optional ScreenScraper query parameters threaded through from the
  * orchestrator. Most are populated when the caller has hash data
  * cached; `systemId` is resolved by an external mapper (coreId → SS
- * systemeid). Round 3 also threads `systemName` so SS-sourced records
- * can populate `RomMetadata.system` — SS's jeuInfos response doesn't
- * include a system name, but the resolver knows it from the coreId.
+ * systemeid). Round 4 dropped `systemName` from this hint — the SS
+ * response itself carries the canonical system name via
+ * `response.jeu.systeme.nom`, so we read it there instead of
+ * threading a coreId-derived value.
  */
 export interface ScreenScraperHint {
   readonly systemId: number;
-  readonly systemName?: string;
   readonly md5?: string;
   readonly sha1?: string;
   readonly crc32?: string;
@@ -228,7 +228,7 @@ export class MetadataService {
       throw err;
     }
     if (game === null) return null;
-    return this.composeFromScreenScraper(hash, game, ssHint.systemName ?? '');
+    return this.composeFromScreenScraper(hash, game);
   }
 
   /**
@@ -243,18 +243,16 @@ export class MetadataService {
   private composeFromScreenScraper(
     hash: string,
     game: ScreenScraperGame,
-    systemName: string,
   ): RomMetadata {
     return {
       version: ROM_METADATA_SCHEMA_VERSION,
       hash,
       name: game.name,
-      // Round 3: SS's jeuInfos response omits a system name, so we
-      // use the OpenVGDB-shaped name the SystemResolver supplied (the
-      // same string `composeFromOpenVgdb` writes for that core). Empty
-      // string when no resolver hint reached us — the renderer treats
-      // it like any other empty field.
-      system: systemName,
+      // Round 4: SS's canonical system label comes straight from
+      // `response.jeu.systeme.nom` (parsed into `game.system`). Empty
+      // string only when SS omits the field — the renderer treats
+      // that like any other empty field.
+      system: game.system ?? '',
       year: parseYearFromDate(game.releaseDate),
       publisher: game.publisher,
       developer: game.developer,

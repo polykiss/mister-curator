@@ -12,23 +12,24 @@ import type {
 } from '@shared/metadata-types';
 
 /**
- * Maps a MiSTer core id (and the path it came from) to two facts:
- *   - `ssSystemId`: the ScreenScraper `systemeid` required by jeuInfos.
- *   - `systemName`: the OpenVGDB-shaped display name (e.g. "Super
- *     Nintendo Entertainment System") used for `RomMetadata.system`.
+ * Maps a MiSTer core id (and the path it came from) to a ScreenScraper
+ * `systemeid`. Required by SS's jeuInfos hash query.
  *
- * Round 3 of PR #16 added `systemName` so SS-sourced records carry a
- * meaningful system label (the SS jeuInfos response doesn't include
- * one). The orchestrator doesn't own the map — `app/main/index.ts`
- * builds it from a static table and injects it via the constructor.
- * Tests pass a tiny inline mapper.
+ * Round 4 reverted this to id-only — round 3 had widened it to also
+ * carry a display system name, but the canonical name comes from the
+ * SS response itself (`response.jeu.systeme.nom`), so the local map
+ * doesn't need to track it.
+ *
+ * The orchestrator doesn't own the map — `app/main/index.ts` builds
+ * it from a static table and injects it via the constructor. Tests
+ * pass a tiny inline mapper.
  */
-export type SystemResolver = (params: {
+export type SystemIdResolver = (params: {
   /** Filename basename (e.g. "Sonic.md") — extension may hint at the system. */
   readonly romPath: string;
   /** Core id from the cores list (e.g. "Genesis"). */
   readonly coreId?: string;
-}) => { readonly ssSystemId: number; readonly systemName: string } | null;
+}) => number | null;
 
 export interface ActiveSession {
   /** SSH-shaped subset the HashService consumes. */
@@ -63,7 +64,7 @@ export class MetadataOrchestrator {
     private readonly metadataService: MetadataService,
     private readonly imageCache: ImageCache,
     private readonly openVgdb: OpenVGDBService,
-    private readonly resolveSystem: SystemResolver,
+    private readonly resolveSystemId: SystemIdResolver,
     private readonly getActiveSession: () => ActiveSession | null,
   ) {}
 
@@ -99,13 +100,12 @@ export class MetadataOrchestrator {
     const entry = hashes.get(romPath);
     if (entry === undefined) return null;
 
-    const resolved = this.resolveSystem({ romPath, coreId });
+    const systemId = this.resolveSystemId({ romPath, coreId });
     const ssHint =
-      resolved === null
+      systemId === null
         ? undefined
         : {
-            systemId: resolved.ssSystemId,
-            systemName: resolved.systemName,
+            systemId,
             md5: entry.md5,
             sha1: entry.sha1,
             crc32: undefined,

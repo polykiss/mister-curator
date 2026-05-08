@@ -5,7 +5,7 @@ import type { ImageCache } from '@app/main/metadata/image-cache';
 import {
   MetadataOrchestrator,
   type ActiveSession,
-  type SystemResolver,
+  type SystemIdResolver,
 } from '@app/main/metadata/metadata-orchestrator';
 import type { MetadataService } from '@app/main/metadata/metadata-service';
 import type {
@@ -68,8 +68,6 @@ function makeOrchestrator(opts: {
   ) => Promise<void>;
   /** SS systemId returned by the resolver. Default 4 (SNES). null disables SS hint construction. */
   readonly systemId?: number | null;
-  /** System name returned by the resolver. Default a SNES-shaped name. */
-  readonly systemName?: string;
 } = {}): OrchestratorBundle {
   const hashService = {
     getHash: vi.fn(
@@ -121,12 +119,8 @@ function makeOrchestrator(opts: {
         }
       : opts.session;
 
-  const ssSystemId = opts.systemId === undefined ? 4 : opts.systemId;
-  const systemName =
-    opts.systemName ?? 'Super Nintendo Entertainment System';
-  const resolveSystemIdSpy = vi.fn<SystemResolver>(() =>
-    ssSystemId === null ? null : { ssSystemId, systemName },
-  );
+  const systemId = opts.systemId === undefined ? 4 : opts.systemId;
+  const resolveSystemIdSpy = vi.fn<SystemIdResolver>(() => systemId);
 
   const orchestrator = new MetadataOrchestrator(
     hashService,
@@ -222,7 +216,6 @@ describe('MetadataOrchestrator', () => {
         .mock.calls[0];
       expect(call?.[2]).toEqual({
         systemId: 4,
-        systemName: 'Super Nintendo Entertainment System',
         md5: HASH,
         sha1: entry.sha1,
         crc32: undefined,
