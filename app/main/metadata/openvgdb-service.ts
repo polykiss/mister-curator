@@ -65,7 +65,21 @@ export type OpenVGDBProgressEvent =
 
 export interface OpenVGDBMetadata {
   readonly md5: string;
+  /**
+   * Display name (release title, e.g. "Super Mario World"). Strips
+   * the region annotation, so this is what the renderer shows.
+   * Falls back to `romBaseName` when no RELEASES row joined.
+   */
   readonly name: string;
+  /**
+   * Round 8: the No-Intro-style filename basename (e.g. "Super Mario
+   * World (USA)") — i.e. `ROMs.romExtensionlessFileName` with no
+   * fallback substitution. libretro-thumbnails files use this exact
+   * naming convention (with the region annotation), so this is the
+   * field the URL builder consumes — NOT `name`. May be null when
+   * OpenVGDB's `romExtensionlessFileName` column is empty.
+   */
+  readonly romBaseName: string | null;
   readonly system: string;
   readonly year: number | null;
   readonly genre: string | null;
@@ -629,9 +643,15 @@ export class OpenVGDBService {
         readString(row.systemName) ??
         readString(row.releaseTempSystemName);
       if (name === null || system === null) return null;
+      // Round 8: surface romExtensionlessFileName as a separate
+      // field so MetadataService can use it for libretro URL
+      // construction (which keys on No-Intro filenames, not the
+      // release title).
+      const romBaseName = readString(row.romExtensionlessFileName);
       return {
         md5: readString(row.hash) ?? md5,
         name,
+        romBaseName,
         system,
         year: parseReleaseYear(readString(row.releaseDate)),
         genre: readString(row.genre),

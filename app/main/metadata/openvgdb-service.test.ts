@@ -908,6 +908,22 @@ describe('OpenVGDBService (round 4 — GitHub releases + jszip)', () => {
       }
     });
 
+    it('surfaces romBaseName from romExtensionlessFileName — round 8', async () => {
+      // The fixture file "Super Mario World (USA).sfc" → extensionless
+      // "Super Mario World (USA)". This is the No-Intro DAT-style
+      // basename libretro-thumbnails files use; MetadataService
+      // threads it into the box-art URL.
+      const svc = await makeReadyService();
+      const smw = await svc.getMetadataByHash(HASH_SMW);
+      expect(smw?.romBaseName).toBe('Super Mario World (USA)');
+      // Region tag is preserved exactly; the title would lose it.
+      expect(smw?.name).toBe('Super Mario World');
+      expect(smw?.romBaseName).not.toBe(smw?.name);
+
+      const sonic = await svc.getMetadataByHash(HASH_SONIC);
+      expect(sonic?.romBaseName).toBe('Sonic The Hedgehog 2 (World)');
+    });
+
     it('falls back to romExtensionlessFileName when no RELEASES row joins', async () => {
       const svc = await makeReadyService(NO_RELEASE_ROWS);
       const meta = await svc.getMetadataByHash(HASH_NO_RELEASE);

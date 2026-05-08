@@ -150,7 +150,7 @@ export class LibretroThumbnailsFetcher {
 
   /** Test/inspection helper — mirrors the public methods. */
   hasSystem(systemName: string): boolean {
-    return SYSTEM_MAP.has(systemName.trim().toLowerCase());
+    return getLibretroDir(systemName) !== null;
   }
 
   // ─── internals ─────────────────────────────────────────────────────
@@ -160,8 +160,8 @@ export class LibretroThumbnailsFetcher {
     romName: string,
     kind: ThumbnailKind,
   ): string | null {
-    const dir = SYSTEM_MAP.get(systemName.trim().toLowerCase());
-    if (dir === undefined) return null;
+    const dir = getLibretroDir(systemName);
+    if (dir === null) return null;
     const cleanRom = sanitiseRomName(romName);
     if (cleanRom.length === 0) return null;
     const systemSegment = dir.replace(/ /g, '_');
@@ -170,6 +170,21 @@ export class LibretroThumbnailsFetcher {
     const fileSegment = `${encodeURIComponent(cleanRom)}.png`;
     return `${BASE}/${systemSegment}/${namedDir(kind)}/${fileSegment}`;
   }
+}
+
+/**
+ * Resolve an OpenVGDB-shaped system name to its libretro-thumbnails
+ * directory (in canonical " - " form, pre-underscore-replacement),
+ * or null when the system isn't covered.
+ *
+ * Round 8: extracted so the case-normalisation rule has a single
+ * call site. OpenVGDB v29.0 returns title-case strings like
+ * "Nintendo Game Boy Advance" / "Sega Genesis/Mega Drive"; the map
+ * keys are lowercase. We normalise here so callers don't have to
+ * remember.
+ */
+export function getLibretroDir(systemName: string): string | null {
+  return SYSTEM_MAP.get(systemName.trim().toLowerCase()) ?? null;
 }
 
 /**

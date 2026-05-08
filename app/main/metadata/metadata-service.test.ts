@@ -18,6 +18,10 @@ function buildDbHit(overrides: Partial<OpenVGDBMetadata> = {}): OpenVGDBMetadata
   return {
     md5: HASH,
     name: 'Super Mario World',
+    // Round 8: the No-Intro filename basename is what libretro keys
+    // on. Default to the region-tagged form so test URL assertions
+    // exercise the realistic path, not the title-only fallback.
+    romBaseName: 'Super Mario World (USA)',
     system: 'Super Nintendo Entertainment System',
     year: 1991,
     genre: 'Platform',
@@ -83,6 +87,43 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     );
     expect(result?.titleScreenUrl).toContain('/Named_Titles/');
     expect(result?.screenshotUrl).toContain('/Named_Snaps/');
+  });
+
+  it('uses romBaseName (No-Intro filename) for libretro URLs, not the release title — round 8', async () => {
+    // libretro-thumbnails files use No-Intro DAT names that include
+    // region tags; the release title strips them. Pre-round-8 we
+    // built URLs from `name` and 404'd on every match. The filename
+    // path is the "(USA)"-tagged form; the display name (`name`)
+    // stays clean.
+    const m = makeMocks({
+      dbReturns: buildDbHit({
+        name: 'Super Mario World',
+        romBaseName: 'Super Mario World (USA)',
+      }),
+    });
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const result = await svc.getMetadata(HASH);
+    expect(result?.name).toBe('Super Mario World');
+    expect(result?.boxArtUrl).toContain('Super%20Mario%20World%20(USA).png');
+    // The release title alone — i.e. without the "(USA)" annotation —
+    // would 404 in the live archive. Pin that we're NOT using it.
+    expect(result?.boxArtUrl).not.toContain('Super%20Mario%20World.png');
+  });
+
+  it('falls back to release title for the URL when romBaseName is null', async () => {
+    // OpenVGDB sometimes has rows without a usable
+    // romExtensionlessFileName. We still construct *some* URL from
+    // the display name — it'll probably 404 in libretro but that's
+    // a clean null downstream.
+    const m = makeMocks({
+      dbReturns: buildDbHit({
+        name: 'Some Game',
+        romBaseName: null,
+      }),
+    });
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const result = await svc.getMetadata(HASH);
+    expect(result?.boxArtUrl).toContain('Some%20Game.png');
   });
 
   it('writes a cache file in v2 shape', async () => {

@@ -142,11 +142,20 @@ export class MetadataService {
    * Combine OpenVGDB facts with libretro thumbnail URLs. The
    * thumbnail URLs may be null when the system isn't in the libretro
    * map — that's fine; the renderer falls back to a placeholder.
+   *
+   * Round 8: thumbnail filenames key on `db.romBaseName` (the
+   * No-Intro DAT-style basename, e.g. "Sonic The Hedgehog 2 (World)")
+   * rather than `db.name` (the cleaner release title, e.g. "Sonic
+   * The Hedgehog 2"). libretro-thumbnails filenames carry the region
+   * annotation, so the title alone 404s. We fall back to `db.name`
+   * only when OpenVGDB has no `romExtensionlessFileName` for the
+   * row — better a probably-missing URL than no URL at all.
    */
   private compose(hash: string, db: OpenVGDBMetadata): RomMetadata {
-    const boxArt = this.thumbnails.getBoxArtUrl(db.system, db.name);
-    const title = this.thumbnails.getTitleScreenUrl(db.system, db.name);
-    const snap = this.thumbnails.getScreenshotUrl(db.system, db.name);
+    const fileBase = db.romBaseName ?? db.name;
+    const boxArt = this.thumbnails.getBoxArtUrl(db.system, fileBase);
+    const title = this.thumbnails.getTitleScreenUrl(db.system, fileBase);
+    const snap = this.thumbnails.getScreenshotUrl(db.system, fileBase);
     return {
       version: ROM_METADATA_SCHEMA_VERSION,
       hash,
