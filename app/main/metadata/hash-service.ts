@@ -6,6 +6,26 @@ import type { Md5SumResult } from '@shared/mister-client';
 
 const HASH_CACHE_SCHEMA_VERSION = 1 as const;
 
+/**
+ * Round 7: bump this constant whenever the algorithm that produces
+ * the cached hashes changes (e.g. round 6 switched from
+ * `md5sum(zip-wrapper)` to `md5sum(unzip -p inner)`). Existing cache
+ * files without a matching `hashStrategyVersion` are treated as a
+ * full miss and re-hashed on next access — no manual `rm` required.
+ *
+ * Distinct from `HASH_CACHE_SCHEMA_VERSION` (the on-disk file
+ * shape): the file shape can stay v1 while the values inside it
+ * become invalid because the algorithm changed underneath.
+ *
+ * Strategy timeline:
+ *   v1 (rounds 1–5): direct `md5sum` of every file, including .zip
+ *                    wrappers.
+ *   v2 (round 6+):   .zip files routed through `unzip -p | md5sum`
+ *                    so the cached hash matches OpenVGDB's
+ *                    inner-rom indexing.
+ */
+const HASH_STRATEGY_VERSION = 2 as const;
+
 /** Cap per SSH round-trip. Larger inputs chunk in JS. */
 const DEFAULT_BATCH_SIZE = 100;
 
@@ -21,6 +41,8 @@ export interface HashEntry {
 
 interface HashCacheFile {
   readonly version: typeof HASH_CACHE_SCHEMA_VERSION;
+  /** Round 7: forces a re-hash when the algorithm bumps. */
+  readonly hashStrategyVersion: typeof HASH_STRATEGY_VERSION;
   readonly host: string;
   readonly entries: Readonly<Record<string, HashEntry>>;
 }
@@ -229,6 +251,7 @@ export class HashService {
   ): Promise<void> {
     const data: HashCacheFile = {
       version: HASH_CACHE_SCHEMA_VERSION,
+      hashStrategyVersion: HASH_STRATEGY_VERSION,
       host,
       entries,
     };
@@ -271,6 +294,11 @@ function isHashCacheFile(v: unknown): v is HashCacheFile {
   if (v === null || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
   if (o.version !== HASH_CACHE_SCHEMA_VERSION) return false;
+  // Round 7: a missing or mismatched `hashStrategyVersion` invalidates
+  // the cache wholesale. Pre-round-7 files don't have the field and
+  // were produced by the v1 algorithm (round 5 and earlier hashed
+  // .zip wrappers directly); we re-hash them on next access.
+  if (o.hashStrategyVersion !== HASH_STRATEGY_VERSION) return false;
   if (typeof o.host !== 'string') return false;
   if (o.entries === null || typeof o.entries !== 'object') return false;
   for (const entry of Object.values(o.entries as Record<string, unknown>)) {

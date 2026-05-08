@@ -144,14 +144,33 @@ async function findTargetRoms(client: IMisterClient): Promise<PickedRom[]> {
   return picked;
 }
 
-/** Issue a HEAD request to verify a box-art URL actually resolves. */
-async function verifyArtUrl(url: string): Promise<boolean> {
+interface ArtProbe {
+  readonly status: number | null; // null on network failure
+  readonly bytes: number | null; // from Content-Length, when present
+}
+
+/**
+ * HEAD-probe a libretro-thumbnails URL to learn whether the asset
+ * exists. Returns the raw HTTP status and (when supplied) the
+ * `Content-Length` so callers can print "200 / 38 KB" lines.
+ */
+async function probeArtUrl(url: string): Promise<ArtProbe> {
   try {
     const res = await fetch(url, { method: 'HEAD' });
-    return res.ok;
+    const lenHeader = res.headers.get('content-length');
+    const len = lenHeader === null ? null : Number.parseInt(lenHeader, 10);
+    const bytes = len !== null && Number.isFinite(len) ? len : null;
+    return { status: res.status, bytes };
   } catch {
-    return false;
+    return { status: null, bytes: null };
   }
+}
+
+function formatBytes(bytes: number | null): string {
+  if (bytes === null) return '?';
+  if (bytes < 1024) return `${String(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 async function main(): Promise<void> {
@@ -297,18 +316,24 @@ async function main(): Promise<void> {
         );
       }
 
-      // Box art: verify the libretro URL resolves, then download.
+      // Box art:
+      //   - URL null  → log the system name so we know which mapping
+      //     to add to the libretro map next round.
+      //   - HEAD 200  → cache the bytes locally too (round 7 spec).
+      //   - HEAD 4xx  → log the status + URL; libretro coverage is
+      //     known to be sparse for some systems.
       if (meta.boxArtUrl !== null) {
-        console.log(`  box art URL ${meta.boxArtUrl}`);
-        const headT = await timed(() => verifyArtUrl(meta.boxArtUrl ?? ''));
-        if (headT.value) {
+        const probe = await probeArtUrl(meta.boxArtUrl);
+        if (probe.status === 200) {
           boxArtVerified += 1;
-          console.log(`  box art HEAD ok  (${Math.round(headT.elapsedMs)}ms)`);
+          console.log(
+            `  box art ✓   ${meta.boxArtUrl} (${formatBytes(probe.bytes)})`,
+          );
           const imgT = await timed(() => imageCache.fetch(meta.boxArtUrl ?? ''));
           if (imgT.value !== null) {
             boxArtDownloaded += 1;
             console.log(
-              `  box art→     ${imgT.value}  (${Math.round(imgT.elapsedMs)}ms cold)`,
+              `  box art→    ${imgT.value}  (${Math.round(imgT.elapsedMs)}ms cold)`,
             );
             if (imgT.elapsedMs > PERF_BUDGETS.imageColdMs) {
               warnings.push(
@@ -328,13 +353,21 @@ async function main(): Promise<void> {
               );
             }
           } else {
-            console.log(`  ✗ box art download failed`);
+            console.log(`  box art ✗   download failed after HEAD 200`);
           }
+        } else if (probe.status === null) {
+          console.log(
+            `  box art ✗   network error  ${meta.boxArtUrl}`,
+          );
         } else {
-          console.log(`  ✗ box art HEAD did not resolve (libretro is sparse here)`);
+          console.log(
+            `  box art ✗   ${String(probe.status)} ${meta.boxArtUrl}`,
+          );
         }
       } else {
-        console.log(`  box art URL —  (system not in libretro map)`);
+        console.log(
+          `  box art —   (system '${meta.system}' not in libretro map)`,
+        );
       }
     }
 

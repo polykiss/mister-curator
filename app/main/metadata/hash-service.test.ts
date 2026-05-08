@@ -287,4 +287,102 @@ describe('HashService', () => {
     // returned no record, so result is empty.
     expect(client.md5Calls).toHaveLength(1);
   });
+
+  describe('round 7 — hashStrategyVersion invalidation', () => {
+    /** Pre-write a cache file with the supplied shape, then read. */
+    async function seedCache(host: string, raw: unknown): Promise<void> {
+      const cacheDir = join(dir, host);
+      await fs.mkdir(cacheDir, { recursive: true });
+      await fs.writeFile(
+        join(cacheDir, 'hashes.json'),
+        JSON.stringify(raw, null, 2),
+      );
+    }
+
+    it('writes hashStrategyVersion: 2 alongside the v1 schema field', async () => {
+      const svc = new HashService(dir);
+      const md5 = new Map([['/p/a', { hash: 'a'.repeat(32), mtime: 1 }]]);
+      await svc.getHash(makeClient({ md5 }), 'host-1', ['/p/a']);
+      const raw = JSON.parse(
+        await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
+      ) as { version: number; hashStrategyVersion: number };
+      expect(raw.version).toBe(1);
+      expect(raw.hashStrategyVersion).toBe(2);
+    });
+
+    it('treats a pre-round-7 cache (no hashStrategyVersion) as an invalid file', async () => {
+      // Pre-round-7 file: schema version 1, no hashStrategyVersion
+      // field. Hashes inside were produced by the v1 algorithm
+      // (direct md5sum of .zip wrappers) — round 6+ algorithm
+      // disagrees, so we must NOT serve them.
+      await seedCache('host-1', {
+        version: 1,
+        host: 'host-1',
+        entries: {
+          '/p/a': {
+            hash: 'wrong-old-hash'.padEnd(32, 'x').slice(0, 32),
+            mtime: 100,
+            hashedAt: '2025-01-01T00:00:00.000Z',
+          },
+        },
+      });
+      const svc = new HashService(dir);
+      const md5 = new Map([['/p/a', { hash: 'a'.repeat(32), mtime: 100 }]]);
+      const client = makeClient({ md5 });
+      const result = await svc.getHash(client, 'host-1', ['/p/a']);
+      // The OLD wrong-shaped hash got dropped; the NEW algorithm
+      // re-hashed and returned the correct value.
+      expect(result.get('/p/a')).toBe('a'.repeat(32));
+      // No stat call was issued (cache treated as empty); md5 was.
+      expect(client.statCalls).toEqual([]);
+      expect(client.md5Calls).toHaveLength(1);
+    });
+
+    it('treats a cache with mismatched hashStrategyVersion as invalid', async () => {
+      // Future-version file (e.g. someone manually set v3) — we
+      // can't trust its values either.
+      await seedCache('host-1', {
+        version: 1,
+        hashStrategyVersion: 999,
+        host: 'host-1',
+        entries: {
+          '/p/a': {
+            hash: 'a'.repeat(32),
+            mtime: 100,
+            hashedAt: '2025-01-01T00:00:00.000Z',
+          },
+        },
+      });
+      const svc = new HashService(dir);
+      const md5 = new Map([['/p/a', { hash: 'b'.repeat(32), mtime: 100 }]]);
+      const client = makeClient({ md5 });
+      const result = await svc.getHash(client, 'host-1', ['/p/a']);
+      expect(result.get('/p/a')).toBe('b'.repeat(32));
+      expect(client.md5Calls).toHaveLength(1);
+    });
+
+    it('serves a cache with matching hashStrategyVersion without re-hashing', async () => {
+      await seedCache('host-1', {
+        version: 1,
+        hashStrategyVersion: 2,
+        host: 'host-1',
+        entries: {
+          '/p/a': {
+            hash: 'c'.repeat(32),
+            mtime: 100,
+            hashedAt: '2025-01-01T00:00:00.000Z',
+          },
+        },
+      });
+      const svc = new HashService(dir);
+      // mtime in stat matches the cached entry → cache hit, no md5.
+      const client = makeClient({
+        md5: new Map(),
+        stat: new Map([['/p/a', 100]]),
+      });
+      const result = await svc.getHash(client, 'host-1', ['/p/a']);
+      expect(result.get('/p/a')).toBe('c'.repeat(32));
+      expect(client.md5Calls).toEqual([]);
+    });
+  });
 });

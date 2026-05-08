@@ -28,10 +28,17 @@ const BASE = 'https://thumbnails.libretro.com';
  *
  * Keep entries lowercase keys; the lookup is case-insensitive. Add
  * synonyms freely — OpenVGDB has historically used several names
- * for the same system (e.g. "Sega Genesis" and "Sega Mega Drive").
+ * for the same system (e.g. "Sega Genesis" and "Sega Genesis/Mega
+ * Drive"). When in doubt, add both the manufacturer-prefixed form
+ * (real OpenVGDB v29.0 strings: "Nintendo Game Boy Advance",
+ * "Sega Genesis/Mega Drive", "SNK Neo Geo Pocket") and the bare
+ * form so legacy callers keep working.
+ *
+ * The libretro directory values stay in their canonical " - "
+ * form here; `buildUrl` swaps spaces for underscores when emitting.
  */
 const SYSTEM_MAP: ReadonlyMap<string, string> = new Map([
-  // ─── Nintendo ────────────────────────────────────────────────────
+  // ─── Nintendo (manufacturer-prefixed forms come from OpenVGDB) ───
   ['nintendo entertainment system', 'Nintendo - Nintendo Entertainment System'],
   ['family computer', 'Nintendo - Nintendo Entertainment System'],
   [
@@ -40,16 +47,23 @@ const SYSTEM_MAP: ReadonlyMap<string, string> = new Map([
   ],
   ['super famicom', 'Nintendo - Super Nintendo Entertainment System'],
   ['nintendo 64', 'Nintendo - Nintendo 64'],
+  ['nintendo game boy', 'Nintendo - Game Boy'],
   ['game boy', 'Nintendo - Game Boy'],
+  ['nintendo game boy color', 'Nintendo - Game Boy Color'],
   ['game boy color', 'Nintendo - Game Boy Color'],
+  ['nintendo game boy advance', 'Nintendo - Game Boy Advance'],
   ['game boy advance', 'Nintendo - Game Boy Advance'],
+  ['nintendo virtual boy', 'Nintendo - Virtual Boy'],
   ['virtual boy', 'Nintendo - Virtual Boy'],
   ['nintendo ds', 'Nintendo - Nintendo DS'],
   ['nintendo gamecube', 'Nintendo - GameCube'],
+  ['nintendo famicom disk system', 'Nintendo - Family Computer Disk System'],
   ['family computer disk system', 'Nintendo - Family Computer Disk System'],
-  // ─── Sega ────────────────────────────────────────────────────────
+  // ─── Sega (OpenVGDB v29.0 returns "Sega Genesis/Mega Drive") ─────
   ['sega genesis', 'Sega - Mega Drive - Genesis'],
   ['sega mega drive', 'Sega - Mega Drive - Genesis'],
+  ['sega genesis/mega drive', 'Sega - Mega Drive - Genesis'],
+  ['sega mega drive/genesis', 'Sega - Mega Drive - Genesis'],
   ['sega master system', 'Sega - Master System - Mark III'],
   ['sega game gear', 'Sega - Game Gear'],
   ['sega 32x', 'Sega - 32X'],
@@ -66,22 +80,38 @@ const SYSTEM_MAP: ReadonlyMap<string, string> = new Map([
   ['atari jaguar', 'Atari - Jaguar'],
   // ─── NEC / TurboGrafx ────────────────────────────────────────────
   ['turbografx-16', 'NEC - PC Engine - TurboGrafx 16'],
+  ['nec turbografx-16', 'NEC - PC Engine - TurboGrafx 16'],
   ['turbografx-cd', 'NEC - PC Engine CD - TurboGrafx-CD'],
+  ['nec turbografx-cd', 'NEC - PC Engine CD - TurboGrafx-CD'],
   ['pc engine', 'NEC - PC Engine - TurboGrafx 16'],
   ['pc engine cd', 'NEC - PC Engine CD - TurboGrafx-CD'],
   // ─── SNK ─────────────────────────────────────────────────────────
   ['neo geo', 'SNK - Neo Geo'],
+  ['snk neo geo', 'SNK - Neo Geo'],
   ['neo geo cd', 'SNK - Neo Geo CD'],
+  ['snk neo geo cd', 'SNK - Neo Geo CD'],
   ['neo geo pocket', 'SNK - Neo Geo Pocket'],
+  ['snk neo geo pocket', 'SNK - Neo Geo Pocket'],
   ['neo geo pocket color', 'SNK - Neo Geo Pocket Color'],
+  ['snk neo geo pocket color', 'SNK - Neo Geo Pocket Color'],
+  // ─── Sony ────────────────────────────────────────────────────────
+  ['sony playstation', 'Sony - PlayStation'],
+  ['playstation', 'Sony - PlayStation'],
+  ['sony playstation portable', 'Sony - PlayStation Portable'],
   // ─── Misc consoles ──────────────────────────────────────────────
   ['colecovision', 'Coleco - ColecoVision'],
+  ['coleco colecovision', 'Coleco - ColecoVision'],
   ['intellivision', 'Mattel - Intellivision'],
+  ['mattel intellivision', 'Mattel - Intellivision'],
   ['vectrex', 'GCE - Vectrex'],
+  ['gce vectrex', 'GCE - Vectrex'],
   ['3do interactive multiplayer', 'The 3DO Company - 3DO'],
   ['wonderswan', 'Bandai - WonderSwan'],
+  ['bandai wonderswan', 'Bandai - WonderSwan'],
   ['wonderswan color', 'Bandai - WonderSwan Color'],
+  ['bandai wonderswan color', 'Bandai - WonderSwan Color'],
   ['odyssey 2', 'Magnavox - Odyssey2'],
+  ['magnavox odyssey 2', 'Magnavox - Odyssey2'],
   ['fairchild channel f', 'Fairchild - Channel F'],
 ]);
 
