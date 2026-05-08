@@ -11,9 +11,18 @@ import {
   type OpenVGDBProgressEvent,
 } from '@app/main/metadata/openvgdb-service';
 
+// Real-world OpenVGDB stores hashes as lowercase hex; our fixture
+// mirrors that (verified against v29.0 with `SELECT romHashMD5 FROM
+// ROMs LIMIT 5`).
 const HASH_SMW = 'd0e7d56cb3eb1f3f8e51a8fd0bcfaf28';
-const HASH_SONIC = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const HASH_SONIC = 'b9f8d04a4e2cebf6df3b3c33b9b6a89e';
+const HASH_ZELDA_LTTP = '03a63945398191337e896e5771f77173';
+const HASH_CHRONO = '6f51a8b3097cd9b9c4ab46f1ad33fdca';
+const HASH_TETRIS = '3060ec56e7b5fa68f4ff2f6c8e8c8eed';
 const HASH_NONEXISTENT = '00112233445566778899aabbccddeeff';
+
+/** ROMs row that has no RELEASES join — name fallback path. */
+const HASH_NO_RELEASE = '0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e';
 
 const FAKE_RELEASES_URL = 'https://api.example.test/releases/latest';
 const FAKE_ZIP_URL = 'https://cdn.example.test/openvgdb.zip';
@@ -23,7 +32,10 @@ const RELEASE_TAG = 'v29.0';
 interface FixtureRow {
   readonly md5: string;
   readonly system: string;
-  readonly title: string;
+  /** ROM filename including extension, e.g. "Super Mario World (USA).sfc". */
+  readonly fileName: string;
+  /** Title from the RELEASES row. Set null to omit the release row entirely. */
+  readonly title: string | null;
   readonly date: string | null;
   readonly genre: string | null;
   readonly publisher: string | null;
@@ -33,9 +45,15 @@ interface FixtureRow {
 }
 
 /**
- * Build a minimal OpenVGDB-shaped SQLite buffer in-memory. The schema
- * matches the columns the service actually queries (ROMs, RELEASES,
- * SYSTEMS) — anything beyond that is irrelevant to these tests.
+ * Build an OpenVGDB-shaped SQLite buffer in-memory using the v29.0
+ * schema. The `ROMs` / `RELEASES` / `SYSTEMS` columns mirror what
+ * `app/main/metadata/openvgdb-service.ts` actually reads — only the
+ * columns we use are declared, but the names + types match the real
+ * archive so the schema sniff is exercised against canonical shape.
+ *
+ * Building inline (rather than committing a binary fixture) keeps
+ * the repo small and means a schema drift in one file forces an
+ * update in the other.
  */
 async function buildFixture(rows: readonly FixtureRow[]): Promise<Uint8Array> {
   const SQL = await initSqlJs();
@@ -43,24 +61,50 @@ async function buildFixture(rows: readonly FixtureRow[]): Promise<Uint8Array> {
   db.run(`
     CREATE TABLE SYSTEMS (
       systemID INTEGER PRIMARY KEY,
-      systemName TEXT
+      systemName TEXT,
+      systemShortName TEXT,
+      systemHeaderSizeBytes INTEGER,
+      systemHashless INTEGER,
+      systemHeader TEXT,
+      systemSerial TEXT,
+      systemOEID TEXT
     );
     CREATE TABLE ROMs (
       romID INTEGER PRIMARY KEY,
       systemID INTEGER,
+      regionID INTEGER,
+      romHashCRC TEXT,
       romHashMD5 TEXT,
-      romFileName TEXT
+      romHashSHA1 TEXT,
+      romSize INTEGER,
+      romFileName TEXT,
+      romExtensionlessFileName TEXT,
+      romParent TEXT,
+      romSerial TEXT,
+      romHeader TEXT,
+      romLanguage TEXT,
+      TEMPromRegion TEXT,
+      romDumpSource TEXT
     );
     CREATE TABLE RELEASES (
       releaseID INTEGER PRIMARY KEY,
       romID INTEGER,
       releaseTitleName TEXT,
-      releaseDate TEXT,
-      releaseGenre TEXT,
-      releasePublisher TEXT,
-      releaseDeveloper TEXT,
+      regionLocalizedID INTEGER,
+      TEMPregionLocalizedName TEXT,
+      TEMPsystemShortName TEXT,
+      TEMPsystemName TEXT,
+      releaseCoverFront TEXT,
+      releaseCoverBack TEXT,
+      releaseCoverCart TEXT,
+      releaseCoverDisc TEXT,
       releaseDescription TEXT,
-      releaseRegion TEXT
+      releaseDeveloper TEXT,
+      releasePublisher TEXT,
+      releaseGenre TEXT,
+      releaseDate TEXT,
+      releaseReferenceURL TEXT,
+      releaseReferenceImageURL TEXT
     );
   `);
   const systemIds = new Map<string, number>();
@@ -69,33 +113,40 @@ async function buildFixture(rows: readonly FixtureRow[]): Promise<Uint8Array> {
     if (sysId === undefined) {
       sysId = systemIds.size + 1;
       systemIds.set(r.system, sysId);
-      db.run('INSERT INTO SYSTEMS (systemID, systemName) VALUES (?, ?)', [
-        sysId,
-        r.system,
-      ]);
+      db.run(
+        'INSERT INTO SYSTEMS (systemID, systemName, systemShortName) VALUES (?, ?, ?)',
+        [sysId, r.system, r.system.split(/\s/)[0] ?? r.system],
+      );
     }
     const romId = db.exec('SELECT IFNULL(MAX(romID), 0) + 1 FROM ROMs')[0]
       ?.values[0]?.[0] as number;
+    const extensionless = r.fileName.replace(/\.[^./]+$/, '');
     db.run(
-      'INSERT INTO ROMs (romID, systemID, romHashMD5) VALUES (?, ?, ?)',
-      [romId, sysId, r.md5],
+      `INSERT INTO ROMs
+        (romID, systemID, romHashMD5, romFileName, romExtensionlessFileName)
+       VALUES (?, ?, ?, ?, ?)`,
+      [romId, sysId, r.md5, r.fileName, extensionless],
     );
-    db.run(
-      `INSERT INTO RELEASES
-        (romID, releaseTitleName, releaseDate, releaseGenre,
-         releasePublisher, releaseDeveloper, releaseDescription, releaseRegion)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        romId,
-        r.title,
-        r.date,
-        r.genre,
-        r.publisher,
-        r.developer,
-        r.description,
-        r.region,
-      ],
-    );
+    if (r.title !== null) {
+      db.run(
+        `INSERT INTO RELEASES
+          (romID, releaseTitleName, releaseDate, releaseGenre,
+           releasePublisher, releaseDeveloper, releaseDescription,
+           TEMPregionLocalizedName, TEMPsystemName)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          romId,
+          r.title,
+          r.date,
+          r.genre,
+          r.publisher,
+          r.developer,
+          r.description,
+          r.region,
+          r.system,
+        ],
+      );
+    }
   }
   const exported = db.export();
   db.close();
@@ -106,6 +157,7 @@ const SAMPLE_ROWS: readonly FixtureRow[] = [
   {
     md5: HASH_SMW,
     system: 'Super Nintendo Entertainment System',
+    fileName: 'Super Mario World (USA).sfc',
     title: 'Super Mario World',
     date: '1991-08-13',
     genre: 'Platform',
@@ -117,6 +169,7 @@ const SAMPLE_ROWS: readonly FixtureRow[] = [
   {
     md5: HASH_SONIC,
     system: 'Sega Genesis',
+    fileName: 'Sonic The Hedgehog 2 (World).md',
     title: 'Sonic The Hedgehog 2',
     date: '1992',
     genre: 'Platform',
@@ -124,6 +177,59 @@ const SAMPLE_ROWS: readonly FixtureRow[] = [
     developer: 'Sega Technical Institute',
     description: null,
     region: 'World',
+  },
+  {
+    md5: HASH_ZELDA_LTTP,
+    system: 'Super Nintendo Entertainment System',
+    fileName: 'Legend of Zelda, The - A Link to the Past (USA).sfc',
+    title: 'The Legend of Zelda: A Link to the Past',
+    date: 'Apr 13, 1992',
+    genre: 'Action-Adventure',
+    publisher: 'Nintendo',
+    developer: 'Nintendo EAD',
+    description: 'Hyrule needs you.',
+    region: 'USA',
+  },
+  {
+    md5: HASH_CHRONO,
+    system: 'Super Nintendo Entertainment System',
+    fileName: 'Chrono Trigger (USA).sfc',
+    title: 'Chrono Trigger',
+    date: '1995-08-22',
+    genre: 'Role-Playing',
+    publisher: 'Square',
+    developer: 'Square',
+    description: 'Time travel saves the world.',
+    region: 'USA',
+  },
+  {
+    md5: HASH_TETRIS,
+    system: 'Game Boy',
+    fileName: 'Tetris (World).gb',
+    title: 'Tetris',
+    date: 'Jul 31, 1989',
+    genre: 'Puzzle',
+    publisher: 'Nintendo',
+    developer: 'Nintendo R&D1',
+    description: null,
+    region: 'World',
+  },
+];
+
+/** Variant fixture used to exercise the no-RELEASES name fallback path. */
+const NO_RELEASE_ROWS: readonly FixtureRow[] = [
+  ...SAMPLE_ROWS,
+  {
+    md5: HASH_NO_RELEASE,
+    system: 'Super Nintendo Entertainment System',
+    fileName: 'Mystery Cart (Proto).sfc',
+    title: null, // → no RELEASES row
+    date: null,
+    genre: null,
+    publisher: null,
+    developer: null,
+    description: null,
+    region: null,
   },
 ];
 
@@ -736,5 +842,224 @@ describe('OpenVGDBService (round 4 — GitHub releases + jszip)', () => {
     await svc.ensureDatabase();
     const sonic = await svc.getMetadataByHash(HASH_SONIC);
     expect(sonic?.year).toBe(1992);
+  });
+
+  // ─── round 5: schema-fix coverage ──────────────────────────────────
+
+  describe('round 5 — v29.0 schema', () => {
+    async function makeReadyService(rows: readonly FixtureRow[] = SAMPLE_ROWS) {
+      const buf = await buildFixture(rows);
+      await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(buf));
+      await fs.writeFile(
+        join(dir, 'openvgdb.version.json'),
+        JSON.stringify({
+          tag: RELEASE_TAG,
+          downloadedAt: new Date().toISOString(),
+        }),
+      );
+      const svc = new OpenVGDBService(dir);
+      await svc.ensureDatabase();
+      return svc;
+    }
+
+    it('returns full RomMetadata fields for each well-known sample row', async () => {
+      const svc = await makeReadyService();
+      const cases = [
+        { hash: HASH_SMW, name: 'Super Mario World', year: 1991, publisher: 'Nintendo' },
+        { hash: HASH_SONIC, name: 'Sonic The Hedgehog 2', year: 1992, publisher: 'Sega' },
+        {
+          hash: HASH_ZELDA_LTTP,
+          name: 'The Legend of Zelda: A Link to the Past',
+          year: 1992,
+          publisher: 'Nintendo',
+        },
+        { hash: HASH_CHRONO, name: 'Chrono Trigger', year: 1995, publisher: 'Square' },
+        { hash: HASH_TETRIS, name: 'Tetris', year: 1989, publisher: 'Nintendo' },
+      ];
+      for (const c of cases) {
+        const meta = await svc.getMetadataByHash(c.hash);
+        expect(meta?.name).toBe(c.name);
+        expect(meta?.year).toBe(c.year);
+        expect(meta?.publisher).toBe(c.publisher);
+        expect(meta?.source).toBe('openvgdb');
+      }
+    });
+
+    it('falls back to romExtensionlessFileName when no RELEASES row joins', async () => {
+      const svc = await makeReadyService(NO_RELEASE_ROWS);
+      const meta = await svc.getMetadataByHash(HASH_NO_RELEASE);
+      expect(meta).not.toBeNull();
+      // Filename minus extension; release fields all null since no
+      // join landed.
+      expect(meta?.name).toBe('Mystery Cart (Proto)');
+      expect(meta?.system).toBe('Super Nintendo Entertainment System');
+      expect(meta?.year).toBeNull();
+      expect(meta?.publisher).toBeNull();
+      expect(meta?.developer).toBeNull();
+      expect(meta?.genre).toBeNull();
+      expect(meta?.description).toBeNull();
+    });
+
+    it('returns null when the hash is not in ROMs at all', async () => {
+      const svc = await makeReadyService();
+      expect(await svc.getMetadataByHash(HASH_NONEXISTENT)).toBeNull();
+    });
+
+    it('parses a calendar-style release date ("Apr 13, 1992")', async () => {
+      const svc = await makeReadyService();
+      const zelda = await svc.getMetadataByHash(HASH_ZELDA_LTTP);
+      expect(zelda?.year).toBe(1992);
+    });
+
+    it('redownloads when the schema is missing a required column', async () => {
+      // Build a fixture where ROMs is missing the
+      // `romExtensionlessFileName` column we depend on.
+      const SQL = await initSqlJs();
+      const badDb = new SQL.Database();
+      badDb.run(`
+        CREATE TABLE SYSTEMS (systemID INTEGER PRIMARY KEY, systemName TEXT);
+        CREATE TABLE ROMs (romID INTEGER PRIMARY KEY, systemID INTEGER, romHashMD5 TEXT, romFileName TEXT);
+        CREATE TABLE RELEASES (releaseID INTEGER PRIMARY KEY, romID INTEGER, releaseTitleName TEXT);
+      `);
+      const badBuf = badDb.export();
+      badDb.close();
+      await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(badBuf));
+      await fs.writeFile(
+        join(dir, 'openvgdb.version.json'),
+        JSON.stringify({
+          tag: RELEASE_TAG,
+          downloadedAt: new Date().toISOString(),
+        }),
+      );
+      // The cached path will reject this file as schema-bad; the
+      // download path then redownloads the v29.0-shaped fixture.
+      const goodBuf = await buildFixture(SAMPLE_ROWS);
+      const goodZip = await makeZip(goodBuf);
+      const fetchMock = vi.fn(
+        routeFetch(
+          new Map([
+            [
+              FAKE_RELEASES_URL,
+              (): Response =>
+                jsonResponse(
+                  releasesJson([{ name: 'openvgdb.zip', url: FAKE_ZIP_URL }]),
+                ),
+            ],
+            [FAKE_ZIP_URL, (): Response => bytesResponse(goodZip)],
+          ]),
+        ),
+      );
+      const svc = new OpenVGDBService(dir, {
+        fetch: fetchMock as unknown as typeof fetch,
+        releasesUrl: FAKE_RELEASES_URL,
+      });
+      await svc.ensureDatabase();
+      expect(svc.isReady()).toBe(true);
+      expect(fetchMock).toHaveBeenCalled();
+      // Lookup against the post-redownload DB works.
+      expect(await svc.getMetadataByHash(HASH_SMW)).not.toBeNull();
+    });
+
+    it('emits a schema error when a freshly-downloaded DB is missing required columns', async () => {
+      // Bad-schema bytes wrapped in a valid zip — exercises the
+      // post-extract validateSchema check.
+      const SQL = await initSqlJs();
+      const badDb = new SQL.Database();
+      badDb.run(
+        `CREATE TABLE ROMs (romID INTEGER, romHashMD5 TEXT);
+         CREATE TABLE RELEASES (releaseID INTEGER);
+         CREATE TABLE SYSTEMS (systemID INTEGER);`,
+      );
+      const badBuf = badDb.export();
+      badDb.close();
+      const wrongZip = new JSZip();
+      wrongZip.file('openvgdb.sqlite', badBuf);
+      const wrongZipBytes = await wrongZip.generateAsync({ type: 'uint8array' });
+
+      const fetchMock = vi.fn(
+        routeFetch(
+          new Map([
+            [
+              FAKE_RELEASES_URL,
+              (): Response =>
+                jsonResponse(
+                  releasesJson([{ name: 'openvgdb.zip', url: FAKE_ZIP_URL }]),
+                ),
+            ],
+            [FAKE_ZIP_URL, (): Response => bytesResponse(wrongZipBytes)],
+          ]),
+        ),
+      );
+      const svc = new OpenVGDBService(dir, {
+        fetch: fetchMock as unknown as typeof fetch,
+        releasesUrl: FAKE_RELEASES_URL,
+      });
+      const events: OpenVGDBProgressEvent[] = [];
+      await svc.ensureDatabase((e) => events.push(e));
+      const errEvent = events.find((e) => e.kind === 'error');
+      if (errEvent?.kind === 'error') {
+        expect(errEvent.category).toBe('schema');
+      }
+      expect(svc.isReady()).toBe(false);
+    });
+  });
+
+  // parseReleaseYear is private — exercise it end-to-end via a row
+  // whose `releaseDate` contains the value of interest. This both
+  // pins the parser semantics and verifies that the column threads
+  // through to RomMetadata.year correctly.
+  describe('round 5 — release-year parsing', () => {
+    interface ParseCase {
+      readonly date: string | null;
+      readonly expected: number | null;
+    }
+
+    const cases: readonly ParseCase[] = [
+      { date: '1992', expected: 1992 },
+      { date: '1992-10-29', expected: 1992 },
+      { date: 'Oct 29, 1992', expected: 1992 },
+      { date: "released in '92", expected: 1992 },
+      { date: "released in '05", expected: 2005 },
+      { date: '', expected: null },
+      { date: null, expected: null },
+      // Plausible-range filter rejects pre-video-game / nonsense years.
+      { date: '1492', expected: null },
+      { date: '21000', expected: null },
+      // Embedded year inside other text still parses.
+      { date: 'Re-released 2007 by Nintendo', expected: 2007 },
+      // Out-of-range first match falls through to a later in-range one.
+      { date: 'rev 1492; released 1991', expected: 1991 },
+    ];
+
+    for (const c of cases) {
+      it(`releaseDate=${JSON.stringify(c.date)} → year=${String(c.expected)}`, async () => {
+        const buf = await buildFixture([
+          {
+            md5: HASH_SMW,
+            system: 'Super Nintendo Entertainment System',
+            fileName: 'Test.sfc',
+            title: 'Test',
+            date: c.date,
+            genre: null,
+            publisher: null,
+            developer: null,
+            description: null,
+            region: null,
+          },
+        ]);
+        await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(buf));
+        await fs.writeFile(
+          join(dir, 'openvgdb.version.json'),
+          JSON.stringify({
+            tag: RELEASE_TAG,
+            downloadedAt: new Date().toISOString(),
+          }),
+        );
+        const svc = new OpenVGDBService(dir);
+        await svc.ensureDatabase();
+        const meta = await svc.getMetadataByHash(HASH_SMW);
+        expect(meta?.year).toBe(c.expected);
+      });
+    }
   });
 });

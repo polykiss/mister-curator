@@ -100,35 +100,83 @@ interface VersionFile {
 }
 
 /**
- * The single SELECT we issue. LEFT JOINs keep the row even if RELEASES
- * or SYSTEMS is missing — OpenVGDB sometimes has ROMs without a
- * release record. COLLATE NOCASE shields against md5 hex case drift
- * (busybox emits lower; the table contains upper).
+ * The single SELECT we issue, written against the OpenVGDB v29.0
+ * schema (verified live against the real archive). LEFT JOINs keep
+ * the row even if RELEASES or SYSTEMS is missing — OpenVGDB
+ * sometimes has ROMs without a release record. `LOWER(?)` shields
+ * against md5 hex case drift (we already lowercase JS-side, but two
+ * layers of safety is cheap).
+ *
+ * Why not the `releaseCover*` URL columns: OpenVGDB's bundled art
+ * URLs point at TheGamesDB CDN paths that have rotted over the
+ * years. We use libretro-thumbnails for art instead, composed by
+ * `LibretroThumbnailsFetcher` from `(systemName, releaseTitleName)`.
+ *
+ * `TEMPsystemName` / `TEMPregionLocalizedName` are OpenVGDB's
+ * denormalized human-readable fallbacks; we read them as a backup
+ * for the JOIN-derived value (occasionally cleaner than the join).
  */
 const QUERY_BY_MD5 = `
   SELECT
-    r.romHashMD5    AS md5,
-    rel.releaseTitleName AS name,
-    s.systemName    AS system,
-    rel.releaseDate AS date,
-    rel.releaseGenre AS genre,
-    rel.releasePublisher AS publisher,
-    rel.releaseDeveloper AS developer,
-    rel.releaseDescription AS description,
-    rel.releaseRegion AS region
-  FROM ROMs r
-  LEFT JOIN RELEASES rel ON r.romID = rel.romID
-  LEFT JOIN SYSTEMS s    ON r.systemID = s.systemID
-  WHERE r.romHashMD5 = ? COLLATE NOCASE
+    rom.romHashMD5                  AS hash,
+    rom.romFileName                 AS romFileName,
+    rom.romExtensionlessFileName    AS romExtensionlessFileName,
+    rel.releaseTitleName            AS name,
+    rel.releaseDate                 AS releaseDate,
+    rel.releaseDeveloper            AS developer,
+    rel.releasePublisher            AS publisher,
+    rel.releaseGenre                AS genre,
+    rel.releaseDescription          AS description,
+    rel.TEMPregionLocalizedName     AS region,
+    sys.systemName                  AS systemName,
+    sys.systemShortName             AS systemShortName,
+    rel.TEMPsystemName              AS releaseTempSystemName
+  FROM ROMs rom
+  LEFT JOIN RELEASES rel ON rel.romID = rom.romID
+  LEFT JOIN SYSTEMS  sys ON sys.systemID = rom.systemID
+  WHERE rom.romHashMD5 = LOWER(?)
   LIMIT 1
 `;
 
 /**
- * Schema sniff: the three tables we read against. If the .sqlite file
- * downloaded into place is missing any of them we treat it as
- * corrupt, delete, and let the next call redownload.
+ * Schema sniff: tables and the columns each one must expose for our
+ * SELECT to compile. PRAGMA `table_info` returns one row per column;
+ * we hash the `name` column and require every entry in the inner
+ * arrays below to be present.
+ *
+ * Drift in OpenVGDB's schema (column rename, table split, …) trips
+ * this check at open time and triggers a redownload — better than
+ * surfacing a `no such column` error from sqlite at query time.
  */
-const REQUIRED_TABLES = ['ROMs', 'RELEASES', 'SYSTEMS'] as const;
+const REQUIRED_SCHEMA: ReadonlyMap<string, readonly string[]> = new Map([
+  [
+    'ROMs',
+    [
+      'romID',
+      'systemID',
+      'romHashMD5',
+      'romFileName',
+      'romExtensionlessFileName',
+    ],
+  ],
+  [
+    'RELEASES',
+    ['romID', 'releaseTitleName'],
+  ],
+  [
+    'SYSTEMS',
+    ['systemID', 'systemName'],
+  ],
+]);
+
+/**
+ * Plausible video-game release years. Bound is `currentYear + 5` so
+ * announced-but-unreleased titles parse OK; bump the upper edge as
+ * years pass. Round 5 was written in 2026, so 2031 covers the next
+ * five years comfortably.
+ */
+const MIN_RELEASE_YEAR = 1970;
+const MAX_RELEASE_YEAR = 2031;
 
 export class OpenVGDBService {
   private readonly fetchImpl: typeof fetch;
@@ -563,14 +611,23 @@ export class OpenVGDBService {
       stmt.bind([md5]);
       if (!stmt.step()) return null;
       const row = stmt.getAsObject();
-      const name = readString(row.name);
-      const system = readString(row.system);
+      // Name: prefer the release title; fall back to the ROM filename
+      // sans extension when no RELEASES row joined. ROMs without a
+      // release record do exist in OpenVGDB — better to surface the
+      // filename than drop the row entirely.
+      const name =
+        readString(row.name) ?? readString(row.romExtensionlessFileName);
+      // System: prefer the SYSTEMS join; fall back to the
+      // denormalized release-side TEMPsystemName when present.
+      const system =
+        readString(row.systemName) ??
+        readString(row.releaseTempSystemName);
       if (name === null || system === null) return null;
       return {
-        md5: readString(row.md5) ?? md5,
+        md5: readString(row.hash) ?? md5,
         name,
         system,
-        year: parseYear(readString(row.date)),
+        year: parseReleaseYear(readString(row.releaseDate)),
         genre: readString(row.genre),
         publisher: readString(row.publisher),
         developer: readString(row.developer),
@@ -692,19 +749,28 @@ function defaultWasmBinaryPath(): string {
 
 function validateSchema(db: Database): boolean {
   try {
-    const stmt = db.prepare(
-      `SELECT name FROM sqlite_master WHERE type='table' AND name=?`,
-    );
-    try {
-      for (const table of REQUIRED_TABLES) {
-        stmt.reset();
-        stmt.bind([table]);
-        if (!stmt.step()) return false;
+    for (const [table, columns] of REQUIRED_SCHEMA) {
+      // PRAGMA can't be parameterised — table name needs to splice
+      // in directly. The keys come from a hard-coded constant, so
+      // the injection surface is nil. Quoting with double-quotes
+      // tolerates the case-sensitive table names OpenVGDB uses
+      // (e.g. `ROMs`).
+      const stmt = db.prepare(`PRAGMA table_info("${table}")`);
+      try {
+        const present = new Set<string>();
+        while (stmt.step()) {
+          const row = stmt.getAsObject();
+          if (typeof row.name === 'string') present.add(row.name);
+        }
+        if (present.size === 0) return false; // table missing entirely
+        for (const col of columns) {
+          if (!present.has(col)) return false;
+        }
+      } finally {
+        stmt.free();
       }
-      return true;
-    } finally {
-      stmt.free();
     }
+    return true;
   } catch {
     return false;
   }
@@ -716,14 +782,49 @@ function readString(value: unknown): string | null {
   return trimmed.length === 0 ? null : trimmed;
 }
 
-function parseYear(text: string | null): number | null {
+/**
+ * Parse a year from a free-form release-date string.
+ *
+ * OpenVGDB's `releaseDate` is a TEXT column with no consistent
+ * format — values like "1992", "1992-10-29", "Oct 29, 1992", and
+ * "released in '92" all show up. We:
+ *   1. Look for a 4-digit year and accept it if it's in our
+ *      plausible range (`MIN_RELEASE_YEAR`..`MAX_RELEASE_YEAR`).
+ *      This rejects "1492", "21000", and similar nonsense — both
+ *      because the regex won't match (5-digit runs lose the right
+ *      `\b`) and because the range filter screens stragglers.
+ *   2. Fall back to a 2-digit shorthand prefixed by an apostrophe
+ *      ("'92" → 1992, "'05" → 2005). The 70-cutoff splits 1900s
+ *      from 2000s — same plausibility window.
+ *
+ * Returns null on null/empty input or when no plausible year is
+ * present.
+ */
+function parseReleaseYear(text: string | null): number | null {
   if (text === null) return null;
-  const match = /\b(\d{4})\b/.exec(text);
-  if (!match) return null;
-  const y = Number.parseInt(match[1] ?? '', 10);
-  if (!Number.isFinite(y)) return null;
-  if (y < 1970 || y > 2100) return null;
-  return y;
+  const t = text.trim();
+  if (t.length === 0) return null;
+
+  for (const match of t.matchAll(/\b(\d{4})\b/g)) {
+    const y = Number.parseInt(match[1] ?? '', 10);
+    if (
+      Number.isFinite(y) &&
+      y >= MIN_RELEASE_YEAR &&
+      y <= MAX_RELEASE_YEAR
+    ) {
+      return y;
+    }
+  }
+
+  const short = /'(\d{2})\b/.exec(t);
+  if (short !== null) {
+    const n = Number.parseInt(short[1] ?? '', 10);
+    if (Number.isFinite(n)) {
+      return n >= 70 ? 1900 + n : 2000 + n;
+    }
+  }
+
+  return null;
 }
 
 function isNodeError(err: unknown): err is NodeJS.ErrnoException {
