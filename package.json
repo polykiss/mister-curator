@@ -13,7 +13,8 @@
     "test": "vitest run",
     "format": "prettier --write .",
     "smoke:real": "tsx scripts/smoke-test-real-client.ts",
-    "diag:real": "tsx scripts/diag-real-client.ts"
+    "diag:real": "tsx scripts/diag-real-client.ts",
+    "test:metadata": "tsx scripts/test-metadata.ts"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
