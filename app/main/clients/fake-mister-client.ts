@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
@@ -61,6 +62,7 @@ import type {
   BulkRomResult,
   CoreVisibilityChange,
   IMisterClient,
+  Md5SumResult,
   MisterSecret,
   PrimeConnectResult,
   RomVisibilityChange,
@@ -654,6 +656,35 @@ export class FakeMisterClient implements IMisterClient {
         }
         throw err;
       }
+    }
+    return out;
+  }
+
+  async md5sumPaths(paths: readonly string[]): Promise<readonly Md5SumResult[]> {
+    this.assertConnected();
+    if (paths.length === 0) return [];
+    await this.delay();
+    const out: Md5SumResult[] = [];
+    for (const p of paths) {
+      const local = this.toLocal(p);
+      let st;
+      try {
+        st = await fs.stat(local);
+      } catch (err) {
+        // Mirror the real client's busybox loop: missing or non-file
+        // paths silently drop instead of throwing — the caller filters
+        // the result map for the paths it cares about.
+        if (isNodeError(err) && err.code === 'ENOENT') continue;
+        throw err;
+      }
+      if (!st.isFile()) continue;
+      const buf = await fs.readFile(local);
+      const hash = createHash('md5').update(buf).digest('hex');
+      out.push({
+        path: p,
+        hash,
+        mtime: Math.floor(st.mtimeMs / 1000),
+      });
     }
     return out;
   }

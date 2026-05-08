@@ -812,4 +812,58 @@ describe('FakeMisterClient', () => {
       expect(after).toEqual(before);
     });
   });
+
+  describe('md5sumPaths', () => {
+    it('returns hash + mtime per file, in the same order as input', async () => {
+      const targets = [
+        '/media/fat/games/NES/Castlevania (USA, Europe).nes',
+        '/media/fat/games/NES/Contra (USA).nes',
+      ];
+      const result = await client.md5sumPaths(targets);
+      expect(result).toHaveLength(2);
+      for (const r of result) {
+        // 32-char lowercase hex.
+        expect(r.hash).toMatch(/^[0-9a-f]{32}$/);
+        expect(r.mtime).toBeGreaterThan(0);
+        expect(targets).toContain(r.path);
+      }
+      // (We don't assert distinct hashes — the fixture ROMs are
+      // empty stubs and all md5 to d41d8cd98f00b204e9800998ecf8427e.)
+    });
+
+    it('produces the canonical empty-string md5 for empty fixture files', async () => {
+      // Pinning the empty-string md5 here proves the FakeMisterClient
+      // is using the same algorithm busybox uses on the device — a
+      // mismatch would silently corrupt every cache entry, and a
+      // round-trip-only test wouldn't catch it.
+      const [r] = await client.md5sumPaths([
+        '/media/fat/games/NES/Castlevania (USA, Europe).nes',
+      ]);
+      expect(r?.hash).toBe('d41d8cd98f00b204e9800998ecf8427e');
+    });
+
+    it('drops paths that don\'t exist on the device', async () => {
+      const result = await client.md5sumPaths([
+        '/media/fat/games/NES/Castlevania (USA, Europe).nes',
+        '/media/fat/games/NES/__no_such_file__.nes',
+      ]);
+      expect(result).toHaveLength(1);
+      expect(result[0]?.path).toBe(
+        '/media/fat/games/NES/Castlevania (USA, Europe).nes',
+      );
+    });
+
+    it('returns an empty array for empty input', async () => {
+      expect(await client.md5sumPaths([])).toEqual([]);
+    });
+
+    it('throws when called before connect', async () => {
+      const disconnected = new FakeMisterClient({
+        rootPath: workDir,
+        pristineRootPath: fixturesDir,
+        latencyMs: 0,
+      });
+      await expect(disconnected.md5sumPaths(['/x'])).rejects.toThrow();
+    });
+  });
 });
