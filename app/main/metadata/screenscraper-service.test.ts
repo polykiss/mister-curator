@@ -905,6 +905,27 @@ describe('redactScreenScraperUrl (round 3)', () => {
       'https://api.screenscraper.fr/api2/jeuInfos.php?ssid=%5Bredacted%5D',
     );
   });
+
+  it('also redacts media URLs (mediaJeu.php carries the same query params)', () => {
+    // SS embeds creds in media URLs too; round 4's live test caught
+    // these printed in plain text by `scripts/test-metadata.ts` for
+    // box art. Same redactor applies — the helper keys on the param
+    // names, not the path.
+    const url =
+      'https://neoclone.screenscraper.fr/api2/mediaJeu.php' +
+      '?devid=misterCurater&devpassword=PLAINTEXT&ssid=u&sspassword=p' +
+      '&jeuid=1234&media=box-2D';
+    const out = redactScreenScraperUrl(url);
+    expect(out).not.toContain('PLAINTEXT');
+    expect(out).not.toContain('misterCurater');
+    expect(out).toContain('devid=%5Bredacted%5D');
+    expect(out).toContain('devpassword=%5Bredacted%5D');
+    expect(out).toContain('ssid=%5Bredacted%5D');
+    expect(out).toContain('sspassword=%5Bredacted%5D');
+    // Non-cred params survive.
+    expect(out).toContain('jeuid=1234');
+    expect(out).toContain('media=box-2D');
+  });
 });
 
 describe('ScreenScraperService — diagnostic logs (round 3)', () => {

@@ -38,7 +38,10 @@ import { ImageCache } from '@app/main/metadata/image-cache';
 import { LibretroThumbnailsFetcher } from '@app/main/metadata/libretro-thumbnails';
 import { MetadataService } from '@app/main/metadata/metadata-service';
 import { OpenVGDBService } from '@app/main/metadata/openvgdb-service';
-import { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
+import {
+  ScreenScraperService,
+  redactScreenScraperUrl,
+} from '@app/main/metadata/screenscraper-service';
 import { MisterConnectionError } from '@shared/types';
 import type { MisterProfile, Rom } from '@shared/types';
 import type { IMisterClient, MisterSecret } from '@shared/mister-client';
@@ -59,15 +62,21 @@ const TARGET_KEYWORDS = [
 
 /**
  * Cold-cache perf budgets. Used as soft assertions — we warn but
- * don't exit. Round 3 splits the cold budget by source: the OpenVGDB
- * path is local SQLite + URL building (≤200ms); ScreenScraper goes
- * over the network with rate-limit gating (give it 5s before flagging).
- * Warm/sentinel/null calls share the OpenVGDB-shaped budget — they
- * never touch the network.
+ * don't exit. Round 3 splits the cold budget by source: OpenVGDB is
+ * local SQLite + URL building; ScreenScraper goes over the network
+ * with rate-limit gating. Warm/sentinel/null calls share the
+ * OpenVGDB-shaped budget — they never touch the network.
+ *
+ * Round 4 raised the SS budget from 5000 → 10000 after the live test
+ * caught Castlevania (5092ms), Sonic 2 (11585ms), Chrono Trigger
+ * (9111ms) tripping warnings on legitimate slow responses. Sonic 2 in
+ * particular was consistent across runs — known SS slowness for that
+ * record, not a regression. 10s catches genuinely runaway calls
+ * without flagging the normal slow tail.
  */
 const PERF_BUDGETS = {
   openVgdbColdMs: 200,
-  screenScraperColdMs: 5000,
+  screenScraperColdMs: 10000,
   metadataWarmMs: 50,
   imageColdMs: 5000,
   imageWarmMs: 50,
@@ -479,11 +488,16 @@ async function main(): Promise<void> {
       //   - HEAD 4xx  → log the status + URL; libretro coverage is
       //     known to be sparse for some systems.
       if (meta.boxArtUrl !== null) {
+        // SS embeds dev creds in media URLs (devid/devpassword query
+        // params on `mediaJeu.php`). Run every printed URL through
+        // the redactor — the bytes still flow over the wire, only the
+        // log string is scrubbed.
+        const safeUrl = redactScreenScraperUrl(meta.boxArtUrl);
         const probe = await probeArtUrl(meta.boxArtUrl);
         if (probe.status === 200) {
           boxArtVerified += 1;
           console.log(
-            `  box art ✓   ${meta.boxArtUrl} (${formatBytes(probe.bytes)})`,
+            `  box art ✓   ${safeUrl} (${formatBytes(probe.bytes)})`,
           );
           const imgT = await timed(() => imageCache.fetch(meta.boxArtUrl ?? ''));
           if (imgT.value !== null) {
@@ -512,13 +526,9 @@ async function main(): Promise<void> {
             console.log(`  box art ✗   download failed after HEAD 200`);
           }
         } else if (probe.status === null) {
-          console.log(
-            `  box art ✗   network error  ${meta.boxArtUrl}`,
-          );
+          console.log(`  box art ✗   network error  ${safeUrl}`);
         } else {
-          console.log(
-            `  box art ✗   ${String(probe.status)} ${meta.boxArtUrl}`,
-          );
+          console.log(`  box art ✗   ${String(probe.status)} ${safeUrl}`);
         }
       } else {
         console.log(
