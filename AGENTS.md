@@ -158,6 +158,16 @@ Update it before changing consumers.
     container hashing (Saturn, MegaCD, X68000) is deferred — those
     sources index disc images by hash inconsistently and need a
     separate strategy.
+
+    For `.zip`-wrapped ROMs (case-insensitive), HashService hashes
+    the EXTRACTED inner content (`unzip -p <zip> | md5sum` on the
+    device), not the wrapper bytes — OpenVGDB indexes inner-file
+    hashes. mtime stays on the wrapper, so cache invalidation
+    follows the user's actions on the visible file. Limitation:
+    multi-file zips concatenate into a single hash that won't match
+    OpenVGDB and surface as "no match" cleanly. Other archive
+    formats (`.7z`, `.gz`, `.rar`) fall through to direct md5sum
+    and won't match OpenVGDB but won't error.
   - `openvgdb.sqlite` — the downloaded SQLite snapshot.
   - `by-hash/<XX>/<hash>.json` — RomMetadata records (matched OR a
     `source: 'none'` sentinel cached for 30 days). Sharded by hash

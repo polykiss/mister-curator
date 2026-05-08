@@ -103,9 +103,15 @@ interface VersionFile {
  * The single SELECT we issue, written against the OpenVGDB v29.0
  * schema (verified live against the real archive). LEFT JOINs keep
  * the row even if RELEASES or SYSTEMS is missing — OpenVGDB
- * sometimes has ROMs without a release record. `LOWER(?)` shields
- * against md5 hex case drift (we already lowercase JS-side, but two
- * layers of safety is cheap).
+ * sometimes has ROMs without a release record.
+ *
+ * `WHERE rom.romHashMD5 = UPPER(?)`: round 6 fix. OpenVGDB stores
+ * md5 hashes in UPPERCASE hex; busybox `md5sum` emits lowercase, so
+ * a literal `column = ?` comparison would always miss. We uppercase
+ * the bind once on the SQLite side, leaving the column comparison
+ * BINARY (the index OpenVGDB ships on `romHashMD5` is BINARY-typed,
+ * so an `UPPER(column)` wrap would force a scan). `COLLATE NOCASE`
+ * would also work but bypasses the BINARY index for the same reason.
  *
  * Why not the `releaseCover*` URL columns: OpenVGDB's bundled art
  * URLs point at TheGamesDB CDN paths that have rotted over the
@@ -134,7 +140,7 @@ const QUERY_BY_MD5 = `
   FROM ROMs rom
   LEFT JOIN RELEASES rel ON rel.romID = rom.romID
   LEFT JOIN SYSTEMS  sys ON sys.systemID = rom.systemID
-  WHERE rom.romHashMD5 = LOWER(?)
+  WHERE rom.romHashMD5 = UPPER(?)
   LIMIT 1
 `;
 

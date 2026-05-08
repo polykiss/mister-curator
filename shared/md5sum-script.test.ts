@@ -30,6 +30,32 @@ describe('md5sum-script', () => {
       expect(script).toContain('for f in "$@"');
       expect(script).toContain('if [ -f "$f" ]');
     });
+
+    it('routes .zip / .ZIP paths through unzip -p before md5sum (round 6)', () => {
+      const script = buildMd5sumScript(['/media/fat/games/SNES/Sonic.zip']);
+      // Case-glob covers both extensions in a single arm.
+      expect(script).toContain('case "$f" in');
+      expect(script).toContain('*.zip|*.ZIP)');
+      expect(script).toContain('unzip -p "$f"');
+      // The unzip arm pipes into md5sum (matches the device-side
+      // behaviour described in the docstring).
+      expect(script).toMatch(/unzip -p "\$f"[^\n]*\|\s*md5sum/);
+    });
+
+    it('keeps the direct md5sum branch for non-archive paths', () => {
+      const script = buildMd5sumScript(['/media/fat/games/SNES/Sonic.sfc']);
+      // The wildcard fallback in case ... esac runs md5sum directly.
+      expect(script).toMatch(/\*\)\s*\n\s*h=\$\(md5sum "\$f"/);
+    });
+
+    it('captures wrapper mtime regardless of the hash branch', () => {
+      // Cache invalidation keys on wrapper mtime — the same `stat`
+      // call applies to .zip and direct paths.
+      const script = buildMd5sumScript(['/x.zip']);
+      expect(script).toContain('m=$(stat -c %Y "$f"');
+      // No second `stat` against a hypothetical inner-file path.
+      expect(script.match(/stat -c %Y/g)?.length).toBe(1);
+    });
   });
 
   describe('parseMd5sumOutput', () => {

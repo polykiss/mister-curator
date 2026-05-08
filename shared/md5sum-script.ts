@@ -13,12 +13,35 @@ import type { Md5SumResult } from '@shared/mister-client';
  * Argv-limit note: busybox sh on the DE10-Nano happily handles ~100
  * paths joined with shell-quoting; the orchestrator (HashService)
  * chunks larger inputs.
+ *
+ * Round 6 — `.zip` extraction:
+ *
+ * OpenVGDB indexes ROMs by the hash of the EXTRACTED file (`.sfc`,
+ * `.md`, `.nes`, `.gba`, …), never by the hash of a `.zip` wrapper.
+ * For paths with a `.zip` (case-insensitive) extension, we pipe the
+ * archive through `unzip -p` before `md5sum` so the cache stores the
+ * inner-file hash. `mtime` is still recorded against the wrapper —
+ * that's what cache invalidation keys on, since the wrapper is what
+ * the user touches.
+ *
+ * Limitation: `unzip -p` writes every entry concatenated. For a
+ * multi-file zip (variant collections, X68000 multi-disk) the
+ * resulting hash won't match anything in OpenVGDB. The metadata
+ * service then returns null cleanly — same outcome as a ROM that
+ * genuinely isn't indexed. Not incorrect, just unmatched. A future
+ * round can detect multi-file zips and hash each entry separately
+ * once we see how often it actually matters.
+ *
+ * Limitation 2: `.zip` is the only archive format handled. `.7z`,
+ * `.gz`, `.rar` and friends fall through to direct `md5sum`, which
+ * won't match OpenVGDB but won't error either.
  */
 export function buildMd5sumScript(paths: readonly string[]): string {
-  // The body is platform-portable: busybox `md5sum`, `stat -c %Y`,
-  // and `printf` all exist on every MiSTer build we care about. We
-  // double-check `-f $f` so a directory path silently drops rather
-  // than producing a confusing md5 of the dir's contents string.
+  // The body is platform-portable: busybox `md5sum`, `unzip`, `stat
+  // -c %Y`, `printf`, and POSIX `case ... esac` all exist on every
+  // MiSTer build we care about. The `[ -f $f ]` guard ensures a
+  // directory path silently drops rather than producing a confusing
+  // md5 of the dir's contents string.
   //
   // The input paths are passed as positional args via `set --`; we
   // shell-quote each so spaces and apostrophes survive untouched.
@@ -27,7 +50,14 @@ export function buildMd5sumScript(paths: readonly string[]): string {
     setLine,
     'for f in "$@"; do',
     '  if [ -f "$f" ]; then',
-    "    h=$(md5sum \"$f\" 2>/dev/null | cut -d' ' -f1)",
+    '    case "$f" in',
+    '      *.zip|*.ZIP)',
+    "        h=$(unzip -p \"$f\" 2>/dev/null | md5sum 2>/dev/null | cut -d' ' -f1)",
+    '        ;;',
+    '      *)',
+    "        h=$(md5sum \"$f\" 2>/dev/null | cut -d' ' -f1)",
+    '        ;;',
+    '    esac',
     '    m=$(stat -c %Y "$f" 2>/dev/null)',
     '    if [ -n "$h" ] && [ -n "$m" ]; then',
     '      printf \'%s\\t%s\\t%s\\n\' "$f" "$h" "$m"',

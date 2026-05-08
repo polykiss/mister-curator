@@ -121,11 +121,15 @@ async function buildFixture(rows: readonly FixtureRow[]): Promise<Uint8Array> {
     const romId = db.exec('SELECT IFNULL(MAX(romID), 0) + 1 FROM ROMs')[0]
       ?.values[0]?.[0] as number;
     const extensionless = r.fileName.replace(/\.[^./]+$/, '');
+    // Round 6 fix: OpenVGDB v29.0 stores hashes in UPPERCASE hex. Our
+    // tests pass lowercase constants (what busybox md5sum produces),
+    // so the fixture uppercases on insert to mirror real-world shape
+    // and exercise the query's `UPPER(?)` case-insensitive path.
     db.run(
       `INSERT INTO ROMs
         (romID, systemID, romHashMD5, romFileName, romExtensionlessFileName)
        VALUES (?, ?, ?, ?, ?)`,
-      [romId, sysId, r.md5, r.fileName, extensionless],
+      [romId, sysId, r.md5.toUpperCase(), r.fileName, extensionless],
     );
     if (r.title !== null) {
       db.run(
@@ -260,6 +264,15 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+function toMixedCase(hash: string): string {
+  // Alternate upper / lower across the hex chars — exercises the
+  // case-insensitive path far more aggressively than just upper.
+  return hash
+    .split('')
+    .map((c, i) => (i % 2 === 0 ? c.toUpperCase() : c.toLowerCase()))
+    .join('');
 }
 
 function bytesResponse(bytes: Uint8Array, status = 200): Response {
@@ -820,7 +833,12 @@ describe('OpenVGDBService (round 4 — GitHub releases + jszip)', () => {
     expect(await svc.getMetadataByHash(HASH_SMW)).toBeNull();
   });
 
-  it('matches md5 case-insensitively', async () => {
+  it('matches md5 case-insensitively (lower / upper / mixed all hit) — round 6', async () => {
+    // OpenVGDB v29.0 stores hashes in UPPERCASE hex; the fixture
+    // builder mirrors that. The service's `WHERE … = UPPER(?)` query
+    // means a caller passing any case form (busybox lowercase, the
+    // DB's own uppercase, or a mixed-case dev typo) lands on the
+    // same row.
     await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(fixtureBuffer));
     await fs.writeFile(
       join(dir, 'openvgdb.version.json'),
@@ -828,8 +846,13 @@ describe('OpenVGDBService (round 4 — GitHub releases + jszip)', () => {
     );
     const svc = new OpenVGDBService(dir);
     await svc.ensureDatabase();
+
+    const lower = await svc.getMetadataByHash(HASH_SMW.toLowerCase());
     const upper = await svc.getMetadataByHash(HASH_SMW.toUpperCase());
+    const mixed = await svc.getMetadataByHash(toMixedCase(HASH_SMW));
+    expect(lower?.name).toBe('Super Mario World');
     expect(upper?.name).toBe('Super Mario World');
+    expect(mixed?.name).toBe('Super Mario World');
   });
 
   it('parses partial date strings into a year', async () => {
