@@ -374,3 +374,83 @@ describe('shouldCountAsRom — unified filter for matcher + listRoms', () => {
     ).toBe(false);
   });
 });
+
+describe('shouldCountAsRom — OS metadata filter (issue #17)', () => {
+  it('rejects an AppleDouble sidecar at the leaf', () => {
+    expect(
+      shouldCountAsRom({
+        relPath: '._castlevania.chd',
+        isDirectory: false,
+        coreId: 'GBA',
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects .DS_Store / Thumbs.db / desktop.ini at the leaf', () => {
+    for (const name of ['.DS_Store', 'Thumbs.db', 'desktop.ini', '.directory']) {
+      expect(
+        shouldCountAsRom({
+          relPath: name,
+          isDirectory: false,
+          coreId: 'GENESIS',
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it('rejects an OS metadata directory itself', () => {
+    for (const name of [
+      '.AppleDouble',
+      '.Spotlight-V100',
+      '.Trashes',
+      '.fseventsd',
+      '$RECYCLE.BIN',
+      'lost+found',
+    ]) {
+      expect(
+        shouldCountAsRom({
+          relPath: name,
+          isDirectory: true,
+          coreId: 'GENESIS',
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it('rejects ANY file inside an OS metadata directory ancestor', () => {
+    // The macOS-on-MiSTer scenario: someone copies a games dir from a
+    // Mac, leaving `.AppleDouble/` shadows and `._sonic.zip` sidecars.
+    // Both ancestor and leaf shapes need to fail closed.
+    expect(
+      shouldCountAsRom({
+        relPath: '.AppleDouble/sonic.zip',
+        isDirectory: false,
+        coreId: 'GENESIS',
+      }),
+    ).toBe(false);
+    expect(
+      shouldCountAsRom({
+        relPath: '$RECYCLE.BIN/some-rom.gba',
+        isDirectory: false,
+        coreId: 'GBA',
+      }),
+    ).toBe(false);
+  });
+
+  it('still counts real ROM files alongside OS metadata', () => {
+    expect(
+      shouldCountAsRom({
+        relPath: 'sonic.zip',
+        isDirectory: false,
+        coreId: 'GENESIS',
+      }),
+    ).toBe(true);
+    expect(
+      shouldCountAsRom({
+        relPath: 'Castlevania - Aria of Sorrow.gba',
+        isDirectory: false,
+        coreId: 'GBA',
+      }),
+    ).toBe(true);
+  });
+});

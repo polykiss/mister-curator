@@ -24,6 +24,7 @@ import {
   type RawSubFolderInput,
 } from '@shared/core-matching';
 import { displayRomName } from '@shared/display';
+import { isOsMetadataDir, isOsMetadataFile } from '@shared/library-filter';
 import {
   classifyFolder,
   resolveClassification,
@@ -277,6 +278,13 @@ export class FakeMisterClient implements IMisterClient {
     const roms: Rom[] = [];
     for (const entry of entries) {
       const filename = entry.name;
+      // Issue #17 — drop OS metadata sidecars (`._*`, `.DS_Store`,
+      // `Thumbs.db`, `desktop.ini`, `.directory`) and metadata
+      // directories (`.AppleDouble`, `$RECYCLE.BIN`, etc.) before
+      // they surface as ROM candidates.
+      if (entry.isFile() && isOsMetadataFile(filename)) continue;
+      if (entry.isDirectory() && isOsMetadataDir(filename)) continue;
+
       const hidden = filename.startsWith('.');
       const visibleBase = hidden ? filename.slice(1) : filename;
       const displayName = displayRomName(visibleBase);
