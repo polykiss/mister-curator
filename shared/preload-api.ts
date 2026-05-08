@@ -54,6 +54,10 @@ export const IPC_CHANNELS = {
   clearMetadataCache: 'mister:clearMetadataCache',
   getBoxArtLocal: 'mister:getBoxArtLocal',
   metadataPrefetchProgress: 'mister:metadataPrefetchProgress',
+  // Round 3 (OpenVGDB). The renderer prompts the user to download
+  // the ~50MB SQLite snapshot; main pulls it down + opens it.
+  ensureMetadataDatabase: 'mister:ensureMetadataDatabase',
+  metadataDatabaseProgress: 'mister:metadataDatabaseProgress',
 } as const;
 
 /** PR #15 prefetch progress kind. Discriminator for the wire event. */
@@ -67,6 +71,32 @@ export type MetadataPrefetchKind = 'hash' | 'metadata';
 export interface MetadataPrefetchEvent extends PrefetchProgress {
   readonly operationId: string;
   readonly kind: MetadataPrefetchKind;
+}
+
+/**
+ * Round 3: streaming progress from the OpenVGDB download. Mirrors
+ * the OpenVGDBProgressEvent shape but flattened for cross-process
+ * transmission so the renderer doesn't depend on the main-process
+ * type.
+ */
+export type MetadataDatabaseProgressEvent =
+  | { readonly kind: 'started' }
+  | {
+      readonly kind: 'downloading';
+      readonly bytesReceived: number;
+      readonly bytesTotal: number | null;
+    }
+  | { readonly kind: 'ready' }
+  | { readonly kind: 'error'; readonly message: string };
+
+/**
+ * Snapshot return value from `mister:ensureMetadataDatabase`. The
+ * renderer reads this synchronously and subscribes to the streaming
+ * progress channel for live updates.
+ */
+export interface MetadataDatabaseState {
+  readonly ready: boolean;
+  readonly downloadInProgress: boolean;
 }
 
 /**
@@ -312,6 +342,22 @@ export interface MisterApi {
    */
   onMetadataPrefetchProgress(
     handler: (event: MetadataPrefetchEvent) => void,
+  ): () => void;
+  /**
+   * Round 3: kick off (or check on) the OpenVGDB SQLite download.
+   * Returns immediately with the current state — the renderer
+   * subscribes to `onMetadataDatabaseProgress` for streaming updates
+   * and re-calls this method to learn when the download settles.
+   */
+  ensureMetadataDatabase(): Promise<MetadataDatabaseState>;
+  /**
+   * Subscribe to OpenVGDB download progress events. Fires `started`
+   * → `downloading*` → `ready` on success, or `error` on a failed
+   * attempt. The download itself runs once per session — repeated
+   * `ensureMetadataDatabase` calls are no-ops once `ready` fires.
+   */
+  onMetadataDatabaseProgress(
+    handler: (event: MetadataDatabaseProgressEvent) => void,
   ): () => void;
 }
 

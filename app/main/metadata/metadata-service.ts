@@ -1,11 +1,11 @@
 import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-import {
-  ScreenScraperAuthError,
-  type ScreenScraperClient,
-} from '@app/main/metadata/clients/screenscraper-client';
-import type { TheGamesDBClient } from '@app/main/metadata/clients/thegamesdb-client';
+import type { LibretroThumbnailsFetcher } from '@app/main/metadata/libretro-thumbnails';
+import type {
+  OpenVGDBMetadata,
+  OpenVGDBService,
+} from '@app/main/metadata/openvgdb-service';
 import {
   NO_MATCH_TTL_MS,
   ROM_METADATA_SCHEMA_VERSION,
@@ -18,83 +18,73 @@ export interface MetadataServiceOptions {
   readonly now?: () => number;
   /** Expiry for `source: 'none'` sentinels. */
   readonly noMatchTtlMs?: number;
-  /**
-   * Single-line warning sink. Used for the "ScreenScraper auth failed,
-   * disabling for this session" notice. Default: no log.
-   */
-  readonly logger?: (message: string) => void;
 }
 
 /**
- * Hash-keyed metadata pipeline. Owns the by-hash on-disk cache; calls
- * out to ScreenScraper first, falls back to TheGamesDB only on miss,
- * and writes a `source: 'none'` sentinel after both fail so we don't
- * re-query the upstreams every time the user opens the same ROM.
+ * Hash-keyed metadata pipeline (PR #15 round 3 pivot).
  *
- * Cache file layout:
+ * Composition:
+ *   1. OpenVGDBService — local SQLite lookup, hash → name + facts.
+ *   2. LibretroThumbnailsFetcher — turns the matched name + system
+ *      into PNG URLs (box art / title / snap).
+ *
+ * Cache file layout (unchanged from rounds 1-2):
  *   <rootDir>/by-hash/<hash[0:2]>/<hash>.json
  *
  * The 2-char shard mirrors ImageCache and prevents one giant directory
  * once a sizable library is hashed.
  *
  * TTL policy:
- *   - matched metadata (source: screenscraper / thegamesdb) never
- *     expires. The on-disk record is the canonical source of truth
- *     until the user explicitly clears the cache.
- *   - sentinels (source: 'none') expire after `noMatchTtlMs` (30
- *     days by default). Past that, the next call re-tries both
- *     upstreams in case coverage has improved.
+ *   - matched metadata never expires. The OpenVGDB snapshot is
+ *     immutable within a session; if we matched once, we'll match
+ *     again. The user clears the cache via `clearAll`.
+ *   - `'none'` sentinels expire after `noMatchTtlMs` (30 days). Past
+ *     that, the next call re-tries — useful if the user has updated
+ *     OpenVGDB to a newer snapshot in the interim.
  *
  * Concurrency: per-hash in-flight gate so two `getMetadata(h)` calls
- * issued in parallel don't double-hit the upstream.
+ * issued in parallel don't double-hit OpenVGDB or double-write the
+ * cache file.
+ *
+ * Schema-version note: v1 cache files (rounds 1-2) fail the parse
+ * guard and are treated as a miss. The first call rewrites them in
+ * v2 shape. No migration step needed.
  */
 export class MetadataService {
   private readonly noMatchTtlMs: number;
   private readonly now: () => number;
-  private readonly logger: (message: string) => void;
   /** Per-hash in-flight gate. */
   private readonly inflight = new Map<string, Promise<RomMetadata | null>>();
-  /**
-   * Round 2 of PR #15: latches `true` on the first
-   * `ScreenScraperAuthError` and short-circuits ScreenScraper for the
-   * remainder of the session. Misconfigured creds aren't going to
-   * start working spontaneously, and re-attempting just stacks the
-   * 1.1s rate-limit wait on every ROM the orchestrator queues.
-   */
-  private screenScraperDisabled = false;
 
   constructor(
     private readonly rootDir: string,
-    private readonly screenScraper: ScreenScraperClient,
-    private readonly theGamesDb: TheGamesDBClient,
+    private readonly openVgdb: OpenVGDBService,
+    private readonly thumbnails: LibretroThumbnailsFetcher,
     options: MetadataServiceOptions = {},
   ) {
     this.noMatchTtlMs = options.noMatchTtlMs ?? NO_MATCH_TTL_MS;
     this.now = options.now ?? Date.now;
-    this.logger = options.logger ?? ((): void => {
-      /* default: no log */
-    });
-  }
-
-  /** Test/inspection helper — true once an AuthError disabled SS. */
-  isScreenScraperDisabled(): boolean {
-    return this.screenScraperDisabled;
   }
 
   /**
    * Returns metadata for a hash. Cache hit → immediate. Sentinel hit
-   * (within TTL) → null without re-fetching. Cold miss / stale
-   * sentinel → ScreenScraper, then TheGamesDB on no-match. Writes
-   * the result (including `source: 'none'` sentinel) to disk.
+   * (within TTL) → null without re-querying. Cold miss / stale
+   * sentinel → OpenVGDB + libretro composition. Writes the result
+   * (including `source: 'none'` sentinel) to disk.
+   *
+   * The `hint` is currently unused — OpenVGDB is hash-keyed so the
+   * hash alone uniquely identifies the ROM. Reserved for future
+   * name-search fallback.
    */
   async getMetadata(
     hash: string,
     hint: MetadataHint = {},
   ): Promise<RomMetadata | null> {
+    void hint;
     const inflight = this.inflight.get(hash);
     if (inflight !== undefined) return inflight;
 
-    const promise = this.doGet(hash, hint).finally(() => {
+    const promise = this.doGet(hash).finally(() => {
       this.inflight.delete(hash);
     });
     this.inflight.set(hash, promise);
@@ -103,7 +93,7 @@ export class MetadataService {
 
   /**
    * Drop one hash from the cache. The next `getMetadata` call will
-   * re-fetch from the upstream services.
+   * re-query the upstream.
    */
   async invalidate(hash: string): Promise<void> {
     const path = this.cachePath(hash);
@@ -130,54 +120,49 @@ export class MetadataService {
 
   // ─── internals ─────────────────────────────────────────────────────
 
-  private async doGet(
-    hash: string,
-    hint: MetadataHint,
-  ): Promise<RomMetadata | null> {
+  private async doGet(hash: string): Promise<RomMetadata | null> {
     const cached = await this.readCache(hash);
     if (cached !== null && !this.isStaleSentinel(cached)) {
       return cached.source === 'none' ? null : cached;
     }
 
-    if (!this.screenScraperDisabled) {
-      try {
-        const fromScreenScraper = await this.screenScraper.getByMd5(hash, hint);
-        if (fromScreenScraper !== null) {
-          await this.writeCache(hash, fromScreenScraper);
-          return fromScreenScraper;
-        }
-      } catch (err) {
-        if (err instanceof ScreenScraperAuthError) {
-          // Two concurrent calls can both observe the throw before
-          // either flips the flag — guard the log so the user sees
-          // exactly one notice even under that race.
-          if (!this.screenScraperDisabled) {
-            this.screenScraperDisabled = true;
-            this.logger(
-              `[ScreenScraper] auth failed (HTTP ${String(err.status)}); disabling for this session. ` +
-                'Verify SCREENSCRAPER_DEVID / SCREENSCRAPER_DEVPASSWORD.',
-            );
-          }
-          // Fall through to TheGamesDB rather than aborting — the
-          // user's library should still get whatever metadata that
-          // source can supply, even if SS creds are wrong.
-        } else {
-          throw err;
-        }
-      }
+    const fromDb = await this.openVgdb.getMetadataByHash(hash);
+    if (fromDb !== null) {
+      const composed = this.compose(hash, fromDb);
+      await this.writeCache(hash, composed);
+      return composed;
     }
 
-    const fromTheGamesDb = await this.theGamesDb.getByHint(hash, hint);
-    if (fromTheGamesDb !== null) {
-      await this.writeCache(hash, fromTheGamesDb);
-      return fromTheGamesDb;
-    }
-
-    // Both upstreams missed. Write the sentinel so we don't keep
-    // re-querying for this hash until the TTL expires.
     const sentinel = this.buildSentinel(hash);
     await this.writeCache(hash, sentinel);
     return null;
+  }
+
+  /**
+   * Combine OpenVGDB facts with libretro thumbnail URLs. The
+   * thumbnail URLs may be null when the system isn't in the libretro
+   * map — that's fine; the renderer falls back to a placeholder.
+   */
+  private compose(hash: string, db: OpenVGDBMetadata): RomMetadata {
+    const boxArt = this.thumbnails.getBoxArtUrl(db.system, db.name);
+    const title = this.thumbnails.getTitleScreenUrl(db.system, db.name);
+    const snap = this.thumbnails.getScreenshotUrl(db.system, db.name);
+    return {
+      version: ROM_METADATA_SCHEMA_VERSION,
+      hash,
+      name: db.name,
+      system: db.system,
+      year: db.year,
+      publisher: db.publisher,
+      developer: db.developer,
+      genre: db.genre,
+      description: db.description,
+      boxArtUrl: boxArt,
+      titleScreenUrl: title,
+      screenshotUrl: snap,
+      source: 'openvgdb',
+      fetchedAt: new Date(this.now()).toISOString(),
+    };
   }
 
   private buildSentinel(hash: string): RomMetadata {
@@ -185,17 +170,15 @@ export class MetadataService {
       version: ROM_METADATA_SCHEMA_VERSION,
       hash,
       name: '(no match)',
+      system: '',
       year: null,
       publisher: null,
       developer: null,
       genre: null,
-      players: null,
-      criticScore: null,
-      ageRating: null,
       description: null,
       boxArtUrl: null,
-      screenshotUrls: [],
       titleScreenUrl: null,
+      screenshotUrl: null,
       source: 'none',
       fetchedAt: new Date(this.now()).toISOString(),
     };
@@ -254,12 +237,11 @@ function isRomMetadata(v: unknown): v is RomMetadata {
   if (v === null || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
   return (
-    o.version === 1 &&
+    o.version === ROM_METADATA_SCHEMA_VERSION &&
     typeof o.hash === 'string' &&
     typeof o.name === 'string' &&
+    typeof o.system === 'string' &&
     typeof o.fetchedAt === 'string' &&
-    (o.source === 'screenscraper' ||
-      o.source === 'thegamesdb' ||
-      o.source === 'none')
+    (o.source === 'openvgdb' || o.source === 'none')
   );
 }

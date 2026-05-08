@@ -37,21 +37,19 @@ vi.mock('electron', () => ({
 const { registerIpcHandlers } = await import('@app/main/ipc/register');
 
 const SAMPLE_META: RomMetadata = {
-  version: 1,
+  version: 2,
   hash: 'a'.repeat(32),
   name: 'Super Mario World',
+  system: 'Super Nintendo Entertainment System',
   year: 1991,
   publisher: 'Nintendo',
   developer: 'Nintendo EAD',
   genre: 'Platform',
-  players: '1-2',
-  criticScore: 95,
-  ageRating: 'E',
   description: 'Mario rescues the princess.',
   boxArtUrl: 'https://cdn/box.png',
-  screenshotUrls: [],
   titleScreenUrl: null,
-  source: 'screenscraper',
+  screenshotUrl: null,
+  source: 'openvgdb',
   fetchedAt: '2025-01-01T00:00:00.000Z',
 };
 
@@ -63,8 +61,10 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
     prefetchMetadata: ReturnType<typeof vi.fn>;
     clearMetadataCache: ReturnType<typeof vi.fn>;
     getBoxArtLocal: ReturnType<typeof vi.fn>;
+    ensureMetadataDatabase: ReturnType<typeof vi.fn>;
   };
   let emitProgress: ReturnType<typeof vi.fn>;
+  let emitDbProgress: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     handlers.clear();
@@ -88,23 +88,33 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
       }),
       clearMetadataCache: vi.fn(async () => undefined),
       getBoxArtLocal: vi.fn(async (url: string) => `/cache/${url}`),
+      ensureMetadataDatabase: vi.fn(
+        async (cb?: (e: { kind: string }) => void) => {
+          cb?.({ kind: 'started' });
+          cb?.({ kind: 'ready' });
+          return { ready: true, downloadInProgress: false };
+        },
+      ),
     };
     emitProgress = vi.fn();
+    emitDbProgress = vi.fn();
 
     registerIpcHandlers(
       stubManager as never,
       { list: () => [] } as never,
       stubOrchestrator as never,
       emitProgress as never,
+      emitDbProgress as never,
     );
   });
 
-  it('registers all four documented metadata channels + getBoxArtLocal', () => {
+  it('registers every documented metadata channel', () => {
     expect(handlers.has(IPC_CHANNELS.getRomMetadata)).toBe(true);
     expect(handlers.has(IPC_CHANNELS.prefetchHashes)).toBe(true);
     expect(handlers.has(IPC_CHANNELS.prefetchMetadata)).toBe(true);
     expect(handlers.has(IPC_CHANNELS.clearMetadataCache)).toBe(true);
     expect(handlers.has(IPC_CHANNELS.getBoxArtLocal)).toBe(true);
+    expect(handlers.has(IPC_CHANNELS.ensureMetadataDatabase)).toBe(true);
   });
 
   it('mister:getRomMetadata returns the orchestrator\'s payload shape', async () => {
@@ -112,7 +122,8 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
     expect(h).toBeDefined();
     const result = (await h!.handler({}, 'SNES', '/p/x.sfc', { name: 'X' })) as RomMetadata;
     expect(result.hash).toBe(SAMPLE_META.hash);
-    expect(result.source).toBe('screenscraper');
+    expect(result.source).toBe('openvgdb');
+    expect(result.system).toBe('Super Nintendo Entertainment System');
     expect(stubOrchestrator.getRomMetadata).toHaveBeenCalledWith(
       'SNES',
       '/p/x.sfc',
@@ -182,5 +193,46 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
     expect(stubOrchestrator.getBoxArtLocal).toHaveBeenCalledWith(
       'https://cdn/box.png',
     );
+  });
+
+  it('mister:ensureMetadataDatabase returns the state and forwards progress', async () => {
+    const h = handlers.get(IPC_CHANNELS.ensureMetadataDatabase);
+    const result = (await h!.handler({})) as {
+      ready: boolean;
+      downloadInProgress: boolean;
+    };
+    expect(result).toEqual({ ready: true, downloadInProgress: false });
+    expect(stubOrchestrator.ensureMetadataDatabase).toHaveBeenCalledTimes(1);
+    expect(emitDbProgress).toHaveBeenCalled();
+    const kinds = emitDbProgress.mock.calls.map(
+      (c) => (c[0] as { kind: string }).kind,
+    );
+    expect(kinds).toContain('started');
+    expect(kinds).toContain('ready');
+  });
+
+  it('strips the `path` field from the underlying ready event', async () => {
+    // The OpenVGDBService emits `{ kind: 'ready', path }` — the
+    // renderer doesn't need that path, so the IPC handler trims it.
+    stubOrchestrator.ensureMetadataDatabase = vi.fn(
+      async (cb?: (e: { kind: string; path?: string }) => void) => {
+        cb?.({ kind: 'ready', path: '/local/path/to/openvgdb.sqlite' });
+        return { ready: true, downloadInProgress: false };
+      },
+    );
+    handlers.clear();
+    registerIpcHandlers(
+      stubManager as never,
+      { list: () => [] } as never,
+      stubOrchestrator as never,
+      emitProgress as never,
+      emitDbProgress as never,
+    );
+    const h = handlers.get(IPC_CHANNELS.ensureMetadataDatabase);
+    await h!.handler({});
+    const readyEvent = emitDbProgress.mock.calls
+      .map((c) => c[0] as { kind: string; path?: string })
+      .find((e) => e.kind === 'ready');
+    expect(readyEvent?.path).toBeUndefined();
   });
 });

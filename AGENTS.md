@@ -123,35 +123,53 @@ Update it before changing consumers.
   mtime only changes on top-level renames), so the cores-list
   romCount can read stale until Refresh. Drilling into the affected
   core picks up the change correctly via the listRoms cache.
-- App-local metadata directory: `<userData>/metadata/` (PR #15). Holds
-  the ROM-hash + metadata + image caches that drive the box-art /
-  scoring UI in PR #16/#17. No on-device writes, no agent code; safe
-  to delete at any time. Layout:
+- App-local metadata directory: `<userData>/metadata/` (PR #15).
+  Holds the ROM-hash + metadata + image caches that drive the box-art
+  / scoring UI in PR #16/#17. No on-device writes, no agent code;
+  safe to delete at any time.
+
+  Round 3 architecture: local-data-only. No upstream API
+  credentials, no rate limits.
+  - **OpenVGDB** — a SQLite snapshot (~50 MB) of the
+    https://github.com/OpenVGDB/OpenVGDB index, downloaded once on
+    first use. Maps md5 → name + system + year + genre + publisher
+    + developer + region. Distributed under the OpenVGDB project's
+    license; check `LICENSE` in that repo for the canonical terms.
+    Mirrors are listed in `app/main/metadata/openvgdb-service.ts`;
+    primary is https://inds.nerd.net/editor/openvgdb.sqlite (direct
+    .sqlite). The GitHub release ships a `.zip`; supporting that
+    needs an unzip dep we haven't added yet.
+  - **libretro-thumbnails** — community-curated PNG archive at
+    https://thumbnails.libretro.com/, organized per system. URL
+    builder lives in `app/main/metadata/libretro-thumbnails.ts`;
+    the system-name → directory map covers cartridge consoles
+    (NES / SNES / Genesis / Game Boy family / Atari / NEC PC
+    Engine / SNK Neo Geo / Vectrex / etc). Some MiSTer cores have
+    no libretro-thumbnails counterpart (X68000, DOS, Apogee, …) —
+    those return null from the builder. Image archive usage
+    follows the same conventions as RetroArch's own access.
+
+  Layout:
   - `<host>/hashes.json` — md5 of every hashed ROM file, mtime-keyed.
     File-only (kind: 'file') ROMs in v0; folder-atomic / folder-
-    container hashing is deferred.
+    container hashing (Saturn, MegaCD, X68000) is deferred — those
+    sources index disc images by hash inconsistently and need a
+    separate strategy.
+  - `openvgdb.sqlite` — the downloaded SQLite snapshot.
   - `by-hash/<XX>/<hash>.json` — RomMetadata records (matched OR a
     `source: 'none'` sentinel cached for 30 days). Sharded by hash
     prefix to keep one directory from hitting millions of files.
+    Schema is `version: 2` after the round-3 pivot — older v1 files
+    fail the parse guard and get silently rewritten on the next
+    lookup.
   - `images/<XX>/<sha1>.bin` — full-size box art / screenshots.
 
-  PR #15 ships the foundation but no UI consumes it. Both upstreams
-  are env-var keyed (no shipped credentials):
-  - `SCREENSCRAPER_DEVID` + `SCREENSCRAPER_DEVPASSWORD` — required;
-    without them the ScreenScraper client returns null cleanly without
-    making requests. Forum:
-    https://www.screenscraper.fr/forumsujets.php?frub=12
-  - `METADATA_THEGAMESDB_KEY` — optional fallback when ScreenScraper
-    misses or auth-fails.
+  PR #15 ships the foundation but no UI consumes it. Either upstream
+  source has no env-var to disable in v0; if needed, delete the
+  `openvgdb.sqlite` file or wipe the whole `metadata/` dir.
 
-  A 401 / 403 from ScreenScraper throws `ScreenScraperAuthError`;
-  `MetadataService` catches it, disables ScreenScraper for the rest
-  of the session, and logs once. This prevents misconfigured creds
-  from compounding into a multi-second-per-ROM stall.
-
-  Either source can be hard-disabled with
-  `METADATA_DISABLE_SCREENSCRAPER=1` / `METADATA_DISABLE_THEGAMESDB=1`.
-  Verification tool: `npm run test:metadata`.
+  Verification tool: `npm run test:metadata` (no credentials
+  required; first run downloads the SQLite snapshot once).
 - On-MiSTer agent directory: `/tmp/mistercurator/`
 - On-MiSTer state directory: `/media/fat/.mistercurator/` — holds the
   small JSON state files the app persists across sessions:

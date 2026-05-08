@@ -63,11 +63,28 @@ export type MetadataPrefetchEmitter = (event: {
   readonly currentPath?: string;
 }) => void;
 
+/**
+ * Round 3: emitter for OpenVGDB download progress (separate channel
+ * from the prefetch one — different event shape, different lifecycle).
+ */
+export type MetadataDatabaseEmitter = (
+  event:
+    | { readonly kind: 'started' }
+    | {
+        readonly kind: 'downloading';
+        readonly bytesReceived: number;
+        readonly bytesTotal: number | null;
+      }
+    | { readonly kind: 'ready' }
+    | { readonly kind: 'error'; readonly message: string },
+) => void;
+
 export function registerIpcHandlers(
   manager: ConnectionManager,
   store: ProfileStore,
   metadata: MetadataOrchestrator,
   emitMetadataProgress: MetadataPrefetchEmitter,
+  emitMetadataDatabaseProgress: MetadataDatabaseEmitter,
 ): void {
   handle<[], MisterProfile[]>(IPC_CHANNELS.listProfiles, () => store.list());
 
@@ -211,6 +228,21 @@ export function registerIpcHandlers(
 
   handle<[string], string | null>(IPC_CHANNELS.getBoxArtLocal, (url) =>
     metadata.getBoxArtLocal(url),
+  );
+
+  handle<[], { readonly ready: boolean; readonly downloadInProgress: boolean }>(
+    IPC_CHANNELS.ensureMetadataDatabase,
+    () =>
+      metadata.ensureMetadataDatabase((event) => {
+        // Strip the `path` field from the underlying `ready` payload —
+        // the renderer doesn't need to know where on disk the file
+        // lives, and surfacing it across processes adds noise.
+        if (event.kind === 'ready') {
+          emitMetadataDatabaseProgress({ kind: 'ready' });
+        } else {
+          emitMetadataDatabaseProgress(event);
+        }
+      }),
   );
 
   ipcMain.handle(

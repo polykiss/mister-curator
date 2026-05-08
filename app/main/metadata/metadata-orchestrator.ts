@@ -2,6 +2,10 @@ import type { HashClient, HashService } from '@app/main/metadata/hash-service';
 import type { ImageCache } from '@app/main/metadata/image-cache';
 import type { MetadataService } from '@app/main/metadata/metadata-service';
 import type {
+  OpenVGDBProgressEvent,
+  OpenVGDBService,
+} from '@app/main/metadata/openvgdb-service';
+import type {
   MetadataHint,
   PrefetchProgress,
   RomMetadata,
@@ -14,28 +18,32 @@ export interface ActiveSession {
   readonly host: string;
 }
 
+/** Snapshot of the OpenVGDB download/open state. */
+export interface MetadataDatabaseState {
+  readonly ready: boolean;
+  readonly downloadInProgress: boolean;
+}
+
 /**
- * Top-level metadata coordinator. The IPC handlers (PR #15 part 7)
- * call this; the orchestrator threads `(client, host)` from the
- * active connection through to HashService and the metadata pipeline.
+ * Top-level metadata coordinator. The IPC handlers call this; the
+ * orchestrator threads `(client, host)` from the active connection
+ * through to HashService and the metadata pipeline.
  *
- * No state of its own — all caching lives in the underlying services.
- *
- * Public API matches the PR #15 spec:
- *   - getRomMetadata(coreId, romPath, hint)
- *   - prefetchHashes(allPaths, onProgress)
- *   - prefetchMetadata(hashes, onProgress)
- *   - clearMetadataCache (also clears the image cache)
- *
- * The image cache is surfaced via `getOrFetchBoxArt` so the UI in
- * PR #16/#17 can render a local file path instead of forcing every
- * <img> to hit the network on first paint.
+ * Round 3 pivot: the upstream is OpenVGDB (local SQLite) + libretro
+ * thumbnails. There are no auth errors to latch around any more —
+ * the database is either downloaded or it isn't. `ensureMetadataDatabase`
+ * exposes that state to the renderer + a streaming progress channel
+ * so PR #16 can drive a "download metadata DB?" prompt.
  */
 export class MetadataOrchestrator {
+  /** Tracks whether `ensureMetadataDatabase` is currently downloading. */
+  private downloadInProgress = false;
+
   constructor(
     private readonly hashService: HashService,
     private readonly metadataService: MetadataService,
     private readonly imageCache: ImageCache,
+    private readonly openVgdb: OpenVGDBService,
     private readonly getActiveSession: () => ActiveSession | null,
   ) {}
 
@@ -45,7 +53,8 @@ export class MetadataOrchestrator {
    *   - no active connection
    *   - the file isn't a regular file on the device (md5sumPaths
    *     drops it silently)
-   *   - both metadata services miss
+   *   - the OpenVGDB database hasn't been downloaded yet
+   *   - the hash isn't in the database
    *
    * `coreId` is unused in v0 but threaded through so the IPC contract
    * matches the spec; PR #16 may use it for analytics or to scope
@@ -102,13 +111,11 @@ export class MetadataOrchestrator {
   /**
    * Walk a list of hashes and run each through the metadata pipeline.
    * Hash cache populates first (via prefetchHashes); this is the
-   * second pass that talks to ScreenScraper / TheGamesDB.
+   * second pass that queries OpenVGDB + composes thumbnails.
    *
-   * We don't parallelize: ScreenScraper's anonymous tier rate-limits
-   * to ~1 req/sec, and the queue inside the client already serializes
-   * calls. Issuing all hashes in parallel just queues them all up at
-   * once; doing it in a sequential loop is no slower and gives us
-   * monotonic progress events.
+   * Sequential rather than parallel: OpenVGDB lookups are cheap
+   * locally but a sequential loop yields monotonic progress events
+   * the renderer can drive a single bar against.
    */
   async prefetchMetadata(
     hashes: readonly string[],
@@ -121,6 +128,40 @@ export class MetadataOrchestrator {
       done += 1;
       onProgress?.({ done, total });
     }
+  }
+
+  /**
+   * Make the OpenVGDB database available. Returns the current state
+   * synchronously after kicking off a download (if needed) — the
+   * renderer subscribes to `onProgress` for streaming updates rather
+   * than awaiting completion.
+   *
+   * If a download is already in progress, this is a no-op (returns
+   * the in-progress state).
+   */
+  async ensureMetadataDatabase(
+    onProgress?: (event: OpenVGDBProgressEvent) => void,
+  ): Promise<MetadataDatabaseState> {
+    if (this.openVgdb.isReady()) {
+      return { ready: true, downloadInProgress: false };
+    }
+    if (this.downloadInProgress) {
+      return { ready: false, downloadInProgress: true };
+    }
+    this.downloadInProgress = true;
+    // Kick off the download in the background. The promise's
+    // settlement updates `downloadInProgress`; the caller can poll
+    // again for the final state.
+    void this.openVgdb
+      .ensureDatabase(onProgress)
+      .catch(() => undefined)
+      .finally(() => {
+        this.downloadInProgress = false;
+      });
+    return {
+      ready: this.openVgdb.isReady(),
+      downloadInProgress: !this.openVgdb.isReady(),
+    };
   }
 
   /** Convenience for the renderer: download box art lazily on first display. */

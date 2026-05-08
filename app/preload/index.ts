@@ -10,6 +10,8 @@ import type {
   BulkCoreProgressEvent,
   ConnectResult,
   CoreVisibilityChangeWire,
+  MetadataDatabaseProgressEvent,
+  MetadataDatabaseState,
   MetadataPrefetchEvent,
   MisterApi,
   PickedKeyFile,
@@ -199,6 +201,25 @@ const api: MisterApi = {
     return () => {
       ipcRenderer.removeListener(
         IPC_CHANNELS.metadataPrefetchProgress,
+        listener,
+      );
+    };
+  },
+  ensureMetadataDatabase: () =>
+    invoke<MetadataDatabaseState>(IPC_CHANNELS.ensureMetadataDatabase),
+  onMetadataDatabaseProgress: (
+    handler: (event: MetadataDatabaseProgressEvent) => void,
+  ) => {
+    const listener = (
+      _event: unknown,
+      payload: MetadataDatabaseProgressEvent,
+    ): void => {
+      handler(payload);
+    };
+    ipcRenderer.on(IPC_CHANNELS.metadataDatabaseProgress, listener);
+    return () => {
+      ipcRenderer.removeListener(
+        IPC_CHANNELS.metadataDatabaseProgress,
         listener,
       );
     };

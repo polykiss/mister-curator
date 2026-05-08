@@ -9,12 +9,12 @@ import type { CacheEvent } from '@app/main/cache/cache-types';
 import { createMisterClient } from '@app/main/clients';
 import { ConnectionManager } from '@app/main/ipc/connection-manager';
 import { registerIpcHandlers } from '@app/main/ipc/register';
-import { ScreenScraperClient } from '@app/main/metadata/clients/screenscraper-client';
-import { TheGamesDBClient } from '@app/main/metadata/clients/thegamesdb-client';
 import { HashService } from '@app/main/metadata/hash-service';
 import { ImageCache } from '@app/main/metadata/image-cache';
+import { LibretroThumbnailsFetcher } from '@app/main/metadata/libretro-thumbnails';
 import { MetadataOrchestrator } from '@app/main/metadata/metadata-orchestrator';
 import { MetadataService } from '@app/main/metadata/metadata-service';
+import { OpenVGDBService } from '@app/main/metadata/openvgdb-service';
 import { ProfileStore } from '@app/main/storage/profile-store';
 
 function resolveClientMode(): 'real' | 'fake' {
@@ -91,36 +91,25 @@ void app.whenReady().then(() => {
   });
   const manager = new ConnectionManager(client, profileStore, cache);
 
-  // PR #15 metadata pipeline. The four services live under a single
-  // `<userData>/metadata/` root so the user can blow it all away in
-  // one rm. ScreenScraper requires developer credentials via
-  // SCREENSCRAPER_DEVID / SCREENSCRAPER_DEVPASSWORD env vars (round 2:
-  // there's no functioning anonymous tier — every request must carry
-  // dev creds). TheGamesDB needs METADATA_THEGAMESDB_KEY. Either source
-  // can be hard-disabled via METADATA_DISABLE_* flags.
+  // PR #15 round 3 metadata pipeline. All caches live under
+  // `<userData>/metadata/` so the user can wipe the lot with one rm.
+  // No credentials needed: OpenVGDB is a public SQLite snapshot and
+  // libretro-thumbnails is a public image archive.
   const metadataRoot = path.join(app.getPath('userData'), 'metadata');
   const hashService = new HashService(metadataRoot);
-  const screenScraper = new ScreenScraperClient({
-    disabled: process.env['METADATA_DISABLE_SCREENSCRAPER'] === '1',
-    devId: process.env['SCREENSCRAPER_DEVID'] ?? null,
-    devPassword: process.env['SCREENSCRAPER_DEVPASSWORD'] ?? null,
-    logger: (m) => console.warn(m),
-  });
-  const theGamesDb = new TheGamesDBClient({
-    apiKey: process.env['METADATA_THEGAMESDB_KEY'] ?? null,
-    disabled: process.env['METADATA_DISABLE_THEGAMESDB'] === '1',
-  });
+  const openVgdb = new OpenVGDBService(metadataRoot);
+  const thumbnails = new LibretroThumbnailsFetcher();
   const metadataService = new MetadataService(
     metadataRoot,
-    screenScraper,
-    theGamesDb,
-    { logger: (m) => console.warn(m) },
+    openVgdb,
+    thumbnails,
   );
   const imageCache = new ImageCache(path.join(metadataRoot, 'images'));
   const metadataOrchestrator = new MetadataOrchestrator(
     hashService,
     metadataService,
     imageCache,
+    openVgdb,
     () => manager.getActiveSession(),
   );
 
@@ -152,7 +141,32 @@ void app.whenReady().then(() => {
     }
   };
 
-  registerIpcHandlers(manager, profileStore, metadataOrchestrator, emitMetadataProgress);
+  // Round 3: separate emitter for OpenVGDB download progress. Same
+  // fan-out shape as the prefetch one so PR #16's UI can model both
+  // the same way.
+  type DbEvent =
+    | { kind: 'started' }
+    | { kind: 'downloading'; bytesReceived: number; bytesTotal: number | null }
+    | { kind: 'ready' }
+    | { kind: 'error'; message: string };
+  const metadataDatabaseListeners = new Set<(event: DbEvent) => void>();
+  const emitMetadataDatabaseProgress = (event: DbEvent): void => {
+    for (const fn of metadataDatabaseListeners) {
+      try {
+        fn(event);
+      } catch {
+        /* swallow */
+      }
+    }
+  };
+
+  registerIpcHandlers(
+    manager,
+    profileStore,
+    metadataOrchestrator,
+    emitMetadataProgress,
+    emitMetadataDatabaseProgress,
+  );
 
   const window = createWindow();
 
@@ -174,6 +188,11 @@ void app.whenReady().then(() => {
   metadataPrefetchListeners.add((event) => {
     if (!window.isDestroyed()) {
       window.webContents.send(IPC_CHANNELS.metadataPrefetchProgress, event);
+    }
+  });
+  metadataDatabaseListeners.add((event) => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.metadataDatabaseProgress, event);
     }
   });
 
@@ -199,6 +218,14 @@ void app.whenReady().then(() => {
         if (!newWindow.isDestroyed()) {
           newWindow.webContents.send(
             IPC_CHANNELS.metadataPrefetchProgress,
+            event,
+          );
+        }
+      });
+      metadataDatabaseListeners.add((event) => {
+        if (!newWindow.isDestroyed()) {
+          newWindow.webContents.send(
+            IPC_CHANNELS.metadataDatabaseProgress,
             event,
           );
         }

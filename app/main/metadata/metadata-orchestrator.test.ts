@@ -7,41 +7,50 @@ import {
   type ActiveSession,
 } from '@app/main/metadata/metadata-orchestrator';
 import type { MetadataService } from '@app/main/metadata/metadata-service';
+import type {
+  OpenVGDBProgressEvent,
+  OpenVGDBService,
+} from '@app/main/metadata/openvgdb-service';
 import type { RomMetadata } from '@shared/metadata-types';
 
 const HASH = 'a'.repeat(32);
 
 function buildMeta(hash: string, name: string): RomMetadata {
   return {
-    version: 1,
+    version: 2,
     hash,
     name,
+    system: 'Super Nintendo Entertainment System',
     year: null,
     publisher: null,
     developer: null,
     genre: null,
-    players: null,
-    criticScore: null,
-    ageRating: null,
     description: null,
     boxArtUrl: null,
-    screenshotUrls: [],
     titleScreenUrl: null,
-    source: 'screenscraper',
+    screenshotUrl: null,
+    source: 'openvgdb',
     fetchedAt: '2025-01-01T00:00:00.000Z',
   };
+}
+
+interface OrchestratorBundle {
+  readonly orchestrator: MetadataOrchestrator;
+  readonly hashService: HashService;
+  readonly metadataService: MetadataService;
+  readonly imageCache: ImageCache;
+  readonly openVgdb: OpenVGDBService;
 }
 
 function makeOrchestrator(opts: {
   hashEntries?: Map<string, string>;
   meta?: RomMetadata | null;
   session?: ActiveSession | null;
-} = {}): {
-  orchestrator: MetadataOrchestrator;
-  hashService: HashService;
-  metadataService: MetadataService;
-  imageCache: ImageCache;
-} {
+  dbReady?: boolean;
+  ensureFn?: (
+    cb?: (e: OpenVGDBProgressEvent) => void,
+  ) => Promise<void>;
+} = {}): OrchestratorBundle {
   const hashCalls: { paths: readonly string[] }[] = [];
   const hashService = {
     getHash: vi.fn(
@@ -75,6 +84,14 @@ function makeOrchestrator(opts: {
     getLocal: vi.fn(async () => null),
   } as unknown as ImageCache;
 
+  const ensureSpy = vi.fn(opts.ensureFn ?? (async () => undefined));
+  const openVgdb = {
+    isReady: vi.fn(() => opts.dbReady ?? true),
+    ensureDatabase: ensureSpy,
+    getMetadataByHash: vi.fn(async () => null),
+    clearDatabase: vi.fn(async () => undefined),
+  } as unknown as OpenVGDBService;
+
   const session: ActiveSession | null =
     opts.session === undefined
       ? {
@@ -90,9 +107,10 @@ function makeOrchestrator(opts: {
     hashService,
     metadataService,
     imageCache,
+    openVgdb,
     () => session,
   );
-  return { orchestrator, hashService, metadataService, imageCache };
+  return { orchestrator, hashService, metadataService, imageCache, openVgdb };
 }
 
 describe('MetadataOrchestrator', () => {
@@ -122,7 +140,7 @@ describe('MetadataOrchestrator', () => {
 
   it('getRomMetadata: returns null when the file has no hash (missing on device)', async () => {
     const { orchestrator, hashService, metadataService } = makeOrchestrator({
-      hashEntries: new Map(), // empty
+      hashEntries: new Map(),
     });
     expect(
       await orchestrator.getRomMetadata('SNES', '/p/x.sfc'),
@@ -158,7 +176,6 @@ describe('MetadataOrchestrator', () => {
     const { orchestrator, hashService } = makeOrchestrator({ hashEntries });
     const events: { done: number; total: number }[] = [];
     await orchestrator.prefetchHashes(paths, (e) => events.push(e));
-    // 250 / 100 = 3 chunks.
     expect(hashService.getHash).toHaveBeenCalledTimes(3);
     expect(events).toEqual([
       { done: 100, total: 250, currentPath: paths[99] },
@@ -210,5 +227,69 @@ describe('MetadataOrchestrator', () => {
     await orchestrator.clearMetadataCache();
     expect(metadataService.clearAll).toHaveBeenCalledTimes(1);
     expect(imageCache.clearAll).toHaveBeenCalledTimes(1);
+  });
+
+  describe('ensureMetadataDatabase (round 3)', () => {
+    it('returns ready=true immediately when the DB is already loaded', async () => {
+      const { orchestrator, openVgdb } = makeOrchestrator({ dbReady: true });
+      const state = await orchestrator.ensureMetadataDatabase();
+      expect(state).toEqual({ ready: true, downloadInProgress: false });
+      expect(openVgdb.ensureDatabase).not.toHaveBeenCalled();
+    });
+
+    it('kicks off ensureDatabase when not ready and reports downloadInProgress', async () => {
+      // Hold the ensureDatabase promise open so we can assert
+      // intermediate state.
+      let resolveEnsure: () => void = (): void => undefined;
+      const { orchestrator, openVgdb } = makeOrchestrator({
+        dbReady: false,
+        ensureFn: () =>
+          new Promise<void>((r) => {
+            resolveEnsure = r;
+          }),
+      });
+      const state = await orchestrator.ensureMetadataDatabase();
+      expect(state).toEqual({ ready: false, downloadInProgress: true });
+      expect(openVgdb.ensureDatabase).toHaveBeenCalledTimes(1);
+      resolveEnsure();
+    });
+
+    it('coalesces a second call while the first is still downloading', async () => {
+      let resolveEnsure: () => void = (): void => undefined;
+      const { orchestrator, openVgdb } = makeOrchestrator({
+        dbReady: false,
+        ensureFn: () =>
+          new Promise<void>((r) => {
+            resolveEnsure = r;
+          }),
+      });
+      await orchestrator.ensureMetadataDatabase();
+      const second = await orchestrator.ensureMetadataDatabase();
+      expect(second).toEqual({ ready: false, downloadInProgress: true });
+      // ensureDatabase shouldn't be called twice — the orchestrator
+      // gates on its own downloadInProgress flag.
+      expect(openVgdb.ensureDatabase).toHaveBeenCalledTimes(1);
+      resolveEnsure();
+    });
+
+    it('forwards progress events from the underlying service', async () => {
+      const events: OpenVGDBProgressEvent[] = [];
+      const { orchestrator } = makeOrchestrator({
+        dbReady: false,
+        ensureFn: async (cb) => {
+          cb?.({ kind: 'started' });
+          cb?.({ kind: 'downloading', bytesReceived: 1024, bytesTotal: 2048 });
+          cb?.({ kind: 'ready', path: '/x' });
+        },
+      });
+      await orchestrator.ensureMetadataDatabase((e) => events.push(e));
+      // Let the in-flight ensureDatabase microtasks settle.
+      await new Promise<void>((r) => setImmediate(r));
+      expect(events.map((e) => e.kind)).toEqual([
+        'started',
+        'downloading',
+        'ready',
+      ]);
+    });
   });
 });
