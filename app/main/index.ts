@@ -93,13 +93,18 @@ void app.whenReady().then(() => {
 
   // PR #15 metadata pipeline. The four services live under a single
   // `<userData>/metadata/` root so the user can blow it all away in
-  // one rm. ScreenScraper runs anonymous-tier; TheGamesDB only fires
-  // when METADATA_THEGAMESDB_KEY is set in the environment. Either
+  // one rm. ScreenScraper requires developer credentials via
+  // SCREENSCRAPER_DEVID / SCREENSCRAPER_DEVPASSWORD env vars (round 2:
+  // there's no functioning anonymous tier — every request must carry
+  // dev creds). TheGamesDB needs METADATA_THEGAMESDB_KEY. Either source
   // can be hard-disabled via METADATA_DISABLE_* flags.
   const metadataRoot = path.join(app.getPath('userData'), 'metadata');
   const hashService = new HashService(metadataRoot);
   const screenScraper = new ScreenScraperClient({
     disabled: process.env['METADATA_DISABLE_SCREENSCRAPER'] === '1',
+    devId: process.env['SCREENSCRAPER_DEVID'] ?? null,
+    devPassword: process.env['SCREENSCRAPER_DEVPASSWORD'] ?? null,
+    logger: (m) => console.warn(m),
   });
   const theGamesDb = new TheGamesDBClient({
     apiKey: process.env['METADATA_THEGAMESDB_KEY'] ?? null,
@@ -109,6 +114,7 @@ void app.whenReady().then(() => {
     metadataRoot,
     screenScraper,
     theGamesDb,
+    { logger: (m) => console.warn(m) },
   );
   const imageCache = new ImageCache(path.join(metadataRoot, 'images'));
   const metadataOrchestrator = new MetadataOrchestrator(

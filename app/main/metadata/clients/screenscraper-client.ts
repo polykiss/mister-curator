@@ -3,9 +3,27 @@ import type { MetadataHint, RomMetadata } from '@shared/metadata-types';
 const ENDPOINT = 'https://api.screenscraper.fr/api2/jeuInfos.php';
 const SOFTNAME = 'mistercurator';
 const DEFAULT_MIN_INTERVAL_MS = 1100;
-const DEFAULT_MAX_RETRIES = 4;
-const DEFAULT_MAX_BACKOFF_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
+
+/**
+ * Retry budgets per-status-class. PR #15 round 2 split the uniform
+ * `maxRetries` cap into per-class so transient and permanent failures
+ * pay different costs.
+ *
+ *   429 → up to 4 retries, but capped at TOTAL_429_BUDGET_MS aggregate
+ *         backoff so a sustained rate-limit doesn't lock the queue
+ *         for a full minute.
+ *   5xx → up to 2 retries with the same exponential ladder.
+ *   net → up to 1 retry on network/timeout errors.
+ *   401/403 → ZERO retries (the spec calls these out explicitly —
+ *         creds aren't going to start working spontaneously).
+ *   404 → ZERO retries (legitimate "no match", returns null).
+ */
+const MAX_429_RETRIES = 4;
+const MAX_5XX_RETRIES = 2;
+const MAX_NETWORK_RETRIES = 1;
+const TOTAL_429_BUDGET_MS = 30_000;
+const DEFAULT_MAX_BACKOFF_MS = 30_000;
 
 /**
  * Region preference for picking text/image fields out of ScreenScraper's
@@ -20,6 +38,28 @@ const BOX_ART_TYPES = ['box-2D', 'box-3D', 'wheel'] as const;
 const SCREENSHOT_TYPES = ['ss'] as const;
 const TITLE_TYPES = ['sstitle'] as const;
 
+/**
+ * Thrown when ScreenScraper returns 401 / 403. Round 2 of PR #15 made
+ * this typed so the orchestrator (or, in our case, MetadataService)
+ * can disable further ScreenScraper calls for the rest of the
+ * session — credentials don't suddenly start working, and retrying
+ * just stacks 10s waits per ROM.
+ *
+ * Distinct from a "client misconfigured (no creds at all)" state:
+ * that case returns null without making a request, no AuthError.
+ */
+export class ScreenScraperAuthError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(
+      `ScreenScraper rejected the request with status ${String(status)}: check SCREENSCRAPER_DEVID / SCREENSCRAPER_DEVPASSWORD.`,
+    );
+    this.name = 'ScreenScraperAuthError';
+    this.status = status;
+  }
+}
+
 export interface ScreenScraperClientOptions {
   /** Test seam — defaults to global `fetch`. */
   readonly fetch?: typeof fetch;
@@ -31,21 +71,41 @@ export interface ScreenScraperClientOptions {
   readonly disabled?: boolean;
   /** Minimum gap between requests, in ms. Default 1100. */
   readonly minIntervalMs?: number;
-  /** Cap on retry attempts after a 429 / 5xx. Default 4. */
-  readonly maxRetries?: number;
   /** Cap on the exponential-backoff delay. Default 30s. */
   readonly maxBackoffMs?: number;
   /** Per-request fetch timeout. Default 15s. */
   readonly timeoutMs?: number;
+  /**
+   * ScreenScraper developer credentials. PR #15 round 2: ScreenScraper
+   * requires devid/devpassword on EVERY request, regardless of whether
+   * user creds (ssid/sspassword) are also supplied. Pass null/empty to
+   * skip ScreenScraper entirely (the client logs once and returns null
+   * from every call without making requests).
+   */
+  readonly devId?: string | null;
+  readonly devPassword?: string | null;
+  /**
+   * Single-line warning sink. Used for the "no credentials configured"
+   * notice and for any non-cred diagnostic. Never receives the URL or
+   * the credential values.
+   */
+  readonly logger?: (message: string) => void;
 }
 
 /**
- * Anonymous-tier ScreenScraper client. Hits `jeuInfos.php` keyed by
- * md5; the response gets normalized into the `RomMetadata` shape.
+ * ScreenScraper API client. Hits `jeuInfos.php` keyed by md5; the
+ * response gets normalized into the `RomMetadata` shape.
  *
- * Rate limit: ~1 request/sec across all anonymous traffic. The client
- * enforces a 1.1s floor between requests via a single-flight queue.
- * 429 responses retry with exponential backoff capped at 30s.
+ * Credentials: ScreenScraper requires developer credentials
+ * (devid/devpassword) on every request. PR #15 round 2 added env-var
+ * wiring (`SCREENSCRAPER_DEVID` / `SCREENSCRAPER_DEVPASSWORD`); when
+ * either is missing, the client returns null from every call without
+ * touching the network and logs once at construction.
+ *
+ * Rate limit: ~1 request/sec. The client enforces a 1.1s floor
+ * between requests via a single-flight queue. 429 responses retry
+ * with exponential backoff capped at a 30s aggregate budget; a 401
+ * or 403 throws `ScreenScraperAuthError` for the caller to pin.
  *
  * Disabled-mode: when `METADATA_DISABLE_SCREENSCRAPER=1` is set in the
  * environment (or `disabled: true` is passed explicitly), every call
@@ -58,14 +118,19 @@ export class ScreenScraperClient {
   private readonly nowImpl: () => number;
   private readonly disabled: boolean;
   private readonly minIntervalMs: number;
-  private readonly maxRetries: number;
   private readonly maxBackoffMs: number;
   private readonly timeoutMs: number;
+  private readonly devId: string | null;
+  private readonly devPassword: string | null;
+  private readonly hasCredentials: boolean;
+  private readonly logger: (message: string) => void;
+  /** Logged the "no creds configured" notice already; suppress repeats. */
+  private warnedNoCreds = false;
 
   /** Promise chain serializing all requests for the rate-limit floor. */
   private queue: Promise<unknown> = Promise.resolve();
   /**
-   * Wall-clock at the end of the most recent request, or null if no
+   * Wall-clock at the start of the most recent request, or null if no
    * request has run yet. The null sentinel makes the first call free
    * — there's no prior request to space against.
    */
@@ -77,16 +142,30 @@ export class ScreenScraperClient {
     this.nowImpl = options.now ?? Date.now;
     this.disabled = options.disabled ?? false;
     this.minIntervalMs = options.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
-    this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.maxBackoffMs = options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.devId = nonEmpty(options.devId);
+    this.devPassword = nonEmpty(options.devPassword);
+    this.hasCredentials = this.devId !== null && this.devPassword !== null;
+    this.logger = options.logger ?? ((): void => {
+      /* default: no log */
+    });
+  }
+
+  /** Whether the client is configured to actually make network calls. */
+  isEnabled(): boolean {
+    return !this.disabled && this.hasCredentials;
   }
 
   /**
-   * Look up metadata by md5. Returns null on no-match (404 or empty
-   * response), on persistent rate-limit / server failure, and when the
-   * client is disabled. The hint is a tie-breaker that future
-   * versions may use to filter ambiguous matches; v0 ignores it.
+   * Look up metadata by md5. Returns null on:
+   *   - 404 (legitimate no-match)
+   *   - persistent rate-limit / server failure after retries
+   *   - missing credentials (logs once at construction-equivalent)
+   *   - the client being explicitly disabled
+   *
+   * Throws `ScreenScraperAuthError` on 401 / 403 so the caller can
+   * disable the client for the remainder of the session.
    */
   async getByMd5(
     md5: string,
@@ -94,6 +173,16 @@ export class ScreenScraperClient {
   ): Promise<RomMetadata | null> {
     void hint; // v0 ignores the hint; reserved for future tie-breaking
     if (this.disabled) return null;
+    if (!this.hasCredentials) {
+      if (!this.warnedNoCreds) {
+        this.warnedNoCreds = true;
+        this.logger(
+          '[ScreenScraper] credentials not configured; metadata fetch skipped. ' +
+            'Set SCREENSCRAPER_DEVID and SCREENSCRAPER_DEVPASSWORD to enable.',
+        );
+      }
+      return null;
+    }
     if (!isMd5Hex(md5)) return null;
     return this.enqueue(() => this.fetchByMd5(md5));
   }
@@ -119,27 +208,53 @@ export class ScreenScraperClient {
   }
 
   private async fetchByMd5(md5: string): Promise<RomMetadata | null> {
-    const url = `${ENDPOINT}?softname=${SOFTNAME}&output=json&md5=${md5}`;
-    let attempt = 0;
+    const url = this.buildUrl(md5);
+    let attempts429 = 0;
+    let attempts5xx = 0;
+    let attemptsNetwork = 0;
+    let total429BackoffMs = 0;
+
     while (true) {
       let res: Response;
       try {
         res = await this.fetchWithTimeout(url);
       } catch {
-        // Network-level error → retry like a 5xx. After exhaustion,
-        // null so the caller can fall through to TheGamesDB.
-        if (attempt >= this.maxRetries) return null;
-        await this.sleepImpl(this.backoffMs(attempt));
-        attempt += 1;
+        // Network-level error → bounded retry. Distinct counter from
+        // 5xx and 429 — a flaky socket isn't the same as a slow
+        // upstream telling us to back off.
+        if (attemptsNetwork >= MAX_NETWORK_RETRIES) return null;
+        await this.sleepImpl(this.backoffMs(attemptsNetwork));
+        attemptsNetwork += 1;
         continue;
       }
-      if (res.status === 429 || res.status >= 500) {
-        if (attempt >= this.maxRetries) return null;
-        await this.sleepImpl(this.backoffMs(attempt));
-        attempt += 1;
-        continue;
+
+      // 401/403: permanent failure for the lifetime of these creds.
+      // Throw so the caller (MetadataService) can flag the client
+      // disabled and skip subsequent calls.
+      if (res.status === 401 || res.status === 403) {
+        throw new ScreenScraperAuthError(res.status);
       }
+      // 404: the legitimate "no match for this hash" case.
       if (res.status === 404) return null;
+      if (res.status === 429) {
+        if (attempts429 >= MAX_429_RETRIES) return null;
+        const backoff = this.backoffMs(attempts429);
+        // Aggregate-budget guard: cap total time spent waiting on
+        // 429s so a sustained rate-limit can't pin the queue.
+        if (total429BackoffMs + backoff > TOTAL_429_BUDGET_MS) return null;
+        await this.sleepImpl(backoff);
+        total429BackoffMs += backoff;
+        attempts429 += 1;
+        continue;
+      }
+      if (res.status >= 500) {
+        if (attempts5xx >= MAX_5XX_RETRIES) return null;
+        await this.sleepImpl(this.backoffMs(attempts5xx));
+        attempts5xx += 1;
+        continue;
+      }
+      // Any other 4xx: not a known retry-worthy class. Surface as
+      // null so the caller can fall through to TheGamesDB.
       if (!res.ok) return null;
       // ScreenScraper sometimes returns 200 + a payload that's HTML or
       // an error string when the hash isn't recognized. Catch parse
@@ -152,6 +267,19 @@ export class ScreenScraperClient {
       }
       return mapJeuToMetadata(json, md5, this.nowImpl);
     }
+  }
+
+  private buildUrl(md5: string): string {
+    // URL.searchParams handles the encoding for us — credentials may
+    // contain characters that need percent-encoding (and historically
+    // some users have pasted in passwords with `&` or `+` characters).
+    const u = new URL(ENDPOINT);
+    u.searchParams.set('softname', SOFTNAME);
+    u.searchParams.set('output', 'json');
+    u.searchParams.set('md5', md5);
+    if (this.devId !== null) u.searchParams.set('devid', this.devId);
+    if (this.devPassword !== null) u.searchParams.set('devpassword', this.devPassword);
+    return u.toString();
   }
 
   private async fetchWithTimeout(url: string): Promise<Response> {
@@ -230,6 +358,12 @@ function isMd5Hex(s: string): boolean {
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function nonEmpty(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? null : trimmed;
 }
 
 function readPath<T>(root: unknown, path: readonly string[]): T | null {

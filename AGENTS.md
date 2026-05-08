@@ -135,12 +135,23 @@ Update it before changing consumers.
     prefix to keep one directory from hitting millions of files.
   - `images/<XX>/<sha1>.bin` — full-size box art / screenshots.
 
-  PR #15 ships the foundation but no UI consumes it. ScreenScraper is
-  anonymous-tier (no shipped key); TheGamesDB is opt-in via the
-  `METADATA_THEGAMESDB_KEY` env var. Either source can be hard-
-  disabled with `METADATA_DISABLE_SCREENSCRAPER=1` /
-  `METADATA_DISABLE_THEGAMESDB=1`. Verification tool:
-  `npm run test:metadata`.
+  PR #15 ships the foundation but no UI consumes it. Both upstreams
+  are env-var keyed (no shipped credentials):
+  - `SCREENSCRAPER_DEVID` + `SCREENSCRAPER_DEVPASSWORD` — required;
+    without them the ScreenScraper client returns null cleanly without
+    making requests. Forum:
+    https://www.screenscraper.fr/forumsujets.php?frub=12
+  - `METADATA_THEGAMESDB_KEY` — optional fallback when ScreenScraper
+    misses or auth-fails.
+
+  A 401 / 403 from ScreenScraper throws `ScreenScraperAuthError`;
+  `MetadataService` catches it, disables ScreenScraper for the rest
+  of the session, and logs once. This prevents misconfigured creds
+  from compounding into a multi-second-per-ROM stall.
+
+  Either source can be hard-disabled with
+  `METADATA_DISABLE_SCREENSCRAPER=1` / `METADATA_DISABLE_THEGAMESDB=1`.
+  Verification tool: `npm run test:metadata`.
 - On-MiSTer agent directory: `/tmp/mistercurator/`
 - On-MiSTer state directory: `/media/fat/.mistercurator/` — holds the
   small JSON state files the app persists across sessions:

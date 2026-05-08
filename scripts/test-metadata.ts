@@ -10,10 +10,22 @@
  *   5. Prints a summary and basic perf assertions.
  *
  * Usage:
- *   MISTER_HOST=192.168.1.42 MISTER_PASSWORD=hunter2 npm run test:metadata
+ *   MISTER_HOST=192.168.1.42 MISTER_PASSWORD=hunter2 \
+ *   SCREENSCRAPER_DEVID=xxx SCREENSCRAPER_DEVPASSWORD=yyy \
+ *     npm run test:metadata
+ *
+ * Required env (MiSTer SSH):
+ *   MISTER_HOST, MISTER_PASSWORD
  *
  * Optional env:
  *   MISTER_PORT (22), MISTER_USER (root)
+ *   SCREENSCRAPER_DEVID / SCREENSCRAPER_DEVPASSWORD
+ *     ScreenScraper requires developer credentials. Without them the
+ *     ScreenScraper client returns null cleanly and the script
+ *     continues — useful for verifying the rest of the pipeline (hash
+ *     computation, image-cache integration) without hitting the API.
+ *     Obtain credentials via the ScreenScraper forum:
+ *     https://www.screenscraper.fr/forumsujets.php?frub=12
  *   METADATA_THEGAMESDB_KEY — enables TheGamesDB fallback when set
  *   METADATA_DISABLE_SCREENSCRAPER=1 — disable upstream calls
  *   METADATA_TEST_DIR=/tmp/x — override the cache root (default: tmp dir)
@@ -164,17 +176,45 @@ async function main(): Promise<void> {
   };
   const secret: MisterSecret = { type: 'password', password };
 
+  const ssDevId = process.env['SCREENSCRAPER_DEVID'] ?? null;
+  const ssDevPassword = process.env['SCREENSCRAPER_DEVPASSWORD'] ?? null;
+  const ssDisabledExplicit = process.env['METADATA_DISABLE_SCREENSCRAPER'] === '1';
+  const ssCredsConfigured =
+    ssDevId !== null && ssDevId.length > 0 && ssDevPassword !== null && ssDevPassword.length > 0;
+  if (ssDisabledExplicit) {
+    console.log('• ScreenScraper: disabled via METADATA_DISABLE_SCREENSCRAPER=1');
+  } else if (!ssCredsConfigured) {
+    console.log(
+      '• ScreenScraper: credentials not configured — skipping. ' +
+        'Set SCREENSCRAPER_DEVID and SCREENSCRAPER_DEVPASSWORD to enable.\n' +
+        '  (Forum: https://www.screenscraper.fr/forumsujets.php?frub=12)',
+    );
+  } else {
+    console.log('• ScreenScraper: credentials configured');
+  }
+  if (process.env['METADATA_THEGAMESDB_KEY'] !== undefined) {
+    console.log('• TheGamesDB: API key configured');
+  } else {
+    console.log('• TheGamesDB: no API key (fallback disabled)');
+  }
+  console.log('');
+
   const client = createMisterClient('real');
   const hashService = new HashService(cacheDir);
   const screenScraper = new ScreenScraperClient({
-    disabled: process.env['METADATA_DISABLE_SCREENSCRAPER'] === '1',
+    disabled: ssDisabledExplicit,
+    devId: ssDevId,
+    devPassword: ssDevPassword,
+    logger: (m) => console.warn(m),
   });
   const theGamesDb = new TheGamesDBClient({
     apiKey: process.env['METADATA_THEGAMESDB_KEY'] ?? null,
     disabled: process.env['METADATA_DISABLE_THEGAMESDB'] === '1',
     logger: (m) => console.warn(m),
   });
-  const metadataService = new MetadataService(cacheDir, screenScraper, theGamesDb);
+  const metadataService = new MetadataService(cacheDir, screenScraper, theGamesDb, {
+    logger: (m) => console.warn(m),
+  });
   const imageCache = new ImageCache(join(cacheDir, 'images'));
   // We deliberately drive the four services directly rather than the
   // MetadataOrchestrator — timing each step independently is more

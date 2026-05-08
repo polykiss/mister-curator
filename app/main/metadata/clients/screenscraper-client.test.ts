@@ -1,11 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  ScreenScraperAuthError,
   ScreenScraperClient,
+  type ScreenScraperClientOptions,
   mapJeuToMetadata,
 } from '@app/main/metadata/clients/screenscraper-client';
 
 const HASH = 'a'.repeat(32);
+const CREDS = {
+  devId: 'test-dev',
+  devPassword: 'test-pw',
+} as const;
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -16,6 +22,22 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 function emptyResponse(status: number): Response {
   return new Response('', { status });
+}
+
+/**
+ * Build a client with credentials populated by default. Most tests
+ * don't care about cred plumbing — they care about retry / response
+ * mapping / rate-limit behavior. Callers can override per-test.
+ */
+function makeClient(overrides: ScreenScraperClientOptions = {}): ScreenScraperClient {
+  return new ScreenScraperClient({
+    devId: CREDS.devId,
+    devPassword: CREDS.devPassword,
+    sleep: () => Promise.resolve(),
+    now: () => 0,
+    minIntervalMs: 0,
+    ...overrides,
+  });
 }
 
 const SAMPLE_JEU = {
@@ -203,52 +225,178 @@ describe('ScreenScraper — response mapping', () => {
   });
 });
 
-describe('ScreenScraperClient — networking', () => {
-  it('returns null without calling fetch when disabled', async () => {
+describe('ScreenScraperClient — credentials (PR #15 round 2)', () => {
+  it('returns null without calling fetch when credentials are missing', async () => {
     const fetchMock = vi.fn();
     const client = new ScreenScraperClient({
       fetch: fetchMock as unknown as typeof fetch,
-      disabled: true,
     });
-    const result = await client.getByMd5(HASH);
-    expect(result).toBeNull();
+    expect(await client.getByMd5(HASH)).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('returns null without calling fetch when md5 is malformed', async () => {
+  it('returns null without calling fetch when devId is empty / whitespace', async () => {
     const fetchMock = vi.fn();
     const client = new ScreenScraperClient({
+      fetch: fetchMock as unknown as typeof fetch,
+      devId: '   ',
+      devPassword: 'something',
+    });
+    expect(await client.getByMd5(HASH)).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('returns null without calling fetch when devPassword is empty', async () => {
+    const fetchMock = vi.fn();
+    const client = new ScreenScraperClient({
+      fetch: fetchMock as unknown as typeof fetch,
+      devId: 'something',
+      devPassword: '',
+    });
+    expect(await client.getByMd5(HASH)).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('logs the "credentials not configured" notice exactly once', async () => {
+    const log = vi.fn();
+    const client = new ScreenScraperClient({
+      fetch: vi.fn() as unknown as typeof fetch,
+      logger: log,
+    });
+    await client.getByMd5(HASH);
+    await client.getByMd5('b'.repeat(32));
+    await client.getByMd5('c'.repeat(32));
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0]?.[0]).toMatch(/credentials not configured/);
+    expect(log.mock.calls[0]?.[0]).toMatch(/SCREENSCRAPER_DEVID/);
+  });
+
+  it('does not include credential values in the warning message', async () => {
+    const log = vi.fn();
+    const client = new ScreenScraperClient({
+      fetch: vi.fn() as unknown as typeof fetch,
+      logger: log,
+      // Even though only devId is set, devPassword is missing → log fires.
+      devId: 'super-secret-id',
+    });
+    await client.getByMd5(HASH);
+    expect(log).toHaveBeenCalled();
+    expect(log.mock.calls[0]?.[0]).not.toContain('super-secret-id');
+  });
+
+  it('isEnabled is false when only devId is supplied', () => {
+    const c1 = new ScreenScraperClient({ devId: 'x' });
+    expect(c1.isEnabled()).toBe(false);
+    const c2 = new ScreenScraperClient({ devPassword: 'y' });
+    expect(c2.isEnabled()).toBe(false);
+  });
+
+  it('isEnabled is true when both creds are present and disabled is false', () => {
+    const c = new ScreenScraperClient({
+      devId: 'x',
+      devPassword: 'y',
+    });
+    expect(c.isEnabled()).toBe(true);
+  });
+
+  it('isEnabled is false when explicitly disabled even with creds', () => {
+    const c = new ScreenScraperClient({
+      devId: 'x',
+      devPassword: 'y',
+      disabled: true,
+    });
+    expect(c.isEnabled()).toBe(false);
+  });
+
+  it('disabled mode wins over creds (no log, no fetch)', async () => {
+    const log = vi.fn();
+    const fetchMock = vi.fn();
+    const client = new ScreenScraperClient({
+      fetch: fetchMock as unknown as typeof fetch,
+      logger: log,
+      devId: 'x',
+      devPassword: 'y',
+      disabled: true,
+    });
+    expect(await client.getByMd5(HASH)).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+  });
+});
+
+describe('ScreenScraperClient — networking', () => {
+  it('returns null without calling fetch when md5 is malformed', async () => {
+    const fetchMock = vi.fn();
+    const client = makeClient({
       fetch: fetchMock as unknown as typeof fetch,
     });
     expect(await client.getByMd5('not-a-hash')).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('passes the expected URL params (softname, output, md5)', async () => {
+  it('passes softname, output, md5, devid, devpassword in the URL', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(SAMPLE_JEU));
-    const client = new ScreenScraperClient({
+    const client = makeClient({
       fetch: fetchMock as unknown as typeof fetch,
-      sleep: () => Promise.resolve(),
-      now: () => 0,
-      minIntervalMs: 0,
+      devId: 'my-dev-id',
+      devPassword: 'pw with spaces & symbols',
     });
     await client.getByMd5(HASH);
     const url = fetchMock.mock.calls[0]?.[0] as string;
     expect(url).toContain('softname=mistercurator');
     expect(url).toContain('output=json');
     expect(url).toContain(`md5=${HASH}`);
+    // URL.searchParams encodes credentials safely.
+    expect(url).toContain('devid=my-dev-id');
+    expect(url).toContain('devpassword=pw+with+spaces+%26+symbols');
   });
 
   it('returns null on 404 without retrying', async () => {
     const fetchMock = vi.fn().mockResolvedValue(emptyResponse(404));
-    const client = new ScreenScraperClient({
+    const client = makeClient({
       fetch: fetchMock as unknown as typeof fetch,
-      sleep: () => Promise.resolve(),
-      now: () => 0,
-      minIntervalMs: 0,
     });
     expect(await client.getByMd5(HASH)).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws ScreenScraperAuthError on 403, no retries', async () => {
+    const sleeps: number[] = [];
+    const fetchMock = vi.fn().mockResolvedValue(emptyResponse(403));
+    const client = makeClient({
+      fetch: fetchMock as unknown as typeof fetch,
+      sleep: (ms) => {
+        sleeps.push(ms);
+        return Promise.resolve();
+      },
+    });
+    await expect(client.getByMd5(HASH)).rejects.toBeInstanceOf(ScreenScraperAuthError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it('throws ScreenScraperAuthError on 401, no retries', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(emptyResponse(401));
+    const client = makeClient({
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    await expect(client.getByMd5(HASH)).rejects.toBeInstanceOf(ScreenScraperAuthError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('AuthError carries the HTTP status', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(emptyResponse(403));
+    const client = makeClient({
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    let caught: ScreenScraperAuthError | null = null;
+    try {
+      await client.getByMd5(HASH);
+    } catch (err) {
+      caught = err as ScreenScraperAuthError;
+    }
+    expect(caught?.status).toBe(403);
+    expect(caught?.message).toMatch(/SCREENSCRAPER_DEVID/);
   });
 
   it('retries 429 with exponential backoff, then returns the parsed response', async () => {
@@ -258,15 +406,12 @@ describe('ScreenScraperClient — networking', () => {
       .mockResolvedValueOnce(emptyResponse(429))
       .mockResolvedValueOnce(emptyResponse(429))
       .mockResolvedValueOnce(jsonResponse(SAMPLE_JEU));
-    const client = new ScreenScraperClient({
+    const client = makeClient({
       fetch: fetchMock as unknown as typeof fetch,
       sleep: (ms: number) => {
         sleeps.push(ms);
         return Promise.resolve();
       },
-      now: () => 0,
-      minIntervalMs: 0,
-      maxRetries: 4,
     });
     const meta = await client.getByMd5(HASH);
     expect(meta).not.toBeNull();
@@ -277,49 +422,97 @@ describe('ScreenScraperClient — networking', () => {
 
   it('caps backoff at maxBackoffMs', async () => {
     const sleeps: number[] = [];
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(emptyResponse(429));
-    const client = new ScreenScraperClient({
+    const fetchMock = vi.fn().mockResolvedValue(emptyResponse(429));
+    const client = makeClient({
       fetch: fetchMock as unknown as typeof fetch,
       sleep: (ms: number) => {
         sleeps.push(ms);
         return Promise.resolve();
       },
-      now: () => 0,
-      minIntervalMs: 0,
-      maxRetries: 6,
       maxBackoffMs: 5000,
     });
     expect(await client.getByMd5(HASH)).toBeNull();
-    // 1s, 2s, 4s, 5s (capped), 5s, 5s.
-    expect(sleeps).toEqual([1000, 2000, 4000, 5000, 5000, 5000]);
+    // 4 retries → 4 sleeps: 1s, 2s, 4s, 5s (capped). Then the 5th
+    // attempt fails the retry cap and we return null.
+    expect(sleeps).toEqual([1000, 2000, 4000, 5000]);
   });
 
-  it('retries on 5xx like 429', async () => {
+  it('caps total 429 backoff at the 30s aggregate budget', async () => {
+    const sleeps: number[] = [];
+    const fetchMock = vi.fn().mockResolvedValue(emptyResponse(429));
+    const client = makeClient({
+      fetch: fetchMock as unknown as typeof fetch,
+      sleep: (ms: number) => {
+        sleeps.push(ms);
+        return Promise.resolve();
+      },
+      // Default maxBackoffMs (30s) so the 5th retry would be 16s; 1+2+4+8 = 15
+      // which is under 30s. The 5th would push total to 31s and trip the
+      // aggregate guard, returning null without sleeping that 16s.
+    });
+    expect(await client.getByMd5(HASH)).toBeNull();
+    // Sum of sleeps must be ≤ 30s.
+    const total = sleeps.reduce((a, b) => a + b, 0);
+    expect(total).toBeLessThanOrEqual(30_000);
+  });
+
+  it('5xx retries cap at 2 attempts (3 fetches total)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(emptyResponse(503));
+    const client = makeClient({
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    expect(await client.getByMd5(HASH)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(3); // initial + 2 retries
+  });
+
+  it('5xx then 200 returns the parsed response', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(emptyResponse(503))
       .mockResolvedValueOnce(jsonResponse(SAMPLE_JEU));
-    const client = new ScreenScraperClient({
+    const client = makeClient({
       fetch: fetchMock as unknown as typeof fetch,
-      sleep: () => Promise.resolve(),
-      now: () => 0,
-      minIntervalMs: 0,
     });
     expect(await client.getByMd5(HASH)).not.toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('network errors retry max once (2 fetches total)', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error('socket hang up'));
+    const client = makeClient({
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    expect(await client.getByMd5(HASH)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('network error then 200 returns the parsed response', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('ECONNRESET'))
+      .mockResolvedValueOnce(jsonResponse(SAMPLE_JEU));
+    const client = makeClient({
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    expect(await client.getByMd5(HASH)).not.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns null on other 4xx (e.g. 400) without retry', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(emptyResponse(400));
+    const client = makeClient({
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    expect(await client.getByMd5(HASH)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('returns null when the response is 200 but not JSON', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValue(new Response('<html>error</html>', { status: 200 }));
-    const client = new ScreenScraperClient({
+    const client = makeClient({
       fetch: fetchMock as unknown as typeof fetch,
-      sleep: () => Promise.resolve(),
-      now: () => 0,
-      minIntervalMs: 0,
     });
     expect(await client.getByMd5(HASH)).toBeNull();
   });
@@ -331,7 +524,7 @@ describe('ScreenScraperClient — networking', () => {
       clock += 100; // each call takes 100ms
       return jsonResponse(SAMPLE_JEU);
     });
-    const client = new ScreenScraperClient({
+    const client = makeClient({
       fetch: fetchMock as unknown as typeof fetch,
       sleep: (ms: number) => {
         sleeps.push(ms);
@@ -343,8 +536,6 @@ describe('ScreenScraperClient — networking', () => {
     });
     await client.getByMd5(HASH);
     await client.getByMd5('b'.repeat(32));
-    // First call: no wait. Second call: wait the remainder of the
-    // 1100ms interval (1100 - 100ms-of-prev-call = 1000).
     expect(sleeps).toEqual([1000]);
   });
 
@@ -357,7 +548,7 @@ describe('ScreenScraperClient — networking', () => {
       clock += 50;
       return jsonResponse(SAMPLE_JEU);
     });
-    const client = new ScreenScraperClient({
+    const client = makeClient({
       fetch: fetchMock as unknown as typeof fetch,
       sleep: (ms: number) => {
         clock += ms;

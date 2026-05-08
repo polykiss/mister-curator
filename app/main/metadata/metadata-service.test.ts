@@ -4,7 +4,10 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ScreenScraperClient } from '@app/main/metadata/clients/screenscraper-client';
+import {
+  ScreenScraperAuthError,
+  type ScreenScraperClient,
+} from '@app/main/metadata/clients/screenscraper-client';
 import type { TheGamesDBClient } from '@app/main/metadata/clients/thegamesdb-client';
 import { MetadataService } from '@app/main/metadata/metadata-service';
 import type { RomMetadata } from '@shared/metadata-types';
@@ -45,6 +48,7 @@ interface MockClients {
 
 function makeClients(opts: {
   ssReturns?: RomMetadata | null;
+  ssThrows?: Error;
   tgdbReturns?: RomMetadata | null;
 }): MockClients {
   const ssCalls: { hash: string; hint: unknown }[] = [];
@@ -52,6 +56,7 @@ function makeClients(opts: {
   const screenScraper = {
     getByMd5: vi.fn(async (hash: string, hint: unknown) => {
       ssCalls.push({ hash, hint });
+      if (opts.ssThrows !== undefined) throw opts.ssThrows;
       return opts.ssReturns ?? null;
     }),
   } as unknown as ScreenScraperClient;
@@ -254,5 +259,105 @@ describe('MetadataService', () => {
 
     const result = await svc.getMetadata(HASH);
     expect(result?.name).toBe('Recovered');
+  });
+
+  describe('ScreenScraperAuthError handling (PR #15 round 2)', () => {
+    it('catches AuthError on first call, falls through to TheGamesDB, logs once', async () => {
+      const tgdbHit = buildTgdbHit(HASH, 'Backup match');
+      const clients = makeClients({
+        ssThrows: new ScreenScraperAuthError(403),
+        tgdbReturns: tgdbHit,
+      });
+      const log = vi.fn();
+      const svc = new MetadataService(dir, clients.screenScraper, clients.theGamesDb, {
+        logger: log,
+      });
+
+      const result = await svc.getMetadata(HASH);
+      expect(result?.source).toBe('thegamesdb');
+      expect(result?.name).toBe('Backup match');
+      expect(clients.ssCalls).toHaveLength(1);
+      expect(clients.tgdbCalls).toHaveLength(1);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log.mock.calls[0]?.[0]).toMatch(/auth failed/);
+      expect(log.mock.calls[0]?.[0]).toMatch(/HTTP 403/);
+      expect(svc.isScreenScraperDisabled()).toBe(true);
+    });
+
+    it('disables ScreenScraper for the rest of the session after a single AuthError', async () => {
+      const clients = makeClients({
+        ssThrows: new ScreenScraperAuthError(403),
+        tgdbReturns: null,
+      });
+      const log = vi.fn();
+      const svc = new MetadataService(dir, clients.screenScraper, clients.theGamesDb, {
+        logger: log,
+      });
+
+      // Three different hashes; only the first should hit SS.
+      await svc.getMetadata(HASH);
+      await svc.getMetadata('b'.repeat(32));
+      await svc.getMetadata('c'.repeat(32));
+
+      expect(clients.ssCalls).toHaveLength(1);
+      // TGDB still gets called for every hash (it's the fallback path).
+      expect(clients.tgdbCalls).toHaveLength(3);
+      // Auth-failure notice fires exactly once across the burst.
+      expect(log).toHaveBeenCalledTimes(1);
+    });
+
+    it('survives a 401 the same way as a 403', async () => {
+      const clients = makeClients({
+        ssThrows: new ScreenScraperAuthError(401),
+        tgdbReturns: null,
+      });
+      const svc = new MetadataService(dir, clients.screenScraper, clients.theGamesDb);
+      const result = await svc.getMetadata(HASH);
+      expect(result).toBeNull();
+      expect(svc.isScreenScraperDisabled()).toBe(true);
+    });
+
+    it('non-AuthError exceptions still propagate (don\'t silently disable)', async () => {
+      const clients = makeClients({
+        ssThrows: new Error('unexpected programming error'),
+      });
+      const svc = new MetadataService(dir, clients.screenScraper, clients.theGamesDb);
+      await expect(svc.getMetadata(HASH)).rejects.toThrow(
+        'unexpected programming error',
+      );
+      expect(svc.isScreenScraperDisabled()).toBe(false);
+    });
+
+    it('writes a sentinel after AuthError + TheGamesDB miss so we don\'t re-query', async () => {
+      const clients = makeClients({
+        ssThrows: new ScreenScraperAuthError(403),
+        tgdbReturns: null,
+      });
+      const svc = new MetadataService(dir, clients.screenScraper, clients.theGamesDb);
+      await svc.getMetadata(HASH);
+
+      const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
+      const onDisk = JSON.parse(await fs.readFile(path, 'utf-8')) as RomMetadata;
+      expect(onDisk.source).toBe('none');
+    });
+
+    it('logs exactly once even when two AuthErrors race each other', async () => {
+      // Two concurrent calls both observe the throw before either
+      // flips the disabled flag — without the guard in `doGet`, both
+      // would log.
+      const clients = makeClients({
+        ssThrows: new ScreenScraperAuthError(403),
+        tgdbReturns: null,
+      });
+      const log = vi.fn();
+      const svc = new MetadataService(dir, clients.screenScraper, clients.theGamesDb, {
+        logger: log,
+      });
+      await Promise.all([
+        svc.getMetadata('a'.repeat(32)),
+        svc.getMetadata('b'.repeat(32)),
+      ]);
+      expect(log).toHaveBeenCalledTimes(1);
+    });
   });
 });

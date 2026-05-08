@@ -1,7 +1,10 @@
 import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-import type { ScreenScraperClient } from '@app/main/metadata/clients/screenscraper-client';
+import {
+  ScreenScraperAuthError,
+  type ScreenScraperClient,
+} from '@app/main/metadata/clients/screenscraper-client';
 import type { TheGamesDBClient } from '@app/main/metadata/clients/thegamesdb-client';
 import {
   NO_MATCH_TTL_MS,
@@ -15,6 +18,11 @@ export interface MetadataServiceOptions {
   readonly now?: () => number;
   /** Expiry for `source: 'none'` sentinels. */
   readonly noMatchTtlMs?: number;
+  /**
+   * Single-line warning sink. Used for the "ScreenScraper auth failed,
+   * disabling for this session" notice. Default: no log.
+   */
+  readonly logger?: (message: string) => void;
 }
 
 /**
@@ -43,8 +51,17 @@ export interface MetadataServiceOptions {
 export class MetadataService {
   private readonly noMatchTtlMs: number;
   private readonly now: () => number;
+  private readonly logger: (message: string) => void;
   /** Per-hash in-flight gate. */
   private readonly inflight = new Map<string, Promise<RomMetadata | null>>();
+  /**
+   * Round 2 of PR #15: latches `true` on the first
+   * `ScreenScraperAuthError` and short-circuits ScreenScraper for the
+   * remainder of the session. Misconfigured creds aren't going to
+   * start working spontaneously, and re-attempting just stacks the
+   * 1.1s rate-limit wait on every ROM the orchestrator queues.
+   */
+  private screenScraperDisabled = false;
 
   constructor(
     private readonly rootDir: string,
@@ -54,6 +71,14 @@ export class MetadataService {
   ) {
     this.noMatchTtlMs = options.noMatchTtlMs ?? NO_MATCH_TTL_MS;
     this.now = options.now ?? Date.now;
+    this.logger = options.logger ?? ((): void => {
+      /* default: no log */
+    });
+  }
+
+  /** Test/inspection helper — true once an AuthError disabled SS. */
+  isScreenScraperDisabled(): boolean {
+    return this.screenScraperDisabled;
   }
 
   /**
@@ -114,10 +139,32 @@ export class MetadataService {
       return cached.source === 'none' ? null : cached;
     }
 
-    const fromScreenScraper = await this.screenScraper.getByMd5(hash, hint);
-    if (fromScreenScraper !== null) {
-      await this.writeCache(hash, fromScreenScraper);
-      return fromScreenScraper;
+    if (!this.screenScraperDisabled) {
+      try {
+        const fromScreenScraper = await this.screenScraper.getByMd5(hash, hint);
+        if (fromScreenScraper !== null) {
+          await this.writeCache(hash, fromScreenScraper);
+          return fromScreenScraper;
+        }
+      } catch (err) {
+        if (err instanceof ScreenScraperAuthError) {
+          // Two concurrent calls can both observe the throw before
+          // either flips the flag — guard the log so the user sees
+          // exactly one notice even under that race.
+          if (!this.screenScraperDisabled) {
+            this.screenScraperDisabled = true;
+            this.logger(
+              `[ScreenScraper] auth failed (HTTP ${String(err.status)}); disabling for this session. ` +
+                'Verify SCREENSCRAPER_DEVID / SCREENSCRAPER_DEVPASSWORD.',
+            );
+          }
+          // Fall through to TheGamesDB rather than aborting — the
+          // user's library should still get whatever metadata that
+          // source can supply, even if SS creds are wrong.
+        } else {
+          throw err;
+        }
+      }
     }
 
     const fromTheGamesDb = await this.theGamesDb.getByHint(hash, hint);
