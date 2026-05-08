@@ -1,21 +1,25 @@
-import { promises as fs } from 'node:fs';
-import { dirname, join } from 'node:path';
-
 import { createRequire } from 'node:module';
+import { promises as fs } from 'node:fs';
+import { join } from 'node:path';
 
+import JSZip from 'jszip';
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
 
 /**
- * Round 3 of PR #15: hash → metadata via the OpenVGDB SQLite snapshot
+ * Round 4 of PR #15: hash → metadata via the OpenVGDB SQLite snapshot
  * (https://github.com/OpenVGDB/OpenVGDB). One ~50 MB file, downloaded
  * once on first use, queried locally with sql.js. No credentials, no
  * rate limit, no per-request network cost.
  *
- * The download is direct to a `.sqlite` file from a community mirror.
- * GitHub releases ship the database inside a zip; supporting that
- * mirror needs a zip-extraction dep we haven't added yet — the URL
- * list below has a `requiresUnzip` flag for entries that would need
- * one, and the service skips them for now.
+ * Source of truth: GitHub releases. We fetch the
+ * `releases/latest` JSON, locate the `.zip` (or `.sqlite`) asset, and
+ * download from its `browser_download_url`. The iNDS mirror that
+ * round 3 used has been DNS-deleted; GitHub is now the sole source.
+ *
+ * Once downloaded, we record the release tag in `openvgdb.version.json`
+ * alongside the `.sqlite`. On subsequent calls we treat the pair as
+ * cached and skip the network entirely. Manual deletion of either
+ * file forces a re-fetch on the next call.
  *
  * sql.js loads via WebAssembly. We pass `wasmBinary` directly (read
  * from node_modules) instead of relying on Emscripten's default
@@ -23,23 +27,26 @@ import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
  * asar packaging cleanly.
  */
 
-const DEFAULT_DOWNLOAD_URLS: readonly DownloadCandidate[] = [
-  {
-    url: 'https://inds.nerd.net/editor/openvgdb.sqlite',
-    requiresUnzip: false,
-  },
-  // Future: GitHub release ships a zip — needs an unzip dep we
-  // haven't added. Track in PR #16+ if this mirror starts to lag.
-  // {
-  //   url: 'https://github.com/OpenVGDB/OpenVGDB/releases/download/v29/openvgdb.zip',
-  //   requiresUnzip: true,
-  // },
-];
+const RELEASES_URL =
+  'https://api.github.com/repos/OpenVGDB/OpenVGDB/releases/latest';
 
-interface DownloadCandidate {
-  readonly url: string;
-  readonly requiresUnzip: boolean;
-}
+const USER_AGENT = 'mister-curator (https://github.com/polykiss/mister-curator)';
+
+const DB_FILENAME = 'openvgdb.sqlite';
+const VERSION_FILENAME = 'openvgdb.version.json';
+const DOWNLOAD_TMP_FILENAME = 'openvgdb.download.tmp';
+const DEFAULT_LRU_CAPACITY = 100;
+
+/**
+ * Categorical tag on `error` progress events. The renderer (PR #16)
+ * uses this to choose the right surfaced copy. Strings are stable.
+ */
+export type OpenVGDBErrorCategory =
+  | 'network'
+  | 'http-error'
+  | 'asset-missing'
+  | 'extract'
+  | 'schema';
 
 /** Streaming progress events emitted during `ensureDatabase`. */
 export type OpenVGDBProgressEvent =
@@ -50,7 +57,11 @@ export type OpenVGDBProgressEvent =
       readonly bytesTotal: number | null;
     }
   | { readonly kind: 'ready'; readonly path: string }
-  | { readonly kind: 'error'; readonly message: string };
+  | {
+      readonly kind: 'error';
+      readonly message: string;
+      readonly category: OpenVGDBErrorCategory;
+    };
 
 export interface OpenVGDBMetadata {
   readonly md5: string;
@@ -69,10 +80,10 @@ export interface OpenVGDBMetadata {
 export interface OpenVGDBServiceOptions {
   /** Test seam — defaults to global `fetch`. */
   readonly fetch?: typeof fetch;
-  /** Test seam — wall-clock source for `fetchedAt`. */
+  /** Test seam — wall-clock source for `fetchedAt` and download metadata. */
   readonly now?: () => number;
-  /** Override the candidate URLs (used by tests). */
-  readonly downloadUrls?: readonly DownloadCandidate[];
+  /** Test seam — overrides the GitHub releases endpoint URL. */
+  readonly releasesUrl?: string;
   /**
    * Override the path to the sql.js WASM binary. If unset, the
    * service resolves it via `require.resolve('sql.js/dist/sql-wasm.wasm')`.
@@ -82,8 +93,11 @@ export interface OpenVGDBServiceOptions {
   readonly lruCapacity?: number;
 }
 
-const DB_FILENAME = 'openvgdb.sqlite';
-const DEFAULT_LRU_CAPACITY = 100;
+/** Sidecar that records which release tag we have on disk. */
+interface VersionFile {
+  readonly tag: string;
+  readonly downloadedAt: string;
+}
 
 /**
  * The single SELECT we issue. LEFT JOINs keep the row even if RELEASES
@@ -119,7 +133,7 @@ const REQUIRED_TABLES = ['ROMs', 'RELEASES', 'SYSTEMS'] as const;
 export class OpenVGDBService {
   private readonly fetchImpl: typeof fetch;
   private readonly nowImpl: () => number;
-  private readonly downloadUrls: readonly DownloadCandidate[];
+  private readonly releasesUrl: string;
   private readonly wasmBinaryPath: string | null;
   private readonly lruCapacity: number;
 
@@ -140,7 +154,7 @@ export class OpenVGDBService {
   ) {
     this.fetchImpl = options.fetch ?? fetch;
     this.nowImpl = options.now ?? Date.now;
-    this.downloadUrls = options.downloadUrls ?? DEFAULT_DOWNLOAD_URLS;
+    this.releasesUrl = options.releasesUrl ?? RELEASES_URL;
     this.wasmBinaryPath = options.wasmBinaryPath ?? null;
     this.lruCapacity = options.lruCapacity ?? DEFAULT_LRU_CAPACITY;
   }
@@ -151,20 +165,25 @@ export class OpenVGDBService {
   }
 
   /**
-   * Make the DB usable. If a valid file already exists at the cache
-   * path, just opens it. Otherwise downloads from the first usable
-   * mirror, validates the schema, and opens. Concurrent callers
-   * coalesce onto the same promise; failures clear the gate so the
-   * next call retries.
+   * Make the DB usable. Round 4 contract:
+   *   - If both `openvgdb.sqlite` AND `openvgdb.version.json` exist
+   *     and the schema is valid, open immediately. No network.
+   *   - Otherwise: GET releases/latest, find the .zip (or .sqlite)
+   *     asset, download, extract, atomic rename, validate, write
+   *     the version sidecar.
+   *
+   * Concurrent callers coalesce onto the same promise; failures
+   * clear the gate so the next call retries.
    *
    * `onProgress` (when supplied) sees `started` once, then either:
    *   - 0+ `downloading` events as bytes accumulate
    *   - one `ready` event on success
-   *   - one `error` event on failure
+   *   - one `error` event on failure (with a `category` tag)
    *
-   * Returns when the DB is open (or throws on error). Does not throw
-   * on download failure — a failed download leaves `ready=false` and
-   * subsequent `getMetadataByHash` calls return null.
+   * Returns when the DB is open or the failure has been surfaced.
+   * Does not throw on download failure — a failed download leaves
+   * `ready=false` and subsequent `getMetadataByHash` calls return
+   * null.
    */
   async ensureDatabase(
     onProgress?: (event: OpenVGDBProgressEvent) => void,
@@ -200,8 +219,9 @@ export class OpenVGDBService {
   }
 
   /**
-   * Wipe the on-disk DB and any in-memory state. Next `ensureDatabase`
-   * will redownload. Used by the "Clear cache" command.
+   * Wipe the on-disk DB, version sidecar, and any in-memory state.
+   * Next `ensureDatabase` will redownload. Used by the "Clear cache"
+   * command.
    */
   async clearDatabase(): Promise<void> {
     this.lru.clear();
@@ -214,12 +234,8 @@ export class OpenVGDBService {
       this.db = null;
     }
     this.ready = false;
-    try {
-      await fs.unlink(this.dbPath());
-    } catch (err) {
-      if (isNodeError(err) && err.code === 'ENOENT') return;
-      throw err;
-    }
+    await unlinkIfExists(this.dbPath());
+    await unlinkIfExists(this.versionPath());
   }
 
   // ─── internals ─────────────────────────────────────────────────────
@@ -227,53 +243,241 @@ export class OpenVGDBService {
   private async doEnsure(
     onProgress: ((event: OpenVGDBProgressEvent) => void) | undefined,
   ): Promise<void> {
-    const path = this.dbPath();
-    onProgress?.({ kind: 'started' });
-
-    // Fast path: file exists, sniff the schema, open. If schema check
-    // fails, drop the file and redownload.
-    let needsDownload = false;
-    try {
-      await fs.access(path);
-    } catch {
-      needsDownload = true;
-    }
-
-    if (!needsDownload) {
-      const opened = await this.tryOpen(path);
+    // Cached path: both files present + schema valid → ready, no
+    // network at all.
+    if (await this.fileExists(this.dbPath()) && (await this.readVersion()) !== null) {
+      const opened = await this.tryOpen(this.dbPath());
       if (opened) {
         this.ready = true;
-        onProgress?.({ kind: 'ready', path });
+        onProgress?.({ kind: 'ready', path: this.dbPath() });
         return;
       }
-      // Schema mismatch — discard and redownload.
-      await fs
-        .unlink(path)
-        .catch(() => undefined);
-      needsDownload = true;
+      // Schema mismatch on a previously-cached file. Wipe and treat
+      // as cold so the redownload below has a clean slate.
+      await unlinkIfExists(this.dbPath());
+      await unlinkIfExists(this.versionPath());
     }
 
-    if (needsDownload) {
-      const downloaded = await this.download(path, onProgress);
-      if (!downloaded) {
-        onProgress?.({
-          kind: 'error',
-          message: 'All OpenVGDB mirrors failed; metadata lookup will return null.',
-        });
+    onProgress?.({ kind: 'started' });
+
+    // Step 1: fetch the releases JSON.
+    let asset: { name: string; url: string };
+    let tag: string;
+    try {
+      const release = await this.fetchLatestRelease();
+      tag = release.tag;
+      const picked = pickAsset(release.assets);
+      if (picked === null) {
+        emitError(
+          onProgress,
+          'asset-missing',
+          'Latest OpenVGDB release has no .sqlite or .zip asset — please report this.',
+        );
         return;
       }
-      const opened = await this.tryOpen(path);
-      if (!opened) {
-        onProgress?.({
-          kind: 'error',
-          message: 'Downloaded OpenVGDB file did not match the expected schema.',
-        });
-        await fs.unlink(path).catch(() => undefined);
-        return;
+      asset = picked;
+    } catch (err) {
+      if (err instanceof HttpStatusError) {
+        if (err.status === 404) {
+          emitError(
+            onProgress,
+            'http-error',
+            'OpenVGDB releases not found — the project may have moved.',
+          );
+        } else {
+          emitError(
+            onProgress,
+            'http-error',
+            `GitHub returned status ${String(err.status)} for the OpenVGDB releases endpoint.`,
+          );
+        }
+      } else {
+        emitError(
+          onProgress,
+          'network',
+          `Could not reach github.com — check your internet connection. (${describeNetworkError(err)})`,
+        );
       }
-      this.ready = true;
-      onProgress?.({ kind: 'ready', path });
+      return;
     }
+
+    // Step 2: download the asset.
+    await fs.mkdir(this.rootDir, { recursive: true });
+    const downloadPath = join(this.rootDir, DOWNLOAD_TMP_FILENAME);
+    try {
+      await this.streamToFile(asset.url, downloadPath, onProgress);
+    } catch (err) {
+      await unlinkIfExists(downloadPath);
+      emitError(
+        onProgress,
+        'network',
+        `OpenVGDB download failed: ${describeNetworkError(err)}`,
+      );
+      return;
+    }
+
+    // Step 3: extract (or just rename, for direct .sqlite assets).
+    const isZip = asset.name.toLowerCase().endsWith('.zip');
+    if (isZip) {
+      try {
+        await this.extractSqliteFromZip(downloadPath, this.dbPath());
+      } catch (err) {
+        await unlinkIfExists(downloadPath);
+        await unlinkIfExists(this.dbPath());
+        emitError(
+          onProgress,
+          'extract',
+          `Downloaded archive is corrupt — please retry. (${describeNetworkError(err)})`,
+        );
+        return;
+      }
+      await unlinkIfExists(downloadPath);
+    } else {
+      await fs.rename(downloadPath, this.dbPath());
+    }
+
+    // Step 4: schema-validate the extracted file.
+    const opened = await this.tryOpen(this.dbPath());
+    if (!opened) {
+      await unlinkIfExists(this.dbPath());
+      emitError(
+        onProgress,
+        'schema',
+        'Downloaded OpenVGDB file did not match the expected schema.',
+      );
+      return;
+    }
+
+    // Step 5: record the version sidecar so subsequent calls skip
+    // the network entirely.
+    await this.writeVersion(tag);
+
+    this.ready = true;
+    onProgress?.({ kind: 'ready', path: this.dbPath() });
+  }
+
+  /**
+   * GET the GitHub releases/latest JSON. Throws `HttpStatusError`
+   * for non-2xx responses (the caller maps to a category) and
+   * surfaces underlying fetch failures unchanged.
+   */
+  private async fetchLatestRelease(): Promise<{
+    tag: string;
+    assets: readonly { name: string; url: string }[];
+  }> {
+    const res = await this.fetchImpl(this.releasesUrl, {
+      headers: {
+        'User-Agent': USER_AGENT,
+        // GitHub's recommended Accept header; the v3 / vnd type fixes
+        // the response shape across API revisions.
+        Accept: 'application/vnd.github+json',
+      },
+    });
+    if (!res.ok) {
+      throw new HttpStatusError(res.status);
+    }
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch (err) {
+      throw new Error(`Releases JSON unparseable: ${describeNetworkError(err)}`);
+    }
+    if (body === null || typeof body !== 'object') {
+      throw new Error('Releases JSON was not an object.');
+    }
+    const obj = body as Record<string, unknown>;
+    const tag = typeof obj.tag_name === 'string' ? obj.tag_name : 'unknown';
+    const rawAssets = obj.assets;
+    const assets: { name: string; url: string }[] = [];
+    if (Array.isArray(rawAssets)) {
+      for (const raw of rawAssets) {
+        if (raw === null || typeof raw !== 'object') continue;
+        const a = raw as Record<string, unknown>;
+        if (
+          typeof a.name === 'string' &&
+          typeof a.browser_download_url === 'string'
+        ) {
+          assets.push({ name: a.name, url: a.browser_download_url });
+        }
+      }
+    }
+    return { tag, assets };
+  }
+
+  /**
+   * Stream `url` to `path` (atomic rename pending — caller decides
+   * what to do with the file afterwards). Emits `downloading`
+   * progress as bytes accumulate.
+   */
+  private async streamToFile(
+    url: string,
+    path: string,
+    onProgress: ((event: OpenVGDBProgressEvent) => void) | undefined,
+  ): Promise<void> {
+    const res = await this.fetchImpl(url, {
+      headers: { 'User-Agent': USER_AGENT },
+    });
+    if (!res.ok || res.body === null) {
+      throw new Error(`Asset download returned status ${String(res.status)}.`);
+    }
+    const totalHeader = res.headers.get('content-length');
+    const total =
+      totalHeader === null ? null : Number.parseInt(totalHeader, 10);
+    const totalBytes = total !== null && Number.isFinite(total) ? total : null;
+
+    const handle = await fs.open(path, 'w', 0o600);
+    let bytesReceived = 0;
+    try {
+      const reader = res.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value !== undefined) {
+          await handle.write(value);
+          bytesReceived += value.length;
+          onProgress?.({
+            kind: 'downloading',
+            bytesReceived,
+            bytesTotal: totalBytes,
+          });
+        }
+      }
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+    if (bytesReceived === 0) {
+      throw new Error('Asset download was empty.');
+    }
+  }
+
+  /**
+   * Extract the first `.sqlite` entry from a zip archive into `outPath`,
+   * atomically (write to .tmp, fsync via close, rename). Throws on:
+   *   - zip parse failure
+   *   - no .sqlite entry inside
+   *   - underlying I/O failure
+   */
+  private async extractSqliteFromZip(
+    zipPath: string,
+    outPath: string,
+  ): Promise<void> {
+    const buf = await fs.readFile(zipPath);
+    const zip = await JSZip.loadAsync(buf);
+    let chosen: JSZip.JSZipObject | null = null;
+    for (const entry of Object.values(zip.files)) {
+      if (entry.dir) continue;
+      if (entry.name.toLowerCase().endsWith('.sqlite')) {
+        chosen = entry;
+        break;
+      }
+    }
+    if (chosen === null) {
+      throw new Error('Zip archive contained no .sqlite entry.');
+    }
+    const sqliteBuf = await chosen.async('uint8array');
+    const tmp = `${outPath}.tmp`;
+    await fs.writeFile(tmp, sqliteBuf, { mode: 0o600 });
+    await fs.rename(tmp, outPath);
   }
 
   /**
@@ -309,72 +513,48 @@ export class OpenVGDBService {
     return true;
   }
 
-  /**
-   * Walk the candidate URL list. The first one that yields a non-empty
-   * 200 body wins; the bytes get atomically written to `path`. Skips
-   * any candidate that needs unzipping (we don't ship a zip dep).
-   */
-  private async download(
-    path: string,
-    onProgress: ((event: OpenVGDBProgressEvent) => void) | undefined,
-  ): Promise<boolean> {
-    await fs.mkdir(dirname(path), { recursive: true });
-    for (const candidate of this.downloadUrls) {
-      if (candidate.requiresUnzip) continue;
-      const ok = await this.downloadOne(candidate.url, path, onProgress);
-      if (ok) return true;
+  private async readVersion(): Promise<VersionFile | null> {
+    let raw: string;
+    try {
+      raw = await fs.readFile(this.versionPath(), 'utf-8');
+    } catch (err) {
+      if (isNodeError(err) && err.code === 'ENOENT') return null;
+      return null;
     }
-    return false;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    if (parsed === null || typeof parsed !== 'object') return null;
+    const o = parsed as Record<string, unknown>;
+    if (typeof o.tag !== 'string' || typeof o.downloadedAt !== 'string') {
+      return null;
+    }
+    return { tag: o.tag, downloadedAt: o.downloadedAt };
   }
 
-  private async downloadOne(
-    url: string,
-    path: string,
-    onProgress: ((event: OpenVGDBProgressEvent) => void) | undefined,
-  ): Promise<boolean> {
-    let res: Response;
+  private async writeVersion(tag: string): Promise<void> {
+    const data: VersionFile = {
+      tag,
+      downloadedAt: new Date(this.nowImpl()).toISOString(),
+    };
+    const tmp = `${this.versionPath()}.tmp`;
+    await fs.writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    await fs.rename(tmp, this.versionPath());
+  }
+
+  private async fileExists(path: string): Promise<boolean> {
     try {
-      res = await this.fetchImpl(url);
+      await fs.access(path);
+      return true;
     } catch {
       return false;
     }
-    if (!res.ok || res.body === null) return false;
-
-    const totalHeader = res.headers.get('content-length');
-    const total =
-      totalHeader === null ? null : Number.parseInt(totalHeader, 10);
-    const totalBytes = total !== null && Number.isFinite(total) ? total : null;
-
-    const tmp = `${path}.tmp`;
-    const handle = await fs.open(tmp, 'w', 0o600);
-    let bytesReceived = 0;
-    try {
-      const reader = res.body.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value !== undefined) {
-          await handle.write(value);
-          bytesReceived += value.length;
-          onProgress?.({
-            kind: 'downloading',
-            bytesReceived,
-            bytesTotal: totalBytes,
-          });
-        }
-      }
-    } catch {
-      await handle.close().catch(() => undefined);
-      await fs.unlink(tmp).catch(() => undefined);
-      return false;
-    }
-    await handle.close();
-    if (bytesReceived === 0) {
-      await fs.unlink(tmp).catch(() => undefined);
-      return false;
-    }
-    await fs.rename(tmp, path);
-    return true;
   }
 
   private queryOne(db: Database, md5: string): OpenVGDBMetadata | null {
@@ -439,9 +619,67 @@ export class OpenVGDBService {
   private dbPath(): string {
     return join(this.rootDir, DB_FILENAME);
   }
+
+  private versionPath(): string {
+    return join(this.rootDir, VERSION_FILENAME);
+  }
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Pick the right release asset. Prefer a direct `.sqlite` if one is
+ * ever shipped (cheaper — no extraction step); otherwise fall through
+ * to the first `.zip`. Returns null when neither is present.
+ */
+function pickAsset(
+  assets: readonly { name: string; url: string }[],
+): { name: string; url: string } | null {
+  const direct = assets.find((a) => a.name.toLowerCase().endsWith('.sqlite'));
+  if (direct !== undefined) return direct;
+  const zipped = assets.find((a) => a.name.toLowerCase().endsWith('.zip'));
+  return zipped ?? null;
+}
+
+class HttpStatusError extends Error {
+  readonly status: number;
+  constructor(status: number) {
+    super(`HTTP ${String(status)}`);
+    this.name = 'HttpStatusError';
+    this.status = status;
+  }
+}
+
+function emitError(
+  onProgress: ((event: OpenVGDBProgressEvent) => void) | undefined,
+  category: OpenVGDBErrorCategory,
+  message: string,
+): void {
+  onProgress?.({ kind: 'error', category, message });
+}
+
+function describeNetworkError(err: unknown): string {
+  if (err instanceof Error) {
+    // node-fetch / undici surface DNS failures as `cause: { code: 'ENOTFOUND' }`.
+    // Reach through to surface that to the user log.
+    const cause = (err as { cause?: unknown }).cause;
+    if (cause !== null && typeof cause === 'object') {
+      const code = (cause as Record<string, unknown>).code;
+      if (typeof code === 'string') return `${err.message} (${code})`;
+    }
+    return err.message;
+  }
+  return String(err);
+}
+
+async function unlinkIfExists(path: string): Promise<void> {
+  try {
+    await fs.unlink(path);
+  } catch (err) {
+    if (isNodeError(err) && err.code === 'ENOENT') return;
+    // Best-effort — caller may not care about cleanup races.
+  }
+}
 
 function defaultWasmBinaryPath(): string {
   // `createRequire` lets us `require.resolve('sql.js/dist/sql-wasm.wasm')`

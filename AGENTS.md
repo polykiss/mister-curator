@@ -135,10 +135,13 @@ Update it before changing consumers.
     first use. Maps md5 → name + system + year + genre + publisher
     + developer + region. Distributed under the OpenVGDB project's
     license; check `LICENSE` in that repo for the canonical terms.
-    Mirrors are listed in `app/main/metadata/openvgdb-service.ts`;
-    primary is https://inds.nerd.net/editor/openvgdb.sqlite (direct
-    .sqlite). The GitHub release ships a `.zip`; supporting that
-    needs an unzip dep we haven't added yet.
+    Source: GitHub Releases (queried via the public unauthenticated
+    API at `https://api.github.com/repos/OpenVGDB/OpenVGDB/releases/latest`).
+    The release ships the SQLite inside a `.zip`; we extract it on
+    download with `jszip`. The release tag is recorded in
+    `openvgdb.version.json` next to the SQLite — once both files are
+    on disk and the schema is valid, subsequent calls skip the
+    network entirely. Manual delete of either file forces a re-fetch.
   - **libretro-thumbnails** — community-curated PNG archive at
     https://thumbnails.libretro.com/, organized per system. URL
     builder lives in `app/main/metadata/libretro-thumbnails.ts`;

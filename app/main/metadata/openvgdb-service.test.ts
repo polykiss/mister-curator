@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import JSZip from 'jszip';
 import initSqlJs from 'sql.js';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -13,6 +14,11 @@ import {
 const HASH_SMW = 'd0e7d56cb3eb1f3f8e51a8fd0bcfaf28';
 const HASH_SONIC = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const HASH_NONEXISTENT = '00112233445566778899aabbccddeeff';
+
+const FAKE_RELEASES_URL = 'https://api.example.test/releases/latest';
+const FAKE_ZIP_URL = 'https://cdn.example.test/openvgdb.zip';
+const FAKE_SQLITE_URL = 'https://cdn.example.test/openvgdb.sqlite';
+const RELEASE_TAG = 'v29.0';
 
 interface FixtureRow {
   readonly md5: string;
@@ -30,10 +36,6 @@ interface FixtureRow {
  * Build a minimal OpenVGDB-shaped SQLite buffer in-memory. The schema
  * matches the columns the service actually queries (ROMs, RELEASES,
  * SYSTEMS) — anything beyond that is irrelevant to these tests.
- *
- * Generating the fixture inline (rather than committing a binary
- * blob) keeps the repo small and means the schema check is exercised
- * against the same definitions the service queries.
  */
 async function buildFixture(rows: readonly FixtureRow[]): Promise<Uint8Array> {
   const SQL = await initSqlJs();
@@ -125,12 +127,68 @@ const SAMPLE_ROWS: readonly FixtureRow[] = [
   },
 ];
 
-describe('OpenVGDBService', () => {
+/** Wraps a SQLite buffer in a `.zip` archive named the way GitHub ships it. */
+async function makeZip(sqlite: Uint8Array): Promise<Uint8Array> {
+  const zip = new JSZip();
+  zip.file('openvgdb.sqlite', sqlite);
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+interface ReleasesAsset {
+  readonly name: string;
+  readonly url: string;
+}
+
+function releasesJson(assets: readonly ReleasesAsset[], tag = RELEASE_TAG) {
+  return {
+    tag_name: tag,
+    assets: assets.map((a) => ({
+      name: a.name,
+      browser_download_url: a.url,
+    })),
+  };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function bytesResponse(bytes: Uint8Array, status = 200): Response {
+  return new Response(Buffer.from(bytes), {
+    status,
+    headers: { 'content-length': String(bytes.byteLength) },
+  });
+}
+
+/**
+ * Build a fetch mock that routes by URL. Each entry is consumed once;
+ * unmatched URLs reject so a missed routing surfaces as a clear test
+ * failure rather than a misleading "got null" downstream.
+ */
+function routeFetch(
+  routes: ReadonlyMap<string, () => Response | Promise<Response>>,
+): typeof fetch {
+  return (async (input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : (input as URL).toString();
+    const handler = routes.get(url);
+    if (handler === undefined) {
+      throw new Error(`Unexpected fetch: ${url}`);
+    }
+    return handler();
+  }) as unknown as typeof fetch;
+}
+
+describe('OpenVGDBService (round 4 — GitHub releases + jszip)', () => {
   let dir: string;
   let fixtureBuffer: Uint8Array;
+  let fixtureZip: Uint8Array;
 
   beforeAll(async () => {
     fixtureBuffer = await buildFixture(SAMPLE_ROWS);
+    fixtureZip = await makeZip(fixtureBuffer);
   });
 
   beforeEach(async () => {
@@ -141,97 +199,147 @@ describe('OpenVGDBService', () => {
     await fs.rm(dir, { recursive: true, force: true });
   });
 
-  it('opens an existing valid file without downloading', async () => {
-    await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(fixtureBuffer));
-    const fetchMock = vi.fn();
-    const svc = new OpenVGDBService(dir, {
-      fetch: fetchMock as unknown as typeof fetch,
-    });
-    await svc.ensureDatabase();
-    expect(svc.isReady()).toBe(true);
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
+  // ─── happy paths ───────────────────────────────────────────────────
 
-  it('returns metadata for a known hash', async () => {
-    await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(fixtureBuffer));
-    const svc = new OpenVGDBService(dir);
-    await svc.ensureDatabase();
-    const meta = await svc.getMetadataByHash(HASH_SMW);
-    expect(meta).not.toBeNull();
-    expect(meta?.name).toBe('Super Mario World');
-    expect(meta?.system).toBe('Super Nintendo Entertainment System');
-    expect(meta?.year).toBe(1991);
-    expect(meta?.publisher).toBe('Nintendo');
-    expect(meta?.developer).toBe('Nintendo EAD');
-    expect(meta?.genre).toBe('Platform');
-    expect(meta?.region).toBe('USA');
-    expect(meta?.description).toBe('Mario rescues the princess.');
-    expect(meta?.source).toBe('openvgdb');
-  });
-
-  it('matches md5 case-insensitively', async () => {
-    await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(fixtureBuffer));
-    const svc = new OpenVGDBService(dir);
-    await svc.ensureDatabase();
-    const upper = await svc.getMetadataByHash(HASH_SMW.toUpperCase());
-    expect(upper?.name).toBe('Super Mario World');
-  });
-
-  it('returns null for an unknown hash', async () => {
-    await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(fixtureBuffer));
-    const svc = new OpenVGDBService(dir);
-    await svc.ensureDatabase();
-    expect(await svc.getMetadataByHash(HASH_NONEXISTENT)).toBeNull();
-  });
-
-  it('returns null when the DB has not been ensured', async () => {
-    const svc = new OpenVGDBService(dir);
-    expect(svc.isReady()).toBe(false);
-    expect(await svc.getMetadataByHash(HASH_SMW)).toBeNull();
-  });
-
-  it('parses partial date strings into a year', async () => {
-    await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(fixtureBuffer));
-    const svc = new OpenVGDBService(dir);
-    await svc.ensureDatabase();
-    const sonic = await svc.getMetadataByHash(HASH_SONIC);
-    expect(sonic?.year).toBe(1992);
-  });
-
-  it('downloads on first call when no DB file exists', async () => {
-    const fetchMock = vi.fn(() =>
-      Promise.resolve(
-        new Response(Buffer.from(fixtureBuffer), {
-          status: 200,
-          headers: { 'content-length': String(fixtureBuffer.byteLength) },
-        }),
+  it('downloads the .zip asset, extracts the .sqlite, and writes the version sidecar', async () => {
+    const fetchMock = vi.fn(
+      routeFetch(
+        new Map([
+          [
+            FAKE_RELEASES_URL,
+            (): Response =>
+              jsonResponse(
+                releasesJson([{ name: 'openvgdb.zip', url: FAKE_ZIP_URL }]),
+              ),
+          ],
+          [FAKE_ZIP_URL, (): Response => bytesResponse(fixtureZip)],
+        ]),
       ),
     );
     const svc = new OpenVGDBService(dir, {
       fetch: fetchMock as unknown as typeof fetch,
-      downloadUrls: [{ url: 'https://example/openvgdb.sqlite', requiresUnzip: false }],
+      releasesUrl: FAKE_RELEASES_URL,
     });
     const events: OpenVGDBProgressEvent[] = [];
     await svc.ensureDatabase((e) => events.push(e));
-    expect(fetchMock).toHaveBeenCalledOnce();
     expect(svc.isReady()).toBe(true);
     expect(events.find((e) => e.kind === 'started')).toBeDefined();
     expect(events.find((e) => e.kind === 'ready')).toBeDefined();
-    expect(events.some((e) => e.kind === 'downloading')).toBe(true);
+
+    // Both the sqlite and the version sidecar exist.
+    await expect(fs.stat(join(dir, 'openvgdb.sqlite'))).resolves.toBeDefined();
+    const versionRaw = await fs.readFile(
+      join(dir, 'openvgdb.version.json'),
+      'utf-8',
+    );
+    expect(JSON.parse(versionRaw)).toMatchObject({
+      tag: RELEASE_TAG,
+    });
+
+    // The intermediate download .tmp is gone.
+    const entries = await fs.readdir(dir);
+    expect(entries.filter((e) => e.endsWith('.tmp'))).toEqual([]);
+    expect(entries).not.toContain('openvgdb.download.tmp');
   });
 
-  it('emits downloading progress with bytesReceived growing monotonically', async () => {
-    const fetchMock = vi.fn(() =>
-      Promise.resolve(
-        new Response(Buffer.from(fixtureBuffer), {
-          status: 200,
-          headers: { 'content-length': String(fixtureBuffer.byteLength) },
-        }),
+  it('returns metadata for a known hash after extraction', async () => {
+    const fetchMock = vi.fn(
+      routeFetch(
+        new Map([
+          [
+            FAKE_RELEASES_URL,
+            (): Response =>
+              jsonResponse(
+                releasesJson([{ name: 'openvgdb.zip', url: FAKE_ZIP_URL }]),
+              ),
+          ],
+          [FAKE_ZIP_URL, (): Response => bytesResponse(fixtureZip)],
+        ]),
       ),
     );
     const svc = new OpenVGDBService(dir, {
       fetch: fetchMock as unknown as typeof fetch,
-      downloadUrls: [{ url: 'https://example/openvgdb.sqlite', requiresUnzip: false }],
+      releasesUrl: FAKE_RELEASES_URL,
+    });
+    await svc.ensureDatabase();
+    const meta = await svc.getMetadataByHash(HASH_SMW);
+    expect(meta?.name).toBe('Super Mario World');
+    expect(meta?.system).toBe('Super Nintendo Entertainment System');
+    expect(meta?.year).toBe(1991);
+  });
+
+  it('uses a direct .sqlite asset if the release ever ships one (no zip extraction)', async () => {
+    const fetchMock = vi.fn(
+      routeFetch(
+        new Map([
+          [
+            FAKE_RELEASES_URL,
+            (): Response =>
+              jsonResponse(
+                releasesJson([
+                  { name: 'openvgdb.sqlite', url: FAKE_SQLITE_URL },
+                ]),
+              ),
+          ],
+          [FAKE_SQLITE_URL, (): Response => bytesResponse(fixtureBuffer)],
+        ]),
+      ),
+    );
+    const svc = new OpenVGDBService(dir, {
+      fetch: fetchMock as unknown as typeof fetch,
+      releasesUrl: FAKE_RELEASES_URL,
+    });
+    await svc.ensureDatabase();
+    expect(svc.isReady()).toBe(true);
+    expect(await svc.getMetadataByHash(HASH_SMW)).not.toBeNull();
+  });
+
+  it('prefers the .sqlite asset over .zip when both are present', async () => {
+    const fetchMock = vi.fn(
+      routeFetch(
+        new Map([
+          [
+            FAKE_RELEASES_URL,
+            (): Response =>
+              jsonResponse(
+                releasesJson([
+                  { name: 'openvgdb.zip', url: FAKE_ZIP_URL },
+                  { name: 'openvgdb.sqlite', url: FAKE_SQLITE_URL },
+                ]),
+              ),
+          ],
+          [FAKE_SQLITE_URL, (): Response => bytesResponse(fixtureBuffer)],
+        ]),
+      ),
+    );
+    const svc = new OpenVGDBService(dir, {
+      fetch: fetchMock as unknown as typeof fetch,
+      releasesUrl: FAKE_RELEASES_URL,
+    });
+    await svc.ensureDatabase();
+    expect(svc.isReady()).toBe(true);
+    // Zip URL was never fetched.
+    expect(fetchMock.mock.calls.map((c) => c[0])).not.toContain(FAKE_ZIP_URL);
+  });
+
+  it('emits monotonically growing downloading progress events', async () => {
+    const fetchMock = vi.fn(
+      routeFetch(
+        new Map([
+          [
+            FAKE_RELEASES_URL,
+            (): Response =>
+              jsonResponse(
+                releasesJson([{ name: 'openvgdb.zip', url: FAKE_ZIP_URL }]),
+              ),
+          ],
+          [FAKE_ZIP_URL, (): Response => bytesResponse(fixtureZip)],
+        ]),
+      ),
+    );
+    const svc = new OpenVGDBService(dir, {
+      fetch: fetchMock as unknown as typeof fetch,
+      releasesUrl: FAKE_RELEASES_URL,
     });
     const progress: { received: number; total: number | null }[] = [];
     await svc.ensureDatabase((e) => {
@@ -245,146 +353,388 @@ describe('OpenVGDBService', () => {
         progress[i - 1]?.received ?? 0,
       );
     }
-    // Total reflects the content-length header.
-    expect(progress[0]?.total).toBe(fixtureBuffer.byteLength);
+    expect(progress[0]?.total).toBe(fixtureZip.byteLength);
   });
 
-  it('emits an error event when no candidate URL succeeds', async () => {
-    const fetchMock = vi.fn(() =>
-      Promise.resolve(new Response('', { status: 503 })),
+  // ─── cached / no-network paths ─────────────────────────────────────
+
+  it('skips the network entirely when sqlite + version sidecar already exist', async () => {
+    // Pre-populate both files.
+    await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(fixtureBuffer));
+    await fs.writeFile(
+      join(dir, 'openvgdb.version.json'),
+      JSON.stringify({
+        tag: RELEASE_TAG,
+        downloadedAt: new Date().toISOString(),
+      }),
+    );
+    const fetchMock = vi.fn();
+    const svc = new OpenVGDBService(dir, {
+      fetch: fetchMock as unknown as typeof fetch,
+      releasesUrl: FAKE_RELEASES_URL,
+    });
+    await svc.ensureDatabase();
+    expect(svc.isReady()).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('redownloads when sqlite exists but the version sidecar is missing', async () => {
+    // Only the sqlite — no sidecar. Round 3 users (sqlite without
+    // sidecar) get one redownload; that's an acceptable upgrade tax.
+    await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(fixtureBuffer));
+    const fetchMock = vi.fn(
+      routeFetch(
+        new Map([
+          [
+            FAKE_RELEASES_URL,
+            (): Response =>
+              jsonResponse(
+                releasesJson([{ name: 'openvgdb.zip', url: FAKE_ZIP_URL }]),
+              ),
+          ],
+          [FAKE_ZIP_URL, (): Response => bytesResponse(fixtureZip)],
+        ]),
+      ),
     );
     const svc = new OpenVGDBService(dir, {
       fetch: fetchMock as unknown as typeof fetch,
-      downloadUrls: [{ url: 'https://example/openvgdb.sqlite', requiresUnzip: false }],
+      releasesUrl: FAKE_RELEASES_URL,
+    });
+    await svc.ensureDatabase();
+    expect(svc.isReady()).toBe(true);
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it('redownloads when the sidecar JSON is corrupt', async () => {
+    await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(fixtureBuffer));
+    await fs.writeFile(join(dir, 'openvgdb.version.json'), '{ not json');
+    const fetchMock = vi.fn(
+      routeFetch(
+        new Map([
+          [
+            FAKE_RELEASES_URL,
+            (): Response =>
+              jsonResponse(
+                releasesJson([{ name: 'openvgdb.zip', url: FAKE_ZIP_URL }]),
+              ),
+          ],
+          [FAKE_ZIP_URL, (): Response => bytesResponse(fixtureZip)],
+        ]),
+      ),
+    );
+    const svc = new OpenVGDBService(dir, {
+      fetch: fetchMock as unknown as typeof fetch,
+      releasesUrl: FAKE_RELEASES_URL,
+    });
+    await svc.ensureDatabase();
+    expect(svc.isReady()).toBe(true);
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it('GitHub API request includes a User-Agent header', async () => {
+    const headerCalls: Headers[] = [];
+    const fetchMock = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = typeof input === 'string' ? input : (input as URL).toString();
+      headerCalls.push(new Headers(init?.headers));
+      if (url === FAKE_RELEASES_URL) {
+        return jsonResponse(
+          releasesJson([{ name: 'openvgdb.zip', url: FAKE_ZIP_URL }]),
+        );
+      }
+      if (url === FAKE_ZIP_URL) {
+        return bytesResponse(fixtureZip);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+    const svc = new OpenVGDBService(dir, {
+      fetch: fetchMock,
+      releasesUrl: FAKE_RELEASES_URL,
+    });
+    await svc.ensureDatabase();
+    expect(svc.isReady()).toBe(true);
+    expect(headerCalls[0]?.get('user-agent')).toBeTruthy();
+    expect(headerCalls[0]?.get('accept')).toContain('vnd.github');
+  });
+
+  // ─── error categorisation ──────────────────────────────────────────
+
+  it('emits a network-category error when the releases endpoint can\'t be reached', async () => {
+    const dnsErr = Object.assign(new Error('fetch failed'), {
+      cause: { code: 'ENOTFOUND' },
+    });
+    const fetchMock = vi.fn(() => Promise.reject(dnsErr));
+    const svc = new OpenVGDBService(dir, {
+      fetch: fetchMock as unknown as typeof fetch,
+      releasesUrl: FAKE_RELEASES_URL,
     });
     const events: OpenVGDBProgressEvent[] = [];
     await svc.ensureDatabase((e) => events.push(e));
-    expect(events.some((e) => e.kind === 'error')).toBe(true);
     expect(svc.isReady()).toBe(false);
+    const errEvent = events.find((e) => e.kind === 'error');
+    expect(errEvent?.kind).toBe('error');
+    if (errEvent?.kind === 'error') {
+      expect(errEvent.category).toBe('network');
+      expect(errEvent.message).toMatch(/check your internet connection/i);
+      expect(errEvent.message).toContain('ENOTFOUND');
+    }
   });
 
-  it('does not leave a .tmp file on download failure', async () => {
-    const fetchMock = vi.fn(() => Promise.reject(new Error('connection reset')));
+  it('emits an http-error for 404 from the releases endpoint', async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response('Not Found', { status: 404 })),
+    );
     const svc = new OpenVGDBService(dir, {
       fetch: fetchMock as unknown as typeof fetch,
-      downloadUrls: [{ url: 'https://example/openvgdb.sqlite', requiresUnzip: false }],
+      releasesUrl: FAKE_RELEASES_URL,
     });
-    await svc.ensureDatabase();
+    const events: OpenVGDBProgressEvent[] = [];
+    await svc.ensureDatabase((e) => events.push(e));
+    const errEvent = events.find((e) => e.kind === 'error');
+    expect(errEvent?.kind).toBe('error');
+    if (errEvent?.kind === 'error') {
+      expect(errEvent.category).toBe('http-error');
+      expect(errEvent.message).toMatch(/may have moved/i);
+    }
+  });
+
+  it('emits an http-error for 500 from the releases endpoint', async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response('boom', { status: 500 })),
+    );
+    const svc = new OpenVGDBService(dir, {
+      fetch: fetchMock as unknown as typeof fetch,
+      releasesUrl: FAKE_RELEASES_URL,
+    });
+    const events: OpenVGDBProgressEvent[] = [];
+    await svc.ensureDatabase((e) => events.push(e));
+    const errEvent = events.find((e) => e.kind === 'error');
+    if (errEvent?.kind === 'error') {
+      expect(errEvent.category).toBe('http-error');
+      expect(errEvent.message).toMatch(/500/);
+    }
+  });
+
+  it('emits an asset-missing error when no .zip or .sqlite asset is in the release', async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        jsonResponse(
+          releasesJson([
+            { name: 'README.md', url: 'https://x' },
+            { name: 'changelog.txt', url: 'https://y' },
+          ]),
+        ),
+      ),
+    );
+    const svc = new OpenVGDBService(dir, {
+      fetch: fetchMock as unknown as typeof fetch,
+      releasesUrl: FAKE_RELEASES_URL,
+    });
+    const events: OpenVGDBProgressEvent[] = [];
+    await svc.ensureDatabase((e) => events.push(e));
+    const errEvent = events.find((e) => e.kind === 'error');
+    if (errEvent?.kind === 'error') {
+      expect(errEvent.category).toBe('asset-missing');
+      expect(errEvent.message).toMatch(/please report this/i);
+    }
+    // No partial files left.
+    const entries = await fs.readdir(dir).catch(() => [] as string[]);
+    expect(entries).not.toContain('openvgdb.sqlite');
+    expect(entries).not.toContain('openvgdb.download.tmp');
+  });
+
+  it('emits an extract error when the downloaded zip is corrupt, no partial files left', async () => {
+    const corruptZip = new Uint8Array([1, 2, 3, 4]); // not a real zip
+    const fetchMock = vi.fn(
+      routeFetch(
+        new Map([
+          [
+            FAKE_RELEASES_URL,
+            (): Response =>
+              jsonResponse(
+                releasesJson([{ name: 'openvgdb.zip', url: FAKE_ZIP_URL }]),
+              ),
+          ],
+          [FAKE_ZIP_URL, (): Response => bytesResponse(corruptZip)],
+        ]),
+      ),
+    );
+    const svc = new OpenVGDBService(dir, {
+      fetch: fetchMock as unknown as typeof fetch,
+      releasesUrl: FAKE_RELEASES_URL,
+    });
+    const events: OpenVGDBProgressEvent[] = [];
+    await svc.ensureDatabase((e) => events.push(e));
+    const errEvent = events.find((e) => e.kind === 'error');
+    if (errEvent?.kind === 'error') {
+      expect(errEvent.category).toBe('extract');
+      expect(errEvent.message).toMatch(/corrupt/i);
+    }
     const entries = await fs.readdir(dir);
     expect(entries.filter((e) => e.endsWith('.tmp'))).toEqual([]);
     expect(entries).not.toContain('openvgdb.sqlite');
+    expect(svc.isReady()).toBe(false);
   });
 
-  it('falls through candidate URLs after a failure', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(new Response('', { status: 503 }))
-      .mockResolvedValueOnce(
-        new Response(Buffer.from(fixtureBuffer), {
-          status: 200,
-          headers: { 'content-length': String(fixtureBuffer.byteLength) },
-        }),
-      );
-    const svc = new OpenVGDBService(dir, {
-      fetch: fetchMock as unknown as typeof fetch,
-      downloadUrls: [
-        { url: 'https://primary/openvgdb.sqlite', requiresUnzip: false },
-        { url: 'https://secondary/openvgdb.sqlite', requiresUnzip: false },
-      ],
-    });
-    await svc.ensureDatabase();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(svc.isReady()).toBe(true);
-  });
-
-  it('skips candidate URLs that need unzipping (not yet supported)', async () => {
-    const fetchMock = vi.fn(() =>
-      Promise.resolve(
-        new Response(Buffer.from(fixtureBuffer), {
-          status: 200,
-          headers: { 'content-length': String(fixtureBuffer.byteLength) },
-        }),
+  it('emits an extract error when the zip has no .sqlite entry inside', async () => {
+    const innerZip = new JSZip();
+    innerZip.file('readme.txt', 'definitely not a database');
+    const wrongZipBytes = await innerZip.generateAsync({ type: 'uint8array' });
+    const fetchMock = vi.fn(
+      routeFetch(
+        new Map([
+          [
+            FAKE_RELEASES_URL,
+            (): Response =>
+              jsonResponse(
+                releasesJson([{ name: 'openvgdb.zip', url: FAKE_ZIP_URL }]),
+              ),
+          ],
+          [FAKE_ZIP_URL, (): Response => bytesResponse(wrongZipBytes)],
+        ]),
       ),
     );
     const svc = new OpenVGDBService(dir, {
       fetch: fetchMock as unknown as typeof fetch,
-      downloadUrls: [
-        { url: 'https://github/openvgdb.zip', requiresUnzip: true },
-        { url: 'https://mirror/openvgdb.sqlite', requiresUnzip: false },
-      ],
+      releasesUrl: FAKE_RELEASES_URL,
     });
-    await svc.ensureDatabase();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const firstCallArgs = fetchMock.mock.calls[0] as unknown as [string];
-    expect(firstCallArgs[0]).toBe('https://mirror/openvgdb.sqlite');
+    const events: OpenVGDBProgressEvent[] = [];
+    await svc.ensureDatabase((e) => events.push(e));
+    const errEvent = events.find((e) => e.kind === 'error');
+    expect(errEvent?.kind).toBe('error');
+    if (errEvent?.kind === 'error') {
+      expect(errEvent.category).toBe('extract');
+    }
   });
 
-  it('treats a schema-mismatched file as corrupt and redownloads', async () => {
-    // Pre-populate with a SQLite that has the wrong schema.
-    const sqlBad = await initSqlJs();
-    const badDb = new sqlBad.Database();
+  it('emits a schema error when the extracted sqlite has the wrong tables', async () => {
+    const SQL = await initSqlJs();
+    const badDb = new SQL.Database();
     badDb.run('CREATE TABLE OOPS (x INTEGER)');
     const badBuf = badDb.export();
     badDb.close();
-    await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(badBuf));
+    const wrongZip = new JSZip();
+    wrongZip.file('openvgdb.sqlite', badBuf);
+    const wrongZipBytes = await wrongZip.generateAsync({ type: 'uint8array' });
 
-    const fetchMock = vi.fn(() =>
-      Promise.resolve(
-        new Response(Buffer.from(fixtureBuffer), {
-          status: 200,
-          headers: { 'content-length': String(fixtureBuffer.byteLength) },
-        }),
+    const fetchMock = vi.fn(
+      routeFetch(
+        new Map([
+          [
+            FAKE_RELEASES_URL,
+            (): Response =>
+              jsonResponse(
+                releasesJson([{ name: 'openvgdb.zip', url: FAKE_ZIP_URL }]),
+              ),
+          ],
+          [FAKE_ZIP_URL, (): Response => bytesResponse(wrongZipBytes)],
+        ]),
       ),
     );
     const svc = new OpenVGDBService(dir, {
       fetch: fetchMock as unknown as typeof fetch,
-      downloadUrls: [{ url: 'https://example/openvgdb.sqlite', requiresUnzip: false }],
+      releasesUrl: FAKE_RELEASES_URL,
     });
-    await svc.ensureDatabase();
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(svc.isReady()).toBe(true);
-    expect(await svc.getMetadataByHash(HASH_SMW)).not.toBeNull();
+    const events: OpenVGDBProgressEvent[] = [];
+    await svc.ensureDatabase((e) => events.push(e));
+    const errEvent = events.find((e) => e.kind === 'error');
+    if (errEvent?.kind === 'error') {
+      expect(errEvent.category).toBe('schema');
+    }
+    expect(svc.isReady()).toBe(false);
   });
+
+  // ─── housekeeping ──────────────────────────────────────────────────
 
   it('coalesces concurrent ensureDatabase calls onto one download', async () => {
     let downloads = 0;
-    const fetchMock = vi.fn(() => {
-      downloads += 1;
-      return Promise.resolve(
-        new Response(Buffer.from(fixtureBuffer), {
-          status: 200,
-          headers: { 'content-length': String(fixtureBuffer.byteLength) },
-        }),
-      );
-    });
+    const fetchMock = vi.fn((async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : (input as URL).toString();
+      if (url === FAKE_RELEASES_URL) {
+        return jsonResponse(
+          releasesJson([{ name: 'openvgdb.zip', url: FAKE_ZIP_URL }]),
+        );
+      }
+      if (url === FAKE_ZIP_URL) {
+        downloads += 1;
+        return bytesResponse(fixtureZip);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch);
     const svc = new OpenVGDBService(dir, {
-      fetch: fetchMock as unknown as typeof fetch,
-      downloadUrls: [{ url: 'https://example/openvgdb.sqlite', requiresUnzip: false }],
+      fetch: fetchMock,
+      releasesUrl: FAKE_RELEASES_URL,
     });
-    await Promise.all([svc.ensureDatabase(), svc.ensureDatabase(), svc.ensureDatabase()]);
+    await Promise.all([
+      svc.ensureDatabase(),
+      svc.ensureDatabase(),
+      svc.ensureDatabase(),
+    ]);
     expect(downloads).toBe(1);
   });
 
-  it('clearDatabase deletes the file and resets isReady', async () => {
+  it('clearDatabase deletes the sqlite and the version sidecar', async () => {
     await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(fixtureBuffer));
+    await fs.writeFile(
+      join(dir, 'openvgdb.version.json'),
+      JSON.stringify({ tag: 'x', downloadedAt: 'y' }),
+    );
     const svc = new OpenVGDBService(dir);
     await svc.ensureDatabase();
     expect(svc.isReady()).toBe(true);
     await svc.clearDatabase();
     expect(svc.isReady()).toBe(false);
-    const exists = await fs
-      .stat(join(dir, 'openvgdb.sqlite'))
-      .then(() => true)
-      .catch(() => false);
-    expect(exists).toBe(false);
+    for (const file of ['openvgdb.sqlite', 'openvgdb.version.json']) {
+      const exists = await fs
+        .stat(join(dir, file))
+        .then(() => true)
+        .catch(() => false);
+      expect(exists).toBe(false);
+    }
   });
 
-  it('LRU caches a recent lookup so repeats don\'t re-prepare the SQL', async () => {
+  // ─── lookups (carry-over coverage) ─────────────────────────────────
+
+  it('returns null for an unknown hash', async () => {
     await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(fixtureBuffer));
-    const svc = new OpenVGDBService(dir, { lruCapacity: 2 });
+    await fs.writeFile(
+      join(dir, 'openvgdb.version.json'),
+      JSON.stringify({ tag: RELEASE_TAG, downloadedAt: new Date().toISOString() }),
+    );
+    const svc = new OpenVGDBService(dir);
     await svc.ensureDatabase();
-    const a1 = await svc.getMetadataByHash(HASH_SMW);
-    const a2 = await svc.getMetadataByHash(HASH_SMW);
-    expect(a1).toEqual(a2);
+    expect(await svc.getMetadataByHash(HASH_NONEXISTENT)).toBeNull();
+  });
+
+  it('returns null when the DB has not been ensured', async () => {
+    const svc = new OpenVGDBService(dir);
+    expect(svc.isReady()).toBe(false);
+    expect(await svc.getMetadataByHash(HASH_SMW)).toBeNull();
+  });
+
+  it('matches md5 case-insensitively', async () => {
+    await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(fixtureBuffer));
+    await fs.writeFile(
+      join(dir, 'openvgdb.version.json'),
+      JSON.stringify({ tag: RELEASE_TAG, downloadedAt: new Date().toISOString() }),
+    );
+    const svc = new OpenVGDBService(dir);
+    await svc.ensureDatabase();
+    const upper = await svc.getMetadataByHash(HASH_SMW.toUpperCase());
+    expect(upper?.name).toBe('Super Mario World');
+  });
+
+  it('parses partial date strings into a year', async () => {
+    await fs.writeFile(join(dir, 'openvgdb.sqlite'), Buffer.from(fixtureBuffer));
+    await fs.writeFile(
+      join(dir, 'openvgdb.version.json'),
+      JSON.stringify({ tag: RELEASE_TAG, downloadedAt: new Date().toISOString() }),
+    );
+    const svc = new OpenVGDBService(dir);
+    await svc.ensureDatabase();
+    const sonic = await svc.getMetadataByHash(HASH_SONIC);
+    expect(sonic?.year).toBe(1992);
   });
 });
