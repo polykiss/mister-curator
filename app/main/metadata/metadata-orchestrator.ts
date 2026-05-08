@@ -12,20 +12,23 @@ import type {
 } from '@shared/metadata-types';
 
 /**
- * Maps an OpenVGDB-shaped systemName (or the directory we know the
- * ROM came from on the MiSTer) to a ScreenScraper systemeid. Round 2
- * uses this to thread the SS query's required `systemeid` through.
+ * Maps a MiSTer core id (and the path it came from) to two facts:
+ *   - `ssSystemId`: the ScreenScraper `systemeid` required by jeuInfos.
+ *   - `systemName`: the OpenVGDB-shaped display name (e.g. "Super
+ *     Nintendo Entertainment System") used for `RomMetadata.system`.
  *
- * The orchestrator doesn't own the map — `app/main/index.ts` builds
- * it from a static table and injects it via the constructor. Tests
- * pass a tiny inline mapper.
+ * Round 3 of PR #16 added `systemName` so SS-sourced records carry a
+ * meaningful system label (the SS jeuInfos response doesn't include
+ * one). The orchestrator doesn't own the map — `app/main/index.ts`
+ * builds it from a static table and injects it via the constructor.
+ * Tests pass a tiny inline mapper.
  */
-export type SystemIdResolver = (params: {
+export type SystemResolver = (params: {
   /** Filename basename (e.g. "Sonic.md") — extension may hint at the system. */
   readonly romPath: string;
   /** Core id from the cores list (e.g. "Genesis"). */
   readonly coreId?: string;
-}) => number | null;
+}) => { readonly ssSystemId: number; readonly systemName: string } | null;
 
 export interface ActiveSession {
   /** SSH-shaped subset the HashService consumes. */
@@ -60,7 +63,7 @@ export class MetadataOrchestrator {
     private readonly metadataService: MetadataService,
     private readonly imageCache: ImageCache,
     private readonly openVgdb: OpenVGDBService,
-    private readonly resolveSystemId: SystemIdResolver,
+    private readonly resolveSystem: SystemResolver,
     private readonly getActiveSession: () => ActiveSession | null,
   ) {}
 
@@ -96,12 +99,13 @@ export class MetadataOrchestrator {
     const entry = hashes.get(romPath);
     if (entry === undefined) return null;
 
-    const systemId = this.resolveSystemId({ romPath, coreId });
+    const resolved = this.resolveSystem({ romPath, coreId });
     const ssHint =
-      systemId === null
+      resolved === null
         ? undefined
         : {
-            systemId,
+            systemId: resolved.ssSystemId,
+            systemName: resolved.systemName,
             md5: entry.md5,
             sha1: entry.sha1,
             crc32: undefined,

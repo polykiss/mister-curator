@@ -34,11 +34,14 @@ export interface MetadataServiceOptions {
 /**
  * Optional ScreenScraper query parameters threaded through from the
  * orchestrator. Most are populated when the caller has hash data
- * cached; `systemId` is resolved by an external mapper (OpenVGDB
- * systemName → SS systemeid).
+ * cached; `systemId` is resolved by an external mapper (coreId → SS
+ * systemeid). Round 3 also threads `systemName` so SS-sourced records
+ * can populate `RomMetadata.system` — SS's jeuInfos response doesn't
+ * include a system name, but the resolver knows it from the coreId.
  */
 export interface ScreenScraperHint {
   readonly systemId: number;
+  readonly systemName?: string;
   readonly md5?: string;
   readonly sha1?: string;
   readonly crc32?: string;
@@ -225,7 +228,7 @@ export class MetadataService {
       throw err;
     }
     if (game === null) return null;
-    return this.composeFromScreenScraper(hash, game);
+    return this.composeFromScreenScraper(hash, game, ssHint.systemName ?? '');
   }
 
   /**
@@ -240,15 +243,18 @@ export class MetadataService {
   private composeFromScreenScraper(
     hash: string,
     game: ScreenScraperGame,
+    systemName: string,
   ): RomMetadata {
     return {
       version: ROM_METADATA_SCHEMA_VERSION,
       hash,
       name: game.name,
-      system: '', // SS doesn't return system name in jeuInfos response;
-      // round 2 keeps this empty when SS-sourced. The OpenVGDB system
-      // is what the orchestrator already knew (round-3 mapping); the
-      // renderer reads the system from the cores list, not RomMetadata.
+      // Round 3: SS's jeuInfos response omits a system name, so we
+      // use the OpenVGDB-shaped name the SystemResolver supplied (the
+      // same string `composeFromOpenVgdb` writes for that core). Empty
+      // string when no resolver hint reached us — the renderer treats
+      // it like any other empty field.
+      system: systemName,
       year: parseYearFromDate(game.releaseDate),
       publisher: game.publisher,
       developer: game.developer,

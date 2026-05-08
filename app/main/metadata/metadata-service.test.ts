@@ -426,6 +426,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
 
     const SS_HINT = {
       systemId: 4,
+      systemName: 'Super Nintendo Entertainment System',
       md5: HASH,
       sha1: 'b'.repeat(40),
       crc32: 'deadbeef',
@@ -624,6 +625,35 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       expect(result?.year).toBe(1991);
       expect(result?.releaseDate).toBe('1991-08-13');
     });
+
+    it('SS-sourced metadata populates system from the hint (round 3)', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ result: buildSsHit() });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result?.source).toBe('screenscraper');
+      expect(result?.system).toBe('Super Nintendo Entertainment System');
+    });
+
+    it('SS-sourced metadata falls back to empty system when hint omits systemName', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ result: buildSsHit() });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+      );
+      const hintNoSystemName = { ...SS_HINT, systemName: undefined };
+      const result = await svc.getMetadata(HASH, {}, hintNoSystemName);
+      expect(result?.source).toBe('screenscraper');
+      expect(result?.system).toBe('');
+    });
   });
 
   describe('round 3 — cache priority on source upgrade', () => {
@@ -674,6 +704,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
 
     const SS_HINT = {
       systemId: 4,
+      systemName: 'Super Nintendo Entertainment System',
       md5: HASH,
       sha1: 'b'.repeat(40),
       crc32: undefined,
