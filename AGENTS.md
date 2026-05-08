@@ -123,6 +123,24 @@ Update it before changing consumers.
   mtime only changes on top-level renames), so the cores-list
   romCount can read stale until Refresh. Drilling into the affected
   core picks up the change correctly via the listRoms cache.
+- App-local metadata directory: `<userData>/metadata/` (PR #15). Holds
+  the ROM-hash + metadata + image caches that drive the box-art /
+  scoring UI in PR #16/#17. No on-device writes, no agent code; safe
+  to delete at any time. Layout:
+  - `<host>/hashes.json` — md5 of every hashed ROM file, mtime-keyed.
+    File-only (kind: 'file') ROMs in v0; folder-atomic / folder-
+    container hashing is deferred.
+  - `by-hash/<XX>/<hash>.json` — RomMetadata records (matched OR a
+    `source: 'none'` sentinel cached for 30 days). Sharded by hash
+    prefix to keep one directory from hitting millions of files.
+  - `images/<XX>/<sha1>.bin` — full-size box art / screenshots.
+
+  PR #15 ships the foundation but no UI consumes it. ScreenScraper is
+  anonymous-tier (no shipped key); TheGamesDB is opt-in via the
+  `METADATA_THEGAMESDB_KEY` env var. Either source can be hard-
+  disabled with `METADATA_DISABLE_SCREENSCRAPER=1` /
+  `METADATA_DISABLE_THEGAMESDB=1`. Verification tool:
+  `npm run test:metadata`.
 - On-MiSTer agent directory: `/tmp/mistercurator/`
 - On-MiSTer state directory: `/media/fat/.mistercurator/` — holds the
   small JSON state files the app persists across sessions:
@@ -175,8 +193,7 @@ flag it in the PR description. Don't quietly work around it.
 
 ## Out of scope for MVP (do not build until asked)
 
-- Audit engine, DAT file matching, ROM hashing
-- Box art, metadata scraping
+- Audit engine, DAT file matching
 - Favorites, playlists, collections
 - Save state or NVRAM backup
 - Cheat file management
@@ -184,5 +201,11 @@ flag it in the PR description. Don't quietly work around it.
 - Multi-MiSTer sync
 - Auto-updates
 
-These are real features on the roadmap, but MVP is connect + browse +
-hide/show + persist. Stay focused.
+ROM hashing and metadata scraping (box art, scoring) are now in
+scope as of PR #15 — the foundation lives in `app/main/metadata/`,
+no UI yet. Treat the four services there as stable; new metadata
+work composes against `MetadataOrchestrator`. The full UI
+(view-mode toggle, grid view, detail modal) lands in PR #16/#17.
+
+Everything else listed above remains roadmap-but-not-MVP. Stay
+focused.
