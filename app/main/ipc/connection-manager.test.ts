@@ -20,7 +20,7 @@ import { ConnectionManager } from '@app/main/ipc/connection-manager';
 import type { ProfileStore } from '@app/main/storage/profile-store';
 import type { ConnectionEvent } from '@shared/connection';
 import type { MisterSecret } from '@shared/mister-client';
-import type { MisterProfile } from '@shared/types';
+import type { CoreEntry, MisterProfile, Rom } from '@shared/types';
 
 const fixturesDir = path.resolve(import.meta.dirname, '../../../fixtures/sample-mister');
 
@@ -658,5 +658,250 @@ describe('ConnectionManager — mid-session disconnect + auto-retry', () => {
     await vi.advanceTimersByTimeAsync(0);
     await connectPromise;
     stub.mockRestore();
+  });
+});
+
+describe('ConnectionManager — single-flight gate on listAll / listRoms (PR #14)', () => {
+  let workDir: string;
+  let cacheRoot: string;
+  let perTestCacheDir: string;
+  let client: FakeMisterClient;
+  let cache: CacheManager;
+  let manager: ConnectionManager;
+
+  beforeAll(async () => {
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-inflight-'));
+    cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-inflight-cache-'));
+  });
+
+  afterAll(async () => {
+    await fs.rm(workDir, { recursive: true, force: true });
+    await fs.rm(cacheRoot, { recursive: true, force: true });
+  });
+
+  beforeEach(async () => {
+    client = new FakeMisterClient({
+      rootPath: workDir,
+      pristineRootPath: fixturesDir,
+      latencyMs: 0,
+    });
+    await client.reset();
+    perTestCacheDir = await fs.mkdtemp(path.join(cacheRoot, 'run-'));
+    cache = new CacheManager(perTestCacheDir);
+    manager = new ConnectionManager(client, makeStubStore(), cache);
+    await manager.connect(profile.id);
+  });
+
+  /**
+   * Wraps `client.listAllCoresWithFiles` with a held promise — the
+   * spy resolves when we explicitly trigger it. The `observed`
+   * promise resolves when the manager's fetch path has actually
+   * called the spy (after invalidate I/O + microtask flushes), so
+   * tests can deterministically wait for the gate to register
+   * before asserting on call counts.
+   */
+  function holdListAllCoresSpy() {
+    let resolveHeld: ((cores: CoreEntry[]) => void) | null = null;
+    let rejectHeld: ((err: Error) => void) | null = null;
+    let signalObserved: (() => void) | null = null;
+    const observed = new Promise<void>((resolve) => {
+      signalObserved = resolve;
+    });
+    const spy = vi.spyOn(client, 'listAllCoresWithFiles').mockImplementation(
+      // No `async` wrapper — return the held Promise directly so a
+      // rejection on it propagates to the awaiter without an extra
+      // microtask layer (the wrapped form had a reproducible hang
+      // when combined with `await expect.rejects`).
+      () =>
+        new Promise<CoreEntry[]>((resolve, reject) => {
+          resolveHeld = (cores: CoreEntry[]) => resolve(cores);
+          rejectHeld = (err: Error) => reject(err);
+          signalObserved?.();
+        }),
+    );
+    const release = (cores: CoreEntry[]): void => {
+      if (resolveHeld === null) throw new Error('release before observation');
+      resolveHeld(cores);
+    };
+    const fail = (err: Error): void => {
+      if (rejectHeld === null) throw new Error('fail before observation');
+      rejectHeld(err);
+    };
+    return { spy, observed, release, fail };
+  }
+
+  it('two concurrent listAllCoresWithFiles callers share the same SSH walk', async () => {
+    // Force a true network fetch by clearing the in-memory cache. The
+    // gate only applies to the SSH-fetch path; in-memory hits
+    // short-circuit before it.
+    await manager.disconnect();
+    await manager.connect(profile.id);
+    const { spy, observed, release } = holdListAllCoresSpy();
+
+    // Fire two listAllCoresWithFiles calls in the same microtask.
+    // forceRefresh: true skips the in-memory cache too, forcing both
+    // to hit the network path and exercise the gate.
+    const a = manager.listAllCoresWithFiles({ forceRefresh: true });
+    const b = manager.listAllCoresWithFiles({ forceRefresh: true });
+
+    // observed fires when the FIRST caller (a) reaches the spy; b
+    // is still paused on its own invalidate I/O at that point. Wait
+    // an extra two setImmediate flushes for b's flow to reach the
+    // gate (and find a's in-flight promise) before we assert.
+    await observed;
+    await new Promise<void>((r) => setImmediate(r));
+    await new Promise<void>((r) => setImmediate(r));
+
+    // The underlying client method was called exactly once — the
+    // second caller awaits the first's in-flight promise.
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    release([{ id: 'NES', name: 'NES' }] as unknown as CoreEntry[]);
+    const [aResult, bResult] = await Promise.all([a, b]);
+    expect(aResult).toBe(bResult);
+    spy.mockRestore();
+  });
+
+  it('rejection propagates to all gated callers (single SSH walk)', async () => {
+    await manager.disconnect();
+    await manager.connect(profile.id);
+    const { spy, observed, fail } = holdListAllCoresSpy();
+
+    // Capture rejections via .then so the unhandled-rejection state
+    // is irrelevant to the test outcome.
+    interface Settled {
+      readonly ok: boolean;
+      readonly err?: Error;
+    }
+    const settle = (p: Promise<unknown>): Promise<Settled> =>
+      p.then(
+        (): Settled => ({ ok: true }),
+        (err: unknown): Settled => ({
+          ok: false,
+          err: err instanceof Error ? err : new Error(String(err)),
+        }),
+      );
+    const aResult = settle(
+      manager.listAllCoresWithFiles({ forceRefresh: true }),
+    );
+    const bResult = settle(
+      manager.listAllCoresWithFiles({ forceRefresh: true }),
+    );
+
+    // observed fires when the FIRST caller (a) reaches the spy. The
+    // SECOND caller (b) is still paused on its own
+    // `invalidateCoresCache` await at that point — fs.unlink hasn't
+    // settled yet. Without an additional flush, calling fail() would
+    // reject the in-flight before b reaches `fetchAndCacheCoresGated`,
+    // and b would then create a fresh in-flight that nothing
+    // resolves. Two setImmediate flushes give libuv time to drain
+    // both unlink callbacks AND let b's flow reach the gate.
+    await observed;
+    await new Promise<void>((r) => setImmediate(r));
+    await new Promise<void>((r) => setImmediate(r));
+
+    fail(new Error('SSH walk crashed'));
+    const [ar, br] = await Promise.all([aResult, bResult]);
+
+    expect(ar.ok).toBe(false);
+    expect(ar.err?.message).toMatch(/SSH walk crashed/);
+    expect(br.ok).toBe(false);
+    expect(br.err?.message).toMatch(/SSH walk crashed/);
+    // The SSH walk ran exactly once — b coalesced onto a's in-flight.
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
+
+  it('gate clears after rejection — next call starts a fresh SSH walk', async () => {
+    await manager.disconnect();
+    await manager.connect(profile.id);
+
+    // One-shot rejecting mock: the first call rejects, the second
+    // call falls through to the real FakeMisterClient impl. Asserts
+    // that the gate cleared after the failure (otherwise the second
+    // call would still be holding the rejected promise and it'd
+    // either hang or rethrow the old error).
+    const spy = vi.spyOn(client, 'listAllCoresWithFiles');
+    spy.mockImplementationOnce(async () => {
+      throw new Error('SSH walk crashed');
+    });
+
+    await expect(
+      manager.listAllCoresWithFiles({ forceRefresh: true }),
+    ).rejects.toThrow(/SSH walk crashed/);
+
+    // Second call runs the real impl (mockImplementationOnce was
+    // one-shot). If the gate hadn't cleared, this would hang on the
+    // already-rejected in-flight promise.
+    const fresh = await manager.listAllCoresWithFiles({ forceRefresh: true });
+    expect(Array.isArray(fresh)).toBe(true);
+    expect(spy).toHaveBeenCalledTimes(2);
+    spy.mockRestore();
+  });
+
+  it('listRoms gate is keyed by (coreId, subPath); different keys run in parallel', async () => {
+    await manager.listAllCoresWithFiles();
+    // Hold listRoms by coreId so we can interleave a NES top-level
+    // call with a NES sub-path call AND a SNES top-level call.
+    type RomsResolver = (roms: Rom[]) => void;
+    const resolvers = new Map<string, RomsResolver>();
+    const spy = vi
+      .spyOn(client, 'listRoms')
+      .mockImplementation((coreId: string, subPath?: string) => {
+        const key = `${coreId}::${subPath ?? ''}`;
+        return new Promise<Rom[]>((resolve) => {
+          resolvers.set(key, resolve);
+        });
+      });
+
+    // Force misses on the disk cache so the gate is exercised.
+    await manager.clearCacheForCurrentHost();
+    const a1 = manager.listRoms('NES', '', { forceRefresh: true });
+    const a2 = manager.listRoms('NES', '', { forceRefresh: true });
+    const b = manager.listRoms('NES', 'sub', { forceRefresh: true });
+    const c = manager.listRoms('SNES', '', { forceRefresh: true });
+    // Same race as the cores tests: each manager call has its own
+    // disk-cache lookup + witness stat to flush before reaching the
+    // gate. Two setImmediate flushes give libuv time to drain.
+    await new Promise<void>((r) => setImmediate(r));
+    await new Promise<void>((r) => setImmediate(r));
+
+    // Three distinct keys → three client calls. The duplicate
+    // (a2 === a1's key) coalesced.
+    expect(spy).toHaveBeenCalledTimes(3);
+
+    resolvers.get('NES::')?.([]);
+    resolvers.get('NES::sub')?.([]);
+    resolvers.get('SNES::')?.([]);
+    await Promise.all([a1, a2, b, c]);
+    spy.mockRestore();
+  });
+
+  it('rapid burst of cache-invalidating ops triggers at most one network walk', async () => {
+    // Repro the live bug the user reported: rapid mark-as-system /
+    // unmark cycles invalidate caches and trigger refetches; without
+    // the gate, two listAllCoresWithFiles SSH walks ran in parallel
+    // and one got killed mid-stream. With the gate, the burst
+    // coalesces.
+    await manager.listAllCoresWithFiles();
+    await manager.disconnect();
+    await manager.connect(profile.id);
+
+    const { spy, observed, release } = holdListAllCoresSpy();
+
+    // Five concurrent forceRefresh callers — the worst-case shape.
+    const inflight = Array.from({ length: 5 }, () =>
+      manager.listAllCoresWithFiles({ forceRefresh: true }),
+    );
+    // Same race as above: observed fires when the first caller
+    // reaches the spy; let the other four catch up before asserting.
+    await observed;
+    await new Promise<void>((r) => setImmediate(r));
+    await new Promise<void>((r) => setImmediate(r));
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    release([] as CoreEntry[]);
+    await Promise.all(inflight);
+    spy.mockRestore();
   });
 });

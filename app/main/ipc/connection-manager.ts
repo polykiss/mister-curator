@@ -146,6 +146,29 @@ export class ConnectionManager {
     private readonly cache: CacheManager,
   ) {}
 
+  /**
+   * In-flight `listAllCoresWithFiles` SSH walk, if one is currently
+   * underway. PR #14: rapid classification / system-mark toggles each
+   * invalidate caches and trigger a refetch from the renderer;
+   * without this gate, those refetches stack on the same SSH session
+   * and the second one's SSH process can be killed mid-stream ("exit
+   * code null" + a subsequent primeConnect timeout). The single-flight
+   * pattern coalesces concurrent callers onto one promise; subsequent
+   * callers await the first result. Cleared on settle (success OR
+   * failure) so a fresh fetch can run after a failure.
+   */
+  private coresInFlightPromise: Promise<CoreEntry[]> | null = null;
+  /**
+   * In-flight `listRoms` SSH walks, keyed by `coreId::subPath`. Same
+   * pattern as `coresInFlightPromise` but per-key — drilling into two
+   * different sub-paths in parallel is fine, drilling into the same
+   * sub-path twice in parallel coalesces. Cleared per key on settle.
+   */
+  private readonly romsInFlightPromises = new Map<
+    string,
+    Promise<Rom[]>
+  >();
+
   getStatus(): ConnectionStatus {
     return this.status;
   }
@@ -317,6 +340,12 @@ export class ConnectionManager {
       this.ledgerCache = EMPTY_LEDGER;
       this.systemFilesMarksCache = EMPTY_SYSTEM_FILES_MARKS;
       this.folderClassificationsCache = EMPTY_FOLDER_CLASSIFICATIONS;
+      // PR #14: drop any in-flight gate references so a reconnect
+      // doesn't accidentally serve stale promises (the underlying
+      // fetches will reject when the SSH client is torn down; both
+      // cleanup paths converge on the same end state).
+      this.coresInFlightPromise = null;
+      this.romsInFlightPromises.clear();
       this.setStatus('disconnected');
     }
   }
@@ -342,12 +371,39 @@ export class ConnectionManager {
           /* swallow — the disk cache being out of sync isn't fatal */
         });
       }
-      return this.fetchAndCacheCores();
+      return this.fetchAndCacheCoresGated();
     }
     if (this.coresCache.length > 0) {
+      // In-memory cache hit — short-circuit before any in-flight
+      // gating. The gate is for the SSH-walk path only; serving
+      // existing data is always free.
       return this.coresCache;
     }
-    return this.fetchAndCacheCores();
+    return this.fetchAndCacheCoresGated();
+  }
+
+  /**
+   * Single-flight wrapper around `fetchAndCacheCores`. PR #14:
+   * concurrent callers (rapid classification toggles, system-mark
+   * mutations, etc.) coalesce onto the same in-flight promise so the
+   * SSH session never runs two cores walks in parallel. The promise
+   * is cleared on settle — success OR failure — so a follow-up call
+   * starts fresh. The disk cache hit / in-memory cache hit paths
+   * short-circuit before this gate; only true network fetches hit it.
+   */
+  private fetchAndCacheCoresGated(): Promise<CoreEntry[]> {
+    const inflight = this.coresInFlightPromise;
+    if (inflight !== null) return inflight;
+    const promise = this.fetchAndCacheCores().finally(() => {
+      // Defensive equality check — if a new promise has been registered
+      // (impossible given finally fires before any observer's then,
+      // but cheap insurance), don't clobber it.
+      if (this.coresInFlightPromise === promise) {
+        this.coresInFlightPromise = null;
+      }
+    });
+    this.coresInFlightPromise = promise;
+    return promise;
   }
 
   /**
@@ -508,7 +564,37 @@ export class ConnectionManager {
       }
     }
 
-    return this.fetchAndCacheRoms(coreId, dirBase, subPath, witnessPath);
+    return this.fetchAndCacheRomsGated(coreId, dirBase, subPath, witnessPath);
+  }
+
+  /**
+   * Single-flight wrapper around `fetchAndCacheRoms`, keyed by
+   * `coreId::subPath`. PR #14: same rationale as
+   * `fetchAndCacheCoresGated` — rapid mutations against a single
+   * (core, subPath) target coalesce onto one in-flight promise.
+   * Different keys run in parallel as before.
+   */
+  private fetchAndCacheRomsGated(
+    coreId: string,
+    dirBase: string,
+    subPath: string,
+    witnessPath: string,
+  ): Promise<Rom[]> {
+    const key = `${coreId}::${subPath}`;
+    const inflight = this.romsInFlightPromises.get(key);
+    if (inflight !== undefined) return inflight;
+    const promise = this.fetchAndCacheRoms(
+      coreId,
+      dirBase,
+      subPath,
+      witnessPath,
+    ).finally(() => {
+      if (this.romsInFlightPromises.get(key) === promise) {
+        this.romsInFlightPromises.delete(key);
+      }
+    });
+    this.romsInFlightPromises.set(key, promise);
+    return promise;
   }
 
   /**
