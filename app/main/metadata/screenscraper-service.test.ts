@@ -47,11 +47,10 @@ const SAMPLE_JEU = {
   response: {
     jeu: {
       id: 1234,
-      systeme: {
-        id: 4,
-        nom: 'Super Nintendo Entertainment System',
-        parentid: 0,
-      },
+      // SS's JSON output delivers system as `{ id, text }` (verified
+      // empirically against the live API for round 5; the docs that
+      // describe `{ id, nom, parentid }` apply to the XML output).
+      systeme: { id: '4', text: 'Super Nintendo Entertainment System' },
       noms: [
         { region: 'eu', text: 'Super Mario World (EU)' },
         { region: 'us', text: 'Super Mario World' },
@@ -304,7 +303,25 @@ describe('ScreenScraperService — response mapping', () => {
     expect(parseScreenScraperResponse(null)).toBeNull();
   });
 
-  it('reads system from response.jeu.systeme.nom (round 4)', () => {
+  it('reads system from response.jeu.systeme.text (round 5 — JSON output shape)', () => {
+    // The shape SS actually returns from `output=json`: a flat
+    // `{ id, text }` (verified live), not the docs' XML-shaped
+    // `{ id, nom, parentid }`.
+    const game = parseScreenScraperResponse({
+      response: {
+        jeu: {
+          id: 1,
+          systeme: { id: '1', text: 'Megadrive' },
+          noms: [{ region: 'us', text: 'Sonic 2' }],
+        },
+      },
+    });
+    expect(game?.system).toBe('Megadrive');
+  });
+
+  it('falls back to systeme.nom for forward-compat with the documented XML shape', () => {
+    // Defensive — if SS ever realigns the JSON to match the docs,
+    // we keep working without code change.
     const game = parseScreenScraperResponse({
       response: {
         jeu: {
@@ -317,21 +334,21 @@ describe('ScreenScraperService — response mapping', () => {
     expect(game?.system).toBe('Sega Mega Drive');
   });
 
-  it('returns system=null when systeme.nom is missing or empty', () => {
+  it('returns system=null when systeme is missing or has neither key', () => {
     const noSysteme = parseScreenScraperResponse({
       response: { jeu: { id: 1, noms: [{ region: 'us', text: 'X' }] } },
     });
     expect(noSysteme?.system).toBeNull();
-    const emptyNom = parseScreenScraperResponse({
+    const empty = parseScreenScraperResponse({
       response: {
         jeu: {
           id: 1,
-          systeme: { id: 1, nom: '', parentid: 0 },
+          systeme: { id: '1', text: '' },
           noms: [{ region: 'us', text: 'X' }],
         },
       },
     });
-    expect(emptyNom?.system).toBeNull();
+    expect(empty?.system).toBeNull();
   });
 
   it('returns null when jeu has no usable name in any region', () => {

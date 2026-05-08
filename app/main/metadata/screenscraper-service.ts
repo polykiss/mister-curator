@@ -693,14 +693,27 @@ function readNestedText(value: unknown): string | null {
 }
 
 /**
- * Read `response.jeu.systeme.nom` — SS's canonical system label. The
- * field is a plain string (not a regional array like `noms`); shape
- * is `{ id, nom, parentid }`. Null when missing or non-string.
+ * Read SS's canonical system label from `response.jeu.systeme`.
+ *
+ * The SS docs describe the field as `{ id, nom, parentid }`, but the
+ * JSON response (output=json) actually delivers `{ id, text }` — the
+ * docs were written against the XML output where `text` is the
+ * element body. Verified empirically against the live API for round
+ * 5; round 4 shipped reading `.nom` (per the docs) and got null for
+ * every record.
+ *
+ * Try `.text` first (production reality), fall back to `.nom`
+ * (docs-as-written, in case SS ever aligns the JSON to the docs),
+ * null otherwise.
  */
 function readSystemName(value: unknown): string | null {
   if (value === null || typeof value !== 'object') return null;
-  const nom = (value as Record<string, unknown>).nom;
-  return typeof nom === 'string' && nom.length > 0 ? nom : null;
+  const obj = value as Record<string, unknown>;
+  const text = obj.text;
+  if (typeof text === 'string' && text.length > 0) return text;
+  const nom = obj.nom;
+  if (typeof nom === 'string' && nom.length > 0) return nom;
+  return null;
 }
 
 function pickAllGenres(value: unknown): readonly string[] {
