@@ -17,7 +17,7 @@ const HASH = 'a'.repeat(32);
 
 function buildMeta(hash: string, name: string): RomMetadata {
   return {
-    version: 2,
+    version: 3,
     hash,
     name,
     system: 'Super Nintendo Entertainment System',

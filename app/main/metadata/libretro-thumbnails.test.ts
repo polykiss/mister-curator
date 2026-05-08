@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { LibretroThumbnailsFetcher } from '@app/main/metadata/libretro-thumbnails';
+import {
+  LibretroThumbnailsFetcher,
+  sanitizeLibretroFilename,
+} from '@app/main/metadata/libretro-thumbnails';
 
 describe('LibretroThumbnailsFetcher', () => {
   const fetcher = new LibretroThumbnailsFetcher();
@@ -10,8 +13,11 @@ describe('LibretroThumbnailsFetcher', () => {
       'Super Nintendo Entertainment System',
       'Super Mario World',
     );
+    // Round 9: the CDN serves the spaced folder form (HTTP-verified).
+    // encodeURIComponent emits `Nintendo%20-%20Super%20…` for
+    // "Nintendo - Super Nintendo Entertainment System".
     expect(url).toBe(
-      'https://thumbnails.libretro.com/Nintendo_-_Super_Nintendo_Entertainment_System/Named_Boxarts/Super%20Mario%20World.png',
+      'https://thumbnails.libretro.com/Nintendo%20-%20Super%20Nintendo%20Entertainment%20System/Named_Boxarts/Super%20Mario%20World.png',
     );
   });
 
@@ -48,9 +54,12 @@ describe('LibretroThumbnailsFetcher', () => {
     expect(url).toContain('A_B_C_D_E_F_G_H_I_J_K_L.png');
   });
 
-  it('uses underscore-separated system directories', () => {
+  it('uses %20-encoded spaced system directories (round 9)', () => {
     const url = fetcher.getBoxArtUrl('Sega Genesis', 'Sonic');
-    expect(url).toContain('/Sega_-_Mega_Drive_-_Genesis/');
+    expect(url).toContain('/Sega%20-%20Mega%20Drive%20-%20Genesis/');
+    // The underscored form is the GitHub repo name, NOT the CDN path.
+    // Pin that we don't accidentally regress to it.
+    expect(url).not.toContain('/Sega_-_Mega_Drive_-_Genesis/');
   });
 
   it('returns null for an unknown system', () => {
@@ -64,7 +73,9 @@ describe('LibretroThumbnailsFetcher', () => {
       'SUPER NINTENDO ENTERTAINMENT SYSTEM',
       'Super Mario World',
     );
-    expect(upper).toContain('Nintendo_-_Super_Nintendo_Entertainment_System');
+    expect(upper).toContain(
+      'Nintendo%20-%20Super%20Nintendo%20Entertainment%20System',
+    );
   });
 
   it('treats Sega Genesis and Sega Mega Drive as the same dir', () => {
@@ -88,27 +99,31 @@ describe('LibretroThumbnailsFetcher', () => {
     // OpenVGDB returns manufacturer-prefixed strings ("Nintendo Game
     // Boy Advance", "Sega Genesis/Mega Drive") that the round-3 map
     // didn't cover. These cases pin the mappings the round-7 fix
-    // added so future map shrinkage breaks loudly.
+    // added so future map shrinkage breaks loudly. URL fragments
+    // updated to the round-9 spaced form.
     const cases: readonly { readonly system: string; readonly dir: string }[] = [
       {
         system: 'Nintendo Game Boy Advance',
-        dir: 'Nintendo_-_Game_Boy_Advance',
+        dir: 'Nintendo%20-%20Game%20Boy%20Advance',
       },
-      { system: 'Nintendo Game Boy', dir: 'Nintendo_-_Game_Boy' },
-      { system: 'Nintendo Game Boy Color', dir: 'Nintendo_-_Game_Boy_Color' },
+      { system: 'Nintendo Game Boy', dir: 'Nintendo%20-%20Game%20Boy' },
+      {
+        system: 'Nintendo Game Boy Color',
+        dir: 'Nintendo%20-%20Game%20Boy%20Color',
+      },
       {
         system: 'Sega Genesis/Mega Drive',
-        dir: 'Sega_-_Mega_Drive_-_Genesis',
+        dir: 'Sega%20-%20Mega%20Drive%20-%20Genesis',
       },
-      { system: 'SNK Neo Geo Pocket', dir: 'SNK_-_Neo_Geo_Pocket' },
+      { system: 'SNK Neo Geo Pocket', dir: 'SNK%20-%20Neo%20Geo%20Pocket' },
       {
         system: 'SNK Neo Geo Pocket Color',
-        dir: 'SNK_-_Neo_Geo_Pocket_Color',
+        dir: 'SNK%20-%20Neo%20Geo%20Pocket%20Color',
       },
-      { system: 'Sony PlayStation', dir: 'Sony_-_PlayStation' },
-      { system: 'Coleco ColecoVision', dir: 'Coleco_-_ColecoVision' },
-      { system: 'Mattel Intellivision', dir: 'Mattel_-_Intellivision' },
-      { system: 'Bandai WonderSwan', dir: 'Bandai_-_WonderSwan' },
+      { system: 'Sony PlayStation', dir: 'Sony%20-%20PlayStation' },
+      { system: 'Coleco ColecoVision', dir: 'Coleco%20-%20ColecoVision' },
+      { system: 'Mattel Intellivision', dir: 'Mattel%20-%20Intellivision' },
+      { system: 'Bandai WonderSwan', dir: 'Bandai%20-%20WonderSwan' },
     ];
     for (const c of cases) {
       it(`maps "${c.system}" → ${c.dir}`, () => {
@@ -121,13 +136,13 @@ describe('LibretroThumbnailsFetcher', () => {
     it('still resolves bare-form synonyms for back-compat', () => {
       // Round 3 entries (no manufacturer prefix) keep working.
       expect(fetcher.getBoxArtUrl('game boy advance', 'X')).toContain(
-        'Nintendo_-_Game_Boy_Advance',
+        'Nintendo%20-%20Game%20Boy%20Advance',
       );
       expect(fetcher.getBoxArtUrl('neo geo pocket', 'X')).toContain(
-        'SNK_-_Neo_Geo_Pocket',
+        'SNK%20-%20Neo%20Geo%20Pocket',
       );
       expect(fetcher.getBoxArtUrl('playstation', 'X')).toContain(
-        'Sony_-_PlayStation',
+        'Sony%20-%20PlayStation',
       );
     });
 
@@ -139,6 +154,85 @@ describe('LibretroThumbnailsFetcher', () => {
       const c = fetcher.getBoxArtUrl('Sega Genesis/Mega Drive', 'Sonic');
       const d = fetcher.getBoxArtUrl('Sega Genesis', 'Sonic');
       expect(c).toBe(d);
+    });
+  });
+
+  describe('round 9 — CDN folder format + sanitizer', () => {
+    it('emits the exact full URL the CDN serves for a Mega Drive ROM', () => {
+      // HTTP-verified: this exact path returns a real listing.
+      const url = fetcher.getBoxArtUrl(
+        'Sega Genesis/Mega Drive',
+        'Sonic The Hedgehog 2 (World)',
+      );
+      expect(url).toBe(
+        'https://thumbnails.libretro.com/Sega%20-%20Mega%20Drive%20-%20Genesis/Named_Boxarts/Sonic%20The%20Hedgehog%202%20(World).png',
+      );
+    });
+
+    it('never emits underscores between system-segment words', () => {
+      // Negative regression: round 7's mistake was rewriting the
+      // canonical " - " to "_-_" before encoding. Pin that we don't.
+      const sample = [
+        ['Nintendo Game Boy Advance', 'Tetris (USA)'],
+        ['Sega Genesis/Mega Drive', 'Sonic'],
+        ['Atari 7800', 'Asteroids (USA)'],
+        ['SNK Neo Geo Pocket', 'X'],
+      ] as const;
+      for (const [system, rom] of sample) {
+        const url = fetcher.getBoxArtUrl(system, rom)!;
+        const after = url.slice('https://thumbnails.libretro.com/'.length);
+        const sysSegment = after.split('/')[0] ?? '';
+        expect(sysSegment).not.toContain('_');
+      }
+    });
+
+    describe('sanitizeLibretroFilename', () => {
+      it('replaces & with _ (Sonic & Knuckles → Sonic _ Knuckles)', () => {
+        expect(sanitizeLibretroFilename('Sonic & Knuckles')).toBe(
+          'Sonic _ Knuckles',
+        );
+      });
+
+      it('replaces : with _', () => {
+        expect(sanitizeLibretroFilename('Star Wars: Empire Strikes Back')).toBe(
+          'Star Wars_ Empire Strikes Back',
+        );
+      });
+
+      it('replaces * with _', () => {
+        expect(sanitizeLibretroFilename("Q*bert's Qubes")).toBe(
+          "Q_bert's Qubes",
+        );
+      });
+
+      it('replaces every char in the documented set in one pass', () => {
+        // & * / : ` < > ? \ | "
+        expect(
+          sanitizeLibretroFilename('A&B*C/D:E`F<G>H?I\\J|K"L'),
+        ).toBe('A_B_C_D_E_F_G_H_I_J_K_L');
+      });
+
+      it('leaves alphanumerics, parens, apostrophes, and spaces alone', () => {
+        const input = "Tony Hawk's Pro Skater 2 (USA)";
+        expect(sanitizeLibretroFilename(input)).toBe(input);
+      });
+
+      it('does not trim — the buildUrl caller does that explicitly', () => {
+        // Pure char substitution; whitespace preservation lets the
+        // buildUrl path decide whether a whitespace-only string is a
+        // valid filename (it isn't — empty after trim → null URL).
+        expect(sanitizeLibretroFilename('  Sonic  ')).toBe('  Sonic  ');
+      });
+    });
+
+    it('actually applies the sanitizer to filenames containing &', () => {
+      const url = fetcher.getBoxArtUrl(
+        'Sega Genesis/Mega Drive',
+        'Sonic & Knuckles (World)',
+      );
+      // & → _, then encodeURIComponent on the rest.
+      expect(url).toContain('Sonic%20_%20Knuckles%20(World).png');
+      expect(url).not.toContain('Sonic%20%26%20Knuckles');
     });
   });
 

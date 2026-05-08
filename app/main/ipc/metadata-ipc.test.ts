@@ -37,7 +37,7 @@ vi.mock('electron', () => ({
 const { registerIpcHandlers } = await import('@app/main/ipc/register');
 
 const SAMPLE_META: RomMetadata = {
-  version: 2,
+  version: 3,
   hash: 'a'.repeat(32),
   name: 'Super Mario World',
   system: 'Super Nintendo Entertainment System',

@@ -7,11 +7,18 @@
  * Pattern:
  *   https://thumbnails.libretro.com/<system_dir>/Named_<Type>/<filename>.png
  * where:
- *   <system_dir> = the libretro directory name with all spaces
- *                  replaced by `_` (so " - " becomes "_-_").
+ *   <system_dir> = the libretro directory name in its human-readable
+ *                  form (spaces preserved), URL-encoded once for the
+ *                  path. e.g. "Sega - Mega Drive - Genesis" emits
+ *                  "Sega%20-%20Mega%20Drive%20-%20Genesis".
  *   <Type>       = "Boxarts" | "Titles" | "Snaps"
- *   <filename>   = ROM name with `& * / : \` < > ? \ | "` replaced by
- *                  `_`, then URL-encoded for the path component.
+ *   <filename>   = ROM name with libretro's reserved chars stripped
+ *                  to `_`, then URL-encoded for the path component.
+ *
+ * NB: GitHub repo names for these archives use underscores
+ * (`Sega_-_Mega_Drive_-_Genesis`), but the CDN serves under the
+ * spaced form. Round 7 confused the two; round 9 corrects it. The
+ * map values below stay spaced; encodeURIComponent emits %20s.
  *
  * Some MiSTer cores have no libretro-thumbnails counterpart (DOS,
  * X68000, Apogee, etc). For those, every method returns null. The
@@ -162,9 +169,13 @@ export class LibretroThumbnailsFetcher {
   ): string | null {
     const dir = getLibretroDir(systemName);
     if (dir === null) return null;
-    const cleanRom = sanitiseRomName(romName);
+    const cleanRom = sanitizeLibretroFilename(romName).trim();
     if (cleanRom.length === 0) return null;
-    const systemSegment = dir.replace(/ /g, '_');
+    // Round 9: the CDN serves under the spaced folder form (verified
+    // by direct HTTP probe — `/Sega%20-%20Mega%20Drive%20-%20Genesis/`
+    // returns a real listing; the underscored form 404s). encodeURI-
+    // Component on `Sega - Mega Drive - Genesis` emits exactly that.
+    const systemSegment = encodeURIComponent(dir);
     // encodeURIComponent leaves alphanumerics and `-_.!~*'()` as-is,
     // and turns spaces into %20 — the right thing for a path segment.
     const fileSegment = `${encodeURIComponent(cleanRom)}.png`;
@@ -189,10 +200,16 @@ export function getLibretroDir(systemName: string): string | null {
 
 /**
  * Replace the chars libretro-thumbnails strips from filenames with
- * underscores. List per RetroArch's own filename derivation:
+ * underscores. List per RetroArch's thumbnail-naming docs:
  *   & * / : ` < > ? \ | "
  * Spaces and apostrophes stay (encodeURIComponent handles spaces).
+ *
+ * Round 9: renamed from `sanitiseRomName` and trimmed-of-trim. Pure
+ * char substitution now; surrounding whitespace is the caller's
+ * problem (`buildUrl` `.trim()`s before checking for empty input).
+ *
+ * Exported for test access.
  */
-function sanitiseRomName(name: string): string {
-  return name.replace(/[&*/:`<>?\\|"]/g, '_').trim();
+export function sanitizeLibretroFilename(name: string): string {
+  return name.replace(/[&*/:`<>?\\|"]/g, '_');
 }

@@ -81,9 +81,10 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     expect(result?.publisher).toBe('Nintendo');
     expect(result?.developer).toBe('Nintendo EAD');
     expect(result?.genre).toBe('Platform');
-    // Box art / title / snap URLs come straight from the libretro builder.
+    // Box art / title / snap URLs come straight from the libretro
+    // builder. Round 9: the CDN serves the spaced (`%20`) folder form.
     expect(result?.boxArtUrl).toContain(
-      'Nintendo_-_Super_Nintendo_Entertainment_System/Named_Boxarts/',
+      'Nintendo%20-%20Super%20Nintendo%20Entertainment%20System/Named_Boxarts/',
     );
     expect(result?.titleScreenUrl).toContain('/Named_Titles/');
     expect(result?.screenshotUrl).toContain('/Named_Snaps/');
@@ -126,14 +127,14 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     expect(result?.boxArtUrl).toContain('Some%20Game.png');
   });
 
-  it('writes a cache file in v2 shape', async () => {
+  it('writes a cache file in v3 shape', async () => {
     const m = makeMocks({ dbReturns: buildDbHit() });
     const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
     await svc.getMetadata(HASH);
 
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
     const onDisk = JSON.parse(await fs.readFile(path, 'utf-8')) as RomMetadata;
-    expect(onDisk.version).toBe(2);
+    expect(onDisk.version).toBe(3);
     expect(onDisk.source).toBe('openvgdb');
     expect(onDisk.system).toBe('Super Nintendo Entertainment System');
   });
@@ -147,7 +148,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
     const onDisk = JSON.parse(await fs.readFile(path, 'utf-8')) as RomMetadata;
     expect(onDisk.source).toBe('none');
-    expect(onDisk.version).toBe(2);
+    expect(onDisk.version).toBe(3);
   });
 
   it('hit on a system not in the libretro map → null thumbnail URLs but full metadata', async () => {
@@ -218,11 +219,11 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
   });
 
   it('matched metadata never expires regardless of fetchedAt', async () => {
-    // Pre-populate a v2 cache file with an old timestamp.
+    // Pre-populate a current-version cache file with an old timestamp.
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
     await fs.mkdir(join(dir, 'by-hash', HASH.slice(0, 2)), { recursive: true });
     const aged: RomMetadata = {
-      version: 2,
+      version: 3,
       hash: HASH,
       name: 'Vintage Game',
       system: 'NES',
@@ -260,6 +261,50 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     const result = await svc.getMetadata(HASH);
     expect(result?.name).toBe('Super Mario World');
     expect(result?.source).toBe('openvgdb');
+  });
+
+  it('evicts v2 cache files on read so round-9 URLs replace round-4–8 ones', async () => {
+    // Rounds 4–8 wrote v2 with libretro URLs that pointed at the
+    // underscored host path (which 404s). Round 9 bumped to v3; the
+    // parser now rejects v2 entries the same way it rejects v1.
+    const dirHash = HASH.slice(0, 2);
+    await fs.mkdir(join(dir, 'by-hash', dirHash), { recursive: true });
+    const stale = {
+      version: 2,
+      hash: HASH,
+      name: 'Sonic The Hedgehog 2',
+      system: 'Sega Genesis/Mega Drive',
+      year: 1992,
+      publisher: 'Sega',
+      developer: 'Sega Technical Institute',
+      genre: 'Platform',
+      description: null,
+      // The bug: underscored folder, would 404 if served.
+      boxArtUrl:
+        'https://thumbnails.libretro.com/Sega_-_Mega_Drive_-_Genesis/Named_Boxarts/Sonic%20The%20Hedgehog%202%20(World).png',
+      titleScreenUrl: null,
+      screenshotUrl: null,
+      source: 'openvgdb',
+      fetchedAt: new Date().toISOString(),
+    };
+    await fs.writeFile(
+      join(dir, 'by-hash', dirHash, `${HASH}.json`),
+      JSON.stringify(stale),
+    );
+    const m = makeMocks({
+      dbReturns: buildDbHit({
+        name: 'Sonic The Hedgehog 2',
+        romBaseName: 'Sonic The Hedgehog 2 (World)',
+        system: 'Sega Genesis/Mega Drive',
+      }),
+    });
+    const svc = new MetadataService(dir, m.openVgdb, m.thumbnails);
+    const result = await svc.getMetadata(HASH);
+    // The replacement URL uses the spaced form.
+    expect(result?.boxArtUrl).toContain(
+      'Sega%20-%20Mega%20Drive%20-%20Genesis',
+    );
+    expect(result?.boxArtUrl).not.toContain('Sega_-_Mega_Drive_-_Genesis');
   });
 
   it('treats a corrupted cache file as a miss and refetches', async () => {

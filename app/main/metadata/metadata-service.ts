@@ -46,9 +46,11 @@ export interface MetadataServiceOptions {
  * issued in parallel don't double-hit OpenVGDB or double-write the
  * cache file.
  *
- * Schema-version note: v1 cache files (rounds 1-2) fail the parse
- * guard and are treated as a miss. The first call rewrites them in
- * v2 shape. No migration step needed.
+ * Schema-version note: cache files with a different
+ * `ROM_METADATA_SCHEMA_VERSION` fail the parse guard and are treated
+ * as a miss; the next call rewrites them in the current shape. No
+ * migration step needed. Round 9 bumped v2 → v3 to evict
+ * libretro-URL-encoding bugs cached during rounds 4–8.
  */
 export class MetadataService {
   private readonly noMatchTtlMs: number;

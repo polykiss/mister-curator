@@ -9,6 +9,13 @@
  * descriptive fields all sources had in common; collapsed the
  * `screenshotUrls` array into a single `screenshotUrl` (libretro
  * exposes one snap per ROM).
+ *
+ * Round 9: bumped to v3. The shape didn't change, but rounds 4–8
+ * stored `boxArtUrl` strings pointing at libretro's underscored
+ * folder form (`/Sega_-_Mega_Drive_-_Genesis/...`) which 404s. Round
+ * 9 emits the spaced form (`%20`-encoded). Bumping the schema
+ * version evicts the stale v2 entries on read so users upgrading
+ * don't keep serving the broken URLs from cache.
  */
 
 export type MetadataSource = 'openvgdb' | 'none';
@@ -22,7 +29,7 @@ export type MetadataSource = 'openvgdb' | 'none';
  * doesn't change underneath us within a session.
  */
 export interface RomMetadata {
-  readonly version: 2;
+  readonly version: 3;
   readonly hash: string;
   readonly name: string;
   readonly system: string;
@@ -53,7 +60,7 @@ export interface MetadataHint {
 /** TTL for `source: 'none'` sentinels. Matched metadata never expires. */
 export const NO_MATCH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
-export const ROM_METADATA_SCHEMA_VERSION = 2 as const;
+export const ROM_METADATA_SCHEMA_VERSION = 3 as const;
 
 /** One progress tick from a long-running prefetch. `done` is 1-based. */
 export interface PrefetchProgress {
