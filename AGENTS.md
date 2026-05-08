@@ -147,7 +147,11 @@ Update it before changing consumers.
     Without dev creds the service stays `unavailable` and
     MetadataService silently falls through to OpenVGDB+libretro.
     Credentials never go in committed source — `.env.local` is
-    gitignored (see `.gitignore` for the full env-pattern).
+    gitignored (see `.gitignore` for the full env-pattern). Any code
+    path that logs an SS request URL must run it through
+    `redactScreenScraperUrl()` (`screenscraper-service.ts`) first;
+    `devid`/`devpassword`/`ssid`/`sspassword` values get replaced
+    with `[redacted]`.
   - **OpenVGDB** — a SQLite snapshot (~50 MB) of the
     https://github.com/OpenVGDB/OpenVGDB index, downloaded once on
     first use. Maps md5 → name + system + year + genre + publisher

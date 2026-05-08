@@ -57,9 +57,17 @@ const TARGET_KEYWORDS = [
   'tetris',
 ] as const;
 
-/** Cold-cache perf budgets. Used as soft assertions — we warn but don't exit. */
+/**
+ * Cold-cache perf budgets. Used as soft assertions — we warn but
+ * don't exit. Round 3 splits the cold budget by source: the OpenVGDB
+ * path is local SQLite + URL building (≤200ms); ScreenScraper goes
+ * over the network with rate-limit gating (give it 5s before flagging).
+ * Warm/sentinel/null calls share the OpenVGDB-shaped budget — they
+ * never touch the network.
+ */
 const PERF_BUDGETS = {
-  metadataColdMs: 200, // local SQLite + URL building only
+  openVgdbColdMs: 200,
+  screenScraperColdMs: 5000,
   metadataWarmMs: 50,
   imageColdMs: 5000,
   imageWarmMs: 50,
@@ -400,11 +408,18 @@ async function main(): Promise<void> {
         metadataService.getMetadata(hashEntry.md5, {}, ssHint),
       );
       const meta = coldT.value;
-      if (coldT.elapsedMs > PERF_BUDGETS.metadataColdMs) {
+      // Round 3: per-source budget. SS hits the network; OpenVGDB is
+      // local. A null result (no source resolved) shares the OpenVGDB
+      // shape since it didn't go over the wire.
+      const coldBudget =
+        meta?.source === 'screenscraper'
+          ? PERF_BUDGETS.screenScraperColdMs
+          : PERF_BUDGETS.openVgdbColdMs;
+      if (coldT.elapsedMs > coldBudget) {
         warnings.push(
-          `metadata-cold over budget for ${rom.filename}: ${Math.round(
-            coldT.elapsedMs,
-          )}ms > ${String(PERF_BUDGETS.metadataColdMs)}ms`,
+          `metadata-cold over budget for ${rom.filename} (${
+            meta?.source ?? 'null'
+          }): ${Math.round(coldT.elapsedMs)}ms > ${String(coldBudget)}ms`,
         );
       }
       if (meta === null || meta.source === 'none') {

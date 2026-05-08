@@ -126,6 +126,37 @@ export class ScreenScraperAuthError extends Error {
 }
 
 /**
+ * Names of credential-bearing query params on `jeuInfos.php`. Anything
+ * we log that includes a request URL must scrub these — leaking dev
+ * creds rotates an account; leaking user creds compromises a personal
+ * SS membership. Order doesn't matter; the redactor checks each.
+ */
+const CREDENTIAL_PARAMS = ['devid', 'devpassword', 'ssid', 'sspassword'];
+
+/**
+ * Replace credential values in a `jeuInfos.php` URL with `[redacted]`.
+ * Safe for unrelated URLs (returns them unchanged) and for URLs with
+ * no creds (no-op). Use this before passing any SS URL to a logger,
+ * an error message, or a stack-trace-bound diagnostic.
+ */
+export function redactScreenScraperUrl(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+  let mutated = false;
+  for (const key of CREDENTIAL_PARAMS) {
+    if (parsed.searchParams.has(key)) {
+      parsed.searchParams.set(key, '[redacted]');
+      mutated = true;
+    }
+  }
+  return mutated ? parsed.toString() : url;
+}
+
+/**
  * Parsed `jeuInfos` payload normalised into a stable shape. Round-1
  * scope: the fields the renderer's list view needs (name, year,
  * genre, publisher, box art) plus the SS-only extras the detail
@@ -367,7 +398,13 @@ export class ScreenScraperService {
       try {
         res = await this.fetchWithTimeout(url);
       } catch {
-        if (attemptsNetwork >= MAX_NETWORK_RETRIES) return null;
+        if (attemptsNetwork >= MAX_NETWORK_RETRIES) {
+          this.logger(
+            `[ScreenScraper] network/timeout after ${String(attemptsNetwork + 1)} attempts; ` +
+              `giving up on ${redactScreenScraperUrl(url)}`,
+          );
+          return null;
+        }
         await this.sleepImpl(this.backoffMs(attemptsNetwork));
         attemptsNetwork += 1;
         continue;
@@ -449,12 +486,23 @@ export class ScreenScraperService {
         return null;
       }
       if (res.status >= 500) {
-        if (attempts5xx >= MAX_5XX_RETRIES) return null;
+        if (attempts5xx >= MAX_5XX_RETRIES) {
+          this.logger(
+            `[ScreenScraper] HTTP ${String(res.status)} persisted after ${String(attempts5xx + 1)} attempts; ` +
+              `giving up on ${redactScreenScraperUrl(url)}`,
+          );
+          return null;
+        }
         await this.sleepImpl(this.backoffMs(attempts5xx));
         attempts5xx += 1;
         continue;
       }
-      if (!res.ok) return null;
+      if (!res.ok) {
+        this.logger(
+          `[ScreenScraper] unexpected HTTP ${String(res.status)} on ${redactScreenScraperUrl(url)}; treating as no-match.`,
+        );
+        return null;
+      }
 
       let body: unknown;
       try {

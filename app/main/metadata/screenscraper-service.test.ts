@@ -4,6 +4,7 @@ import {
   ScreenScraperAuthError,
   ScreenScraperService,
   parseScreenScraperResponse,
+  redactScreenScraperUrl,
   type ScreenScraperLookupQuery,
   type ScreenScraperServiceOptions,
 } from '@app/main/metadata/screenscraper-service';
@@ -832,6 +833,96 @@ describe('ScreenScraperService — request queue', () => {
  *   curl 'https://api.screenscraper.fr/api2/systemesListe.php?devid=…&devpassword=…&output=json' \
  *     | jq '.response.systemes[] | select(.noms.nom_eu | test("Mega Drive"))'
  */
+describe('redactScreenScraperUrl (round 3)', () => {
+  it('replaces every credential param value with [redacted]', () => {
+    const url =
+      'https://api.screenscraper.fr/api2/jeuInfos.php' +
+      '?devid=secret-dev&devpassword=secret-pw' +
+      '&ssid=user&sspassword=user-pw' +
+      '&systemeid=4&md5=abc&romnom=foo.sfc';
+    const out = redactScreenScraperUrl(url);
+    expect(out).toContain('devid=%5Bredacted%5D');
+    expect(out).toContain('devpassword=%5Bredacted%5D');
+    expect(out).toContain('ssid=%5Bredacted%5D');
+    expect(out).toContain('sspassword=%5Bredacted%5D');
+    // Non-cred params are preserved verbatim.
+    expect(out).toContain('systemeid=4');
+    expect(out).toContain('md5=abc');
+    expect(out).toContain('romnom=foo.sfc');
+    // No leftover plaintext creds anywhere.
+    expect(out).not.toMatch(/secret-dev|secret-pw|user-pw/);
+  });
+
+  it('returns the URL unchanged when no creds are present', () => {
+    const url = 'https://api.screenscraper.fr/api2/jeuInfos.php?systemeid=4';
+    expect(redactScreenScraperUrl(url)).toBe(url);
+  });
+
+  it('returns malformed input unchanged (no crash)', () => {
+    expect(redactScreenScraperUrl('not a url')).toBe('not a url');
+  });
+
+  it('redacts only the cred params, leaving order/structure intact', () => {
+    const url = 'https://api.screenscraper.fr/api2/jeuInfos.php?ssid=u';
+    const out = redactScreenScraperUrl(url);
+    expect(out).toBe(
+      'https://api.screenscraper.fr/api2/jeuInfos.php?ssid=%5Bredacted%5D',
+    );
+  });
+});
+
+describe('ScreenScraperService — diagnostic logs (round 3)', () => {
+  it('logs a redacted URL when network/timeout retries are exhausted', async () => {
+    const messages: string[] = [];
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('ETIMEDOUT');
+    });
+    const svc = makeService({
+      fetch: fetchImpl as unknown as typeof fetch,
+      logger: (m) => messages.push(m),
+    });
+    const result = await svc.lookup(SNES_QUERY);
+    expect(result).toBeNull();
+    const networkLog = messages.find((m) => m.includes('network/timeout'));
+    expect(networkLog).toBeDefined();
+    // The cred values must NOT appear in the log; the placeholder must.
+    expect(networkLog!).not.toContain(CREDS.devId);
+    expect(networkLog!).not.toContain(CREDS.devPassword);
+    expect(networkLog!).toContain('devid=%5Bredacted%5D');
+    expect(networkLog!).toContain('devpassword=%5Bredacted%5D');
+  });
+
+  it('logs a redacted URL when 5xx retries are exhausted', async () => {
+    const messages: string[] = [];
+    const fetchImpl = vi.fn(async () => emptyResponse(503));
+    const svc = makeService({
+      fetch: fetchImpl as unknown as typeof fetch,
+      logger: (m) => messages.push(m),
+    });
+    const result = await svc.lookup(SNES_QUERY);
+    expect(result).toBeNull();
+    const log5xx = messages.find((m) => m.includes('HTTP 503'));
+    expect(log5xx).toBeDefined();
+    expect(log5xx!).not.toContain(CREDS.devPassword);
+    expect(log5xx!).toContain('devpassword=%5Bredacted%5D');
+  });
+
+  it('logs a redacted URL on unexpected non-2xx (e.g. 418) and returns null', async () => {
+    const messages: string[] = [];
+    const fetchImpl = vi.fn(async () => emptyResponse(418));
+    const svc = makeService({
+      fetch: fetchImpl as unknown as typeof fetch,
+      logger: (m) => messages.push(m),
+    });
+    const result = await svc.lookup(SNES_QUERY);
+    expect(result).toBeNull();
+    const log4xx = messages.find((m) => m.includes('HTTP 418'));
+    expect(log4xx).toBeDefined();
+    expect(log4xx!).not.toContain(CREDS.devPassword);
+    expect(log4xx!).toContain('devpassword=%5Bredacted%5D');
+  });
+});
+
 const liveProbeEnabled = process.env['SCREENSCRAPER_LIVE_PROBE'] === '1';
 
 describe.runIf(liveProbeEnabled)('ScreenScraperService — live probes', () => {
