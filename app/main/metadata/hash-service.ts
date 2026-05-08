@@ -2,46 +2,54 @@ import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { sanitiseFsSegment } from '@app/main/cache/cache-types';
-import type { Md5SumResult } from '@shared/mister-client';
+import type { HashRecord } from '@shared/mister-client';
 
 const HASH_CACHE_SCHEMA_VERSION = 1 as const;
 
 /**
- * Round 7: bump this constant whenever the algorithm that produces
- * the cached hashes changes (e.g. round 6 switched from
- * `md5sum(zip-wrapper)` to `md5sum(unzip -p inner)`). Existing cache
- * files without a matching `hashStrategyVersion` are treated as a
- * full miss and re-hashed on next access — no manual `rm` required.
+ * Bump this constant whenever the algorithm that produces the cached
+ * hashes changes. Existing cache files without a matching
+ * `hashStrategyVersion` are treated as a full miss and re-hashed on
+ * next access — no manual `rm` required.
  *
- * Distinct from `HASH_CACHE_SCHEMA_VERSION` (the on-disk file
- * shape): the file shape can stay v1 while the values inside it
- * become invalid because the algorithm changed underneath.
+ * Distinct from `HASH_CACHE_SCHEMA_VERSION` (the on-disk file shape):
+ * the file shape can stay v1 while the values inside it become invalid
+ * because the algorithm changed underneath.
  *
  * Strategy timeline:
- *   v1 (rounds 1–5): direct `md5sum` of every file, including .zip
- *                    wrappers.
- *   v2 (round 6+):   .zip files routed through `unzip -p | md5sum`
- *                    so the cached hash matches OpenVGDB's
- *                    inner-rom indexing.
+ *   v1 (PR #15 rounds 1–5): direct `md5sum` of every file, including
+ *                           .zip wrappers.
+ *   v2 (PR #15 round 6+):   .zip files routed through `unzip -p |
+ *                           md5sum` so the cached hash matches
+ *                           OpenVGDB's inner-rom indexing.
+ *   v3 (PR #16 round 2):    md5 + sha1 + extracted-content size in
+ *                           one pass per file. SHA-1 alongside MD5
+ *                           lets ScreenScraper match either hash;
+ *                           cached size feeds SS's `romtaille`.
  */
-const HASH_STRATEGY_VERSION = 2 as const;
+const HASH_STRATEGY_VERSION = 3 as const;
 
 /** Cap per SSH round-trip. Larger inputs chunk in JS. */
 const DEFAULT_BATCH_SIZE = 100;
 
 /**
- * One persisted hash record. `mtime` is epoch seconds — matches what
- * `IMisterClient.md5sumPaths` and `statWitnesses` return.
+ * One persisted entry. mtime is epoch seconds of the wrapper file
+ * (cache invalidation key — what the user actually touches). md5
+ * and sha1 are hashes of the EXTRACTED ROM content (inner-file for
+ * .zip wrappers, raw bytes for direct files). size is the extracted
+ * byte count, matching SS's `romtaille` semantics.
  */
 export interface HashEntry {
-  readonly hash: string;
+  readonly md5: string;
+  readonly sha1: string;
+  readonly size: number;
   readonly mtime: number;
   readonly hashedAt: string;
 }
 
 interface HashCacheFile {
   readonly version: typeof HASH_CACHE_SCHEMA_VERSION;
-  /** Round 7: forces a re-hash when the algorithm bumps. */
+  /** Forces a re-hash when the algorithm bumps. */
   readonly hashStrategyVersion: typeof HASH_STRATEGY_VERSION;
   readonly host: string;
   readonly entries: Readonly<Record<string, HashEntry>>;
@@ -55,33 +63,39 @@ interface HashCacheFile {
  */
 export interface HashClient {
   statWitnesses(paths: readonly string[]): Promise<Record<string, number>>;
-  md5sumPaths(paths: readonly string[]): Promise<readonly Md5SumResult[]>;
+  hashPaths(paths: readonly string[]): Promise<readonly HashRecord[]>;
 }
 
 export interface HashServiceOptions {
-  /** Chunk size for `md5sumPaths` calls. Test override. */
+  /** Chunk size for `hashPaths` calls. Test override. */
   readonly batchSize?: number;
   /** Test seam — override for deterministic `hashedAt` timestamps. */
   readonly now?: () => Date;
 }
 
 /**
- * MD5 hashes of ROM files on the MiSTer, persisted per-host on local
+ * Hashes of ROM files on the MiSTer, persisted per-host on local
  * disk. Keyed by the file's absolute path on the device; entries
  * invalidate when the file's mtime changes.
  *
+ * Round 2 (PR #16): each entry now carries md5 + sha1 + extracted
+ * size, computed in one device-side script pass. ScreenScraper takes
+ * md5 + sha1 in a single multi-hash query and cross-matches; the
+ * cached size feeds SS's `romtaille` parameter.
+ *
  * Pipeline shape:
- *   1. caller supplies paths to `getHash`.
- *   2. for paths we have cached, stat the device once to verify mtime.
- *      A mtime match returns the cached hash with no md5 call.
- *   3. for paths we don't have cached or whose mtime drifted, batch
- *      `md5sumPaths` in chunks of `batchSize` (default 100).
- *   4. write the merged result back to disk atomically.
+ *   1. Caller supplies paths to `getHash`.
+ *   2. For paths we have cached, stat the device once to verify
+ *      mtime. A mtime match returns the cached entry with no hash
+ *      call.
+ *   3. For paths we don't have cached or whose mtime drifted, batch
+ *      `hashPaths` in chunks of `batchSize` (default 100).
+ *   4. Write the merged result back to disk atomically.
  *
  * Concurrency: all `getHash` calls for one host serialize through a
  * per-host Promise chain. Two callers asking for overlapping paths
  * naturally share work — caller B awaits A, then sees A's freshly-
- * cached hashes on its own pass. This is the same coalescing pattern
+ * cached entries on its own pass. Same coalescing pattern
  * `ConnectionManager` uses for `listAllCoresWithFiles`.
  *
  * No on-device writes. The cache lives entirely under
@@ -104,27 +118,28 @@ export class HashService {
   }
 
   /**
-   * Hash the supplied paths. Returns a Map keyed by the original input
-   * path (may be a subset — paths that don't exist on the device drop
-   * silently, mirroring the busybox script's behavior).
+   * Hash the supplied paths. Returns a Map keyed by the original
+   * input path. Each value is the full {md5, sha1, size, mtime,
+   * hashedAt} entry — pulled from cache when fresh, otherwise the
+   * device-side script computes it.
    *
-   * `host` is the cache-key dimension. Two MiSTer profiles at the same
-   * IP but different SD cards are correctly partitioned because the
-   * caller passes a different `host` per profile.
+   * `host` is the cache-key dimension. Two MiSTer profiles at the
+   * same IP but different SD cards are correctly partitioned because
+   * the caller passes a different `host` per profile.
    */
   async getHash(
     client: HashClient,
     host: string,
     paths: readonly string[],
-  ): Promise<Map<string, string>> {
+  ): Promise<Map<string, HashEntry>> {
     if (paths.length === 0) return new Map();
     return this.runGated(host, () => this.doGetHash(client, host, paths));
   }
 
   /**
-   * Drop a single path's cache entry. Used after a hide/show rename so
-   * the next hash request walks fresh. Best-effort — a missing entry
-   * is a no-op.
+   * Drop a single path's cache entry. Used after a hide/show rename
+   * so the next hash request walks fresh. Best-effort — a missing
+   * entry is a no-op.
    */
   async invalidate(host: string, path: string): Promise<void> {
     return this.runGated(host, async () => {
@@ -157,9 +172,9 @@ export class HashService {
     client: HashClient,
     host: string,
     paths: readonly string[],
-  ): Promise<Map<string, string>> {
+  ): Promise<Map<string, HashEntry>> {
     const entries = await this.loadEntries(host);
-    const result = new Map<string, string>();
+    const result = new Map<string, HashEntry>();
 
     // Validate any cached paths in one stat batch. A cache hit needs
     // the current mtime to match the recorded one.
@@ -177,11 +192,11 @@ export class HashService {
           current !== 0 &&
           current === entry.mtime
         ) {
-          result.set(p, entry.hash);
+          result.set(p, entry);
         } else {
           // Either missing-on-device, or mtime drifted. Either way,
-          // re-hash. (If the file is genuinely gone the md5 call will
-          // silently drop it and we'll just not return that path.)
+          // re-hash. (If the file is genuinely gone the hash call
+          // will silently drop it and we'll just not return the path.)
           needsHash.push(p);
         }
       }
@@ -190,17 +205,24 @@ export class HashService {
     if (needsHash.length === 0) return result;
 
     // Hash uncached / stale paths in bounded chunks. We update the
-    // in-memory map per chunk so a partial failure later in the batch
-    // still preserves the work that succeeded in earlier chunks.
+    // in-memory map per chunk so a partial failure later in the
+    // batch still preserves the work that succeeded earlier.
     const next: Record<string, HashEntry> = { ...entries };
     let dirty = false;
     const nowIso = this.now().toISOString();
     for (let i = 0; i < needsHash.length; i += this.batchSize) {
       const chunk = needsHash.slice(i, i + this.batchSize);
-      const records = await client.md5sumPaths(chunk);
+      const records = await client.hashPaths(chunk);
       for (const r of records) {
-        result.set(r.path, r.hash);
-        next[r.path] = { hash: r.hash, mtime: r.mtime, hashedAt: nowIso };
+        const entry: HashEntry = {
+          md5: r.md5,
+          sha1: r.sha1,
+          size: r.size,
+          mtime: r.mtime,
+          hashedAt: nowIso,
+        };
+        result.set(r.path, entry);
+        next[r.path] = entry;
         dirty = true;
       }
     }
@@ -214,16 +236,15 @@ export class HashService {
   }
 
   /**
-   * Serialize calls per host. The first call sets up the chain; later
-   * calls await the tail. Failures don't break the chain — the catch
-   * arm replaces a rejection with a resolved value so the gate keeps
-   * advancing (the caller still sees the rejection on the original
-   * promise).
+   * Serialize calls per host. The first call sets up the chain;
+   * later calls await the tail. Failures don't break the chain —
+   * the catch arm replaces a rejection with a resolved value so
+   * the gate keeps advancing (the caller still sees the rejection
+   * on the original promise).
    */
   private async runGated<T>(host: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.gates.get(host) ?? Promise.resolve();
     const next = prev.then(fn, fn);
-    // Chain consumers (the gate itself) only care that work finished.
     this.gates.set(
       host,
       next.catch(() => undefined),
@@ -294,10 +315,10 @@ function isHashCacheFile(v: unknown): v is HashCacheFile {
   if (v === null || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
   if (o.version !== HASH_CACHE_SCHEMA_VERSION) return false;
-  // Round 7: a missing or mismatched `hashStrategyVersion` invalidates
-  // the cache wholesale. Pre-round-7 files don't have the field and
-  // were produced by the v1 algorithm (round 5 and earlier hashed
-  // .zip wrappers directly); we re-hash them on next access.
+  // A missing or mismatched `hashStrategyVersion` invalidates the
+  // cache wholesale. Pre-round-7 files don't have the field at all;
+  // pre-round-2-of-PR-#16 files have v2 (md5 only); v3 files have
+  // md5 + sha1 + size. We re-hash anything that doesn't match.
   if (o.hashStrategyVersion !== HASH_STRATEGY_VERSION) return false;
   if (typeof o.host !== 'string') return false;
   if (o.entries === null || typeof o.entries !== 'object') return false;
@@ -311,7 +332,9 @@ function isHashEntry(v: unknown): v is HashEntry {
   if (v === null || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
   return (
-    typeof o.hash === 'string' &&
+    typeof o.md5 === 'string' &&
+    typeof o.sha1 === 'string' &&
+    typeof o.size === 'number' &&
     typeof o.mtime === 'number' &&
     typeof o.hashedAt === 'string'
   );

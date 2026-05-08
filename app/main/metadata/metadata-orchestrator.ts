@@ -11,6 +11,26 @@ import type {
   RomMetadata,
 } from '@shared/metadata-types';
 
+/**
+ * Maps a MiSTer core id (and the path it came from) to a ScreenScraper
+ * `systemeid`. Required by SS's jeuInfos hash query.
+ *
+ * Round 4 reverted this to id-only — round 3 had widened it to also
+ * carry a display system name, but the canonical name comes from the
+ * SS response itself (`response.jeu.systeme.nom`), so the local map
+ * doesn't need to track it.
+ *
+ * The orchestrator doesn't own the map — `app/main/index.ts` builds
+ * it from a static table and injects it via the constructor. Tests
+ * pass a tiny inline mapper.
+ */
+export type SystemIdResolver = (params: {
+  /** Filename basename (e.g. "Sonic.md") — extension may hint at the system. */
+  readonly romPath: string;
+  /** Core id from the cores list (e.g. "Genesis"). */
+  readonly coreId?: string;
+}) => number | null;
+
 export interface ActiveSession {
   /** SSH-shaped subset the HashService consumes. */
   readonly client: HashClient;
@@ -44,6 +64,7 @@ export class MetadataOrchestrator {
     private readonly metadataService: MetadataService,
     private readonly imageCache: ImageCache,
     private readonly openVgdb: OpenVGDBService,
+    private readonly resolveSystemId: SystemIdResolver,
     private readonly getActiveSession: () => ActiveSession | null,
   ) {}
 
@@ -51,21 +72,23 @@ export class MetadataOrchestrator {
    * Compute (or recall) the hash for one ROM file and look up its
    * metadata. Returns null when:
    *   - no active connection
-   *   - the file isn't a regular file on the device (md5sumPaths
-   *     drops it silently)
-   *   - the OpenVGDB database hasn't been downloaded yet
-   *   - the hash isn't in the database
+   *   - the file isn't a regular file on the device (hashPaths drops
+   *     it silently)
+   *   - the OpenVGDB database hasn't been downloaded AND SS is
+   *     unavailable / out of quota / hits no match
+   *   - all sources miss
    *
-   * `coreId` is unused in v0 but threaded through so the IPC contract
-   * matches the spec; PR #16 may use it for analytics or to scope
-   * cache policies per-core.
+   * Round 2 (PR #16): threads the multi-hash output (md5 + sha1 +
+   * size) through to MetadataService along with a resolved SS
+   * systemId, so SS gets a proper hash-search query when it's
+   * available. Falls back to OpenVGDB+libretro when SS misses or is
+   * unavailable.
    */
   async getRomMetadata(
     coreId: string,
     romPath: string,
     hint?: MetadataHint,
   ): Promise<RomMetadata | null> {
-    void coreId; // unused in v0; reserved for per-core scoping later
     const session = this.getActiveSession();
     if (session === null) return null;
 
@@ -74,10 +97,22 @@ export class MetadataOrchestrator {
       session.host,
       [romPath],
     );
-    const hash = hashes.get(romPath);
-    if (hash === undefined) return null;
+    const entry = hashes.get(romPath);
+    if (entry === undefined) return null;
 
-    return this.metadataService.getMetadata(hash, hint ?? {});
+    const systemId = this.resolveSystemId({ romPath, coreId });
+    const ssHint =
+      systemId === null
+        ? undefined
+        : {
+            systemId,
+            md5: entry.md5,
+            sha1: entry.sha1,
+            crc32: undefined,
+            romName: basename(romPath),
+            romSize: entry.size,
+          };
+    return this.metadataService.getMetadata(entry.md5, hint ?? {}, ssHint);
   }
 
   /**
@@ -177,4 +212,9 @@ export class MetadataOrchestrator {
       this.imageCache.clearAll(),
     ]);
   }
+}
+
+function basename(path: string): string {
+  const slash = path.lastIndexOf('/');
+  return slash < 0 ? path : path.slice(slash + 1);
 }

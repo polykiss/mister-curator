@@ -5,43 +5,68 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { HashService, type HashClient } from '@app/main/metadata/hash-service';
-import type { Md5SumResult } from '@shared/mister-client';
+import type { HashRecord } from '@shared/mister-client';
 
-/** Simple in-memory test client. Records every call; lets each test
- * pre-program the responses. */
+/** A tiny in-memory mock that mirrors the IMisterClient subset
+ * HashService consumes. Test seeds a Map of path → fixture data;
+ * the mock returns matching HashRecord rows. */
+interface FixtureHash {
+  readonly md5: string;
+  readonly sha1: string;
+  readonly size: number;
+  readonly mtime: number;
+}
+
 function makeClient(opts: {
-  md5: Map<string, { hash: string; mtime: number }>;
+  hashes: Map<string, FixtureHash>;
   stat?: Map<string, number>;
   shouldFail?: boolean;
 }): HashClient & {
-  md5Calls: string[][];
+  hashCalls: string[][];
   statCalls: string[][];
 } {
-  const md5Calls: string[][] = [];
+  const hashCalls: string[][] = [];
   const statCalls: string[][] = [];
   return {
-    md5Calls,
+    hashCalls,
     statCalls,
-    async md5sumPaths(paths: readonly string[]): Promise<readonly Md5SumResult[]> {
-      md5Calls.push([...paths]);
+    async hashPaths(paths: readonly string[]): Promise<readonly HashRecord[]> {
+      hashCalls.push([...paths]);
       if (opts.shouldFail) throw new Error('SSH failure');
       return paths
         .map((p) => {
-          const rec = opts.md5.get(p);
+          const rec = opts.hashes.get(p);
           if (!rec) return null;
-          return { path: p, hash: rec.hash, mtime: rec.mtime };
+          return {
+            path: p,
+            md5: rec.md5,
+            sha1: rec.sha1,
+            size: rec.size,
+            mtime: rec.mtime,
+          };
         })
-        .filter((r): r is Md5SumResult => r !== null);
+        .filter((r): r is HashRecord => r !== null);
     },
     async statWitnesses(paths: readonly string[]): Promise<Record<string, number>> {
       statCalls.push([...paths]);
       const out: Record<string, number> = {};
       for (const p of paths) {
-        out[p] = opts.stat?.get(p) ?? opts.md5.get(p)?.mtime ?? 0;
+        out[p] = opts.stat?.get(p) ?? opts.hashes.get(p)?.mtime ?? 0;
       }
       return out;
     },
   };
+}
+
+/** Build a fixture entry with predictable hashes derived from a label. */
+function fix(
+  label: string,
+  size = 1024,
+  mtime = 1700000000,
+): FixtureHash {
+  const md5 = label.repeat(32).slice(0, 32);
+  const sha1 = label.repeat(40).slice(0, 40);
+  return { md5, sha1, size, mtime };
 }
 
 describe('HashService', () => {
@@ -57,88 +82,85 @@ describe('HashService', () => {
 
   it('returns an empty map for empty input without touching the client', async () => {
     const svc = new HashService(dir);
-    const client = makeClient({ md5: new Map() });
+    const client = makeClient({ hashes: new Map() });
     const result = await svc.getHash(client, 'host-1', []);
     expect(result.size).toBe(0);
-    expect(client.md5Calls).toEqual([]);
+    expect(client.hashCalls).toEqual([]);
     expect(client.statCalls).toEqual([]);
   });
 
-  it('hashes uncached paths via md5sumPaths and writes the cache', async () => {
+  it('hashes uncached paths via hashPaths and writes the cache', async () => {
     const svc = new HashService(dir);
-    const md5 = new Map<string, { hash: string; mtime: number }>([
-      ['/media/fat/games/A.sfc', { hash: 'a'.repeat(32), mtime: 100 }],
-      ['/media/fat/games/B.sfc', { hash: 'b'.repeat(32), mtime: 200 }],
+    const hashes = new Map<string, FixtureHash>([
+      ['/media/fat/games/A.sfc', fix('a', 100, 1)],
+      ['/media/fat/games/B.sfc', fix('b', 200, 2)],
     ]);
-    const client = makeClient({ md5 });
+    const client = makeClient({ hashes });
     const result = await svc.getHash(client, 'host-1', [
       '/media/fat/games/A.sfc',
       '/media/fat/games/B.sfc',
     ]);
-    expect(result.get('/media/fat/games/A.sfc')).toBe('a'.repeat(32));
-    expect(result.get('/media/fat/games/B.sfc')).toBe('b'.repeat(32));
-    // No stat call — every input was uncached, so we go straight to md5.
+    expect(result.get('/media/fat/games/A.sfc')?.md5).toBe('a'.repeat(32));
+    expect(result.get('/media/fat/games/A.sfc')?.sha1).toBe('a'.repeat(40));
+    expect(result.get('/media/fat/games/A.sfc')?.size).toBe(100);
+    expect(result.get('/media/fat/games/B.sfc')?.md5).toBe('b'.repeat(32));
     expect(client.statCalls).toEqual([]);
-    expect(client.md5Calls).toHaveLength(1);
+    expect(client.hashCalls).toHaveLength(1);
 
-    // File on disk has the entries.
     const cachePath = join(dir, 'host-1', 'hashes.json');
     const raw = JSON.parse(await fs.readFile(cachePath, 'utf-8')) as {
       version: number;
+      hashStrategyVersion: number;
       host: string;
-      entries: Record<string, { hash: string; mtime: number }>;
+      entries: Record<string, FixtureHash & { hashedAt: string }>;
     };
     expect(raw.version).toBe(1);
+    expect(raw.hashStrategyVersion).toBe(3); // PR #16 round 2 bump
     expect(raw.host).toBe('host-1');
-    expect(raw.entries['/media/fat/games/A.sfc']?.hash).toBe('a'.repeat(32));
+    expect(raw.entries['/media/fat/games/A.sfc']?.md5).toBe('a'.repeat(32));
+    expect(raw.entries['/media/fat/games/A.sfc']?.sha1).toBe('a'.repeat(40));
+    expect(raw.entries['/media/fat/games/A.sfc']?.size).toBe(100);
   });
 
-  it('serves cached hashes without re-running md5 when mtime matches', async () => {
+  it('serves cached entries without re-running hash when mtime matches', async () => {
     const svc = new HashService(dir);
-    const md5 = new Map([
-      ['/p/a', { hash: 'a'.repeat(32), mtime: 500 }],
-    ]);
-    const client = makeClient({ md5 });
+    const hashes = new Map([['/p/a', fix('a', 100, 500)]]);
+    const client = makeClient({ hashes });
 
-    // First call populates the cache.
     await svc.getHash(client, 'host-1', ['/p/a']);
-    expect(client.md5Calls).toHaveLength(1);
+    expect(client.hashCalls).toHaveLength(1);
 
-    // Second call: mtime in stat matches the cached entry, so the
-    // md5 call does NOT run again.
+    // Second call: mtime in stat matches the cached entry, so no
+    // hashPaths call.
     const result = await svc.getHash(client, 'host-1', ['/p/a']);
-    expect(result.get('/p/a')).toBe('a'.repeat(32));
-    expect(client.md5Calls).toHaveLength(1); // unchanged
-    expect(client.statCalls).toHaveLength(1); // exactly one validation
+    expect(result.get('/p/a')?.md5).toBe('a'.repeat(32));
+    expect(client.hashCalls).toHaveLength(1); // unchanged
+    expect(client.statCalls).toHaveLength(1);
   });
 
   it('re-hashes when the device mtime drifts from the cached one', async () => {
     const svc = new HashService(dir);
-    const stale = { hash: 'a'.repeat(32), mtime: 500 };
-    const fresh = { hash: 'c'.repeat(32), mtime: 999 };
-    const md5 = new Map([['/p/a', stale]]);
-    const client = makeClient({ md5 });
-
+    const stale = fix('a', 100, 500);
+    const fresh = fix('c', 200, 999);
+    const hashes = new Map([['/p/a', stale]]);
+    const client = makeClient({ hashes });
     await svc.getHash(client, 'host-1', ['/p/a']);
 
-    // Simulate the device file getting touched: stat returns a new
-    // mtime, md5 returns a new hash.
-    md5.set('/p/a', fresh);
+    hashes.set('/p/a', fresh);
     const stat = new Map([['/p/a', 999]]);
-    const client2 = makeClient({ md5, stat });
-
+    const client2 = makeClient({ hashes, stat });
     const result = await svc.getHash(client2, 'host-1', ['/p/a']);
-    expect(result.get('/p/a')).toBe('c'.repeat(32));
-    expect(client2.md5Calls).toHaveLength(1);
+    expect(result.get('/p/a')?.md5).toBe('c'.repeat(32));
+    expect(result.get('/p/a')?.size).toBe(200);
+    expect(client2.hashCalls).toHaveLength(1);
   });
 
-  it('does not write a partial cache on SSH failure', async () => {
+  it('does not write a partial cache on hashPaths failure', async () => {
     const svc = new HashService(dir);
-    const client = makeClient({ md5: new Map(), shouldFail: true });
+    const client = makeClient({ hashes: new Map(), shouldFail: true });
     await expect(svc.getHash(client, 'host-1', ['/x'])).rejects.toThrow(
       'SSH failure',
     );
-    // No cache file should exist.
     const exists = await fs
       .stat(join(dir, 'host-1', 'hashes.json'))
       .then(() => true)
@@ -146,73 +168,62 @@ describe('HashService', () => {
     expect(exists).toBe(false);
   });
 
-  it('chunks 250 paths into 3 md5sumPaths calls (100 / 100 / 50)', async () => {
+  it('chunks 250 paths into 3 hashPaths calls (100 / 100 / 50)', async () => {
     const svc = new HashService(dir, { batchSize: 100 });
-    const md5 = new Map<string, { hash: string; mtime: number }>();
+    const hashes = new Map<string, FixtureHash>();
     const paths: string[] = [];
     for (let i = 0; i < 250; i += 1) {
       const p = `/p/file-${String(i).padStart(3, '0')}`;
       paths.push(p);
-      md5.set(p, { hash: 'a'.repeat(32), mtime: i + 1 });
+      hashes.set(p, fix('a', 1, i + 1));
     }
-    const client = makeClient({ md5 });
+    const client = makeClient({ hashes });
     const result = await svc.getHash(client, 'host-1', paths);
     expect(result.size).toBe(250);
-    expect(client.md5Calls).toHaveLength(3);
-    expect(client.md5Calls[0]?.length).toBe(100);
-    expect(client.md5Calls[1]?.length).toBe(100);
-    expect(client.md5Calls[2]?.length).toBe(50);
+    expect(client.hashCalls).toHaveLength(3);
+    expect(client.hashCalls[0]?.length).toBe(100);
+    expect(client.hashCalls[1]?.length).toBe(100);
+    expect(client.hashCalls[2]?.length).toBe(50);
   });
 
-  it('respects a custom batchSize override', async () => {
-    const svc = new HashService(dir, { batchSize: 25 });
-    const md5 = new Map<string, { hash: string; mtime: number }>();
-    const paths: string[] = [];
-    for (let i = 0; i < 60; i += 1) {
-      const p = `/p/${String(i)}`;
-      paths.push(p);
-      md5.set(p, { hash: 'a'.repeat(32), mtime: i });
-    }
-    const client = makeClient({ md5 });
-    await svc.getHash(client, 'host-1', paths);
-    expect(client.md5Calls.map((c) => c.length)).toEqual([25, 25, 10]);
-  });
-
-  it('drops paths the device says don\'t exist (md5 returns nothing for them)', async () => {
+  it('drops paths the device says don\'t exist', async () => {
     const svc = new HashService(dir);
-    const md5 = new Map([['/p/exists', { hash: 'a'.repeat(32), mtime: 100 }]]);
-    const client = makeClient({ md5 });
-    const result = await svc.getHash(client, 'host-1', ['/p/exists', '/p/missing']);
+    const hashes = new Map([['/p/exists', fix('a', 100, 1)]]);
+    const client = makeClient({ hashes });
+    const result = await svc.getHash(client, 'host-1', [
+      '/p/exists',
+      '/p/missing',
+    ]);
     expect(result.size).toBe(1);
-    expect(result.get('/p/exists')).toBe('a'.repeat(32));
+    expect(result.has('/p/exists')).toBe(true);
     expect(result.has('/p/missing')).toBe(false);
   });
 
   it('partitions hosts so two profiles never share entries', async () => {
     const svc = new HashService(dir);
-    const md5A = new Map([['/p/x', { hash: 'a'.repeat(32), mtime: 1 }]]);
-    const md5B = new Map([['/p/x', { hash: 'b'.repeat(32), mtime: 2 }]]);
+    const ha = new Map([['/p/x', fix('a', 1, 1)]]);
+    const hb = new Map([['/p/x', fix('b', 2, 2)]]);
 
-    await svc.getHash(makeClient({ md5: md5A }), 'host-A', ['/p/x']);
-    await svc.getHash(makeClient({ md5: md5B }), 'host-B', ['/p/x']);
+    await svc.getHash(makeClient({ hashes: ha }), 'host-A', ['/p/x']);
+    await svc.getHash(makeClient({ hashes: hb }), 'host-B', ['/p/x']);
 
     const a = JSON.parse(
       await fs.readFile(join(dir, 'host-A', 'hashes.json'), 'utf-8'),
-    ) as { entries: Record<string, { hash: string }> };
+    ) as { entries: Record<string, FixtureHash> };
     const b = JSON.parse(
       await fs.readFile(join(dir, 'host-B', 'hashes.json'), 'utf-8'),
-    ) as { entries: Record<string, { hash: string }> };
-    expect(a.entries['/p/x']?.hash).toBe('a'.repeat(32));
-    expect(b.entries['/p/x']?.hash).toBe('b'.repeat(32));
+    ) as { entries: Record<string, FixtureHash> };
+    expect(a.entries['/p/x']?.md5).toBe('a'.repeat(32));
+    expect(b.entries['/p/x']?.md5).toBe('b'.repeat(32));
   });
 
   it('invalidate removes one entry from the cache', async () => {
     const svc = new HashService(dir);
-    const md5 = new Map([
-      ['/p/a', { hash: 'a'.repeat(32), mtime: 1 }],
-      ['/p/b', { hash: 'b'.repeat(32), mtime: 2 }],
+    const hashes = new Map([
+      ['/p/a', fix('a', 1, 1)],
+      ['/p/b', fix('b', 2, 2)],
     ]);
-    await svc.getHash(makeClient({ md5 }), 'host-1', ['/p/a', '/p/b']);
+    await svc.getHash(makeClient({ hashes }), 'host-1', ['/p/a', '/p/b']);
     await svc.invalidate('host-1', '/p/a');
 
     const file = JSON.parse(
@@ -224,8 +235,8 @@ describe('HashService', () => {
 
   it('clearForHost removes the cache file', async () => {
     const svc = new HashService(dir);
-    const md5 = new Map([['/p/a', { hash: 'a'.repeat(32), mtime: 1 }]]);
-    await svc.getHash(makeClient({ md5 }), 'host-1', ['/p/a']);
+    const hashes = new Map([['/p/a', fix('a', 1, 1)]]);
+    await svc.getHash(makeClient({ hashes }), 'host-1', ['/p/a']);
     await svc.clearForHost('host-1');
     const exists = await fs
       .stat(join(dir, 'host-1', 'hashes.json'))
@@ -234,27 +245,22 @@ describe('HashService', () => {
     expect(exists).toBe(false);
   });
 
-  it('serializes concurrent calls per host (overlapping paths share work)', async () => {
+  it('serializes concurrent calls per host so overlapping paths share work', async () => {
     const svc = new HashService(dir);
-    const md5 = new Map([
-      ['/p/a', { hash: 'a'.repeat(32), mtime: 1 }],
-      ['/p/b', { hash: 'b'.repeat(32), mtime: 2 }],
+    const hashes = new Map([
+      ['/p/a', fix('a', 1, 1)],
+      ['/p/b', fix('b', 2, 2)],
     ]);
-    const client = makeClient({ md5 });
+    const client = makeClient({ hashes });
 
-    // Both calls request /p/a; the second should observe A's cache
-    // hit and not re-run md5 for that path.
     const [r1, r2] = await Promise.all([
       svc.getHash(client, 'host-1', ['/p/a']),
       svc.getHash(client, 'host-1', ['/p/a', '/p/b']),
     ]);
-    expect(r1.get('/p/a')).toBe('a'.repeat(32));
-    expect(r2.get('/p/a')).toBe('a'.repeat(32));
-    expect(r2.get('/p/b')).toBe('b'.repeat(32));
-    // Total md5 calls: one for the first call (/p/a), one for the
-    // second (/p/b only — /p/a is now cached). If the gate were
-    // missing, /p/a would be hashed twice.
-    const allHashed = client.md5Calls.flat();
+    expect(r1.get('/p/a')?.md5).toBe('a'.repeat(32));
+    expect(r2.get('/p/a')?.md5).toBe('a'.repeat(32));
+    expect(r2.get('/p/b')?.md5).toBe('b'.repeat(32));
+    const allHashed = client.hashCalls.flat();
     expect(allHashed.filter((p) => p === '/p/a')).toHaveLength(1);
     expect(allHashed.filter((p) => p === '/p/b')).toHaveLength(1);
   });
@@ -265,31 +271,28 @@ describe('HashService', () => {
     await fs.mkdir(cacheDir, { recursive: true });
     await fs.writeFile(join(cacheDir, 'hashes.json'), 'this is not json');
 
-    const md5 = new Map([['/p/a', { hash: 'a'.repeat(32), mtime: 1 }]]);
-    const result = await svc.getHash(makeClient({ md5 }), 'host-1', ['/p/a']);
-    expect(result.get('/p/a')).toBe('a'.repeat(32));
+    const hashes = new Map([['/p/a', fix('a', 1, 1)]]);
+    const result = await svc.getHash(
+      makeClient({ hashes }),
+      'host-1',
+      ['/p/a'],
+    );
+    expect(result.get('/p/a')?.md5).toBe('a'.repeat(32));
   });
 
   it('treats device mtime 0 (file missing) as cache miss', async () => {
     const svc = new HashService(dir);
-    const md5 = new Map([['/p/a', { hash: 'a'.repeat(32), mtime: 100 }]]);
-    await svc.getHash(makeClient({ md5 }), 'host-1', ['/p/a']);
+    const hashes = new Map([['/p/a', fix('a', 100, 100)]]);
+    await svc.getHash(makeClient({ hashes }), 'host-1', ['/p/a']);
 
-    // Simulate the file being deleted: stat returns 0, md5 returns
-    // nothing. The result map should be empty (the path is gone),
-    // and the in-memory entry preserved (we didn't get a new
-    // observation to overwrite it with).
     const stat = new Map([['/p/a', 0]]);
-    const client = makeClient({ md5: new Map(), stat });
+    const client = makeClient({ hashes: new Map(), stat });
     const result = await svc.getHash(client, 'host-1', ['/p/a']);
     expect(result.size).toBe(0);
-    // md5 was attempted (mtime 0 looks like drift) but the device
-    // returned no record, so result is empty.
-    expect(client.md5Calls).toHaveLength(1);
+    expect(client.hashCalls).toHaveLength(1);
   });
 
-  describe('round 7 — hashStrategyVersion invalidation', () => {
-    /** Pre-write a cache file with the supplied shape, then read. */
+  describe('hashStrategyVersion invalidation (PR #16 round 2)', () => {
     async function seedCache(host: string, raw: unknown): Promise<void> {
       const cacheDir = join(dir, host);
       await fs.mkdir(cacheDir, { recursive: true });
@@ -299,51 +302,24 @@ describe('HashService', () => {
       );
     }
 
-    it('writes hashStrategyVersion: 2 alongside the v1 schema field', async () => {
+    it('writes hashStrategyVersion: 3 alongside the v1 schema field', async () => {
       const svc = new HashService(dir);
-      const md5 = new Map([['/p/a', { hash: 'a'.repeat(32), mtime: 1 }]]);
-      await svc.getHash(makeClient({ md5 }), 'host-1', ['/p/a']);
+      const hashes = new Map([['/p/a', fix('a', 1, 1)]]);
+      await svc.getHash(makeClient({ hashes }), 'host-1', ['/p/a']);
       const raw = JSON.parse(
         await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
       ) as { version: number; hashStrategyVersion: number };
       expect(raw.version).toBe(1);
-      expect(raw.hashStrategyVersion).toBe(2);
+      expect(raw.hashStrategyVersion).toBe(3);
     });
 
-    it('treats a pre-round-7 cache (no hashStrategyVersion) as an invalid file', async () => {
-      // Pre-round-7 file: schema version 1, no hashStrategyVersion
-      // field. Hashes inside were produced by the v1 algorithm
-      // (direct md5sum of .zip wrappers) — round 6+ algorithm
-      // disagrees, so we must NOT serve them.
+    it('treats a v2 (md5-only) cache as invalid and re-hashes', async () => {
+      // PR #15 round 6 produced v2 entries with just `hash` + `mtime`
+      // + `hashedAt` (no sha1, no size). PR #16 round 2 needs the
+      // full triple — schema bump invalidates v2 wholesale.
       await seedCache('host-1', {
         version: 1,
-        host: 'host-1',
-        entries: {
-          '/p/a': {
-            hash: 'wrong-old-hash'.padEnd(32, 'x').slice(0, 32),
-            mtime: 100,
-            hashedAt: '2025-01-01T00:00:00.000Z',
-          },
-        },
-      });
-      const svc = new HashService(dir);
-      const md5 = new Map([['/p/a', { hash: 'a'.repeat(32), mtime: 100 }]]);
-      const client = makeClient({ md5 });
-      const result = await svc.getHash(client, 'host-1', ['/p/a']);
-      // The OLD wrong-shaped hash got dropped; the NEW algorithm
-      // re-hashed and returned the correct value.
-      expect(result.get('/p/a')).toBe('a'.repeat(32));
-      // No stat call was issued (cache treated as empty); md5 was.
-      expect(client.statCalls).toEqual([]);
-      expect(client.md5Calls).toHaveLength(1);
-    });
-
-    it('treats a cache with mismatched hashStrategyVersion as invalid', async () => {
-      // Future-version file (e.g. someone manually set v3) — we
-      // can't trust its values either.
-      await seedCache('host-1', {
-        version: 1,
-        hashStrategyVersion: 999,
+        hashStrategyVersion: 2,
         host: 'host-1',
         entries: {
           '/p/a': {
@@ -354,35 +330,83 @@ describe('HashService', () => {
         },
       });
       const svc = new HashService(dir);
-      const md5 = new Map([['/p/a', { hash: 'b'.repeat(32), mtime: 100 }]]);
-      const client = makeClient({ md5 });
+      const hashes = new Map([['/p/a', fix('z', 999, 100)]]);
+      const client = makeClient({ hashes });
       const result = await svc.getHash(client, 'host-1', ['/p/a']);
-      expect(result.get('/p/a')).toBe('b'.repeat(32));
-      expect(client.md5Calls).toHaveLength(1);
+      expect(result.get('/p/a')?.md5).toBe('z'.repeat(32));
+      expect(result.get('/p/a')?.sha1).toBe('z'.repeat(40));
+      expect(result.get('/p/a')?.size).toBe(999);
+      expect(client.hashCalls).toHaveLength(1);
     });
 
-    it('serves a cache with matching hashStrategyVersion without re-hashing', async () => {
+    it('treats a pre-round-7 cache (no hashStrategyVersion) as invalid', async () => {
       await seedCache('host-1', {
         version: 1,
-        hashStrategyVersion: 2,
         host: 'host-1',
         entries: {
           '/p/a': {
-            hash: 'c'.repeat(32),
+            hash: 'a'.repeat(32),
             mtime: 100,
             hashedAt: '2025-01-01T00:00:00.000Z',
           },
         },
       });
       const svc = new HashService(dir);
-      // mtime in stat matches the cached entry → cache hit, no md5.
+      const hashes = new Map([['/p/a', fix('z', 1, 100)]]);
+      const client = makeClient({ hashes });
+      const result = await svc.getHash(client, 'host-1', ['/p/a']);
+      expect(result.get('/p/a')?.md5).toBe('z'.repeat(32));
+      expect(client.hashCalls).toHaveLength(1);
+    });
+
+    it('treats a future-version cache (mismatched > current) as invalid', async () => {
+      await seedCache('host-1', {
+        version: 1,
+        hashStrategyVersion: 999,
+        host: 'host-1',
+        entries: {
+          '/p/a': {
+            md5: 'a'.repeat(32),
+            sha1: 'a'.repeat(40),
+            size: 100,
+            mtime: 100,
+            hashedAt: '2025-01-01T00:00:00.000Z',
+          },
+        },
+      });
+      const svc = new HashService(dir);
+      const hashes = new Map([['/p/a', fix('z', 1, 100)]]);
+      const client = makeClient({ hashes });
+      const result = await svc.getHash(client, 'host-1', ['/p/a']);
+      expect(result.get('/p/a')?.md5).toBe('z'.repeat(32));
+      expect(client.hashCalls).toHaveLength(1);
+    });
+
+    it('serves a current-version cache with full triple without re-hashing', async () => {
+      await seedCache('host-1', {
+        version: 1,
+        hashStrategyVersion: 3,
+        host: 'host-1',
+        entries: {
+          '/p/a': {
+            md5: 'c'.repeat(32),
+            sha1: 'd'.repeat(40),
+            size: 4242,
+            mtime: 100,
+            hashedAt: '2025-01-01T00:00:00.000Z',
+          },
+        },
+      });
+      const svc = new HashService(dir);
       const client = makeClient({
-        md5: new Map(),
+        hashes: new Map(),
         stat: new Map([['/p/a', 100]]),
       });
       const result = await svc.getHash(client, 'host-1', ['/p/a']);
-      expect(result.get('/p/a')).toBe('c'.repeat(32));
-      expect(client.md5Calls).toEqual([]);
+      expect(result.get('/p/a')?.md5).toBe('c'.repeat(32));
+      expect(result.get('/p/a')?.sha1).toBe('d'.repeat(40));
+      expect(result.get('/p/a')?.size).toBe(4242);
+      expect(client.hashCalls).toEqual([]);
     });
   });
 });

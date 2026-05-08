@@ -63,8 +63,8 @@ import type {
   BulkCoreResult,
   BulkRomResult,
   CoreVisibilityChange,
+  HashRecord,
   IMisterClient,
-  Md5SumResult,
   MisterSecret,
   PrimeConnectResult,
   RomVisibilityChange,
@@ -662,11 +662,11 @@ export class FakeMisterClient implements IMisterClient {
     return out;
   }
 
-  async md5sumPaths(paths: readonly string[]): Promise<readonly Md5SumResult[]> {
+  async hashPaths(paths: readonly string[]): Promise<readonly HashRecord[]> {
     this.assertConnected();
     if (paths.length === 0) return [];
     await this.delay();
-    const out: Md5SumResult[] = [];
+    const out: HashRecord[] = [];
     for (const p of paths) {
       const local = this.toLocal(p);
       let st;
@@ -680,20 +680,22 @@ export class FakeMisterClient implements IMisterClient {
         throw err;
       }
       if (!st.isFile()) continue;
-      // Round 6: mirror the device-side `unzip -p | md5sum` path so a
-      // fake-client integration test produces the same hash the real
-      // client would. .zip wrappers get the inner content hashed;
-      // anything else gets the raw bytes hashed. mtime is the
-      // wrapper's mtime in both cases — cache invalidation tracks the
-      // wrapper, not the inner file.
+      // PR #16 round 2: compute md5 + sha1 + inner size in one pass.
+      // .zip wrappers get the inner-content hashed (mirroring the
+      // device-side `unzip -p | md5sum` / `sha1sum` / `wc -c`
+      // pipeline); other paths hash the raw bytes. mtime stays on
+      // the wrapper either way — cache invalidation tracks what the
+      // user touches, not the inner file.
       const lower = p.toLowerCase();
-      const hash = lower.endsWith('.zip')
-        ? await md5OfZipContents(local)
-        : md5OfBuffer(await fs.readFile(local));
-      if (hash === null) continue;
+      const hashes = lower.endsWith('.zip')
+        ? await hashZipContents(local)
+        : hashBuffer(await fs.readFile(local));
+      if (hashes === null) continue;
       out.push({
         path: p,
-        hash,
+        md5: hashes.md5,
+        sha1: hashes.sha1,
+        size: hashes.size,
         mtime: Math.floor(st.mtimeMs / 1000),
       });
     }
@@ -900,20 +902,31 @@ function isNodeError(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && 'code' in err;
 }
 
-function md5OfBuffer(buf: Buffer | Uint8Array): string {
-  return createHash('md5').update(buf).digest('hex');
+interface HashTriple {
+  readonly md5: string;
+  readonly sha1: string;
+  readonly size: number;
+}
+
+function hashBuffer(buf: Buffer | Uint8Array): HashTriple {
+  return {
+    md5: createHash('md5').update(buf).digest('hex'),
+    sha1: createHash('sha1').update(buf).digest('hex'),
+    size: buf.byteLength,
+  };
 }
 
 /**
- * Mirror the device-side `unzip -p <zip> | md5sum` pipeline. Reads
- * every entry concatenated, in zip-listing order, and md5s the
- * resulting stream. Matches what busybox `unzip -p` produces against
- * the same archive.
+ * Mirror the device-side three-pass pipeline (`unzip -p | md5sum`,
+ * `unzip -p | sha1sum`, `unzip -p | wc -c`) — but read the archive
+ * once and feed every entry concatenated through both hashers. Same
+ * byte stream as `unzip -p` produces, so the resulting hashes match
+ * what the real client computes against the same archive.
  *
  * Returns null on a corrupt or unreadable archive — the caller drops
  * the row, same as the device side does for `unzip -p` failures.
  */
-async function md5OfZipContents(localPath: string): Promise<string | null> {
+async function hashZipContents(localPath: string): Promise<HashTriple | null> {
   let zip: JSZip;
   try {
     const buf = await fs.readFile(localPath);
@@ -921,13 +934,21 @@ async function md5OfZipContents(localPath: string): Promise<string | null> {
   } catch {
     return null;
   }
-  const hash = createHash('md5');
+  const md5 = createHash('md5');
+  const sha1 = createHash('sha1');
+  let size = 0;
   for (const entry of Object.values(zip.files)) {
     if (entry.dir) continue;
     const bytes = await entry.async('uint8array');
-    hash.update(bytes);
+    md5.update(bytes);
+    sha1.update(bytes);
+    size += bytes.byteLength;
   }
-  return hash.digest('hex');
+  return {
+    md5: md5.digest('hex'),
+    sha1: sha1.digest('hex'),
+    size,
+  };
 }
 
 /**
