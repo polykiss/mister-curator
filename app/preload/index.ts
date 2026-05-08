@@ -10,11 +10,16 @@ import type {
   BulkCoreProgressEvent,
   ConnectResult,
   CoreVisibilityChangeWire,
+  MetadataPrefetchEvent,
   MisterApi,
   PickedKeyFile,
   RomVisibilityChangeWire,
   SystemFileMarkChangeWire,
 } from '@shared/preload-api';
+import type {
+  MetadataHint,
+  RomMetadata,
+} from '@shared/metadata-types';
 import type {
   BulkCoreResult,
   BulkRomResult,
@@ -158,6 +163,46 @@ const api: MisterApi = {
       classification,
     ),
   clearCache: () => invoke<void>(IPC_CHANNELS.clearCache),
+  // ─── PR #15: metadata pipeline ──────────────────────────────────
+  getRomMetadata: (
+    coreId: string,
+    romPath: string,
+    hint?: MetadataHint,
+  ) =>
+    invoke<RomMetadata | null>(
+      IPC_CHANNELS.getRomMetadata,
+      coreId,
+      romPath,
+      hint,
+    ),
+  prefetchHashes: (
+    allPaths: readonly string[],
+    options?: { readonly operationId?: string },
+  ) => invoke<void>(IPC_CHANNELS.prefetchHashes, allPaths, options),
+  prefetchMetadata: (
+    hashes: readonly string[],
+    options?: { readonly operationId?: string },
+  ) => invoke<void>(IPC_CHANNELS.prefetchMetadata, hashes, options),
+  clearMetadataCache: () => invoke<void>(IPC_CHANNELS.clearMetadataCache),
+  getBoxArtLocal: (url: string) =>
+    invoke<string | null>(IPC_CHANNELS.getBoxArtLocal, url),
+  onMetadataPrefetchProgress: (
+    handler: (event: MetadataPrefetchEvent) => void,
+  ) => {
+    const listener = (
+      _event: unknown,
+      payload: MetadataPrefetchEvent,
+    ): void => {
+      handler(payload);
+    };
+    ipcRenderer.on(IPC_CHANNELS.metadataPrefetchProgress, listener);
+    return () => {
+      ipcRenderer.removeListener(
+        IPC_CHANNELS.metadataPrefetchProgress,
+        listener,
+      );
+    };
+  },
 };
 
 contextBridge.exposeInMainWorld('mister', api);

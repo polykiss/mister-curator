@@ -64,8 +64,9 @@ export class ImageCache {
    */
   async fetch(
     url: string,
-    _opts: { readonly maxWidth?: number } = {},
+    opts?: { readonly maxWidth?: number },
   ): Promise<string | null> {
+    void opts; // maxWidth is reserved for the post-#15 resize path
     const cached = await this.getLocal(url);
     if (cached !== null) return cached;
 

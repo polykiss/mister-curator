@@ -1,5 +1,10 @@
 import type { ConnectionEvent } from '@shared/connection';
 import type {
+  MetadataHint,
+  PrefetchProgress,
+  RomMetadata,
+} from '@shared/metadata-types';
+import type {
   BulkCoreProgress,
   BulkCoreResult,
   BulkRomResult,
@@ -41,7 +46,28 @@ export const IPC_CHANNELS = {
   listFolderClassifications: 'mister:listFolderClassifications',
   setFolderClassification: 'mister:setFolderClassification',
   connectionEvent: 'mister:connectionEvent',
+  // PR #15 — metadata pipeline. No UI consumer in this PR; the
+  // channels are wired so PR #16/#17 has a stable contract.
+  getRomMetadata: 'mister:getRomMetadata',
+  prefetchHashes: 'mister:prefetchHashes',
+  prefetchMetadata: 'mister:prefetchMetadata',
+  clearMetadataCache: 'mister:clearMetadataCache',
+  getBoxArtLocal: 'mister:getBoxArtLocal',
+  metadataPrefetchProgress: 'mister:metadataPrefetchProgress',
 } as const;
+
+/** PR #15 prefetch progress kind. Discriminator for the wire event. */
+export type MetadataPrefetchKind = 'hash' | 'metadata';
+
+/**
+ * One progress tick from a long-running metadata prefetch. The
+ * `kind` discriminates "hashing the library" from "fetching metadata
+ * for the hashed library" — two phases of the same flow.
+ */
+export interface MetadataPrefetchEvent extends PrefetchProgress {
+  readonly operationId: string;
+  readonly kind: MetadataPrefetchKind;
+}
 
 /**
  * Wire-side bulk progress event. The renderer uses `operationId` to
@@ -236,6 +262,57 @@ export interface MisterApi {
    * (no-op).
    */
   clearCache(): Promise<void>;
+  // ─── PR #15: metadata pipeline ────────────────────────────────────
+  /**
+   * Hash the supplied ROM path on the device, then look up its
+   * metadata via ScreenScraper (primary) and TheGamesDB (fallback).
+   * Returns null when no session is active, when the file isn't a
+   * regular file, or when both upstreams miss.
+   *
+   * No UI consumer in PR #15 — PR #16/#17 wires this in. The
+   * `coreId` argument is unused in v0 but reserved for per-core
+   * scoping in a follow-up.
+   */
+  getRomMetadata(
+    coreId: string,
+    romPath: string,
+    hint?: MetadataHint,
+  ): Promise<RomMetadata | null>;
+  /**
+   * Background hash job for the entire ROM library. Fires
+   * `metadataPrefetchProgress` events keyed by `operationId` so the
+   * renderer can scope progress to the call it triggered.
+   */
+  prefetchHashes(
+    allPaths: readonly string[],
+    options?: { readonly operationId?: string },
+  ): Promise<void>;
+  /**
+   * Background metadata fetch for already-hashed ROMs. Subject to
+   * the ScreenScraper rate limit, so a 2000-entry library prefetch
+   * takes ~30 minutes. Progress fires per-hash.
+   */
+  prefetchMetadata(
+    hashes: readonly string[],
+    options?: { readonly operationId?: string },
+  ): Promise<void>;
+  /** Wipe the metadata + image caches. Hash cache is independent. */
+  clearMetadataCache(): Promise<void>;
+  /**
+   * Resolve a remote box-art URL to a local file path, downloading
+   * lazily on first request. Returns null on fetch failure or when
+   * the URL is empty.
+   */
+  getBoxArtLocal(url: string): Promise<string | null>;
+  /**
+   * Subscribe to `metadataPrefetchProgress` events from
+   * `prefetchHashes` / `prefetchMetadata`. Returns an unsubscribe
+   * function. The renderer matches `operationId` to the call it
+   * triggered.
+   */
+  onMetadataPrefetchProgress(
+    handler: (event: MetadataPrefetchEvent) => void,
+  ): () => void;
 }
 
 const VALID_CONNECTION_ERROR_CODES: ReadonlySet<ConnectionErrorCode> = new Set([

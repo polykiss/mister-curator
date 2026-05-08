@@ -52,10 +52,11 @@ export class MetadataOrchestrator {
    * cache policies per-core.
    */
   async getRomMetadata(
-    _coreId: string,
+    coreId: string,
     romPath: string,
-    hint: MetadataHint = {},
+    hint?: MetadataHint,
   ): Promise<RomMetadata | null> {
+    void coreId; // unused in v0; reserved for per-core scoping later
     const session = this.getActiveSession();
     if (session === null) return null;
 
@@ -67,7 +68,7 @@ export class MetadataOrchestrator {
     const hash = hashes.get(romPath);
     if (hash === undefined) return null;
 
-    return this.metadataService.getMetadata(hash, hint);
+    return this.metadataService.getMetadata(hash, hint ?? {});
   }
 
   /**

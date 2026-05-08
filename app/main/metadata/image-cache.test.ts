@@ -10,7 +10,9 @@ const URL_A = 'https://cdn.example/box-art-a.jpg';
 const URL_B = 'https://cdn.example/box-art-b.png';
 
 function imageResponse(bytes: Uint8Array, status = 200): Response {
-  return new Response(bytes, {
+  // Wrap in Buffer so the BodyInit overloads pick the right one
+  // across the TS/Node lib versions we target.
+  return new Response(Buffer.from(bytes), {
     status,
     headers: { 'content-type': 'image/jpeg' },
   });

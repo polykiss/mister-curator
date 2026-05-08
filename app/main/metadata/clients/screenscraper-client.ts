@@ -90,8 +90,9 @@ export class ScreenScraperClient {
    */
   async getByMd5(
     md5: string,
-    _hint: MetadataHint = {},
+    hint?: MetadataHint,
   ): Promise<RomMetadata | null> {
+    void hint; // v0 ignores the hint; reserved for future tie-breaking
     if (this.disabled) return null;
     if (!isMd5Hex(md5)) return null;
     return this.enqueue(() => this.fetchByMd5(md5));

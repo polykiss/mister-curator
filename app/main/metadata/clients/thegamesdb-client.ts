@@ -142,8 +142,10 @@ interface TgdbBoxartFile {
 export function mapTheGamesDbToMetadata(
   body: unknown,
   hash: string,
-  _hint: MetadataHint,
+  hint: MetadataHint,
 ): RomMetadata | null {
+  void hint; // v0 doesn't filter by the hint; the API call uses `name`
+  // already, and platform-aware tie-breaking lands in PR #16+.
   if (body === null || typeof body !== 'object') return null;
   const obj = body as Record<string, unknown>;
   const data = obj.data;

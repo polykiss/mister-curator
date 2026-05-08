@@ -12,6 +12,10 @@ import type {
   SystemFileMarkChangeWire,
 } from '@shared/preload-api';
 import type {
+  MetadataHint,
+  RomMetadata,
+} from '@shared/metadata-types';
+import type {
   BulkCoreResult,
   BulkRomResult,
   MisterSecret,
@@ -23,6 +27,7 @@ import type {
 } from '@shared/types';
 
 import type { ConnectionManager } from '@app/main/ipc/connection-manager';
+import type { MetadataOrchestrator } from '@app/main/metadata/metadata-orchestrator';
 import type { ProfileStore } from '@app/main/storage/profile-store';
 
 type IpcHandler<TArgs extends readonly unknown[], TResult> = (
@@ -45,9 +50,24 @@ function handle<TArgs extends readonly unknown[], TResult>(
   });
 }
 
+/**
+ * Forward a metadata-prefetch progress tick to the renderer. The wiring
+ * layer (`app/main/index.ts`) plumbs each window's `webContents.send`
+ * into here so the IPC handlers stay window-agnostic.
+ */
+export type MetadataPrefetchEmitter = (event: {
+  readonly operationId: string;
+  readonly kind: 'hash' | 'metadata';
+  readonly done: number;
+  readonly total: number;
+  readonly currentPath?: string;
+}) => void;
+
 export function registerIpcHandlers(
   manager: ConnectionManager,
   store: ProfileStore,
+  metadata: MetadataOrchestrator,
+  emitMetadataProgress: MetadataPrefetchEmitter,
 ): void {
   handle<[], MisterProfile[]>(IPC_CHANNELS.listProfiles, () => store.list());
 
@@ -152,6 +172,45 @@ export function registerIpcHandlers(
 
   handle<[], void>(IPC_CHANNELS.clearCache, () =>
     manager.clearCacheForCurrentHost(),
+  );
+
+  // ─── PR #15: metadata pipeline ─────────────────────────────────────
+  let nextMetadataOpId = 1;
+  const newOpId = (): string => `mop-${String(nextMetadataOpId++)}`;
+
+  handle<
+    [string, string, MetadataHint | undefined],
+    RomMetadata | null
+  >(IPC_CHANNELS.getRomMetadata, (coreId, romPath, hint) =>
+    metadata.getRomMetadata(coreId, romPath, hint ?? {}),
+  );
+
+  handle<
+    [readonly string[], { readonly operationId?: string } | undefined],
+    void
+  >(IPC_CHANNELS.prefetchHashes, async (allPaths, options) => {
+    const operationId = options?.operationId ?? newOpId();
+    await metadata.prefetchHashes(allPaths, (event) => {
+      emitMetadataProgress({ operationId, kind: 'hash', ...event });
+    });
+  });
+
+  handle<
+    [readonly string[], { readonly operationId?: string } | undefined],
+    void
+  >(IPC_CHANNELS.prefetchMetadata, async (hashes, options) => {
+    const operationId = options?.operationId ?? newOpId();
+    await metadata.prefetchMetadata(hashes, (event) => {
+      emitMetadataProgress({ operationId, kind: 'metadata', ...event });
+    });
+  });
+
+  handle<[], void>(IPC_CHANNELS.clearMetadataCache, () =>
+    metadata.clearMetadataCache(),
+  );
+
+  handle<[string], string | null>(IPC_CHANNELS.getBoxArtLocal, (url) =>
+    metadata.getBoxArtLocal(url),
   );
 
   ipcMain.handle(

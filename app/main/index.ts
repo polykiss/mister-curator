@@ -9,6 +9,12 @@ import type { CacheEvent } from '@app/main/cache/cache-types';
 import { createMisterClient } from '@app/main/clients';
 import { ConnectionManager } from '@app/main/ipc/connection-manager';
 import { registerIpcHandlers } from '@app/main/ipc/register';
+import { ScreenScraperClient } from '@app/main/metadata/clients/screenscraper-client';
+import { TheGamesDBClient } from '@app/main/metadata/clients/thegamesdb-client';
+import { HashService } from '@app/main/metadata/hash-service';
+import { ImageCache } from '@app/main/metadata/image-cache';
+import { MetadataOrchestrator } from '@app/main/metadata/metadata-orchestrator';
+import { MetadataService } from '@app/main/metadata/metadata-service';
 import { ProfileStore } from '@app/main/storage/profile-store';
 
 function resolveClientMode(): 'real' | 'fake' {
@@ -85,7 +91,62 @@ void app.whenReady().then(() => {
   });
   const manager = new ConnectionManager(client, profileStore, cache);
 
-  registerIpcHandlers(manager, profileStore);
+  // PR #15 metadata pipeline. The four services live under a single
+  // `<userData>/metadata/` root so the user can blow it all away in
+  // one rm. ScreenScraper runs anonymous-tier; TheGamesDB only fires
+  // when METADATA_THEGAMESDB_KEY is set in the environment. Either
+  // can be hard-disabled via METADATA_DISABLE_* flags.
+  const metadataRoot = path.join(app.getPath('userData'), 'metadata');
+  const hashService = new HashService(metadataRoot);
+  const screenScraper = new ScreenScraperClient({
+    disabled: process.env['METADATA_DISABLE_SCREENSCRAPER'] === '1',
+  });
+  const theGamesDb = new TheGamesDBClient({
+    apiKey: process.env['METADATA_THEGAMESDB_KEY'] ?? null,
+    disabled: process.env['METADATA_DISABLE_THEGAMESDB'] === '1',
+  });
+  const metadataService = new MetadataService(
+    metadataRoot,
+    screenScraper,
+    theGamesDb,
+  );
+  const imageCache = new ImageCache(path.join(metadataRoot, 'images'));
+  const metadataOrchestrator = new MetadataOrchestrator(
+    hashService,
+    metadataService,
+    imageCache,
+    () => manager.getActiveSession(),
+  );
+
+  // Aggregator for metadata-prefetch progress. The IPC handler calls
+  // this; we forward to every live BrowserWindow via webContents.send.
+  // (Same shape as `bulkCoreProgress` and `connectionStatusChanged`.)
+  const metadataPrefetchListeners = new Set<
+    (event: {
+      operationId: string;
+      kind: 'hash' | 'metadata';
+      done: number;
+      total: number;
+      currentPath?: string;
+    }) => void
+  >();
+  const emitMetadataProgress = (event: {
+    operationId: string;
+    kind: 'hash' | 'metadata';
+    done: number;
+    total: number;
+    currentPath?: string;
+  }): void => {
+    for (const fn of metadataPrefetchListeners) {
+      try {
+        fn(event);
+      } catch {
+        /* never let a window-listener error break a prefetch */
+      }
+    }
+  };
+
+  registerIpcHandlers(manager, profileStore, metadataOrchestrator, emitMetadataProgress);
 
   const window = createWindow();
 
@@ -102,6 +163,11 @@ void app.whenReady().then(() => {
   manager.onConnectionEvent((event) => {
     if (!window.isDestroyed()) {
       window.webContents.send(IPC_CHANNELS.connectionEvent, event);
+    }
+  });
+  metadataPrefetchListeners.add((event) => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.metadataPrefetchProgress, event);
     }
   });
 
@@ -121,6 +187,14 @@ void app.whenReady().then(() => {
       manager.onConnectionEvent((event) => {
         if (!newWindow.isDestroyed()) {
           newWindow.webContents.send(IPC_CHANNELS.connectionEvent, event);
+        }
+      });
+      metadataPrefetchListeners.add((event) => {
+        if (!newWindow.isDestroyed()) {
+          newWindow.webContents.send(
+            IPC_CHANNELS.metadataPrefetchProgress,
+            event,
+          );
         }
       });
     }
