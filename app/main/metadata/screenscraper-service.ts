@@ -807,16 +807,58 @@ function readSystemName(value: unknown): string | null {
   return null;
 }
 
+/**
+ * chore/search-and-filter-cleanup commit 3: prefer English for genre
+ * names.
+ *
+ * SS genre `noms` are LANGUAGE-keyed (`langue: 'en' | 'de' | 'fr' …`),
+ * NOT region-keyed. Pre-fix the code routed through `pickRegionalText`,
+ * which looks for the `region` field — never present on genres — and
+ * fell through to "first non-empty text," which depended on response
+ * order and surfaced German entries like "Kampf / Versus, Kampf"
+ * instead of the English "Fighting".
+ *
+ * Output is deduped case-insensitively in case SS lists the same genre
+ * twice (one game cataloged with both an "Action" and a duplicate
+ * "Action" entry under different SS genre IDs).
+ */
 function pickAllGenres(value: unknown): readonly string[] {
   if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
   const out: string[] = [];
   for (const g of value) {
     if (g === null || typeof g !== 'object') continue;
     const noms = (g as Record<string, unknown>).noms;
-    const name = pickRegionalText(noms);
-    if (name !== null) out.push(name);
+    const name = pickGenreNameEnglishFirst(noms);
+    if (name === null) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
   }
   return out;
+}
+
+/**
+ * Walk a SS `noms` array (`[ { langue: 'en', text: '...' }, ... ]`)
+ * and return the English entry's text when present, else the first
+ * non-empty text. Mirrors the language-preference logic
+ * `pickSynopsis` already uses for game descriptions.
+ */
+function pickGenreNameEnglishFirst(value: unknown): string | null {
+  if (!Array.isArray(value)) return null;
+  const items = value.filter(
+    (v): v is Record<string, unknown> =>
+      v !== null && typeof v === 'object' && 'text' in v,
+  );
+  const en = items.find((it) => it.langue === 'en');
+  if (en !== undefined && typeof en.text === 'string' && en.text.length > 0) {
+    return en.text;
+  }
+  for (const it of items) {
+    if (typeof it.text === 'string' && it.text.length > 0) return it.text;
+  }
+  return null;
 }
 
 function pickSynopsis(value: unknown): string | null {

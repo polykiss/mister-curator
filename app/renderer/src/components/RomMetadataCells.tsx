@@ -20,7 +20,7 @@ import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
 import { TableCell } from '@app/renderer/src/components/ui/table';
 import { cn } from '@app/renderer/src/lib/cn';
 import { formatBytes } from '@app/renderer/src/lib/format';
-import { abbreviateGenre } from '@app/renderer/src/lib/genre-format';
+import { formatGenreList } from '@app/renderer/src/lib/genre-format';
 import {
   displayGenre as displayGenreOf,
   displayName as displayNameOf,
@@ -308,12 +308,18 @@ export function RomMetadataInfoCells(
   const { dimmed, metadata, error } = props;
   const loading = metadata === undefined && !error;
   // PR-D2 (PR #29): user-override wins via `displayGenreOf` /
-  // `displayRatingOf`. The genre then goes through the same
-  // PR-C round 2 abbreviation pipeline.
-  const primaryGenre = pickPrimaryGenre(
+  // `displayRatingOf`. chore/search-and-filter-cleanup commit 3:
+  // run the cached value through `formatGenreList` first so multi-
+  // language and slash-duplicated forms ("Action / Action",
+  // "RPG / Role-Playing Game") collapse before the primary-pick.
+  // `formatGenreList` also applies the abbreviation map per slash-
+  // token, so the cell's abbreviation no longer needs a separate
+  // call.
+  const cleanedGenre = formatGenreList(
     metadata ? displayGenreOf(metadata) : null,
   );
-  const displayGenre = abbreviateGenre(primaryGenre);
+  const primaryGenre = pickPrimaryGenre(cleanedGenre);
+  const displayGenre = primaryGenre ?? '';
   const rating = formatRating(
     metadata ? displayRatingOf(metadata) : null,
   );
@@ -323,7 +329,7 @@ export function RomMetadataInfoCells(
       <TableCell className="w-28 truncate">
         <span
           className={cn('truncate text-body-sm', !dimmed && 'text-fg-muted')}
-          title={primaryGenre ?? undefined}
+          title={cleanedGenre !== '' ? cleanedGenre : undefined}
         >
           {loading ? (
             <DashSkeleton width="w-16" />
