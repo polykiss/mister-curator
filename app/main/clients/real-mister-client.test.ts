@@ -599,6 +599,75 @@ describe('RealMisterClient', () => {
       expect(vectrex?.recursiveRomCount).toBe(0);
     });
 
+    it('PR-B (PR #24): drops .png / .ips / .nfo etc. inside non-system folders via launchable-extension filter', async () => {
+      // The original bug: NES showed "~680 ROMs" when only ~25
+      // launchable .nes files existed. The inflation came from
+      // .png screenshots, .ips ROM-hack patches, .nfo notes, etc.
+      // inside `Hacks/`, `ScreenShots/`, etc. — folders NOT in
+      // SYSTEM_FOLDER_NAMES. shouldCountAsRom alone (negative
+      // filter) let them through; the launchable-extension
+      // positive filter drops them.
+      //
+      // Fixture: NES with `Hacks/` (container shape — many .ips
+      // patches + a few .nes) and `ScreenShots/` (container shape
+      // — many .png). Top-level: 3 actual .nes ROMs.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      const fLines: string[] = [];
+      // Hacks/: 50 .ips patches (excluded) + 2 patched .nes (counted)
+      for (let i = 0; i < 50; i += 1) {
+        fLines.push(`F\tNES/Hacks/patch-${String(i)}.ips`);
+      }
+      fLines.push('F\tNES/Hacks/SuperMarioHack.nes');
+      fLines.push('F\tNES/Hacks/ZeldaHack.nes');
+      // ScreenShots/: 100 .png (all excluded)
+      for (let i = 0; i < 100; i += 1) {
+        fLines.push(`F\tNES/ScreenShots/screen-${String(i)}.png`);
+      }
+      // SE-lines for classifyFolder (need 5+ same-extension or
+      // subdirs to classify as container). Use the .ips files.
+      const seLines: string[] = [];
+      for (let i = 0; i < 50; i += 1) {
+        seLines.push(`SE\tNES/Hacks/f/patch-${String(i)}.ips`);
+      }
+      for (let i = 0; i < 100; i += 1) {
+        seLines.push(`SE\tNES/ScreenShots/f/screen-${String(i)}.png`);
+      }
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'P\tConsole\t/media/fat/_Console/NES_20240520.rbf',
+            'G\tNES',
+            'GF\tNES\tMario.nes',
+            'GF\tNES\tZelda.nes',
+            'GF\tNES\tMetroid.nes',
+            'GD\tNES\tHacks',
+            'GD\tNES\tScreenShots',
+            ...seLines,
+            ...fLines,
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const cores = await client.listAllCoresWithFiles();
+      const nes = cores.find((c) => c.id === 'NES');
+      expect(nes).toBeDefined();
+      // romCount is `filteredFiles.length + filteredDirs.length` —
+      // top-level visible entries that pass `shouldCountAsRom` and
+      // (for files) `isLaunchableRomExtension`. Files: 3 .nes. Dirs:
+      // Hacks + ScreenShots (both pass — neither is a system folder
+      // name). → 5.
+      expect(nes?.romCount).toBe(5);
+      // recursiveRomCount: 3 top-level files (each contributes 1) +
+      // Hacks/ container (50 .ips filtered out, 2 .nes counted → 2) +
+      // ScreenShots/ container (100 .png ALL filtered out → 0) = 5.
+      // Pre-PR-B this would have been ~155 (3 + 52 from Hacks + 100
+      // from ScreenShots) — the inflation this PR is fixing.
+      expect(nes?.recursiveRomCount).toBe(5);
+    });
+
     it('aggregates F-lines through shouldCountAsRom — Vectrex/Overlays excluded', async () => {
       // Regression: pre-Round-2, this shape contributed 90 to the
       // recursive count. The unified filter now drops every file

@@ -1,6 +1,6 @@
 import { MISTER_GAMES_DIR } from '@shared/constants';
 import { emit, type DiagnosticsCollector } from '@shared/diag';
-import { classifyFolder } from '@shared/folder-rom';
+import { classifyFolder, isLaunchableRomExtension } from '@shared/folder-rom';
 import {
   isAutoDetectedSystemFile,
   isAutoDetectedSystemFolder,
@@ -315,13 +315,23 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     // Single-source-of-truth filter: shouldCountAsRom decides whether
     // each top-level entry contributes to the cores-list count.
     // Same function listRoms uses, so the two paths can't drift apart.
+    //
+    // PR-B (PR #24): top-level FILES additionally require a
+    // launchable ROM extension (.nes/.smc/.cue/...). The negative
+    // shouldCountAsRom filter alone let .nfo / .pdf / .dat at the
+    // top level inflate counts. Folders (filteredDirs below) keep
+    // shouldCountAsRom-only — atomic-vs-container classification
+    // happens later in computeRecursiveRomCount and decides
+    // whether the folder contributes 1 (one game) or its filtered
+    // recursive file count (NEOGEO-shape container).
     const filteredFiles = gd.files.filter((f) => {
-      const counted = shouldCountAsRom({
+      const passesSystemFilter = shouldCountAsRom({
         relPath: f,
         isDirectory: false,
         coreId: visibleName,
         marks,
       });
+      const counted = passesSystemFilter && isLaunchableRomExtension(f);
       emit(diag, {
         kind: 'system-filter',
         coreId: visibleName,
@@ -779,8 +789,20 @@ function computeRecursiveRomCount(
       // Container folder: contribute the recursive file count. Falls
       // back to immediate file + dir count when the client didn't
       // supply a precomputed total.
+      //
+      // PR-B (PR #24): the fallback now filters `sub.files` by
+      // `isLaunchableRomExtension` so it stays in sync with the
+      // F-line aggregation upstream (which applies the same filter).
+      // Without this, a subfolder whose F-lines all got filtered
+      // out (.png-only ScreenShots/, .ips-only Hacks/) would report
+      // `recursiveFileCount === undefined`, the fallback would fire,
+      // and the unfiltered SE-line `files.length` would re-introduce
+      // the inflation. `dirs.length` is kept unfiltered — every dir
+      // is still treated as a contributing entry (1 ROM each via the
+      // atomic-vs-container heuristic when its turn comes around).
       const recursive =
-        sub.recursiveFileCount ?? sub.files.length + sub.dirs.length;
+        sub.recursiveFileCount ??
+        sub.files.filter(isLaunchableRomExtension).length + sub.dirs.length;
       const recursiveHidden = sub.recursiveHiddenFileCount ?? 0;
       total += recursive;
       let hiddenContribution: number;

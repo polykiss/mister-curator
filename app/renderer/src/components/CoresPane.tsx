@@ -443,43 +443,30 @@ function densityValueFor(core: CoreEntry): number {
 }
 
 /**
- * Cores-list count summary. When the recursive ROM count exceeds the
- * top-level item count (i.e. the core has at least one container
- * folder that the matcher walked into), we surface BOTH numbers:
+ * Cores-list count summary. PR-B (PR #24): one exact integer per core
+ * — the recursive-walk launchable-ROM count from the matcher. The
+ * previous "X folders · ~Y ROMs" breakdown was dropped along with
+ * the "~" tilde:
  *
- *   "9 folders · ~300 ROMs"
+ *   • Folders are no longer a distinct concept in the sidebar — they
+ *     drill down into contents and contribute their filtered file
+ *     counts (or 1 for atomic folders) to the single number here.
+ *   • The "~" tilde meant "approximate". The matcher's count IS now
+ *     exact (positive launchable-extension filter on top of the
+ *     existing system-file filter — no more .png / .ips / .nfo
+ *     inflation).
  *
- * The folder count is `romCount` (top-level entries after the system-
- * file filter); the ROM total is the recursive-walk approximation.
- * The `~` is intentional — recursive counts can over- or under-count
- * (non-standard ROM extensions, atomic folders nested inside
- * containers, etc.). Single-number form is used when the two agree.
- *
- * Round 5 simplified the model: every non-arcade core renders this
- * summary, even cores without a games dir (they show `0`). No special
- * "no games dir" label, no "hidden externally" label.
+ * Falls back to `romCount` when `recursiveRomCount` is undefined
+ * (matcher input lacked subfolder data — shouldn't happen in
+ * production, kept for legacy fixture compatibility). The hidden-
+ * count parenthetical stays — it's distinct information (how many
+ * of the visible total are dot-prefixed).
  */
 function CoreCountSummary({ core }: { readonly core: CoreEntry }): JSX.Element {
-  const recursive = core.recursiveRomCount;
-  const hasBreakdown =
-    recursive !== undefined && recursive !== core.romCount && core.romCount > 0;
-  if (hasBreakdown) {
-    return (
-      <>
-        <span className="min-w-[2.5rem] text-right">{core.romCount}</span>
-        <span className="font-sans text-fg-disabled">folders ·</span>
-        <span>~{recursive}</span>
-        <span className="font-sans text-fg-disabled">ROMs</span>
-        {core.hiddenCount > 0 ? (
-          <span className="text-fg-disabled">({core.hiddenCount} hidden)</span>
-        ) : null}
-      </>
-    );
-  }
-  const single = recursive ?? core.romCount;
+  const total = core.recursiveRomCount ?? core.romCount;
   return (
     <>
-      <span className="min-w-[2.5rem] text-right">{single}</span>
+      <span className="min-w-[2.5rem] text-right">{total}</span>
       {core.hiddenCount > 0 ? (
         <span className="text-fg-disabled">({core.hiddenCount} hidden)</span>
       ) : null}

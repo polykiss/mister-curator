@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   classifyFolder,
+  isLaunchableRomExtension,
   resolveClassification,
   type FolderContents,
 } from '@shared/folder-rom';
@@ -287,5 +288,121 @@ describe('resolveClassification — override layer', () => {
   it('preserves the heuristic call when no override is present', () => {
     expect(resolveClassification('container', undefined)).toBe('container');
     expect(resolveClassification('atomic', undefined)).toBe('atomic');
+  });
+});
+
+describe('isLaunchableRomExtension — PR-B (PR #24) positive ROM filter', () => {
+  // The cores-list count had been inflated by anything that passed the
+  // negative `shouldCountAsRom` filter (no system-folder ancestor, not
+  // BIOS-named) regardless of extension. Real-MiSTer NES showed ~680
+  // ROMs vs 25 actual because .png screenshots, .ips ROM-hack patches,
+  // .nfo notes etc. inside non-system folders all counted. This filter
+  // is the positive layer that excludes those by extension.
+
+  describe('common cartridge formats — true', () => {
+    it.each([
+      ['.nes', 'NES cartridge'],
+      ['.smc', 'SNES cartridge'],
+      ['.sfc', 'SNES cartridge (alt)'],
+      ['.gba', 'Game Boy Advance'],
+      ['.gb', 'Game Boy'],
+      ['.gbc', 'Game Boy Color'],
+      ['.md', 'Sega Genesis / Mega Drive'],
+      ['.zip', 'Archived cartridge dump'],
+      ['.7z', 'Archived cartridge dump (7z)'],
+      ['.bin', 'Generic binary cartridge'],
+    ])('counts %s files (%s)', (ext) => {
+      expect(isLaunchableRomExtension(`Game${ext}`)).toBe(true);
+    });
+  });
+
+  describe('disc image formats — true', () => {
+    it.each([
+      ['.cue', 'CUE sheet (Saturn / MegaCD / etc.)'],
+      ['.gdi', 'Dreamcast GDI'],
+      ['.iso', 'ISO image'],
+      ['.chd', 'Compressed Hunks of Data'],
+    ])('counts %s files (%s)', (ext) => {
+      expect(isLaunchableRomExtension(`Disc${ext}`)).toBe(true);
+    });
+  });
+
+  describe('PR-B (PR #24) extension expansions — true', () => {
+    // These extensions weren't in the pre-PR-B `CART_EXTENSIONS` list
+    // because no path needed them (`classifyFolder` could fall back
+    // to `unknown → atomic`). The cores-list count needs them to
+    // recognize C64 disk images (.d64), Famicom Disk System (.fds),
+    // generic .rom files, etc. as launchable.
+    it.each([
+      ['.d64', 'Commodore 64 disk image'],
+      ['.t64', 'Commodore 64 tape archive'],
+      ['.crt', 'Commodore 64 cartridge'],
+      ['.prg', 'Commodore 64 program'],
+      ['.rom', 'Generic ROM (BIOS-named .rom files filtered separately)'],
+      ['.fds', 'Famicom Disk System'],
+      ['.unf', 'NES UNIF format'],
+      ['.unif', 'NES UNIF format (long)'],
+      ['.atr', 'Atari 8-bit disk image'],
+      ['.xex', 'Atari 8-bit executable'],
+    ])('counts %s files (%s)', (ext) => {
+      expect(isLaunchableRomExtension(`Game${ext}`)).toBe(true);
+    });
+  });
+
+  describe('non-ROM extensions — false (this is the bug fix)', () => {
+    it.each([
+      ['.pal', 'NES palette file (Palettes/ folder content)'],
+      ['.ips', 'ROM-hack patch (Hacks/ folder content)'],
+      ['.nfo', 'Release notes'],
+      ['.dat', 'Data table (cheat list, mapping)'],
+      ['.png', 'Screenshot'],
+      ['.jpg', 'Box art image'],
+      ['.pdf', 'Manual'],
+      ['.txt', 'Readme'],
+      ['.sav', 'Save state'],
+      ['.srm', 'SRAM dump'],
+      ['.nsf', 'NES Sound File (music, not playable)'],
+      ['.xml', 'Config (also caught by shouldCountAsRom)'],
+      ['.ini', 'Config (also caught by shouldCountAsRom)'],
+    ])('does NOT count %s files (%s)', (ext) => {
+      expect(isLaunchableRomExtension(`File${ext}`)).toBe(false);
+    });
+  });
+
+  describe('case sensitivity', () => {
+    it('matches uppercase extensions', () => {
+      expect(isLaunchableRomExtension('GAME.NES')).toBe(true);
+      expect(isLaunchableRomExtension('disc.CUE')).toBe(true);
+      expect(isLaunchableRomExtension('art.PNG')).toBe(false);
+    });
+
+    it('matches mixed-case extensions', () => {
+      expect(isLaunchableRomExtension('Game.NeS')).toBe(true);
+      expect(isLaunchableRomExtension('art.Png')).toBe(false);
+    });
+  });
+
+  describe('edge cases', () => {
+    it('returns false for files with no extension', () => {
+      expect(isLaunchableRomExtension('readme')).toBe(false);
+      expect(isLaunchableRomExtension('LICENSE')).toBe(false);
+    });
+
+    it('returns false for empty string', () => {
+      expect(isLaunchableRomExtension('')).toBe(false);
+    });
+
+    it('treats dot-prefixed names correctly — extension is what follows the LAST dot', () => {
+      // `.gitkeep` has extension `.gitkeep` (everything after the
+      // leading dot) — not in the launchable list.
+      expect(isLaunchableRomExtension('.gitkeep')).toBe(false);
+      // `.hidden.nes` has extension `.nes` — last-dot rule applies.
+      expect(isLaunchableRomExtension('.hidden.nes')).toBe(true);
+    });
+
+    it('handles multi-dot filenames by using the last dot', () => {
+      expect(isLaunchableRomExtension('Game.with.dots.nes')).toBe(true);
+      expect(isLaunchableRomExtension('Game (USA, v1.1).png')).toBe(false);
+    });
   });
 });
