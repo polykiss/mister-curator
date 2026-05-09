@@ -103,3 +103,21 @@ describe('isOsMetadataDir — well-known directories', () => {
     expect(isOsMetadataDir('lost-found')).toBe(false); // hyphen, not plus
   });
 });
+
+describe('isOsMetadataFile — chore/search-and-filter-cleanup commit 4 four-case matrix', () => {
+  // The user report singled out four shapes that need the right
+  // behavior. The filter has handled "._" since the 2244a94 commit
+  // (when this module landed) — these tests pin all four together so
+  // the contract is obvious in one block. If the user still sees
+  // "._" files in the listing, the bug is upstream of this helper
+  // (a code path that bypasses the filter entirely), not in the
+  // helper's classification logic.
+  it.each([
+    ['._Foo.zip', true, 'AppleDouple — filtered out'],
+    ['.Foo.zip', false, 'user-hidden ROM — kept (dimmed in UI)'],
+    ['Foo.zip', false, 'visible ROM — kept'],
+    ['._.DS_Store', true, 'AppleDouple shadow of .DS_Store — filtered out'],
+  ])('classifies %s as filtered=%s (%s)', (filename, expected) => {
+    expect(isOsMetadataFile(filename)).toBe(expected);
+  });
+});

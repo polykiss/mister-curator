@@ -1294,6 +1294,56 @@ describe('RealMisterClient', () => {
       expect(folders).toHaveLength(1);
       expect(folders[0]?.sizeBytes).toBe(40960 + 8192);
     });
+
+    // chore/search-and-filter-cleanup commit 4 — pin AppleDouble + OS
+    // metadata are filtered out of the row listing end-to-end. The
+    // shared/library-filter helper has handled this since 2244a94 and
+    // is wired into listRoms; this integration test pins the wire.
+    // FakeMisterClient's filesystem-backed test suite already covers
+    // the same surface; this one adds the find-output → Rom[]
+    // pathway specific to the real client.
+    describe('AppleDouble + OS-metadata exclusion', () => {
+      it('drops "._" files at every depth and inside .AppleDouble/', async () => {
+        const client = new RealMisterClient();
+        await client.connect(profile, secret);
+        mocks.execCommand.mockClear();
+        // Find output mixes the four cases from the spec plus a
+        // nested .AppleDouble subtree to confirm ancestor-poison.
+        mocks.execCommand.mockResolvedValueOnce(
+          execOk(
+            [
+              // Spec four-case matrix at top level:
+              'f\t._Foo.zip\t4096', // AppleDouble — must drop
+              'f\t.Foo.zip\t40960', // user-hidden ROM — must keep
+              'f\tFoo.zip\t40960', // visible ROM — must keep
+              'f\t._.DS_Store\t4096', // AppleDouble shadow — must drop
+              // .DS_Store itself (not _._) — must drop via exact-name match.
+              'f\t.DS_Store\t6148',
+              // .AppleDouble/ subtree — must drop via ancestor poison.
+              'd\t.AppleDouble\t0',
+              'f\t.AppleDouble/Foo.zip\t4096',
+              'f\t.AppleDouble/.DS_Store\t4096',
+              // AppleDouble inside an atomic-shape disc folder.
+              'd\tDisc Game\t0',
+              'f\tDisc Game/Game.cue\t512',
+              'f\tDisc Game/Game.bin\t1048576',
+              'f\tDisc Game/._Game.cue\t4096',
+            ].join('\n'),
+          ),
+        );
+        const roms = await client.listRoms('NES');
+        const filenames = roms.map((r) => r.filename).sort();
+        // Expected: only the two top-level real ROMs and the disc folder.
+        expect(filenames).toEqual(['.Foo.zip', 'Disc Game', 'Foo.zip']);
+        // Negative pins — no AppleDouble or OS-metadata names appear
+        // in the row listing.
+        for (const name of filenames) {
+          expect(name.startsWith('._')).toBe(false);
+          expect(name.toLowerCase()).not.toBe('.ds_store');
+          expect(name).not.toBe('.AppleDouble');
+        }
+      });
+    });
   });
 
   describe('setRomVisibility', () => {
