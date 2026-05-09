@@ -33,6 +33,7 @@ import {
   RomNameYearStack,
   RomThumbnailCell,
 } from '@app/renderer/src/components/RomMetadataCells';
+import type { RomMetadata } from '@shared/metadata-types';
 import { Button } from '@app/renderer/src/components/ui/button';
 import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
@@ -141,6 +142,50 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   useEffect(() => {
     void ensureRoms(core.id, subPath);
   }, [core.id, subPath, ensureRoms]);
+
+  // PR #20 round 2 — list-view streaming prefetch. ONE batched IPC
+  // call per `roms` change, with per-path results streamed back as
+  // they settle. Replaces the round-1 per-row hooks that fired N
+  // parallel `getRomMetadata` calls and tipped over WiFi-attached
+  // MiSTers (each call cost a sequential SSH `statWitnesses`
+  // round-trip).
+  //
+  // State shape: undefined-by-key = not-yet-resolved (loading);
+  // present = settled (matched / unmatched / error).
+  const [metadataByPath, setMetadataByPath] = useState<
+    Record<string, { metadata: RomMetadata | null; error: boolean }>
+  >({});
+  useEffect(() => {
+    setMetadataByPath({});
+    if (!roms || roms.length === 0) return;
+    // Folder-kind ROMs aren't hashed by the metadata pipeline; the
+    // prefetch can skip them and the renderer falls through to
+    // filename rendering for them.
+    const filePaths = roms
+      .filter((r) => r.kind === 'file')
+      .map((r) => r.path);
+    if (filePaths.length === 0) return;
+    // Operation id scopes the streamed events to THIS pane mount —
+    // a quick navigation away starts a fresh prefetch with a new
+    // operationId; events from the in-flight prior prefetch are
+    // ignored by the listener filter.
+    const operationId = `pane-${core.id}-${String(Date.now())}-${String(
+      Math.random(),
+    )}`;
+    const unsubscribe = window.mister.onRomMetadataResolved((event) => {
+      if (event.operationId !== operationId) return;
+      setMetadataByPath((prev) => ({
+        ...prev,
+        [event.path]: { metadata: event.metadata, error: event.error },
+      }));
+    });
+    void window.mister.prefetchRomsMetadata(core.id, filePaths, {
+      operationId,
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [roms, core.id]);
 
   // System-file classification is keyed on (filename, kind). Cache for
   // the current rom list so the renderer doesn't re-classify on every
@@ -803,6 +848,13 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                 const isSelected = selected.has(rom.filename);
                 const isSystem = systemFlags.get(rom.filename) === true;
                 const isDimmed = rom.hidden || isSystem;
+                // PR #20 round 2: metadata streamed from the parent's
+                // prefetch effect. undefined = loading; entry present
+                // = settled (metadata may be null = unmatched, or
+                // error = true = fetch failed).
+                const metadataState = metadataByPath[rom.path];
+                const metadata = metadataState?.metadata;
+                const fetchError = metadataState?.error ?? false;
                 return (
                   <TableRow
                     key={rom.filename}
@@ -830,11 +882,16 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         onChange={(e) => onToggleSelect(rom.filename, e.target.checked)}
                       />
                     </TableCell>
-                    {/* PR #20 round 1: thumbnail cell. Lazy-loads SS or
-                        libretro art via the per-row useBoxArt hook;
-                        skeleton while loading, ImageOff placeholder
-                        when no art is available. */}
-                    <RomThumbnailCell rom={rom} dimmed={isDimmed} />
+                    {/* PR #20 round 2: thumbnail cell. Metadata
+                        streamed from the parent prefetch; box-art
+                        bytes still fetched per-row via useBoxArt
+                        once the URL resolves. */}
+                    <RomThumbnailCell
+                      rom={rom}
+                      dimmed={isDimmed}
+                      metadata={metadata}
+                      error={fetchError}
+                    />
                     <TableCell
                       className={cn(
                         'truncate',
@@ -866,6 +923,8 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                       <RomNameYearStack
                         rom={rom}
                         dimmed={isDimmed}
+                        metadata={metadata}
+                        error={fetchError}
                         leadingIcon={
                           isSystem ? (
                             <Settings
@@ -893,7 +952,12 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         The v0 numeric Size column is retired — the
                         density bar already encodes size visually,
                         which buys back horizontal room for these. */}
-                    <RomMetadataInfoCells rom={rom} dimmed={isDimmed} />
+                    <RomMetadataInfoCells
+                      rom={rom}
+                      dimmed={isDimmed}
+                      metadata={metadata}
+                      error={fetchError}
+                    />
                     {/* MoreHorizontal lives left of the density+eye
                         right-edge stack (Round 3 / SYSTEM.md §5). The
                         eye toggle owns the far-right slot so the

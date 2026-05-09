@@ -62,6 +62,13 @@ export const IPC_CHANNELS = {
   // custom protocol handler is the structural follow-up.
   getBoxArtBytes: 'mister:getBoxArtBytes',
   metadataPrefetchProgress: 'mister:metadataPrefetchProgress',
+  // PR #20 round 2 — list-view streaming prefetch. Replaces the
+  // round-1 per-row IPC pattern (32 parallel `getRomMetadata`
+  // calls per pane mount overwhelmed WiFi-attached MiSTers). The
+  // container fires one `prefetchRomsMetadata` and subscribes to
+  // `romMetadataResolved` events keyed on operationId.
+  prefetchRomsMetadata: 'mister:prefetchRomsMetadata',
+  romMetadataResolved: 'mister:romMetadataResolved',
   // Round 3 (OpenVGDB). The renderer prompts the user to download
   // the ~50MB SQLite snapshot; main pulls it down + opens it.
   ensureMetadataDatabase: 'mister:ensureMetadataDatabase',
@@ -70,6 +77,20 @@ export const IPC_CHANNELS = {
 
 /** PR #15 prefetch progress kind. Discriminator for the wire event. */
 export type MetadataPrefetchKind = 'hash' | 'metadata';
+
+/**
+ * PR #20 round 2 — per-path resolution event from the list-view
+ * streaming prefetch. The renderer matches `operationId` to the
+ * prefetch call it triggered and updates per-row state by `path`.
+ * `error: true` means the upstream fetch failed (e.g., SSH dropped);
+ * `metadata: null, error: false` means a clean no-match.
+ */
+export interface RomMetadataResolvedEvent {
+  readonly operationId: string;
+  readonly path: string;
+  readonly metadata: RomMetadata | null;
+  readonly error: boolean;
+}
 
 /**
  * One progress tick from a long-running metadata prefetch. The
@@ -361,6 +382,32 @@ export interface MisterApi {
    */
   onMetadataPrefetchProgress(
     handler: (event: MetadataPrefetchEvent) => void,
+  ): () => void;
+  /**
+   * PR #20 round 2 — list-view streaming prefetch. Hashes all
+   * supplied paths in one batched SSH round-trip, then iterates
+   * per-path metadata sequentially (gated by SS rate limit). Emits
+   * one `romMetadataResolved` event per path as it settles. Returns
+   * after every path has been emitted.
+   *
+   * The renderer fires this once per RomsPane mount instead of one
+   * `getRomMetadata` per row — the round-1 pattern issued N
+   * sequential SSH `statWitnesses` calls per render and tipped over
+   * WiFi-attached MiSTers.
+   */
+  prefetchRomsMetadata(
+    coreId: string,
+    paths: readonly string[],
+    options?: { readonly operationId?: string },
+  ): Promise<void>;
+  /**
+   * Subscribe to per-path resolution events from
+   * `prefetchRomsMetadata`. Returns an unsubscribe function. The
+   * renderer matches `operationId` to the prefetch call it
+   * triggered and ignores stale events from a prior pane mount.
+   */
+  onRomMetadataResolved(
+    handler: (event: RomMetadataResolvedEvent) => void,
   ): () => void;
   /**
    * Round 3: kick off (or check on) the OpenVGDB SQLite download.

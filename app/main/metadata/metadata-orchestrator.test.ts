@@ -290,6 +290,154 @@ describe('MetadataOrchestrator', () => {
     expect(hashService.getHash).not.toHaveBeenCalled();
   });
 
+  describe('getRomsMetadata (PR #20 round 2 — list-view streaming prefetch)', () => {
+    it('hashes all paths in ONE batched HashService call (collapses N IPC into 1 SSH)', async () => {
+      // Reproduces the round-1 hotfix scenario: 32 paths shouldn't
+      // cost 32 sequential SSH `statWitnesses` round-trips.
+      const paths: string[] = [];
+      const hashEntries = new Map<string, HashEntry>();
+      for (let i = 0; i < 32; i += 1) {
+        const p = `/p/snes-${String(i)}.sfc`;
+        const md5 = String(i).padStart(32, '0');
+        paths.push(p);
+        hashEntries.set(p, buildHashEntry(md5));
+      }
+      const meta = buildMeta(HASH, 'X');
+      const { orchestrator, hashService } = makeOrchestrator({
+        hashEntries,
+        meta,
+      });
+      const events: {
+        path: string;
+        metadata: unknown;
+        error: boolean;
+      }[] = [];
+      await orchestrator.getRomsMetadata('SNES', paths, (e) => events.push(e));
+      // ONE batched call to hashService — not 32. This is the
+      // structural fix for the round-1 SSH-overload bug.
+      expect(hashService.getHash).toHaveBeenCalledTimes(1);
+      expect(hashService.getHash).toHaveBeenCalledWith(
+        expect.anything(),
+        'host-1',
+        paths,
+      );
+      // One event per path, in order.
+      expect(events).toHaveLength(32);
+      expect(events.map((e) => e.path)).toEqual(paths);
+      expect(events.every((e) => !e.error)).toBe(true);
+    });
+
+    it('emits unmatched (no error) for every path when no session is active', async () => {
+      const { orchestrator, hashService } = makeOrchestrator({
+        session: null,
+      });
+      const events: {
+        path: string;
+        metadata: unknown;
+        error: boolean;
+      }[] = [];
+      await orchestrator.getRomsMetadata('SNES', ['/p/a', '/p/b'], (e) =>
+        events.push(e),
+      );
+      expect(hashService.getHash).not.toHaveBeenCalled();
+      expect(events).toHaveLength(2);
+      for (const e of events) {
+        expect(e.metadata).toBeNull();
+        expect(e.error).toBe(false);
+      }
+    });
+
+    it('emits error=true for every path when the hash batch throws (SSH dropped mid-flight)', async () => {
+      const { orchestrator } = makeOrchestrator({
+        hashEntries: new Map([['/p/a', buildHashEntry(HASH)]]),
+      });
+      // Override the stub to simulate a mid-flight SSH failure.
+      (
+        (orchestrator as unknown as {
+          hashService: { getHash: ReturnType<typeof vi.fn> };
+        }).hashService.getHash
+      ).mockReset();
+      (
+        (orchestrator as unknown as {
+          hashService: { getHash: ReturnType<typeof vi.fn> };
+        }).hashService.getHash
+      ).mockRejectedValue(new Error('RealMisterClient is not connected'));
+      const events: {
+        path: string;
+        metadata: unknown;
+        error: boolean;
+      }[] = [];
+      await orchestrator.getRomsMetadata('SNES', ['/p/a', '/p/b', '/p/c'], (e) =>
+        events.push(e),
+      );
+      expect(events).toHaveLength(3);
+      for (const e of events) {
+        expect(e.metadata).toBeNull();
+        expect(e.error).toBe(true);
+      }
+    });
+
+    it('per-path metadata failure is isolated — subsequent paths still emit', async () => {
+      const paths = ['/p/a', '/p/b', '/p/c'];
+      const hashEntries = new Map<string, HashEntry>();
+      for (const p of paths) hashEntries.set(p, buildHashEntry(HASH));
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries,
+        meta: buildMeta(HASH, 'X'),
+      });
+      // Throw on the SECOND call only.
+      let call = 0;
+      (metadataService.getMetadata as ReturnType<typeof vi.fn>).mockReset();
+      (metadataService.getMetadata as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          call += 1;
+          if (call === 2) throw new Error('boom');
+          return buildMeta(HASH, 'X');
+        },
+      );
+      const events: {
+        path: string;
+        metadata: unknown;
+        error: boolean;
+      }[] = [];
+      await orchestrator.getRomsMetadata('SNES', paths, (e) => events.push(e));
+      expect(events).toHaveLength(3);
+      expect(events[0]?.error).toBe(false);
+      expect(events[1]?.error).toBe(true);
+      expect(events[2]?.error).toBe(false);
+    });
+
+    it('emits unmatched (no error) for paths not present in the hash result', async () => {
+      // E.g., file vanished from the device between scan and hash.
+      const { orchestrator } = makeOrchestrator({
+        hashEntries: new Map([['/p/present', buildHashEntry(HASH)]]),
+        meta: buildMeta(HASH, 'X'),
+      });
+      const events: {
+        path: string;
+        metadata: unknown;
+        error: boolean;
+      }[] = [];
+      await orchestrator.getRomsMetadata(
+        'SNES',
+        ['/p/present', '/p/missing'],
+        (e) => events.push(e),
+      );
+      expect(events).toHaveLength(2);
+      const missingEvent = events.find((e) => e.path === '/p/missing');
+      expect(missingEvent?.metadata).toBeNull();
+      expect(missingEvent?.error).toBe(false);
+    });
+
+    it('no-op on empty paths', async () => {
+      const { orchestrator, hashService } = makeOrchestrator();
+      const events: unknown[] = [];
+      await orchestrator.getRomsMetadata('SNES', [], (e) => events.push(e));
+      expect(hashService.getHash).not.toHaveBeenCalled();
+      expect(events).toHaveLength(0);
+    });
+  });
+
   it('prefetchMetadata: walks every hash and emits progress per call', async () => {
     const meta = buildMeta(HASH, 'X');
     const { orchestrator, metadataService } = makeOrchestrator({ meta });

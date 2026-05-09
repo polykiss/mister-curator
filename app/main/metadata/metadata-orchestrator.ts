@@ -1,6 +1,10 @@
 import { readFile } from 'node:fs/promises';
 
-import type { HashClient, HashService } from '@app/main/metadata/hash-service';
+import type {
+  HashClient,
+  HashEntry,
+  HashService,
+} from '@app/main/metadata/hash-service';
 import type { ImageCache } from '@app/main/metadata/image-cache';
 import type { MetadataService } from '@app/main/metadata/metadata-service';
 import type {
@@ -44,6 +48,17 @@ export interface ActiveSession {
 export interface MetadataDatabaseState {
   readonly ready: boolean;
   readonly downloadInProgress: boolean;
+}
+
+/**
+ * One per-path event emitted by `getRomsMetadata` as each ROM
+ * settles. `error: true` distinguishes a fetch failure (e.g., SSH
+ * disconnect) from a clean no-match (`metadata: null, error: false`).
+ */
+export interface RomMetadataResolvedEvent {
+  readonly path: string;
+  readonly metadata: RomMetadata | null;
+  readonly error: boolean;
 }
 
 /**
@@ -164,6 +179,98 @@ export class MetadataOrchestrator {
       await this.metadataService.getMetadata(hash);
       done += 1;
       onProgress?.({ done, total });
+    }
+  }
+
+  /**
+   * PR #20 round 2 — list-view streaming prefetch. Hashes ALL paths in
+   * one SSH round-trip via the existing batched `hashService.getHash`,
+   * then iterates per-path metadata sequentially, emitting one
+   * `onResolved` event as each path settles.
+   *
+   * The shape replaces the round-1 per-row IPC pattern that fired
+   * N parallel `getRomMetadata(coreId, romPath)` calls. Each of those
+   * called `hashService.getHash([single])` which serialized through
+   * the per-host gate but still issued one SSH `statWitnesses`
+   * round-trip per row — 32 sequential SSH commands for a 32-row pane,
+   * which overwhelmed WiFi-attached MiSTers and tripped the 10s op
+   * deadline.
+   *
+   * Now: one batched `statWitnesses(allPaths)` (and at most one
+   * `hashPaths(allPaths)` for cold paths) + N local-cache metadata
+   * lookups. The SS rate-limit (1 req/sec) still gates cold metadata
+   * fetches, so a cohort of 30 unmatched ROMs takes ~30s to fully
+   * resolve — but every row that hits warm cache (the common case
+   * after first scan) emits its event within milliseconds, and
+   * cold-path SS rate-limiting is a property of the upstream API
+   * rather than something we should fight here.
+   *
+   * Failure modes:
+   *   - No active session → emit `{ metadata: null, error: false }`
+   *     for every path. Treat the whole batch as unmatched.
+   *   - Hash batch throws (e.g., SSH dropped mid-flight) → emit
+   *     `{ metadata: null, error: true }` for every path so the
+   *     renderer can show a per-row error indicator instead of
+   *     perpetual skeletons.
+   *   - Per-path metadata throws → emit `{ ..., error: true }` for
+   *     just that path; subsequent paths still get a chance.
+   */
+  async getRomsMetadata(
+    coreId: string,
+    romPaths: readonly string[],
+    onResolved?: (event: RomMetadataResolvedEvent) => void,
+  ): Promise<void> {
+    if (romPaths.length === 0) return;
+    const session = this.getActiveSession();
+    if (session === null) {
+      for (const path of romPaths) {
+        onResolved?.({ path, metadata: null, error: false });
+      }
+      return;
+    }
+
+    let hashes: Map<string, HashEntry>;
+    try {
+      hashes = await this.hashService.getHash(
+        session.client,
+        session.host,
+        romPaths,
+      );
+    } catch {
+      for (const path of romPaths) {
+        onResolved?.({ path, metadata: null, error: true });
+      }
+      return;
+    }
+
+    for (const path of romPaths) {
+      const entry = hashes.get(path);
+      if (entry === undefined) {
+        onResolved?.({ path, metadata: null, error: false });
+        continue;
+      }
+      const systemId = this.resolveSystemId({ romPath: path, coreId });
+      const ssHint =
+        systemId === null
+          ? undefined
+          : {
+              systemId,
+              md5: entry.md5,
+              sha1: entry.sha1,
+              crc32: undefined,
+              romName: basename(path),
+              romSize: entry.size,
+            };
+      try {
+        const metadata = await this.metadataService.getMetadata(
+          entry.md5,
+          {},
+          ssHint,
+        );
+        onResolved?.({ path, metadata, error: false });
+      } catch {
+        onResolved?.({ path, metadata: null, error: true });
+      }
     }
   }
 

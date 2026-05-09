@@ -2,6 +2,7 @@ import path from 'node:path';
 
 import { app, BrowserWindow, shell } from 'electron';
 
+import type { RomMetadata } from '@shared/metadata-types';
 import { IPC_CHANNELS } from '@shared/preload-api';
 
 import { CacheManager } from '@app/main/cache/cache-manager';
@@ -257,12 +258,34 @@ void app.whenReady().then(() => {
     }
   };
 
+  // PR #20 round 2: per-path resolution events from the list-view
+  // streaming prefetch. Same fan-out shape as the other emitters.
+  interface RomMetadataResolved {
+    operationId: string;
+    path: string;
+    metadata: RomMetadata | null;
+    error: boolean;
+  }
+  const romMetadataResolvedListeners = new Set<
+    (event: RomMetadataResolved) => void
+  >();
+  const emitRomMetadataResolved = (event: RomMetadataResolved): void => {
+    for (const fn of romMetadataResolvedListeners) {
+      try {
+        fn(event);
+      } catch {
+        /* swallow */
+      }
+    }
+  };
+
   registerIpcHandlers(
     manager,
     profileStore,
     metadataOrchestrator,
     emitMetadataProgress,
     emitMetadataDatabaseProgress,
+    emitRomMetadataResolved,
   );
 
   const window = createWindow();
@@ -290,6 +313,11 @@ void app.whenReady().then(() => {
   metadataDatabaseListeners.add((event) => {
     if (!window.isDestroyed()) {
       window.webContents.send(IPC_CHANNELS.metadataDatabaseProgress, event);
+    }
+  });
+  romMetadataResolvedListeners.add((event) => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.romMetadataResolved, event);
     }
   });
 
@@ -323,6 +351,14 @@ void app.whenReady().then(() => {
         if (!newWindow.isDestroyed()) {
           newWindow.webContents.send(
             IPC_CHANNELS.metadataDatabaseProgress,
+            event,
+          );
+        }
+      });
+      romMetadataResolvedListeners.add((event) => {
+        if (!newWindow.isDestroyed()) {
+          newWindow.webContents.send(
+            IPC_CHANNELS.romMetadataResolved,
             event,
           );
         }

@@ -64,6 +64,19 @@ export type MetadataPrefetchEmitter = (event: {
 }) => void;
 
 /**
+ * PR #20 round 2: per-path resolution events from the list-view
+ * streaming prefetch. Mirrors the `RomMetadataResolvedEvent` shape
+ * in `shared/preload-api.ts` (kept inline to keep this module
+ * dependency-light).
+ */
+export type RomMetadataResolvedEmitter = (event: {
+  readonly operationId: string;
+  readonly path: string;
+  readonly metadata: RomMetadata | null;
+  readonly error: boolean;
+}) => void;
+
+/**
  * Round 3: emitter for OpenVGDB download progress (separate channel
  * from the prefetch one — different event shape, different lifecycle).
  */
@@ -85,6 +98,7 @@ export function registerIpcHandlers(
   metadata: MetadataOrchestrator,
   emitMetadataProgress: MetadataPrefetchEmitter,
   emitMetadataDatabaseProgress: MetadataDatabaseEmitter,
+  emitRomMetadataResolved: RomMetadataResolvedEmitter,
 ): void {
   handle<[], MisterProfile[]>(IPC_CHANNELS.listProfiles, () => store.list());
 
@@ -233,6 +247,20 @@ export function registerIpcHandlers(
   handle<[string], Uint8Array | null>(IPC_CHANNELS.getBoxArtBytes, (url) =>
     metadata.getBoxArtBytes(url),
   );
+
+  handle<
+    [
+      string,
+      readonly string[],
+      { readonly operationId?: string } | undefined,
+    ],
+    void
+  >(IPC_CHANNELS.prefetchRomsMetadata, async (coreId, paths, options) => {
+    const operationId = options?.operationId ?? newOpId();
+    await metadata.getRomsMetadata(coreId, paths, (event) => {
+      emitRomMetadataResolved({ operationId, ...event });
+    });
+  });
 
   handle<[], { readonly ready: boolean; readonly downloadInProgress: boolean }>(
     IPC_CHANNELS.ensureMetadataDatabase,
