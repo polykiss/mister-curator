@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { abbreviateGenre } from '@app/renderer/src/lib/genre-format';
+import { abbreviateGenre, formatGenreList } from '@app/renderer/src/lib/genre-format';
 
 describe('abbreviateGenre — PR-C round 2 genre map', () => {
   describe('mapped genres', () => {
@@ -58,6 +58,85 @@ describe('abbreviateGenre — PR-C round 2 genre map', () => {
     });
     it('returns empty string for empty input', () => {
       expect(abbreviateGenre('')).toBe('');
+    });
+  });
+});
+
+describe('formatGenreList — chore/search-and-filter-cleanup commit 3', () => {
+  // Bug: SS sometimes serves a single genre as a slash-joined list of
+  // synonym forms ("RPG / Role-Playing Game") or surfaces the same
+  // concept twice across different language entries
+  // ("Action / Action"). Pre-fix, the cell + edit modal showed the
+  // duplicates verbatim. `formatGenreList` cleans them up in the
+  // renderer; the SS-side `pickGenreNameEnglishFirst` change in this
+  // same commit prevents new duplicates from being cached at all.
+
+  describe('slash-token dedupe (case-insensitive)', () => {
+    it('"Action / Action" → "Action"', () => {
+      expect(formatGenreList('Action / Action')).toBe('Action');
+    });
+
+    it('case-insensitive: "Action / ACTION" → "Action" (first-occurrence case wins)', () => {
+      expect(formatGenreList('Action / ACTION')).toBe('Action');
+    });
+
+    it('"RPG / Role-Playing Game" → "RPG" (abbreviation collapses pair)', () => {
+      // The abbreviation map normalizes "Role Playing Game" → "RPG"
+      // (note the spec uses a hyphen but the abbreviation key has
+      // none — input "Role Playing Game" abbreviates to "RPG"; the
+      // hyphenated "Role-Playing Game" passes through). Either way,
+      // when both forms reduce to "RPG" the dedupe collapses them.
+      expect(formatGenreList('RPG / Role Playing Game')).toBe('RPG');
+    });
+
+    it('preserves slash-distinct entries that don\'t collide', () => {
+      // Different genres on either side of the slash stay separate.
+      expect(formatGenreList('Action / Adventure')).toBe('Action / Adventure');
+    });
+  });
+
+  describe('comma-separated content treated as a single slash-token', () => {
+    it('"Action, Adventure" → "Action, Adventure" (kept whole)', () => {
+      // Commas separate distinct genres at the record level; the
+      // formatter doesn't second-guess that. The cell uses
+      // pickPrimaryGenre downstream to pick the lead.
+      expect(formatGenreList('Action, Adventure')).toBe('Action, Adventure');
+    });
+
+    it('"Kampf / Versus, Kampf" — slash split + dedupe, but "Versus, Kampf" stays whole', () => {
+      // The German-text incident from the spec. Renderer-side dedupe
+      // handles what it can ("Kampf" + "Versus, Kampf" are different
+      // strings → both kept). The root fix for this case is the
+      // SS-side English preference in pickAllGenres.
+      expect(formatGenreList('Kampf / Versus, Kampf')).toBe(
+        'Kampf / Versus, Kampf',
+      );
+    });
+  });
+
+  describe('whitespace + edges', () => {
+    it('trims whitespace around slash separators', () => {
+      expect(formatGenreList('Action  /  Adventure')).toBe(
+        'Action / Adventure',
+      );
+      expect(formatGenreList('Action/Adventure')).toBe('Action / Adventure');
+    });
+
+    it('drops empty slash-tokens', () => {
+      expect(formatGenreList('Action / / Adventure')).toBe(
+        'Action / Adventure',
+      );
+    });
+
+    it('null / undefined / empty → empty string (matches abbreviateGenre)', () => {
+      expect(formatGenreList(null)).toBe('');
+      expect(formatGenreList(undefined)).toBe('');
+      expect(formatGenreList('')).toBe('');
+    });
+
+    it('single-genre input passes through with abbreviation', () => {
+      expect(formatGenreList('Role Playing Game')).toBe('RPG');
+      expect(formatGenreList('Action')).toBe('Action');
     });
   });
 });

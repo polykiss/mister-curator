@@ -53,3 +53,45 @@ export function abbreviateGenre(
   if (genre === null || genre === undefined || genre === '') return '';
   return GENRE_ABBREVIATIONS[genre] ?? genre;
 }
+
+/**
+ * chore/search-and-filter-cleanup commit 3: clean a multi-language /
+ * duplicated genre string.
+ *
+ * SS sometimes serves a single genre as a slash-joined list of
+ * synonym forms ("RPG / Role-Playing Game") or surfaces the same
+ * concept twice across different language entries ("Action / Action").
+ * `formatGenreList` splits on " / ", abbreviates each part, dedupes
+ * case-insensitively, and re-joins. Comma-separated content is left
+ * inside a single slash-token (commas separate distinct genres at the
+ * record level — `"Action, Adventure"` is two genres but one
+ * slash-token).
+ *
+ * The full-string output is what the edit modal + hover-tooltip
+ * surface; the row cell still calls `pickPrimaryGenre` afterward to
+ * pick the lead.
+ *
+ * Note: the root fix for non-English genres is the
+ * `pickGenreNameEnglishFirst` change in `screenscraper-service.ts`
+ * (commit 3). Records cached before that fix landed still need a
+ * refresh to drop their non-English entries.
+ */
+export function formatGenreList(
+  genre: string | null | undefined,
+): string {
+  if (genre === null || genre === undefined || genre === '') return '';
+  const parts = genre
+    .split(/\s*\/\s*/u)
+    .map((s) => s.trim())
+    .filter((s) => s !== '');
+  const abbreviated = parts.map((p) => abbreviateGenre(p));
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const p of abbreviated) {
+    const key = p.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(p);
+  }
+  return unique.join(' / ');
+}

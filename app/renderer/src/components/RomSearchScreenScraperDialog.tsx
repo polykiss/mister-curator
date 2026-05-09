@@ -262,12 +262,48 @@ function SearchResultItem(props: {
  * prefill. Mirrors the shape `filename-hint.ts` produces, but
  * inlined here since this is a renderer-only concern (we don't
  * want to import a main-process module).
+ *
+ * chore/search-and-filter-cleanup commit 1: also strip a leading
+ * "." or "._" before the rest of the normalization. The MiSTer
+ * hide convention dot-prefixes filenames (".Aero Fighters 3.neo")
+ * and macOS SMB copies leave AppleDouble files ("._Foo.zip"). The
+ * leading dot/underscore-pair is filesystem metadata, NEVER part
+ * of the actual game name — leaving it in pollutes the SS search
+ * term. (The "._" filter in commit 4 keeps AppleDouple files out
+ * of the listing entirely; this strip is the belt-and-suspenders
+ * second line.)
  */
 export function filenameToSearchTerm(filename: string): string {
-  return filename
+  const stem = filename
+    .replace(/^\._?/u, '') // strip leading "." or "._" (hide / AppleDouble)
     .replace(/\.[a-z0-9]+$/i, '') // strip extension
     .replace(/\s*\([^)]*\)/gu, '') // strip (...)
     .replace(/\s*\[[^\]]*\]/gu, '') // strip [...]
     .replace(/\s+/gu, ' ')
     .trim();
+  return reorderTrailingArticle(stem);
+}
+
+/**
+ * chore/search-and-filter-cleanup commit 2: rotate a trailing
+ * ", The" / ", A" / ", An" to a leading article.
+ *
+ * No-Intro / TOSEC name canonical form puts the article last after
+ * a comma — "Legend of Zelda, The". ScreenScraper indexes by the
+ * natural "The Legend of Zelda" form, so the comma shape returns
+ * zero matches. Reorder before sending so the prefill matches the
+ * SS canonical name out of the gate.
+ *
+ * Match rule: comma + (one or more spaces) + article + end-of-
+ * string, case-insensitive on the article. Mid-string commas
+ * (e.g. "Adams, The Family") never match — only trailing.
+ */
+function reorderTrailingArticle(stem: string): string {
+  const match = stem.match(/^(.+),\s+(the|a|an)\s*$/iu);
+  if (match === null) return stem;
+  const body = match[1]!;
+  const article = match[2]!;
+  // Preserve the article's input case — "The"/"A"/"An" tend to be
+  // title-cased in No-Intro filenames; keep that, don't lowercase.
+  return `${article} ${body}`;
 }

@@ -67,17 +67,22 @@ const SAMPLE_JEU = {
         { langue: 'fr', text: '...French...' },
         { langue: 'en', text: 'Mario rescues the princess.' },
       ],
+      // Real SS responses key genre `noms` by `langue` (NOT `region`
+      // — that's used for game names + dates + synopsis). chore/
+      // search-and-filter-cleanup commit 3 fixed the picker to read
+      // `langue` and prefer English; the fixture mirrors the real
+      // API shape.
       genres: [
         {
           id: 'platform',
           noms: [
-            { region: 'wor', text: 'Plateforme' },
-            { region: 'us', text: 'Platform' },
+            { langue: 'fr', text: 'Plateforme' },
+            { langue: 'en', text: 'Platform' },
           ],
         },
         {
           id: 'action',
-          noms: [{ region: 'us', text: 'Action' }],
+          noms: [{ langue: 'en', text: 'Action' }],
         },
       ],
       medias: [
@@ -295,6 +300,95 @@ describe('ScreenScraperService — response mapping', () => {
       'https://cdn/snap-1.png',
       'https://cdn/snap-2.png',
     ]);
+  });
+
+  // chore/search-and-filter-cleanup commit 3 — genre language pref +
+  // dedupe in pickAllGenres.
+  describe('genre language preference (chore/search-and-filter-cleanup)', () => {
+    function parseGenresOnly(genres: unknown): readonly string[] {
+      const game = parseScreenScraperResponse({
+        response: {
+          jeu: {
+            id: 1,
+            systeme: { id: '1', text: 'Megadrive' },
+            noms: [{ region: 'us', text: 'Title' }],
+            genres,
+          },
+        },
+      });
+      return game?.genres ?? [];
+    }
+
+    it('prefers langue="en" over other languages', () => {
+      // Pre-fix the picker walked REGION_ORDER on a langue-keyed
+      // payload, fell through to "first non-empty text," and surfaced
+      // German "Kampf" instead of English "Fighting".
+      expect(
+        parseGenresOnly([
+          {
+            id: '5',
+            noms: [
+              { langue: 'de', text: 'Kampf' },
+              { langue: 'fr', text: 'Combat' },
+              { langue: 'en', text: 'Fighting' },
+            ],
+          },
+        ]),
+      ).toEqual(['Fighting']);
+    });
+
+    it('falls back to first non-empty text when no English entry', () => {
+      // Defensive: SS sometimes omits English for niche genres. Keep
+      // the first non-empty rather than dropping the whole genre.
+      expect(
+        parseGenresOnly([
+          {
+            id: '5',
+            noms: [
+              { langue: 'de', text: 'Kampf' },
+              { langue: 'fr', text: 'Combat' },
+            ],
+          },
+        ]),
+      ).toEqual(['Kampf']);
+    });
+
+    it('dedupes duplicate genres case-insensitively', () => {
+      // SS occasionally lists the same conceptual genre under two IDs
+      // — Action + Action, or Action + ACTION. Collapse them so the
+      // joined cache string isn't "Action, Action".
+      expect(
+        parseGenresOnly([
+          {
+            id: '1',
+            noms: [{ langue: 'en', text: 'Action' }],
+          },
+          {
+            id: '2',
+            noms: [{ langue: 'en', text: 'ACTION' }],
+          },
+          {
+            id: '3',
+            noms: [{ langue: 'en', text: 'Adventure' }],
+          },
+        ]),
+      ).toEqual(['Action', 'Adventure']);
+    });
+
+    it('first-occurrence case wins on dedupe', () => {
+      expect(
+        parseGenresOnly([
+          {
+            id: '1',
+            noms: [{ langue: 'en', text: 'Action' }],
+          },
+          {
+            id: '2',
+            noms: [{ langue: 'en', text: 'ACTION' }],
+          },
+        ]),
+      ).toEqual(['Action']);
+    });
   });
 
   it('returns null when response.jeu is missing', () => {
