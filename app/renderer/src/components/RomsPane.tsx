@@ -1170,11 +1170,28 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                     <TableCell className="p-0">
                       <div className="flex h-full shrink-0 items-stretch">
                         {!isSystem ? (
+                          // PR #23 round 2: explicit h-10 override.
+                          // The cores-pane render of DensityBar
+                          // works with `h-full` because its parent
+                          // `<li>` has an explicit `h-10` for
+                          // h-full to resolve against. The ROM row
+                          // chain is `<tr>` → `<td>` → `<div h-full
+                          // items-stretch>` → DensityBar — `<td>`
+                          // height is content-dependent without an
+                          // explicit `<tr>`/`<td>` height, so the
+                          // h-full chain resolves to 0. PR-A item 9
+                          // missed that asymmetry and the indicator
+                          // disappeared on the ROM row. h-10 is
+                          // honest: row design is 40px, bar is 40px.
+                          // tailwind-merge in `cn` makes the
+                          // override win cleanly over the default
+                          // h-full.
                           <DensityBar
                             floor="bg-elevated"
                             value={rom.sizeBytes}
                             max={maxSizeBytes}
                             ariaLabel={`${formatBytes(rom.sizeBytes)} of peer max ${formatBytes(maxSizeBytes)}`}
+                            className="h-10"
                           />
                         ) : null}
                         {isSystem ? (

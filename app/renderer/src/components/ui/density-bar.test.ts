@@ -178,4 +178,24 @@ describe('DensityBar — render shape (PR-A item 9)', () => {
     expect(cn).toContain('w-5');
     expect(cn).toContain('shrink-0');
   });
+
+  it('caller-supplied height className overrides the default h-full (PR #23 round 2)', () => {
+    // Live verification of PR-A item 9 caught a regression: the
+    // ROM row chain `<tr>` → `<td>` → `<div h-full items-stretch>`
+    // doesn't propagate height the way the cores-pane `<li
+    // h-10>` does, so `h-full` on DensityBar resolved to 0 and the
+    // indicator disappeared. The fix passes `className="h-10"`
+    // from the ROM row callsite. This test pins that the override
+    // wins via tailwind-merge — if `cn` ever stops merging
+    // height utilities the regression would silently re-fire.
+    const result = DensityBar({
+      value: 50,
+      max: 100,
+      floor: 'bg-elevated',
+      className: 'h-10',
+    }) as ReactElement<{ readonly className: string }>;
+    const cn = result.props.className;
+    expect(cn).toContain('h-10');
+    expect(cn).not.toContain('h-full');
+  });
 });
