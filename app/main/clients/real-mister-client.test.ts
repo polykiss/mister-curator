@@ -38,7 +38,7 @@ vi.mock('node-ssh', () => ({
   })),
 }));
 
-const { RealMisterClient, assertSafeSegment } = await import(
+const { RealMisterClient, assertSafeSegment, BULK_ROM_RENAME_CHUNK_SIZE } = await import(
   '@app/main/clients/real-mister-client'
 );
 
@@ -1429,6 +1429,179 @@ describe('RealMisterClient', () => {
       expect(result.failed).toEqual([
         { filename: 'b.nes', reason: 'mv: cannot stat b.nes' },
       ]);
+    });
+
+    // fix/hide-all-large-dirs — incident: a 1455-row "Hide all" on
+    // X68000 returned the "Nothing to do" toast because the
+    // single-script approach built ~555KB of shell, which dropbear
+    // (the SSH server on MiSTer) silently truncated/dropped on the
+    // exec channel. execCommand returned with `stdout === ''`,
+    // parseBulkResult returned both arrays empty, and the renderer
+    // reported "Nothing to do" — confusing on a directory the user
+    // had just confirmed contains hundreds of visible ROMs.
+    //
+    // Fix: chunk the script into batches of BULK_ROM_RENAME_CHUNK_SIZE
+    // (100). The tests below pin both halves of the contract:
+    //   • Small batches still issue exactly one call (no overhead
+    //     regression for the common case).
+    //   • Large batches issue ceil(N / chunk) calls and concatenate
+    //     results in order, so the renderer sees one merged result.
+    describe('chunking — fix/hide-all-large-dirs', () => {
+      it('issues ceil(N / chunk) SSH calls for a 1500-row batch', async () => {
+        const client = new RealMisterClient();
+        await client.connect(profile, secret);
+        mocks.execCommand.mockClear();
+
+        const N = 1500;
+        const expectedCalls = Math.ceil(N / BULK_ROM_RENAME_CHUNK_SIZE);
+        // Mock each chunk's stdout: filenames a0..a99 OK, then a100..199, etc.
+        for (let chunk = 0; chunk < expectedCalls; chunk += 1) {
+          const start = chunk * BULK_ROM_RENAME_CHUNK_SIZE;
+          const end = Math.min(start + BULK_ROM_RENAME_CHUNK_SIZE, N);
+          const lines: string[] = [];
+          for (let i = start; i < end; i += 1) {
+            lines.push(`OK\ta${String(i)}.nes`);
+          }
+          mocks.execCommand.mockResolvedValueOnce(execOk(lines.join('\n')));
+        }
+
+        const changes: { filename: string; hidden: boolean }[] = [];
+        for (let i = 0; i < N; i += 1) {
+          changes.push({ filename: `a${String(i)}.nes`, hidden: true });
+        }
+
+        const result = await client.setBulkRomVisibility('X68000', changes);
+
+        expect(mocks.execCommand).toHaveBeenCalledTimes(expectedCalls);
+        expect(result.succeeded.length).toBe(N);
+        expect(result.failed).toEqual([]);
+        // Result preserves input order across chunk boundaries.
+        expect(result.succeeded[0]).toBe('a0.nes');
+        expect(result.succeeded[99]).toBe('a99.nes');
+        expect(result.succeeded[100]).toBe('a100.nes');
+        expect(result.succeeded[N - 1]).toBe(`a${String(N - 1)}.nes`);
+      });
+
+      it('each chunk script stays small enough to fit a 64KB SSH buffer', async () => {
+        // The original incident was a single ~555KB script for 1455
+        // rows. Pin that no individual chunk script exceeds 64KB even
+        // with worst-case-ish 60-char filenames — that's the ceiling
+        // we picked the chunk size against.
+        const client = new RealMisterClient();
+        await client.connect(profile, secret);
+        mocks.execCommand.mockClear();
+        for (let i = 0; i < Math.ceil(1500 / BULK_ROM_RENAME_CHUNK_SIZE); i += 1) {
+          mocks.execCommand.mockResolvedValueOnce(execOk(''));
+        }
+
+        const longName = (i: number): string =>
+          `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa${String(i).padStart(4, '0')}.nes`;
+        const changes: { filename: string; hidden: boolean }[] = [];
+        for (let i = 0; i < 1500; i += 1) {
+          changes.push({ filename: longName(i), hidden: true });
+        }
+        await client.setBulkRomVisibility('X68000', changes);
+
+        for (const call of mocks.execCommand.mock.calls) {
+          const script = call[0] as string;
+          expect(script.length).toBeLessThan(64 * 1024);
+        }
+      });
+
+      it('merges per-chunk failures into the single returned result', async () => {
+        // 250 changes → 3 chunks. Make chunk 2 contain one FAIL line
+        // so we can confirm the merger keeps it in `result.failed`.
+        const client = new RealMisterClient();
+        await client.connect(profile, secret);
+        mocks.execCommand.mockClear();
+
+        // chunk 1: 100 OK
+        mocks.execCommand.mockResolvedValueOnce(
+          execOk(
+            Array.from({ length: 100 }, (_, i) => `OK\ta${String(i)}.nes`).join('\n'),
+          ),
+        );
+        // chunk 2: 99 OK + 1 FAIL on a150.nes
+        mocks.execCommand.mockResolvedValueOnce(
+          execOk(
+            Array.from({ length: 100 }, (_, i) => {
+              const idx = 100 + i;
+              if (idx === 150) return `FAIL\ta150.nes\tmv: permission denied`;
+              return `OK\ta${String(idx)}.nes`;
+            }).join('\n'),
+          ),
+        );
+        // chunk 3: 50 OK
+        mocks.execCommand.mockResolvedValueOnce(
+          execOk(
+            Array.from({ length: 50 }, (_, i) => `OK\ta${String(200 + i)}.nes`).join(
+              '\n',
+            ),
+          ),
+        );
+
+        const changes: { filename: string; hidden: boolean }[] = [];
+        for (let i = 0; i < 250; i += 1) {
+          changes.push({ filename: `a${String(i)}.nes`, hidden: true });
+        }
+        const result = await client.setBulkRomVisibility('X68000', changes);
+
+        expect(mocks.execCommand).toHaveBeenCalledTimes(3);
+        expect(result.succeeded.length).toBe(249);
+        expect(result.failed).toEqual([
+          { filename: 'a150.nes', reason: 'mv: permission denied' },
+        ]);
+      });
+
+      it('regression: 5-row batch still issues exactly one SSH call (small-list fast path)', async () => {
+        // The chunking refactor must not add overhead for small lists.
+        // The hbmame case (~27 rows) MUST stay one round-trip.
+        const client = new RealMisterClient();
+        await client.connect(profile, secret);
+        mocks.execCommand.mockClear();
+        mocks.execCommand.mockResolvedValueOnce(
+          execOk(['a.nes', 'b.nes', 'c.nes', 'd.nes', 'e.nes']
+            .map((id) => `OK\t${id}`)
+            .join('\n')),
+        );
+
+        await client.setBulkRomVisibility('NES', [
+          { filename: 'a.nes', hidden: true },
+          { filename: 'b.nes', hidden: true },
+          { filename: 'c.nes', hidden: true },
+          { filename: 'd.nes', hidden: true },
+          { filename: 'e.nes', hidden: true },
+        ]);
+
+        expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      });
+
+      it('every chunk re-cd\'s into the core dir (no inter-chunk dir state)', async () => {
+        // Each chunk is its own SSH exec invocation — there's no shell
+        // session continuity. Pin that every chunk script begins with
+        // a `cd` to the core dir. Regression case: someone "optimizes"
+        // by hoisting the cd to a one-time prologue, which silently
+        // breaks every chunk after the first.
+        const client = new RealMisterClient();
+        await client.connect(profile, secret);
+        mocks.execCommand.mockClear();
+        for (let i = 0; i < 3; i += 1) {
+          mocks.execCommand.mockResolvedValueOnce(execOk(''));
+        }
+
+        const changes: { filename: string; hidden: boolean }[] = [];
+        for (let i = 0; i < 250; i += 1) {
+          changes.push({ filename: `a${String(i)}.nes`, hidden: true });
+        }
+        await client.setBulkRomVisibility('X68000', changes, 'sub/dir');
+
+        for (const call of mocks.execCommand.mock.calls) {
+          const script = call[0] as string;
+          expect(script.startsWith(`cd '/media/fat/games/X68000/sub/dir'\n`)).toBe(
+            true,
+          );
+        }
+      });
     });
   });
 
