@@ -644,6 +644,29 @@ export class ConnectionManager {
    * leading dot when hidden — back to the client so paths target the
    * right directory.
    */
+  /**
+   * PR-C round 2 (PR #26): recursive ROM-file path list for one
+   * core, filtered by the sidebar-count predicate
+   * (`shouldCountAsRom` + `isLaunchableRomExtension`). The
+   * auto-scrape engine queues this so its footer total matches the
+   * sidebar's integer count — pre-round-2 the engine asked
+   * `listRoms(coreId, '', {})` and got only top-level entries.
+   *
+   * Per-core SSH find runs lazily when the engine reaches the core
+   * (~1-2s), not upfront. For 60 cores total that's ~60-120s of
+   * SSH overhead spread across the multi-minute scraping window —
+   * negligible relative to scrape time.
+   */
+  async listAllRomPathsForCore(coreId: string): Promise<readonly string[]> {
+    this.assertConnected();
+    const gamesDirBasename = this.resolveOnDiskGamesDirBasename(coreId);
+    return this.client.listRecursiveRomFiles({
+      coreId,
+      gamesDirBasename,
+      marks: this.systemFilesMarksCache,
+    });
+  }
+
   private resolveOnDiskGamesDirBasename(coreId: string): string {
     const core = this.coresCache.find((c) => c.id === coreId);
     if (!core || !core.gamesDirExists) return coreId;

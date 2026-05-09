@@ -21,6 +21,7 @@ import {
 import { MetadataService } from '@app/main/metadata/metadata-service';
 import { OpenVGDBService } from '@app/main/metadata/openvgdb-service';
 import { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
+import { AutoScrapeEngine } from '@app/main/services/auto-scrape-engine';
 import { ProfileStore } from '@app/main/storage/profile-store';
 
 function resolveClientMode(): 'real' | 'fake' {
@@ -216,6 +217,37 @@ void app.whenReady().then(() => {
     }
   };
 
+  // PR-C (PR #26) — auto-scrape engine. Walks every core's metadata
+  // in the background on connect, sidebar order. Pause/resume tied
+  // to connection lifecycle (see manager.onStatusChange below).
+  // Deps:
+  //   • listRomPaths → ConnectionManager.listRoms (top-level files
+  //     only; folder-atomic scraping is a separate scope per the
+  //     PR-C "Out of scope" list).
+  //   • scrape → MetadataOrchestrator.getRomsMetadata, threading
+  //     the engine's shouldAbort callback so setFocus pivots land
+  //     within one path's wall time.
+  const autoScrapeEngine = new AutoScrapeEngine({
+    // PR-C round 2: recursive ROM-file path list, filtered by the
+    // sidebar-count predicate (shouldCountAsRom +
+    // isLaunchableRomExtension). Round 1 used `manager.listRoms`
+    // which returned only top-level entries — a GBA core with 145
+    // ROMs (most in nested folders) showed as "GBA · 39/62" in the
+    // footer. The new wrapper does an SSH find for the whole core
+    // tree and returns absolute paths, so the engine queues
+    // exactly the files the sidebar count promised.
+    listRomPaths: async (coreId) =>
+      manager.listAllRomPathsForCore(coreId),
+    scrape: async (coreId, paths, onPathResolved, shouldAbort) => {
+      await metadataOrchestrator.getRomsMetadata(
+        coreId,
+        paths,
+        () => onPathResolved(),
+        shouldAbort,
+      );
+    },
+  });
+
   registerIpcHandlers(
     manager,
     profileStore,
@@ -223,6 +255,7 @@ void app.whenReady().then(() => {
     emitMetadataProgress,
     emitMetadataDatabaseProgress,
     emitRomMetadataResolved,
+    autoScrapeEngine,
   );
 
   const window = createWindow();
@@ -255,6 +288,39 @@ void app.whenReady().then(() => {
   romMetadataResolvedListeners.add((event) => {
     if (!window.isDestroyed()) {
       window.webContents.send(IPC_CHANNELS.romMetadataResolved, event);
+    }
+  });
+
+  // PR-C (PR #26) — bridge engine progress events to the renderer
+  // so the footer-left can render the live "<core> · <done>/<total>"
+  // string. The engine itself doesn't import Electron, so the
+  // window.webContents.send wrapper lives here.
+  autoScrapeEngine.onProgress((event) => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.autoScrapeProgress, event);
+    }
+  });
+
+  // PR-C (PR #26) — lifecycle: start the engine on connect (with
+  // the sidebar core list in display order), pause on every other
+  // status. Cache is the source of truth for "is this core scanned",
+  // so resume after disconnect is just "rebuild the queue and let
+  // warm cores zip through". No persistent engine state.
+  manager.onStatusChange(async (status) => {
+    if (status !== 'connected') {
+      autoScrapeEngine.pause();
+      return;
+    }
+    try {
+      const cores = await manager.listAllCoresWithFiles({});
+      const coreIds = cores
+        .filter((c) => c.gamesDirExists)
+        .map((c) => c.id);
+      autoScrapeEngine.start(coreIds);
+    } catch {
+      // listAllCoresWithFiles can fail (SSH dropped right after
+      // connect). The engine stays idle; the next status flip
+      // (likely 'disconnected' shortly after) is handled above.
     }
   });
 
@@ -298,6 +364,11 @@ void app.whenReady().then(() => {
             IPC_CHANNELS.romMetadataResolved,
             event,
           );
+        }
+      });
+      autoScrapeEngine.onProgress((event) => {
+        if (!newWindow.isDestroyed()) {
+          newWindow.webContents.send(IPC_CHANNELS.autoScrapeProgress, event);
         }
       });
     }

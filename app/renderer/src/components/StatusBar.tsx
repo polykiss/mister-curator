@@ -1,8 +1,10 @@
 import { Loader2 } from 'lucide-react';
 import type { JSX } from 'react';
 
+import type { AutoScrapeProgressEvent } from '@shared/preload-api';
 import type { ConnectionStatus } from '@shared/types';
 
+import { useAutoScrapeProgress } from '@app/renderer/src/contexts/AutoScrapeContext';
 import {
   useConnection,
   type AutoRetryProgress,
@@ -28,13 +30,20 @@ export function StatusBar(): JSX.Element {
   const { current, currentProgress } = useOperationStatus();
   const { status, lostConnection, autoRetry, autoRetryFailed } =
     useConnection();
+  const autoScrape = useAutoScrapeProgress();
 
+  // PR-C (PR #26): when no manual operation is in flight AND the
+  // connection is steady-state connected, fall back to the
+  // auto-scrape engine's progress (if any). The active-state
+  // string is `<core display label> · <done>/<total>` per the
+  // spec — no "ROMs" word, no percentage, no padding.
   const idleMessage = idleMessageFor(status, {
     lostConnection,
     autoRetry,
     autoRetryFailed,
   });
-  const baseMessage = current ?? idleMessage;
+  const autoScrapeMessage = autoScrapeMessageFor(autoScrape, status);
+  const baseMessage = current ?? autoScrapeMessage ?? idleMessage;
   const isBusy = current !== null;
   // Reconnecting overrides the underlying disconnected dot so the
   // user sees the progress signal instead of a "we gave up" gray.
@@ -149,6 +158,30 @@ export function idleMessageFor(
     case 'disconnected':
       return 'Disconnected';
   }
+}
+
+/**
+ * PR-C (PR #26): convert an auto-scrape progress event to the
+ * footer-left string. Only renders when the engine is `active` AND
+ * the connection is steady-state connected (the engine pauses on
+ * disconnect, but a stale event could still be in the renderer's
+ * state — gating on status keeps the footer honest if the
+ * connection drops mid-scrape and the pause event hasn't propagated
+ * yet). Returns null when there's nothing to surface, so the caller
+ * can fall through to `idleMessageFor`.
+ *
+ * Format per the PR-C round 2 spec: `Scraping <core label> · <done>/<total>`.
+ * Round 1 used just `<label> · <done>/<total>` — the "Scraping" verb
+ * makes the state legible at a glance and matches the user's mental
+ * model. No "ROMs" word, no `~`, no padding.
+ */
+export function autoScrapeMessageFor(
+  event: AutoScrapeProgressEvent,
+  status: ConnectionStatus,
+): string | null {
+  if (event.state !== 'active') return null;
+  if (status !== 'connected') return null;
+  return `Scraping ${event.coreLabel} · ${String(event.done)}/${String(event.total)}`;
 }
 
 function statusDotClass(state: ConnectionStatus | 'reconnecting'): string {

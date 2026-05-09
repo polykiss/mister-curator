@@ -73,6 +73,14 @@ export const IPC_CHANNELS = {
   // the ~50MB SQLite snapshot; main pulls it down + opens it.
   ensureMetadataDatabase: 'mister:ensureMetadataDatabase',
   metadataDatabaseProgress: 'mister:metadataDatabaseProgress',
+  // PR-C (PR #26) — auto-scrape engine. The main process walks every
+  // core's metadata in the background (sidebar order). The renderer
+  // subscribes to `autoScrapeProgress` to render live progress in
+  // the footer-left slot and calls `setAutoScrapeFocus` when the
+  // user clicks a core (jumps it to the head of the queue, current
+  // active core resumes after).
+  autoScrapeProgress: 'mister:autoScrapeProgress',
+  setAutoScrapeFocus: 'mister:setAutoScrapeFocus',
 } as const;
 
 /** PR #15 prefetch progress kind. Discriminator for the wire event. */
@@ -136,6 +144,23 @@ export interface MetadataDatabaseState {
 export interface BulkCoreProgressEvent extends BulkCoreProgress {
   readonly operationId: string;
 }
+
+/**
+ * PR-C (PR #26) — auto-scrape progress. Two states:
+ *   • `active` while the engine is working on a core (`done`/`total`
+ *     count individual paths within that core; `coreLabel` is the
+ *     display name, e.g. `mame` → "Arcade")
+ *   • `idle` when the queue is empty / engine paused / not yet started
+ */
+export type AutoScrapeProgressEvent =
+  | {
+      readonly state: 'active';
+      readonly coreId: string;
+      readonly coreLabel: string;
+      readonly done: number;
+      readonly total: number;
+    }
+  | { readonly state: 'idle' };
 
 export interface SystemFileMarkChangeWire {
   readonly filename: string;
@@ -425,6 +450,22 @@ export interface MisterApi {
   onMetadataDatabaseProgress(
     handler: (event: MetadataDatabaseProgressEvent) => void,
   ): () => void;
+  /**
+   * PR-C (PR #26): subscribe to auto-scrape progress events. Fires
+   * one `active` event per resolved path while the engine is working
+   * on a core, plus an `idle` event when the queue empties / engine
+   * pauses on disconnect. Returns an unsubscribe function.
+   */
+  onAutoScrapeProgress(
+    handler: (event: AutoScrapeProgressEvent) => void,
+  ): () => void;
+  /**
+   * PR-C (PR #26): pivot the auto-scrape engine to a specific core
+   * (called when the user clicks a sidebar row). Moves `coreId` to
+   * the head of the queue; the previously-active core resumes at
+   * position 1. No-op if the focused core is already active.
+   */
+  setAutoScrapeFocus(coreId: string): Promise<void>;
 }
 
 const VALID_CONNECTION_ERROR_CODES: ReadonlySet<ConnectionErrorCode> = new Set([

@@ -129,6 +129,9 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
       emitProgress as never,
       emitDbProgress as never,
       emitRomMetadataResolved as never,
+      // PR-C (PR #26): metadata-ipc tests don't exercise the
+      // auto-scrape engine path; pass a stub that never gets called.
+      { setFocus: () => undefined } as never,
     );
   });
 
@@ -292,6 +295,9 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
       emitProgress as never,
       emitDbProgress as never,
       emitRomMetadataResolved as never,
+      // PR-C (PR #26): metadata-ipc tests don't exercise the
+      // auto-scrape engine path; pass a stub that never gets called.
+      { setFocus: () => undefined } as never,
     );
     const h = handlers.get(IPC_CHANNELS.ensureMetadataDatabase);
     await h!.handler({});

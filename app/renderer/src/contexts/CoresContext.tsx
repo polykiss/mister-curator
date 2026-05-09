@@ -769,6 +769,18 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
 
   const selectCore = useCallback((coreId: string | null) => {
     setSelectedCoreId(coreId);
+    // PR-C (PR #26): pivot the auto-scrape engine to the user's
+    // focus. setAutoScrapeFocus is idempotent (no-op if already
+    // active), so re-clicking the same core doesn't disrupt the
+    // in-flight scrape. `null` (deselect) doesn't dispatch — the
+    // engine continues with whatever it was doing.
+    if (coreId !== null) {
+      void window.mister.setAutoScrapeFocus(coreId).catch(() => {
+        // Silent failure — IPC errors here aren't user-actionable
+        // (the engine just stays on its current core; scrape still
+        // happens, just not in the user's preferred order).
+      });
+    }
   }, []);
 
   const selectedCore = useMemo(

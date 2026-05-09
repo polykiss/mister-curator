@@ -7,6 +7,7 @@ import {
   setMisterConnectionErrorFactory,
 } from '@shared/preload-api';
 import type {
+  AutoScrapeProgressEvent,
   BulkCoreProgressEvent,
   ConnectResult,
   CoreVisibilityChangeWire,
@@ -252,6 +253,22 @@ const api: MisterApi = {
       ipcRenderer.removeListener(IPC_CHANNELS.romMetadataResolved, listener);
     };
   },
+  onAutoScrapeProgress: (
+    handler: (event: AutoScrapeProgressEvent) => void,
+  ) => {
+    const listener = (
+      _event: unknown,
+      payload: AutoScrapeProgressEvent,
+    ): void => {
+      handler(payload);
+    };
+    ipcRenderer.on(IPC_CHANNELS.autoScrapeProgress, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.autoScrapeProgress, listener);
+    };
+  },
+  setAutoScrapeFocus: (coreId: string) =>
+    invoke<void>(IPC_CHANNELS.setAutoScrapeFocus, coreId),
 };
 
 contextBridge.exposeInMainWorld('mister', api);
