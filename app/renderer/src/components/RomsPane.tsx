@@ -891,7 +891,11 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
         </div>
       </header>
 
-      <div className="flex-1 overflow-auto">
+      {/* PR #23 round 5 commit 1: `scroll-themed` reserves a stable
+          scrollbar gutter and paints a permanent themed bar so native
+          overlay scrollbars on macOS can't fade in over the eye
+          column on the right. */}
+      <div className="scroll-themed flex-1 overflow-auto">
         {loading && !roms ? (
           <div className="space-y-1 p-4">
             {Array.from({ length: 8 }).map((_, i) => (

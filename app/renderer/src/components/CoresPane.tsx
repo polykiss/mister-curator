@@ -288,7 +288,10 @@ function renderCoreList(args: RenderArgs): JSX.Element {
 
   return (
     <ul
-      className="flex-1 overflow-auto"
+      // PR #23 round 5 commit 1: `scroll-themed` reserves a stable
+      // scrollbar gutter and paints a permanent themed bar so native
+      // overlay scrollbars on macOS can't fade in over the eye column.
+      className="scroll-themed flex-1 overflow-auto"
       role="listbox"
       aria-label="MiSTer cores"
     >
