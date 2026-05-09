@@ -29,11 +29,21 @@ export const Table = forwardRef<HTMLTableElement, HTMLAttributes<HTMLTableElemen
     // sized to fit), so we don't lose useful horizontal-scroll
     // behavior. `relative` stays as a positioning anchor for any
     // future absolute descendants.
+    // PR #25: `table-fixed` is what makes per-cell width constraints
+    // (`w-N` on TableHead cells) AND `truncate` on the name cell
+    // actually apply. With the default `table-auto`, cells grow to
+    // fit their content — so a 100-char ROM title pushes the name
+    // column past its allotted space and shoves Year / Genre /
+    // Rating / Actions / Density / Eye off the visible area. Fixed
+    // layout pins each column to its declared width and the name
+    // column (the only cell with no explicit width on its TableHead)
+    // gets the remainder, where `max-w-0` + `truncate` on the body
+    // cell turn long titles into ellipses instead of overflow.
     return (
       <div className="relative w-full">
         <table
           ref={ref}
-          className={cn('w-full text-body text-fg', className)}
+          className={cn('w-full table-fixed text-body text-fg', className)}
           {...props}
         />
       </div>

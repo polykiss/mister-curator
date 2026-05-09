@@ -7,6 +7,7 @@ import type { Rom } from '@shared/types';
 import {
   DENSITY_EYE_CELL_CLASSNAMES,
   RomDensityEyeCell,
+  RomNameInner,
 } from '@app/renderer/src/components/RomMetadataCells';
 
 /**
@@ -121,5 +122,121 @@ describe('RomDensityEyeCell — render shape', () => {
     expect(sysCell.props.children.props.className).toBe(
       DENSITY_EYE_CELL_CLASSNAMES.wrapper,
     );
+  });
+});
+
+describe('RomNameInner — PR #25 truncation + title-attribute tooltip', () => {
+  // The name cell's <td> uses `max-w-0 truncate` and the parent
+  // `<table>` is `table-fixed` (Table primitive), so per-cell width
+  // constraints actually apply and long titles ellipsis instead of
+  // pushing right-side columns off the visible area. The inner span
+  // carries a `title=` attribute so the browser-native hover tooltip
+  // surfaces the full title when it's truncated. Three contracts to
+  // pin: classes still include `truncate`, the title attribute is
+  // present, and it equals the visible display name (so the tooltip
+  // is never out-of-sync with the row).
+
+  function rom(overrides: Partial<Rom> = {}): Rom {
+    return {
+      coreId: 'NES',
+      filename: 'long.nes',
+      displayName:
+        "The Adventures of Some Game with a Really Long Subtitle (USA, Europe) (Beta) [Extended Demo]",
+      sizeBytes: 1024,
+      hidden: false,
+      path: '/media/fat/games/NES/long.nes',
+      kind: 'file',
+      relativePath: 'long.nes',
+      ...overrides,
+    };
+  }
+
+  // RomNameInner returns a wrapping <span> with [leadingIcon, innerSpan].
+  // We need the LAST child (innerSpan) to assert on its props.
+  function callInner(displayName?: string): {
+    readonly className: string;
+    readonly title: string;
+    readonly children: string;
+  } {
+    const r = rom(displayName ? { displayName } : {});
+    const result = RomNameInner({
+      rom: r,
+      dimmed: false,
+      metadata: undefined,
+      error: false,
+    }) as ReactElement<{
+      readonly children: readonly ReactElement<{
+        readonly className: string;
+        readonly title: string;
+        readonly children: string;
+      }>[];
+    }>;
+    // children is [leadingIcon (undefined here), innerSpan]
+    const children = Array.isArray(result.props.children)
+      ? result.props.children
+      : [result.props.children];
+    const innerSpan = children[children.length - 1]!;
+    return {
+      className: innerSpan.props.className,
+      title: innerSpan.props.title,
+      children: innerSpan.props.children,
+    };
+  }
+
+  it('inner span has the `truncate` class so long titles ellipsis', () => {
+    const inner = callInner();
+    expect(inner.className).toContain('truncate');
+  });
+
+  it('inner span carries a title= attribute equal to the visible display name', () => {
+    // For short titles the tooltip duplicates what's visible — fine,
+    // browsers show it on hover with no harm. For long truncated
+    // titles, this is what surfaces the full text. The two MUST agree
+    // (same source, no parallel state) so the tooltip can't show a
+    // different name than the row.
+    const inner = callInner('Mike Tyson Punch Out');
+    expect(inner.title).toBe('Mike Tyson Punch Out');
+    expect(inner.children).toBe('Mike Tyson Punch Out');
+  });
+
+  it('uses metadata.name when present, on-disk displayName otherwise', () => {
+    // Pin the resolution path: metadata.name wins when set; the title
+    // attribute follows the same fallback chain as the visible text.
+    const r = rom({ displayName: 'on-disk-name.nes' });
+    const result = RomNameInner({
+      rom: r,
+      dimmed: false,
+      metadata: {
+        version: 4,
+        hash: 'a'.repeat(32),
+        name: 'Canonical Game Title',
+        system: 'Nintendo Entertainment System',
+        year: null,
+        publisher: null,
+        developer: null,
+        genre: null,
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: null,
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        source: 'screenscraper',
+        fetchedAt: '2026-05-09T00:00:00.000Z',
+      },
+      error: false,
+    }) as ReactElement<{
+      readonly children: readonly ReactElement<{
+        readonly title: string;
+        readonly children: string;
+      }>[];
+    }>;
+    const children = Array.isArray(result.props.children)
+      ? result.props.children
+      : [result.props.children];
+    const innerSpan = children[children.length - 1]!;
+    expect(innerSpan.props.title).toBe('Canonical Game Title');
+    expect(innerSpan.props.children).toBe('Canonical Game Title');
   });
 });
