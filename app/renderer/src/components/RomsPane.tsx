@@ -1020,8 +1020,15 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                 >
                   <TableCell className="pl-4" />
                   <BackThumbnailCell />
-                  <TableCell className="truncate">
-                    <span className="font-mono text-body-sm text-fg-muted">
+                  {/* PR #25: same max-w-0 + truncate combo as the
+                      ROM-row name cell — long parent labels (deep
+                      drill paths) shouldn't push the right-side
+                      cells off the visible area either. */}
+                  <TableCell className="max-w-0 truncate">
+                    <span
+                      className="font-mono text-body-sm text-fg-muted"
+                      title={`../ ${backRow.parentLabel}`}
+                    >
                       ../ {backRow.parentLabel}
                     </span>
                   </TableCell>
@@ -1087,9 +1094,20 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                       error={fetchError}
                       rowType={rowType}
                     />
+                    {/* PR #25: `max-w-0` is the standard CSS trick that
+                        lets a flex/auto-width table cell honor its
+                        children's `truncate`. Without it, the cell's
+                        intrinsic content size dominates and a 100-
+                        char title pushes Year / Genre / Rating off
+                        the visible area. Combined with the parent
+                        `<table className="table-fixed">` (set in the
+                        Table primitive), the name column gets the
+                        remaining width after the explicit `w-N`
+                        cells and the inner span's `truncate` does
+                        the ellipsis. */}
                     <TableCell
                       className={cn(
-                        'truncate',
+                        'max-w-0 truncate',
                         rom.kind === 'folder-container' &&
                           !rom.hidden &&
                           'cursor-pointer',

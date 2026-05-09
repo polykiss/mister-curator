@@ -215,6 +215,14 @@ function FolderTile(props: {
  * dedicated `RomYearCell`. The parent owns the surrounding
  * `<TableCell>` so the existing icons (system / folder), click
  * handlers, and dim styling stay where they were.
+ *
+ * PR #25: the inner span carries `title={displayName}` so the full
+ * title surfaces in the browser-native hover tooltip when the visible
+ * text is truncated. Set unconditionally — for short titles the
+ * tooltip duplicates what's already visible (harmless), and skipping
+ * the conditional avoids needing JS scrollWidth detection or a
+ * dedicated Tooltip primitive (the codebase doesn't ship one and the
+ * existing tooltips throughout the app use the same `title=` pattern).
  */
 export function RomNameInner(
   props: RomMetadataCellProps & { readonly leadingIcon?: ReactNode },
@@ -225,7 +233,10 @@ export function RomNameInner(
   return (
     <span className="flex min-w-0 items-center gap-2">
       {leadingIcon}
-      <span className={cn('truncate text-body-sm', !dimmed && 'text-fg')}>
+      <span
+        className={cn('truncate text-body-sm', !dimmed && 'text-fg')}
+        title={displayName}
+      >
         {displayName}
       </span>
     </span>
