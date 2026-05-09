@@ -96,6 +96,20 @@ export interface RomMetadata {
    *     read. Optional so old v4 records still parse.
    */
   readonly ssAvailableAtWrite?: boolean;
+  /**
+   * PR-D1 round 2 (PR #27 round 2): true once the name-search
+   * fallback has run for this hash (regardless of whether it hit or
+   * not). Pre-D1 records have this undefined → cache-priority
+   * treats them as "needs retry once" so legacy sentinels get a
+   * chance at the new pipeline without requiring a manual cache
+   * wipe. After the retry runs, the field is set on the next cache
+   * write so subsequent reads honor the sentinel normally.
+   *
+   * Does NOT bump the schema version — this is a minor opt-in flag,
+   * not a structural change. Old records without it still parse;
+   * new records always set it true (or false on the first write).
+   */
+  readonly triedNameSearch?: boolean;
 }
 
 /**

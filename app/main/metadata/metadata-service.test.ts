@@ -967,6 +967,11 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     function buildSentinel(
       ssAvailableAtWrite: boolean | undefined,
       fetchedAt = new Date().toISOString(),
+      // Round 2 (PR #27 round 2): default true so existing round-9
+      // tests model "post-D1 sentinel" semantics. The pre-D1 retry
+      // path is exercised by separate tests that explicitly pass
+      // false / undefined.
+      triedNameSearch: boolean | undefined = true,
     ): RomMetadata {
       const base: RomMetadata = {
         version: 4,
@@ -987,8 +992,13 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
         source: 'none',
         fetchedAt,
       };
-      if (ssAvailableAtWrite === undefined) return base;
-      return { ...base, ssAvailableAtWrite };
+      const withSs =
+        ssAvailableAtWrite === undefined
+          ? base
+          : { ...base, ssAvailableAtWrite };
+      return triedNameSearch === undefined
+        ? withSs
+        : { ...withSs, triedNameSearch };
     }
 
     it('authoritative sentinel (ssAvailableAtWrite=true) within TTL → use cache, no SS call', async () => {
@@ -1410,6 +1420,118 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       });
       expect(result).toBeNull();
       expect(ss.searchCalls).toEqual([]);
+    });
+
+    it('round 2: pre-D1 sentinel (triedNameSearch=undefined) retries when SS is available', async () => {
+      // The "user upgraded to PR-D1 with existing cache" recovery
+      // path. Pre-D1 sentinels lack the triedNameSearch flag → the
+      // cache decision treats them as "needs retry once" so legacy
+      // misses get a chance at the new pipeline.
+      const m = makeMocks({ dbReturns: null });
+      // Seed with a pre-D1 sentinel: source=none, ssAvailableAtWrite=true,
+      // NO triedNameSearch field.
+      const oldSentinel: RomMetadata = {
+        version: 4,
+        hash: HASH,
+        name: '(no match)',
+        system: '',
+        year: null,
+        publisher: null,
+        developer: null,
+        genre: null,
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: null,
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        source: 'none',
+        fetchedAt: new Date().toISOString(),
+        ssAvailableAtWrite: true,
+        // triedNameSearch intentionally absent — pre-D1 record
+      };
+      const cachePath = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
+      await fs.mkdir(join(dir, 'by-hash', HASH.slice(0, 2)), { recursive: true });
+      await fs.writeFile(cachePath, JSON.stringify(oldSentinel));
+      // SS available; name-search returns a candidate that scores high.
+      const ss = makeSearchSS({
+        lookupResult: null,
+        searchResults: { mslug2: [buildSsHit({ name: 'mslug2' })] },
+      });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      const result = await svc.getMetadata(
+        HASH,
+        { filename: 'Metal Slug 2 (mslug2).neo' },
+        SS_HINT,
+      );
+      // Pre-D1 sentinel was retried, name-search bound the result.
+      expect(result?.source).toBe('screenscraper-name-search');
+      expect(ss.searchCalls.length).toBeGreaterThan(0);
+    });
+
+    it('round 2: post-D1 sentinel (triedNameSearch=true) is honored within TTL — no retry', async () => {
+      // After PR-D1 wrote the sentinel with triedNameSearch=true,
+      // subsequent reads honor the authoritative TTL — no infinite
+      // retry loop, no API budget waste.
+      const m = makeMocks({ dbReturns: null });
+      const post: RomMetadata = {
+        version: 4,
+        hash: HASH,
+        name: '(no match)',
+        system: '',
+        year: null,
+        publisher: null,
+        developer: null,
+        genre: null,
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: null,
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        source: 'none',
+        fetchedAt: new Date().toISOString(),
+        ssAvailableAtWrite: true,
+        triedNameSearch: true,
+      };
+      const cachePath = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
+      await fs.mkdir(join(dir, 'by-hash', HASH.slice(0, 2)), { recursive: true });
+      await fs.writeFile(cachePath, JSON.stringify(post));
+      const ss = makeSearchSS({ lookupResult: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      const result = await svc.getMetadata(
+        HASH,
+        { filename: 'mslug2.neo' },
+        SS_HINT,
+      );
+      expect(result).toBeNull();
+      // No SS calls — sentinel honored as authoritative.
+      expect(ss.searchCalls).toEqual([]);
+    });
+
+    it('round 2: name-search miss writes a sentinel with triedNameSearch=true (don\'t loop)', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({
+        lookupResult: null,
+        // No candidates for the search term → name-search ran but
+        // produced no bind. Sentinel write should still mark
+        // triedNameSearch=true so we don't retry forever.
+        searchResults: { mslug2: [] },
+      });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      await svc.getMetadata(
+        HASH,
+        { filename: 'Metal Slug 2 (mslug2).neo' },
+        SS_HINT,
+      );
+      // Read the sentinel back from disk and confirm the flag.
+      const cachePath = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
+      const raw = await fs.readFile(cachePath, 'utf-8');
+      const written = JSON.parse(raw) as RomMetadata;
+      expect(written.source).toBe('none');
+      expect(written.triedNameSearch).toBe(true);
     });
 
     it('OpenVGDB hit short-circuits before name-search runs', async () => {

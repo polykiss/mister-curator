@@ -198,6 +198,12 @@ export class MetadataService {
     hint: MetadataHint,
   ): Promise<RomMetadata | null> {
     const ssAvailable = this.canQueryScreenScraper(ssHint);
+    // PR-D1 round 2 (PR #27 round 2): tracks whether the name-search
+    // fallback actually ran (vs being skipped due to missing
+    // prereqs). Set true inside the name-search branch when
+    // `tryNameSearch` reports `tried: true`. Used to mark sentinels
+    // with `triedNameSearch` so pre-D1 records retry once.
+    let nameSearchActuallyRan = false;
     const cached = await this.readCache(hash);
     diagLog('info', 'meta', '·', 'metadata-cache', {
       hash: hash.slice(0, 12),
@@ -294,28 +300,39 @@ export class MetadataService {
       this.screenScraper.getStatus() === 'available' &&
       hint.filename !== undefined
     ) {
-      const nameSearchHit = await this.tryNameSearch(
+      const nameSearchResult = await this.tryNameSearch(
         hash,
         ssHint.systemId,
         hint,
       );
-      if (nameSearchHit !== null) {
-        await this.writeCache(hash, nameSearchHit);
-        return nameSearchHit;
+      if (nameSearchResult.metadata !== null) {
+        await this.writeCache(hash, nameSearchResult.metadata);
+        return nameSearchResult.metadata;
       }
+      // Name-search ran (with or without candidates); the sentinel
+      // below is marked `triedNameSearch: true` via the closure-set
+      // flag so future reads honor the authoritative TTL.
+      nameSearchActuallyRan = nameSearchResult.tried;
     }
 
     // All sources missed — sentinel. Round 9 records the ssAvailable
     // bit at write-time so the next read can distinguish "definitive
     // SS no-match" (authoritative TTL) from "we couldn't even ask SS"
-    // (refetch on next opportunity).
+    // (refetch on next opportunity). PR-D1 round 2 also records
+    // whether the name-search fallback ran so pre-D1 records get a
+    // one-time retry without wedging the cache.
     diagLog('info', 'meta', '·', 'metadata-decision', {
       hash: hash.slice(0, 12),
       action: 'write-sentinel',
       reason: 'all-sources-miss',
       ssAvailableAtWrite: ssAvailable ? 1 : 0,
+      triedNameSearch: nameSearchActuallyRan ? 1 : 0,
     });
-    const sentinel = this.buildSentinel(hash, ssAvailable);
+    const sentinel = this.buildSentinel(
+      hash,
+      ssAvailable,
+      nameSearchActuallyRan,
+    );
     await this.writeCache(hash, sentinel);
     return null;
   }
@@ -335,9 +352,19 @@ export class MetadataService {
     hash: string,
     systemId: number,
     hint: MetadataHint,
-  ): Promise<RomMetadata | null> {
-    if (this.screenScraper === null) return null;
-    if (hint.filename === undefined) return null;
+  ): Promise<{
+    readonly metadata: RomMetadata | null;
+    /**
+     * PR-D1 round 2 (PR #27 round 2): true iff at least one
+     * jeuRecherche call ran. False when no hints were extracted
+     * (no filename, no atomic-folder, etc.) — caller uses this to
+     * decide whether the sentinel write should mark
+     * `triedNameSearch: true` for the pre-D1 retry contract.
+     */
+    readonly tried: boolean;
+  }> {
+    if (this.screenScraper === null) return { metadata: null, tried: false };
+    if (hint.filename === undefined) return { metadata: null, tried: false };
     const hints = extractNameHints({
       filename: hint.filename,
       parentFolder: hint.parentFolder,
@@ -346,7 +373,8 @@ export class MetadataService {
       // `Hacks`) would waste API calls returning no candidates.
       parentFolderIsAtomic: hint.parentFolderIsAtomic,
     });
-    if (hints.length === 0) return null;
+    if (hints.length === 0) return { metadata: null, tried: false };
+    let triedAny = false;
     for (const h of hints) {
       let candidates: readonly ScreenScraperGame[];
       try {
@@ -354,6 +382,7 @@ export class MetadataService {
           systemId,
           searchTerm: h.value,
         });
+        triedAny = true;
       } catch (err) {
         if (err instanceof ScreenScraperAuthError) {
           // Auth latched mid-search; SS won't recover this session.
@@ -361,7 +390,9 @@ export class MetadataService {
           this.logger(
             `[MetadataService] ScreenScraper auth failed during name-search; aborting fallback.`,
           );
-          return null;
+          // Return triedAny as it stood — auth failure aborts but
+          // doesn't invalidate previous successful attempts.
+          return { metadata: null, tried: triedAny };
         }
         throw err;
       }
@@ -385,13 +416,16 @@ export class MetadataService {
         outcome: score >= AUTO_BIND_THRESHOLD ? 'bind' : 'low-confidence',
       });
       if (score >= AUTO_BIND_THRESHOLD) {
-        return this.composeFromScreenScraperNameSearch(hash, top);
+        return {
+          metadata: this.composeFromScreenScraperNameSearch(hash, top),
+          tried: true,
+        };
       }
       // Below threshold — try the next hint. The candidate IS in
       // SS's database, but the rank-1 result didn't match the search
       // term well enough to auto-bind; continue rather than commit.
     }
-    return null;
+    return { metadata: null, tried: triedAny };
   }
 
   /**
@@ -406,7 +440,14 @@ export class MetadataService {
     game: ScreenScraperGame,
   ): RomMetadata {
     const base = this.composeFromScreenScraper(hash, game);
-    return { ...base, source: 'screenscraper-name-search' };
+    // Round 2 (PR #27 round 2): mark triedNameSearch on the bind
+    // record too, so a later cache audit can tell which records
+    // were sourced via name-search AND know the fallback ran.
+    return {
+      ...base,
+      source: 'screenscraper-name-search',
+      triedNameSearch: true,
+    };
   }
 
   /**
@@ -534,7 +575,11 @@ export class MetadataService {
     };
   }
 
-  private buildSentinel(hash: string, ssAvailableAtWrite: boolean): RomMetadata {
+  private buildSentinel(
+    hash: string,
+    ssAvailableAtWrite: boolean,
+    triedNameSearch: boolean,
+  ): RomMetadata {
     return {
       version: ROM_METADATA_SCHEMA_VERSION,
       hash,
@@ -554,6 +599,13 @@ export class MetadataService {
       source: 'none',
       fetchedAt: new Date(this.now()).toISOString(),
       ssAvailableAtWrite,
+      // Round 2 (PR #27 round 2): records whether the new
+      // jeuRecherche fallback ran. Pre-D1 records lack this field
+      // → cache decision treats them as "needs retry once" so they
+      // get a chance at the new pipeline. Once the fallback runs,
+      // future writes set this true and the sentinel is honored
+      // normally.
+      triedNameSearch,
     };
   }
 
@@ -633,6 +685,17 @@ export class MetadataService {
     // cached.source === 'none' — sentinel.
     const age = this.sentinelAgeMs(cached);
     const authoritative = cached.ssAvailableAtWrite === true;
+    // PR-D1 round 2 (PR #27 round 2): pre-D1 sentinels lack the
+    // `triedNameSearch` flag and never went through the new
+    // jeuRecherche fallback. Force a one-time retry so legacy cached
+    // misses get a chance at the new pipeline without the user
+    // having to wipe the cache. After the retry runs, the next cache
+    // write sets `triedNameSearch: true` and this branch stops
+    // firing.
+    const triedNameSearch = cached.triedNameSearch === true;
+    if (!triedNameSearch && ssAvailable) {
+      return { refetch: true, reason: 'sentinel-pre-d1-name-search-retry' };
+    }
     if (authoritative) {
       if (age === null || age > this.authoritativeSentinelTtlMs) {
         return { refetch: true, reason: 'sentinel-authoritative-stale' };
