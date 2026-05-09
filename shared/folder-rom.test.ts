@@ -275,6 +275,159 @@ describe('classifyFolder — round 9 many-similar-files rule', () => {
   });
 });
 
+describe('classifyFolder — fix/floppy-folder-classification (FLOPPY_EXTENSIONS)', () => {
+  // The reported bug: X68000 multi-disk game folders containing 2-4
+  // floppy images each rendered as drillable containers (or — when
+  // any subdir like `Manuals/` was present — as containers via the
+  // dirs-mean-container rule), forcing a useless drill-in to load
+  // the game. Multi-disk folders with 5+ disks (rare but real)
+  // tripped the many-same-extension rule and ALSO classified as
+  // container.
+  //
+  // Fix: a third extension bucket (FLOPPY_EXTENSIONS) wired into
+  // rule 1, parallel to DISC_EXTENSIONS. ANY floppy file in the
+  // folder pins the classification to atomic — overriding both
+  // the dirs-mean-container rule AND the many-same-extension rule.
+  // Mirrors the disc-marker rule's precedence for the same reason:
+  // the file IS the game, subdirs are companions, multiple disks
+  // are still one game.
+
+  describe('multi-disk X68000 shape', () => {
+    it('2-4 .dim files → atomic', () => {
+      expect(
+        classifyFolder({
+          files: ['Carrot Party Disk 1.dim', 'Carrot Party Disk 2.dim', 'Carrot Party Disk 3.dim'],
+          dirs: [],
+        }),
+      ).toBe('atomic');
+    });
+
+    it('single .dim → atomic', () => {
+      expect(
+        classifyFolder({ files: ['Game.dim'], dirs: [] }),
+      ).toBe('atomic');
+    });
+
+    it('5+ .dim → atomic (overrides the many-same-extension container rule)', () => {
+      // Pre-fix: 5+ files of one extension hit the long-tail
+      // many-same rule → container. Post-fix: floppy precedence
+      // pins to atomic regardless of count.
+      const files: string[] = [];
+      for (let i = 1; i <= 8; i += 1) files.push(`Disk ${String(i)}.dim`);
+      expect(classifyFolder({ files, dirs: [] })).toBe('atomic');
+    });
+
+    it('mixed floppy extensions in one folder still classify atomic', () => {
+      expect(
+        classifyFolder({
+          files: ['disk1.d88', 'disk2.dim'],
+          dirs: [],
+        }),
+      ).toBe('atomic');
+    });
+
+    it('floppy file + manual companion → atomic (cart shape carryover)', () => {
+      expect(
+        classifyFolder({
+          files: ['game.adf', 'manual.txt'],
+          dirs: [],
+        }),
+      ).toBe('atomic');
+    });
+
+    it('floppy + subdir → atomic (overrides the dirs-mean-container rule)', () => {
+      // Real X68000 layout sometimes has Saves/ or Manuals/ next to
+      // the disk images. Pre-fix: subdir rule fired → container.
+      // Post-fix: floppy precedence pins to atomic.
+      expect(
+        classifyFolder({
+          files: ['game.dim'],
+          dirs: ['Manuals'],
+        }),
+      ).toBe('atomic');
+    });
+  });
+
+  describe('extension list — every spec-listed floppy extension classifies atomic', () => {
+    // Each newly-recognized floppy extension tested via a single-file
+    // folder. Includes the shared-with-CART entries so future
+    // refactors that move things between sets stay covered.
+    const FLOPPY_EXTS = [
+      // X68000
+      '.dim', '.d88', '.xdf', '.hdm', '.2hd', '.2dd',
+      // Amiga
+      '.adf', '.adz', '.ipf', '.hdf',
+      // Atari ST
+      '.st', '.msa', '.stx',
+      // Apple II
+      '.nib', '.woz', '.po', '.do', '.2mg',
+      // C64
+      '.d64', '.d71', '.d81', '.g64', '.t64',
+      // Shared (X68000 / Apple II / Amstrad CPC)
+      '.dsk',
+      // Spectrum
+      '.trd', '.scl',
+      // BBC Micro
+      '.ssd', '.dsd',
+    ] as const;
+
+    it.each(FLOPPY_EXTS)('single %s file → atomic', (ext) => {
+      expect(classifyFolder({ files: [`Game${ext}`], dirs: [] })).toBe(
+        'atomic',
+      );
+    });
+
+    it.each(FLOPPY_EXTS)('%s is launchable (counts toward sidebar totals)', (ext) => {
+      expect(isLaunchableRomExtension(`Game${ext}`)).toBe(true);
+    });
+  });
+
+  describe('non-floppy folders unchanged', () => {
+    it('three .txt files → unknown (no floppy/cart/disc — falls through to unknown)', () => {
+      // Pre-existing behavior preserved: classifyFolder returns
+      // 'unknown' for un-recognizable shapes; resolveClassification
+      // turns 'unknown' into 'atomic' for safety.
+      expect(
+        classifyFolder({
+          files: ['a.txt', 'b.txt', 'c.txt'],
+          dirs: [],
+        }),
+      ).toBe('unknown');
+    });
+
+    it('NEOGEO 6+ .zip files → container (many-same-extension still wins for non-floppy)', () => {
+      // Regression pin: floppy precedence MUST NOT cross-contaminate
+      // the .zip cart-shape. NEOGEO's 1 World A-Z layout still
+      // classifies as container.
+      const files = ['mslug.zip', 'kof97.zip', 'samsho.zip', 'lastblade2.zip', 'garou.zip', 'mslug3.zip'];
+      expect(classifyFolder({ files, dirs: [] })).toBe('container');
+    });
+  });
+
+  describe('floppy + disc in same folder', () => {
+    // Edge case from spec: which atomic-rule wins doesn't matter
+    // outcome-wise (both → atomic) but pin the behavior so the
+    // contract is explicit. Both signals fire in rule 1 — the OR
+    // returns true at the first match (disc check runs first as a
+    // happenstance of code order, not a load-bearing precedence).
+    it('atomic wins regardless of which rule fires first', () => {
+      expect(
+        classifyFolder({
+          files: ['game.cue', 'game.bin', 'game.dim'],
+          dirs: [],
+        }),
+      ).toBe('atomic');
+      // Reverse order in the file list — still atomic.
+      expect(
+        classifyFolder({
+          files: ['game.dim', 'game.cue'],
+          dirs: [],
+        }),
+      ).toBe('atomic');
+    });
+  });
+});
+
 describe('resolveClassification — override layer', () => {
   it('user override wins over the heuristic', () => {
     expect(resolveClassification('container', 'atomic')).toBe('atomic');

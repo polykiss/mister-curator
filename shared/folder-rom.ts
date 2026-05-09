@@ -130,6 +130,77 @@ const CART_EXTENSIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Floppy / disk-image extensions for computer cores (X68000, Amiga,
+ * Atari ST, Apple II, C64, Amstrad CPC, Spectrum, BBC Micro …).
+ *
+ * fix/floppy-folder-classification — a multi-disk computer game lives
+ * in a folder with 2-4 (or sometimes more) disk-image files plus
+ * occasionally a manual / saves subdir. Pre-fix:
+ *   • 2-4 files → no rule fired → unknown → atomic via fallback (OK)
+ *   • 5+ files of one extension (rare, but exists) → many-same rule
+ *     fired → container → user had to drill in to load anything (BUG)
+ *   • 2-4 floppy files + a `Manuals/` subdir → dirs.length > 0 rule
+ *     fired → container → same drill-in friction (BUG)
+ *
+ * Wired into `classifyFolder` rule 1 (the same precedence as
+ * `hasDiscMarker`): ANY floppy file in the folder pins the
+ * classification to atomic, overriding both the many-same-extension
+ * rule and the subdirs-mean-container rule. Reasoning matches the
+ * disc rule — if there's a disc image (or a floppy image) sitting
+ * loose in the folder, that file IS the game; subdirs are
+ * companions, not distinct games.
+ *
+ * Some entries (`.dsk`, `.adf`, `.hdf`, `.st`, `.msa`, `.do`,
+ * `.po`, `.d64`, `.t64`) are also in `CART_EXTENSIONS` from earlier
+ * rounds. Keeping them in BOTH sets is intentional: CART_EXTENSIONS
+ * is the "single file = one game" lookup for `isLaunchableRomExtension`
+ * + the round-4 cart-shape atomic check, while FLOPPY_EXTENSIONS is
+ * the override-priority atomic signal. Overlap is harmless — Set
+ * membership is the same regardless of which set fires first.
+ *
+ * `.dsk` is overloaded across X68000 / Apple II / Amstrad CPC / etc.
+ * — that's fine, the rule applies uniformly.
+ */
+const FLOPPY_EXTENSIONS: ReadonlySet<string> = new Set([
+  // X68000
+  '.dim',
+  '.d88',
+  '.xdf',
+  '.hdm',
+  '.2hd',
+  '.2dd',
+  // Amiga
+  '.adf',
+  '.adz',
+  '.ipf',
+  '.hdf',
+  // Atari ST
+  '.st',
+  '.msa',
+  '.stx',
+  // Apple II
+  '.nib',
+  '.woz',
+  '.po',
+  '.do',
+  '.2mg',
+  // C64
+  '.d64',
+  '.d71',
+  '.d81',
+  '.g64',
+  '.t64',
+  // Amstrad CPC / X68000 / Apple II / many — the shared one
+  '.dsk',
+  // Spectrum (TR-DOS)
+  '.trd',
+  '.scl',
+  // BBC Micro
+  '.ssd',
+  '.dsd',
+]);
+
+/**
  * Threshold for the "many similar files" rule. Folders with this many
  * non-disc files sharing a single extension are treated as container —
  * the extension list above is non-exhaustive, and this catches the
@@ -151,9 +222,12 @@ const SAME_EXTENSION_THRESHOLD = 5;
  * reorders the rules so the X68000 single-game-folder shape
  * (`<game>/<game>.zip`) classifies atomic instead of container:
  *
- *   1. Disc markers / track patterns → atomic (a `.cue` folder full of
- *      `.bin`s is the Saturn shape; the disc rule wins so the `.bin`s
- *      don't drag us into a different branch).
+ *   1. Disc markers / track patterns / floppy-disk images → atomic
+ *      (a `.cue` folder full of `.bin`s is the Saturn shape; a
+ *      multi-disk X68000 game is `<name>/disk1.dim` + `disk2.dim` +
+ *      …; both pin to atomic so the rule-2/3 container signals don't
+ *      drag a multi-disk game into drillable). Floppy precedence
+ *      added in fix/floppy-folder-classification.
  *   2. Has subdirectories → container (likely an organisational tree;
  *      the user expects to drill in).
  *   3. Many files share a single extension → container. Catches NEOGEO
@@ -166,7 +240,11 @@ const SAME_EXTENSION_THRESHOLD = 5;
  *   5. Otherwise → unknown (resolves to atomic for safety).
  */
 export function classifyFolder(contents: FolderContents): FolderClassification {
-  if (hasDiscMarker(contents.files) || hasTrackPattern(contents.files)) {
+  if (
+    hasDiscMarker(contents.files) ||
+    hasTrackPattern(contents.files) ||
+    hasFloppyExtension(contents.files)
+  ) {
     return 'atomic';
   }
   if (contents.dirs.length > 0) {
@@ -215,6 +293,14 @@ function hasCartExtension(files: readonly string[]): boolean {
   for (const f of files) {
     const ext = extensionOf(f);
     if (ext !== '' && CART_EXTENSIONS.has(ext)) return true;
+  }
+  return false;
+}
+
+function hasFloppyExtension(files: readonly string[]): boolean {
+  for (const f of files) {
+    const ext = extensionOf(f);
+    if (ext !== '' && FLOPPY_EXTENSIONS.has(ext)) return true;
   }
   return false;
 }
@@ -272,5 +358,9 @@ function extensionOf(name: string): string {
 export function isLaunchableRomExtension(filename: string): boolean {
   const ext = extensionOf(filename);
   if (ext === '') return false;
-  return CART_EXTENSIONS.has(ext) || DISC_EXTENSIONS.has(ext);
+  return (
+    CART_EXTENSIONS.has(ext) ||
+    DISC_EXTENSIONS.has(ext) ||
+    FLOPPY_EXTENSIONS.has(ext)
+  );
 }
