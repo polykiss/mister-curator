@@ -61,6 +61,44 @@ describe('filenameToSearchTerm', () => {
       filenameToSearchTerm('Metal Slug 2 (mslug2).neo'),
     ).toBe('Metal Slug 2');
   });
+
+  // chore/search-and-filter-cleanup commit 1
+  describe('strip leading "." or "._" (hide convention + AppleDouble)', () => {
+    it('strips a single leading dot (MiSTer hide convention)', () => {
+      // Bug: hidden ROM ".Aero Fighters 3 (sonicwi3).neo" prefilled as
+      // ".Aero Fighters 3" — the dot is the hide marker, never part
+      // of the game name. SS search returned nothing.
+      expect(
+        filenameToSearchTerm('.Aero Fighters 3 (sonicwi3).neo'),
+      ).toBe('Aero Fighters 3');
+    });
+
+    it('strips leading "._" (macOS AppleDouble resource fork)', () => {
+      // AppleDouble shouldn't reach the listing post-commit-4, but
+      // strip it here as defense-in-depth in case one slips through.
+      expect(filenameToSearchTerm('._foo (bar).zip')).toBe('foo');
+    });
+
+    it('strips dot then continues with paren strip in the same pass', () => {
+      expect(filenameToSearchTerm('.foo (bar).zip')).toBe('foo');
+    });
+
+    it('strips at most one leading dot (no greedy strip)', () => {
+      // Pin the rule: SINGLE leading "." is removed, not all leading
+      // dots. The second dot stays — it's part of the (deliberately
+      // unusual) filename and may be load-bearing for the user.
+      // "..foo.zip" → after strip: ".foo.zip" → after extension strip:
+      // ".foo" → no further dot strip happens since the regex only
+      // applies once at the start.
+      expect(filenameToSearchTerm('..foo.zip')).toBe('.foo');
+    });
+
+    it('regular filenames are unchanged', () => {
+      expect(
+        filenameToSearchTerm('Aero Fighters 3 (sonicwi3).neo'),
+      ).toBe('Aero Fighters 3');
+    });
+  });
 });
 
 describe('SearchResultItem — every result is selectable (PR-D2 r2 c3)', () => {
