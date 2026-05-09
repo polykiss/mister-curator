@@ -1,0 +1,140 @@
+/**
+ * Classification-aware Rom enumeration.
+ *
+ * Background: `listRoms` returns one `Rom` per top-level entry with a
+ * `kind` discriminator (`'file'`, `'folder-atomic'`, `'folder-container'`)
+ * — `classifyFolder` (in `folder-rom.ts`) decides which. Downstream
+ * consumers (the auto-scrape engine, the renderer's per-row metadata
+ * lookup, and any future bulk enumerator) need the SAME view: one
+ * row-level entry per atomic folder, NOT one per contained file.
+ *
+ * Pre-helper, the auto-scrape engine read `listRecursiveRomFiles`
+ * (every launchable file in the games dir, no classification awareness)
+ * and queued each contained file individually — for X68000 with ~647
+ * atomic floppy folders × 2.25 disks each, that's ~1455 paths queued
+ * instead of ~647. Every disk got hashed separately + the same
+ * folder-name search ran 2-4 times per game. The renderer's per-row
+ * metadata lookup also reinvented the same `kind === 'folder-atomic'
+ * → use containedRomPath` ternary at every call site.
+ *
+ * `enumerateRomEntries(roms)` is the single source of truth: feed it
+ * the `Rom[]` from `listRoms`, get back a flat `RomEntry[]` where:
+ *   - file rows pass through (`path` = file path, `kind` = `'file'`)
+ *   - folder-atomic rows collapse to ONE entry (`path` = the folder's
+ *     `containedRomPath`, `kind` = `'atomic-folder'`, `displayName` =
+ *     the folder's display name — used as the SS name-search query)
+ *   - folder-container rows are NOT emitted; the caller drills into
+ *     them via `listRoms(coreId, container.relativePath)` and runs
+ *     this helper again on the inner level
+ *   - atomic folders without a `containedRomPath` (defensive: empty
+ *     atomic folder) are skipped — there's nothing to scrape or hash
+ */
+
+import type { Rom } from '@shared/types';
+
+/**
+ * The kind discriminator on `Rom` is FILESYSTEM-shape oriented (file
+ * vs folder vs container); `RomEntryKind` is the SCRAPE-pipeline view
+ * (file vs atomic-folder representation). The two collapse on
+ * `'file'`; `'folder-atomic'` becomes `'atomic-folder'`; container
+ * folders don't appear in the entry stream at all.
+ */
+export type RomEntryKind = 'file' | 'atomic-folder';
+
+export interface RomEntry {
+  /**
+   * The on-device path the scrape pipeline + renderer use as the
+   * metadata-cache lookup key. For files, this is the file's full
+   * path. For atomic folders, this is the contained primary file's
+   * full path (`Rom.containedRomPath`) — same shape as the file
+   * branch, so the cache stays md5-keyed without a schema change.
+   */
+  readonly path: string;
+  readonly kind: RomEntryKind;
+  /**
+   * What the user sees on the row + what gets passed to the SS
+   * name-search as the query string. For atomic folders this is the
+   * FOLDER name (without extension stripping — folders don't have
+   * meaningful extensions); for files it's the file's
+   * `Rom.displayName` (extension already stripped by the client).
+   */
+  readonly displayName: string;
+  /**
+   * The original `Rom.path` — distinct from `path` for atomic folders
+   * (where `path` points at the contained file). Callers use this
+   * for hide/show ops + folder-level bulk actions (which operate on
+   * the directory, not the contained file).
+   */
+  readonly rowPath: string;
+}
+
+/**
+ * Convert a `Rom[]` (one entry per row from `listRoms`) into the
+ * scrape-pipeline view. Pure — no IPC, no SSH, no async.
+ *
+ * Container folders are filtered out: callers that want their
+ * contents recurse via `listRoms(coreId, container.relativePath)` and
+ * call this helper on each inner level. Empty atomic folders (no
+ * `containedRomPath`) are skipped — they have no file to hash and no
+ * meaningful name-search target beyond the folder name itself, so
+ * they fall through to the `source: 'none'` sentinel naturally if a
+ * caller decides to enumerate them separately.
+ */
+export function enumerateRomEntries(
+  roms: readonly Rom[],
+): readonly RomEntry[] {
+  const out: RomEntry[] = [];
+  for (const r of roms) {
+    if (r.kind === 'file') {
+      out.push({
+        path: r.path,
+        kind: 'file',
+        displayName: r.displayName,
+        rowPath: r.path,
+      });
+    } else if (r.kind === 'folder-atomic') {
+      if (r.containedRomPath === undefined) continue;
+      out.push({
+        path: r.containedRomPath,
+        kind: 'atomic-folder',
+        displayName: r.displayName,
+        rowPath: r.path,
+      });
+    }
+    // folder-container: caller recurses; not emitted here.
+  }
+  return out;
+}
+
+/**
+ * Subset of `enumerateRomEntries` that just returns the path strings
+ * — the shape `listRecursiveRomFiles` returns and the auto-scrape
+ * engine queues. Convenience over `enumerateRomEntries(...).map(e =>
+ * e.path)` because it's the dominant call shape.
+ */
+export function enumerateScrapePaths(
+  roms: readonly Rom[],
+): readonly string[] {
+  return enumerateRomEntries(roms).map((e) => e.path);
+}
+
+/**
+ * Subset of atomic-folder paths from a `Rom[]`. The orchestrator's
+ * `getRomsMetadata` accepts an `atomicFolderPaths` set so it can
+ * route those paths' name-search through the parent folder name (the
+ * strongest hint when hash misses). Returns the SAME paths
+ * `enumerateRomEntries` returns for atomic-folder entries — i.e. the
+ * `containedRomPath`, NOT the folder path itself, so the orchestrator
+ * can match on the path it already has.
+ */
+export function atomicFolderPathsFromRoms(
+  roms: readonly Rom[],
+): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const r of roms) {
+    if (r.kind === 'folder-atomic' && r.containedRomPath !== undefined) {
+      out.add(r.containedRomPath);
+    }
+  }
+  return out;
+}
