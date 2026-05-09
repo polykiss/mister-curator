@@ -843,21 +843,25 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
         ? 'Override the name, year, genre, rating, tags, or note for this row.'
         : 'No metadata to edit yet — wait for the prefetch to land.',
     });
-    // "Find on ScreenScraper..." — always available. The search modal
-    // can run even on rows with no cached metadata yet (the bind path
-    // requires a cached hash, gated by hasMetadata; the modal still
-    // surfaces a helpful error in that edge case).
+    // "Find on ScreenScraper..." — always enabled. PR-D2 r2 c2: this
+    // is the primary affordance for source='none' rows (the auto-binder
+    // missed) so disabling it on those exact rows was the bug. The
+    // modal opens regardless of cache state; the bind path inside the
+    // modal surfaces its own error toast if there's no cached hash yet.
+    // For source='none' (or no metadata), prefix with ★ to signal that
+    // this is the recommended next step for that row.
+    const sourceState = metadataByPath[lookupPath]?.metadata?.source ?? 'none';
+    const isUnmatched = !hasMetadata || sourceState === 'none';
     items.push({
-      label: 'Find on ScreenScraper...',
+      label: isUnmatched ? '★ Find on ScreenScraper...' : 'Find on ScreenScraper...',
       onSelect: () =>
         setSearchScreenScraperFor({
           path: lookupPath,
           filename: rom.filename,
         }),
-      disabled: !hasMetadata,
-      title: hasMetadata
-        ? 'Search ScreenScraper for the right match — useful when the auto-binder missed or got it wrong.'
-        : 'No cached hash yet — wait for the prefetch to land.',
+      title: isUnmatched
+        ? 'Recommended — this row has no automatic match. Search ScreenScraper to bind it manually.'
+        : 'Search ScreenScraper for the right match — useful when the auto-binder missed or got it wrong.',
     });
 
     return items;
