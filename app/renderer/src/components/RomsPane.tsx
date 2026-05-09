@@ -28,6 +28,7 @@ function shortName(path: string): string {
   return i < 0 ? path : path.slice(i + 1);
 }
 
+import { RomEditMetadataDialog } from '@app/renderer/src/components/RomEditMetadataDialog';
 import {
   RomRowMenu,
   type RomRowMenuItem,
@@ -124,6 +125,12 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     readonly rom: Rom;
     readonly x: number;
     readonly y: number;
+  } | null>(null);
+  // PR-D2 (PR #29): edit-metadata modal state. The modal is "open
+  // for this row" (path, displayName) — closed when null.
+  const [editMetadataFor, setEditMetadataFor] = useState<{
+    readonly path: string;
+    readonly displayName: string;
   } | null>(null);
 
   // Reset drill state SYNCHRONOUSLY when the visible core changes so
@@ -808,6 +815,28 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
       });
     }
 
+    // PR-D2 (PR #29) — manual override entries. "Edit metadata..."
+    // opens the field-edit modal; gated on metadata existing for
+    // this row. The search-modal entry ships in commit 5.
+    const lookupPath =
+      rom.kind === 'folder-atomic' && rom.containedRomPath !== undefined
+        ? rom.containedRomPath
+        : rom.path;
+    const hasMetadata = metadataByPath[lookupPath]?.metadata !== undefined &&
+      metadataByPath[lookupPath]?.metadata !== null;
+    items.push({
+      label: 'Edit metadata...',
+      onSelect: () =>
+        setEditMetadataFor({
+          path: lookupPath,
+          displayName: metadataByPath[lookupPath]?.metadata?.name ?? rom.displayName,
+        }),
+      disabled: !hasMetadata,
+      title: hasMetadata
+        ? 'Override the name, year, genre, rating, tags, or note for this row.'
+        : 'No metadata to edit yet — wait for the prefetch to land.',
+    });
+
     return items;
   }
 
@@ -1322,6 +1351,30 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
           y={menuFor.y}
           items={buildMenuItems(menuFor.rom)}
           onClose={() => setMenuFor(null)}
+        />
+      ) : null}
+      {/* PR-D2 (PR #29) — edit-metadata modal. Renders only when a
+          row's selected for editing AND its metadata is loaded
+          (the menu item gates on hasMetadata; this guard is
+          defensive against a race where the metadata vanishes
+          between menu-click and modal-open). */}
+      {editMetadataFor !== null &&
+      metadataByPath[editMetadataFor.path]?.metadata !== null &&
+      metadataByPath[editMetadataFor.path]?.metadata !== undefined ? (
+        <RomEditMetadataDialog
+          path={editMetadataFor.path}
+          displayName={editMetadataFor.displayName}
+          metadata={metadataByPath[editMetadataFor.path]!.metadata!}
+          open
+          onOpenChange={(open) => {
+            if (!open) setEditMetadataFor(null);
+          }}
+          onSaved={(updated) => {
+            setMetadataByPath((prev) => ({
+              ...prev,
+              [editMetadataFor.path]: { metadata: updated, error: false },
+            }));
+          }}
         />
       ) : null}
     </div>
