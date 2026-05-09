@@ -1,8 +1,6 @@
 import {
   ChevronDown,
   ChevronUp,
-  Eye,
-  EyeOff,
   Folder,
   FolderOpen,
   MoreHorizontal,
@@ -38,6 +36,7 @@ import {
 } from '@app/renderer/src/components/RomRowMenu';
 import {
   BackThumbnailCell,
+  RomDensityEyeCell,
   RomMetadataInfoCells,
   RomNameInner,
   RomThumbnailCell,
@@ -53,7 +52,6 @@ import {
 import { classifyRow } from '@app/renderer/src/lib/row-type';
 import type { RomMetadata } from '@shared/metadata-types';
 import { Button } from '@app/renderer/src/components/ui/button';
-import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
 import {
   Table,
@@ -71,7 +69,7 @@ import {
   subPathAtDepth,
 } from '@app/renderer/src/lib/breadcrumb';
 import { cn } from '@app/renderer/src/lib/cn';
-import { formatBytes, summarizeBulkResult } from '@app/renderer/src/lib/format';
+import { summarizeBulkResult } from '@app/renderer/src/lib/format';
 import type { VisibilityChange } from '@app/renderer/src/lib/optimistic';
 import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
 
@@ -1177,92 +1175,24 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         <MoreHorizontal strokeWidth={1.5} />
                       </Button>
                     </TableCell>
-                    {/* Combined density + eye column. The wrapper's
-                        `h-full` lets the density rectangle and eye
-                        button stretch to the row's actual height —
-                        same flex bridge the cores pane uses. The
-                        `<td>` here has `p-0`, the inner flex has
-                        `items-stretch`, and DensityBar's hardcoded
-                        h-10 sits flush against the eye button with
-                        no gap utility class between them. System rows
-                        skip the rectangle; the gear icon + dimming
-                        already says "read-only", so the eye-icon
-                        slot reads as "read-only" copy. */}
-                    <TableCell className="h-full p-0">
-                      {/* PR #23 round 3: `h-full` on the <td> is
-                          what unlocks the height-stretch chain.
-                          Round 2 used a hardcoded `h-10` (40px)
-                          override on DensityBar to dodge a
-                          propagation issue, but the row's actual
-                          height is ~56px (the 48px thumbnail +
-                          4px p-1 padding pushes it past the
-                          design-token 40px), leaving ~16px of gap
-                          above + below the bar and breaking the
-                          continuous-strip read.
-                          In Chromium (Electron's renderer) a
-                          percentage height on a `<td>` resolves
-                          against the row's *computed* height —
-                          which is the actual rendered height,
-                          not the declared `h-10`. Adding `h-full`
-                          here lets the inner div's `h-full`
-                          resolve to the real ~56px, which then
-                          lets DensityBar's default `h-full`
-                          stretch to fill it. Bars on consecutive
-                          rows now touch with just the row's 1px
-                          border-b between them. */}
-                      <div className="flex h-full shrink-0 items-stretch">
-                        {!isSystem ? (
-                          <DensityBar
-                            floor="bg-elevated"
-                            value={rom.sizeBytes}
-                            max={maxSizeBytes}
-                            ariaLabel={`${formatBytes(rom.sizeBytes)} of peer max ${formatBytes(maxSizeBytes)}`}
-                          />
-                        ) : null}
-                        {isSystem ? (
-                          <span
-                            className="flex items-center px-2 font-mono text-body-sm text-fg-disabled"
-                            aria-label="read-only"
-                          >
-                            read-only
-                          </span>
-                        ) : (
-                          // Eye / EyeOff toggle — always visible at
-                          // rest (Round 3 Issue 1). Hover lifts
-                          // opacity on row-hover (matches cores pane,
-                          // which uses the same `group-hover/row`
-                          // pattern via the `group/row` class on
-                          // TableRow from the Table primitive).
-                          // `canMutate` gates against a lost-
-                          // connection session.
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => void onSingleToggle(rom)}
-                            disabled={!canMutate}
-                            title={
-                              canMutate
-                                ? rom.hidden
-                                  ? `Show ${rom.displayName}`
-                                  : `Hide ${rom.displayName}`
-                                : DISCONNECTED_TOOLTIP
-                            }
-                            aria-label={
-                              rom.hidden
-                                ? `Show ${rom.displayName}`
-                                : `Hide ${rom.displayName}`
-                            }
-                            className="self-center opacity-70 transition-opacity group-hover/row:opacity-100 focus-visible:opacity-100"
-                          >
-                            {rom.hidden ? (
-                              <EyeOff strokeWidth={1.5} />
-                            ) : (
-                              <Eye strokeWidth={1.5} />
-                            )}
-                          </Button>
-                        )}
-                      </div>
-                    </TableCell>
+                    {/* Combined density + eye column. PR #23 round 4
+                        extracted the cell into RomDensityEyeCell to
+                        give the absolute-positioning workaround a
+                        stable contract a regression test can pin —
+                        see RomMetadataCells.tsx for the long
+                        explanation of why `position: absolute` is the
+                        only reliable way to fill the row's actual
+                        height when the `<tr>` height is
+                        content-driven (the 48px thumbnail makes the
+                        actual row ~56px, not the declared 40px). */}
+                    <RomDensityEyeCell
+                      rom={rom}
+                      isSystem={isSystem}
+                      maxSizeBytes={maxSizeBytes}
+                      canMutate={canMutate}
+                      disconnectedTooltip={DISCONNECTED_TOOLTIP}
+                      onSingleToggle={onSingleToggle}
+                    />
                   </TableRow>
                 );
               })}

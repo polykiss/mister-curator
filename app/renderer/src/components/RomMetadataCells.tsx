@@ -1,6 +1,8 @@
 import {
   AlertCircle,
   CornerUpLeft,
+  Eye,
+  EyeOff,
   Folder as FolderIcon,
   FolderOpen,
   ImageOff,
@@ -12,9 +14,12 @@ import type { Rom } from '@shared/types';
 
 import { diagLog } from '@shared/diag-log';
 
+import { Button } from '@app/renderer/src/components/ui/button';
+import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
 import { TableCell } from '@app/renderer/src/components/ui/table';
 import { cn } from '@app/renderer/src/lib/cn';
+import { formatBytes } from '@app/renderer/src/lib/format';
 import {
   formatRating,
   pickPrimaryGenre,
@@ -310,4 +315,125 @@ function DashSkeleton(props: { readonly width: string }): JSX.Element {
 function shortName(path: string): string {
   const i = path.lastIndexOf('/');
   return i < 0 ? path : path.slice(i + 1);
+}
+
+/**
+ * Stable className contract for the density+eye cell. Exported so the
+ * regression test can pin them without reaching into a render tree —
+ * the combination `relative` on the `<td>` + `absolute inset-0` on the
+ * inner wrapper is THE fix that makes the density bar fill the row
+ * height. See the long comment on `RomDensityEyeCell` below.
+ */
+export const DENSITY_EYE_CELL_CLASSNAMES = {
+  cell: 'relative p-0',
+  wrapper: 'absolute inset-0 flex shrink-0 items-stretch',
+} as const;
+
+/**
+ * Combined density-rectangle + Eye-toggle cell — the right-edge slot on
+ * every ROM row. PR #23 round 4 extracted this from RomsPane so the
+ * absolute-positioning workaround has a stable contract a unit test
+ * can pin.
+ *
+ * Why absolute positioning:
+ *
+ *   • Round 1 hardcoded the bar to `h-10` (40px) — visible but with a
+ *     ~16px gap above + below because the row's actual height is ~56px
+ *     (the 48px thumbnail in `w-16 p-1` drives it past the design-token
+ *     40px on `<tr>`).
+ *   • Round 2 reverted to `h-10` after `h-full` rendered as 0 in some
+ *     row configurations. Round 3 part 1 added `h-full` to the `<td>`
+ *     hoping percentage-height would chain through the cell. Live test
+ *     said no — the chain doesn't propagate reliably in Chromium when
+ *     the parent `<tr>` height is content-driven.
+ *   • Round 4 stops fighting table-cell percentage heights entirely.
+ *     `position: relative` on the `<td>` + `position: absolute; inset: 0`
+ *     on the inner wrapper makes the wrapper fill the cell's actual
+ *     rendered bounds REGARDLESS of how the height resolves. The
+ *     DensityBar then fills the wrapper via its default `h-full`,
+ *     which is now resolving against an absolutely-positioned parent
+ *     with a defined size.
+ *
+ * Width: the column header (`<TableHead className="w-[3.25rem] p-0"/>`)
+ * sets the column to ~52px; the body cell inherits that width from the
+ * table layout, so absolute-only content doesn't collapse the column.
+ *
+ * Adjacent-cell behavior: the absolutely-positioned wrapper doesn't
+ * leak — its `inset-0` is bounded by `<td position: relative>`. The
+ * Eye button stays vertically centered via `self-center` inside the
+ * stretched flex container.
+ */
+export function RomDensityEyeCell(props: {
+  readonly rom: Rom;
+  readonly isSystem: boolean;
+  readonly maxSizeBytes: number;
+  readonly canMutate: boolean;
+  readonly disconnectedTooltip: string;
+  readonly onSingleToggle: (rom: Rom) => void;
+}): JSX.Element {
+  const {
+    rom,
+    isSystem,
+    maxSizeBytes,
+    canMutate,
+    disconnectedTooltip,
+    onSingleToggle,
+  } = props;
+  // Class strings inlined as literals (rather than referencing
+  // `DENSITY_EYE_CELL_CLASSNAMES`) so source-string scanners like
+  // `right-edge-stack.test.ts` can find them without resolving a
+  // const reference. The exported constants must agree with the
+  // strings here — `RomMetadataCells.test.ts` pins both ends.
+  return (
+    <TableCell className="relative p-0">
+      <div className="absolute inset-0 flex shrink-0 items-stretch">
+        {!isSystem ? (
+          <DensityBar
+            floor="bg-elevated"
+            value={rom.sizeBytes}
+            max={maxSizeBytes}
+            ariaLabel={`${formatBytes(rom.sizeBytes)} of peer max ${formatBytes(maxSizeBytes)}`}
+          />
+        ) : null}
+        {isSystem ? (
+          <span
+            className="flex items-center px-2 font-mono text-body-sm text-fg-disabled"
+            aria-label="read-only"
+          >
+            read-only
+          </span>
+        ) : (
+          // Eye / EyeOff toggle — always visible at rest; row-hover
+          // lifts opacity (matches the cores pane via `group-hover/row`
+          // on the TableRow primitive). `canMutate` gates against a
+          // lost-connection session.
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => void onSingleToggle(rom)}
+            disabled={!canMutate}
+            title={
+              canMutate
+                ? rom.hidden
+                  ? `Show ${rom.displayName}`
+                  : `Hide ${rom.displayName}`
+                : disconnectedTooltip
+            }
+            aria-label={
+              rom.hidden
+                ? `Show ${rom.displayName}`
+                : `Hide ${rom.displayName}`
+            }
+            className="self-center opacity-70 transition-opacity group-hover/row:opacity-100 focus-visible:opacity-100"
+          >
+            {rom.hidden ? (
+              <EyeOff strokeWidth={1.5} />
+            ) : (
+              <Eye strokeWidth={1.5} />
+            )}
+          </Button>
+        )}
+      </div>
+    </TableCell>
+  );
 }

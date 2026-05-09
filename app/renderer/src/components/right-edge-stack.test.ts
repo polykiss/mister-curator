@@ -23,13 +23,21 @@ import { describe, expect, it } from 'vitest';
  *     `hover:` (button-self hover) so both panes match
  *
  * PR #11 round 5 added the ROMs-pane assertions after a live test
- * showed visible whitespace between density and eye on the ROMs pane,
- * traced to a sibling `<TableCell>` (the MoreHorizontal cell) whose
- * default `py-2` padding pushed the row past h-10 — the density
- * rectangle was 40px in a ~48px row, leaving 4px of bg-elevated above
- * and below.
+ * showed visible whitespace between density and eye on the ROMs pane.
+ *
+ * PR #23 round 4 extracted the ROMs-pane density+eye cell into
+ * `RomMetadataCells.tsx` (as `RomDensityEyeCell`) so this test now
+ * scans that file for the ROMs-pane assertions; the stronger,
+ * exported-constant contract lives in `RomMetadataCells.test.ts`.
+ * The cores-pane density+eye stays inline in `CoresPane.tsx`.
  */
 
+// Round 4: the ROMs-pane density+eye cell lives in RomMetadataCells,
+// not RomsPane. Source assertions targeting that cell scan here.
+const ROMS_DENSITY_EYE_SOURCE = readFileSync(
+  resolve(__dirname, 'RomMetadataCells.tsx'),
+  'utf8',
+);
 const ROMS_PANE = readFileSync(
   resolve(__dirname, 'RomsPane.tsx'),
   'utf8',
@@ -68,7 +76,7 @@ describe('Right-edge stack — density + eye structure (PR #11 round 5)', () => 
   });
 
   it('roms pane wrapper: flex + items-stretch, no spacing classes', () => {
-    const cls = findRightEdgeStackWrapperClasses(ROMS_PANE);
+    const cls = findRightEdgeStackWrapperClasses(ROMS_DENSITY_EYE_SOURCE);
     expect(cls).toContain('flex');
     expect(cls).toContain('items-stretch');
     expect(cls).not.toMatch(/\bgap-\d/);
@@ -77,14 +85,20 @@ describe('Right-edge stack — density + eye structure (PR #11 round 5)', () => 
     expect(cls).not.toMatch(/\bmx-\d/);
   });
 
-  it('roms pane wrapper inherits row height (h-full, not a hardcoded h-N)', () => {
-    // Round 5 fix: wrapper was `h-10` (40px), but the MoreHorizontal
-    // cell's default py-2 pushed the row taller and left bg-elevated
-    // above/below the density rectangle. h-full lets the wrapper
-    // track whatever the row's actual height is.
-    const cls = findRightEdgeStackWrapperClasses(ROMS_PANE);
-    expect(cls).toContain('h-full');
+  it('roms pane wrapper uses absolute positioning to fill the row height', () => {
+    // PR #23 round 4: hardcoded `h-10` (round 1/2) and percentage
+    // `h-full` on the `<td>` (round 3) both failed live — the bar
+    // either left a gap or rendered at 0px. Round 4 wraps the
+    // density+eye stack in `position: absolute; inset: 0` inside a
+    // `position: relative` `<td>` so the wrapper fills the cell's
+    // actual rendered bounds regardless of how percentage heights
+    // resolve. Pin against re-introduction of the previous failed
+    // approaches.
+    const cls = findRightEdgeStackWrapperClasses(ROMS_DENSITY_EYE_SOURCE);
+    expect(cls).toContain('absolute');
+    expect(cls).toContain('inset-0');
     expect(cls).not.toMatch(/\bh-\d+\b/);
+    expect(cls).not.toMatch(/\bh-full\b/);
   });
 
   it('roms pane MoreHorizontal cell uses py-0 to keep the row at h-10', () => {
@@ -101,11 +115,9 @@ describe('Right-edge stack — density + eye structure (PR #11 round 5)', () => 
     // pane uses `group-hover/row:opacity-100` so hovering anywhere
     // on the row lifts the eye to full opacity. ROMs pane was using
     // plain `hover:opacity-100` (button-self hover only) — visually
-    // inconsistent.
-    expect(ROMS_PANE).toContain('group-hover/row:opacity-100');
-    // Plain `hover:opacity-100` no longer appears for the eye row.
-    // (We allow it elsewhere in case future buttons want it; the
-    // assertion above is the load-bearing part.)
+    // inconsistent. Round 4: the ROMs eye button moved into
+    // RomMetadataCells (RomDensityEyeCell) so scan there.
+    expect(ROMS_DENSITY_EYE_SOURCE).toContain('group-hover/row:opacity-100');
   });
 
   it('DensityBar is the immediate prior sibling of the eye Button (no spacer between)', () => {
@@ -123,7 +135,7 @@ describe('Right-edge stack — density + eye structure (PR #11 round 5)', () => 
     const ALLOWED_BRANCH_MARKERS = /(read-only|ARCADE_TOOLTIP|aria-label=\{\s*isHiddenCore|role="status")/;
     for (const [name, source] of [
       ['cores pane', CORES_PANE],
-      ['roms pane', ROMS_PANE],
+      ['roms pane', ROMS_DENSITY_EYE_SOURCE],
     ] as const) {
       const idx = source.indexOf('<DensityBar');
       expect(idx, `${name}: DensityBar not found`).toBeGreaterThan(-1);
