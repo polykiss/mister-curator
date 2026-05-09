@@ -78,6 +78,33 @@ export class MetadataOrchestrator {
   /** Tracks whether `ensureMetadataDatabase` is currently downloading. */
   private downloadInProgress = false;
 
+  /**
+   * PR-D1 round 2 (PR #27 round 2): per-coreId in-flight gate for
+   * `getRomsMetadata`. The auto-scrape engine and RomsPane's
+   * per-pane prefetch both hit the same orchestrator method when
+   * the user clicks the focused core. Without this gate, both
+   * outer loops ran independently — same paths processed twice,
+   * same `prefetch.lookup` log lines emitted twice, ~2× the work.
+   *
+   * When a second call arrives for a coreId already in flight, the
+   * second caller's `onResolved` is added to the in-flight call's
+   * subscriber set; the second caller awaits the in-flight promise
+   * and returns when it resolves. Only one underlying scrape loop
+   * runs per coreId at a time. Path-set differences (engine =
+   * recursive, RomsPane = visible subset) are accepted: the
+   * second caller gets events for ALL paths in the in-flight set,
+   * including any it didn't explicitly request — RomsPane filters
+   * those out by visible-set on the renderer side, so the only
+   * cost is wasted event dispatch (microseconds).
+   */
+  private inflightByCoreId = new Map<
+    string,
+    {
+      readonly promise: Promise<void>;
+      readonly callbacks: Set<(event: RomMetadataResolvedEvent) => void>;
+    }
+  >();
+
   constructor(
     private readonly hashService: HashService,
     private readonly metadataService: MetadataService,
@@ -263,30 +290,61 @@ export class MetadataOrchestrator {
     coreId: string,
     romPaths: readonly string[],
     onResolved?: (event: RomMetadataResolvedEvent) => void,
-    /**
-     * PR-C (PR #26): cooperative cancellation for the auto-scrape
-     * engine. Checked at the top of each per-path iteration —
-     * returns early if true, leaving partial work in the metadata
-     * cache (which is the source of truth for "this path is
-     * scanned"). The engine flips this flag from setFocus / pause
-     * so the user's pivot lands within ~one path's wall time. SSH
-     * round-trips themselves aren't aborted (separate refactor
-     * scope per the PR-C spec); the abort surfaces between paths.
-     */
     shouldAbort?: () => boolean,
-    /**
-     * PR-D1 round 2 (PR #27 round 2): paths whose immediate parent
-     * dir is a `folder-atomic` single-game folder. Only these paths
-     * get the parent-folder name passed as a name-search hint —
-     * organizational containers (NEOGEO `1 World A-Z`, NES `Hacks`)
-     * would waste API budget on hints returning no candidates.
-     *
-     * Optional. When omitted, no path is treated as atomic — the
-     * caller (engine) doesn't currently track classification, so
-     * the safe default is "no folder hints anywhere". The renderer's
-     * per-pane prefetch passes the atomic-folder containedRomPaths
-     * it knows about.
-     */
+    atomicFolderPaths?: ReadonlySet<string>,
+  ): Promise<void> {
+    // PR-D1 round 2 (PR #27 round 2): per-coreId in-flight gate.
+    // If a scrape is already running for this coreId, subscribe
+    // this call's onResolved to the in-flight call's fan-out and
+    // await its promise — only ONE underlying scrape loop runs per
+    // coreId. Eliminates duplicate `prefetch.lookup` log lines
+    // when the auto-scrape engine and RomsPane's per-pane prefetch
+    // both target the focused core.
+    const inflight = this.inflightByCoreId.get(coreId);
+    if (inflight !== undefined) {
+      diagLog('info', 'prefetch', '·', 'gate-coalesce', {
+        coreId,
+        paths: romPaths.length,
+      });
+      if (onResolved !== undefined) inflight.callbacks.add(onResolved);
+      try {
+        await inflight.promise;
+      } finally {
+        if (onResolved !== undefined) inflight.callbacks.delete(onResolved);
+      }
+      return;
+    }
+
+    const callbacks = new Set<(event: RomMetadataResolvedEvent) => void>();
+    if (onResolved !== undefined) callbacks.add(onResolved);
+    const fanOut = (event: RomMetadataResolvedEvent): void => {
+      for (const cb of callbacks) cb(event);
+    };
+    const promise = this.runScrapeLoop(
+      coreId,
+      romPaths,
+      fanOut,
+      shouldAbort,
+      atomicFolderPaths,
+    ).finally(() => {
+      this.inflightByCoreId.delete(coreId);
+    });
+    this.inflightByCoreId.set(coreId, { promise, callbacks });
+    return promise;
+  }
+
+  /**
+   * PR-D1 round 2 (PR #27 round 2): the actual scrape loop. Was
+   * `getRomsMetadata`'s body before round 2 added the
+   * coreId-keyed in-flight gate. Now invoked by the public
+   * `getRomsMetadata` which handles dedup; this private method
+   * runs the work itself.
+   */
+  private async runScrapeLoop(
+    coreId: string,
+    romPaths: readonly string[],
+    onResolved: (event: RomMetadataResolvedEvent) => void,
+    shouldAbort?: () => boolean,
     atomicFolderPaths?: ReadonlySet<string>,
   ): Promise<void> {
     if (romPaths.length === 0) return;
@@ -302,7 +360,7 @@ export class MetadataOrchestrator {
     if (session === null) {
       diagLog('warn', 'prefetch', '·', 'no-session', { coreId });
       for (const path of romPaths) {
-        onResolved?.({ path, metadata: null, error: false });
+        onResolved({ path, metadata: null, error: false });
       }
       return;
     }
@@ -431,7 +489,7 @@ export class MetadataOrchestrator {
             source: 'error',
             ms: Date.now() - perRomStart,
           });
-          onResolved?.({ path, metadata: null, error: true });
+          onResolved({ path, metadata: null, error: true });
           errors += 1;
           continue;
         }
@@ -441,7 +499,7 @@ export class MetadataOrchestrator {
           source: 'synthetic-sentinel',
           ms: Date.now() - perRomStart,
         });
-        onResolved?.({ path, metadata, error: false });
+        onResolved({ path, metadata, error: false });
         resolved += 1;
         hashSkipped += 1;
         continue;
@@ -472,7 +530,7 @@ export class MetadataOrchestrator {
             source: 'error',
             ms: Date.now() - perRomStart,
           });
-          onResolved?.({ path, metadata: null, error: true });
+          onResolved({ path, metadata: null, error: true });
           errors += 1;
           continue;
         }
@@ -489,7 +547,7 @@ export class MetadataOrchestrator {
           source: 'unmatched',
           ms: Date.now() - perRomStart,
         });
-        onResolved?.({ path, metadata: null, error: false });
+        onResolved({ path, metadata: null, error: false });
         resolved += 1;
         continue;
       }
@@ -533,7 +591,7 @@ export class MetadataOrchestrator {
           source: metadata?.source ?? 'none',
           ms: Date.now() - perRomStart,
         });
-        onResolved?.({ path, metadata, error: false });
+        onResolved({ path, metadata, error: false });
         resolved += 1;
       } catch (err) {
         diagLog('error', 'prefetch', '✗', 'lookup failed', {
@@ -548,7 +606,7 @@ export class MetadataOrchestrator {
           source: 'error',
           ms: Date.now() - perRomStart,
         });
-        onResolved?.({ path, metadata: null, error: true });
+        onResolved({ path, metadata: null, error: true });
         errors += 1;
       }
     }

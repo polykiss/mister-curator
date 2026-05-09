@@ -5,6 +5,7 @@ import type { ImageCache } from '@app/main/metadata/image-cache';
 import {
   MetadataOrchestrator,
   type ActiveSession,
+  type RomMetadataResolvedEvent,
   type SystemIdResolver,
 } from '@app/main/metadata/metadata-orchestrator';
 import type { MetadataService } from '@app/main/metadata/metadata-service';
@@ -246,6 +247,76 @@ describe('MetadataOrchestrator', () => {
       .calls[0];
     expect(call?.[0]).toBe(HASH);
     expect(call?.[1]).toEqual({ name: 'Super', system: 'snes' });
+  });
+
+  describe('getRomsMetadata in-flight gate (PR-D1 round 2 — dedup duplicate prefetch)', () => {
+    it('coalesces concurrent calls for the same coreId — one underlying scrape, both callbacks fire', async () => {
+      // The duplicate-prefetch bug: auto-scrape engine and
+      // RomsPane's per-pane prefetch both target the focused core,
+      // each emits prefetch.lookup events for every path, ~2× the
+      // log noise (and ~2× the underlying work). Round 2's gate
+      // collapses these to ONE underlying scrape; both callbacks
+      // get all events.
+      const meta = buildMeta(HASH, 'X');
+      const { orchestrator, hashService, metadataService } = makeOrchestrator(
+        {
+          hashEntries: new Map([['/p/x.sfc', buildHashEntry(HASH)]]),
+          meta,
+        },
+      );
+      const aEvents: RomMetadataResolvedEvent[] = [];
+      const bEvents: RomMetadataResolvedEvent[] = [];
+      // Fire two concurrent calls for the same coreId.
+      const a = orchestrator.getRomsMetadata('SNES', ['/p/x.sfc'], (e) =>
+        aEvents.push(e),
+      );
+      const b = orchestrator.getRomsMetadata('SNES', ['/p/x.sfc'], (e) =>
+        bEvents.push(e),
+      );
+      await Promise.all([a, b]);
+      // Both callbacks received the per-path event.
+      expect(aEvents).toHaveLength(1);
+      expect(bEvents).toHaveLength(1);
+      expect(aEvents[0]?.path).toBe('/p/x.sfc');
+      expect(bEvents[0]?.path).toBe('/p/x.sfc');
+      // Critical: only ONE underlying call to the metadata service —
+      // the gate prevented the duplicate work.
+      expect(metadataService.getMetadata).toHaveBeenCalledTimes(1);
+      // Hash lookups also happened only once (one mtime-batch + one
+      // computeHash if needed).
+      expect(hashService.checkCachedMtimes).toHaveBeenCalledTimes(1);
+    });
+
+    it('separate coreIds run independently — gate is per-coreId', async () => {
+      const meta = buildMeta(HASH, 'X');
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map([
+          ['/p/snes.sfc', buildHashEntry(HASH)],
+          ['/p/nes.nes', buildHashEntry(HASH)],
+        ]),
+        meta,
+      });
+      await Promise.all([
+        orchestrator.getRomsMetadata('SNES', ['/p/snes.sfc']),
+        orchestrator.getRomsMetadata('NES', ['/p/nes.nes']),
+      ]);
+      // Two separate underlying scrapes — gate didn't collapse
+      // across coreIds.
+      expect(metadataService.getMetadata).toHaveBeenCalledTimes(2);
+    });
+
+    it('after first call resolves, the gate clears for subsequent calls', async () => {
+      const meta = buildMeta(HASH, 'X');
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map([['/p/x.sfc', buildHashEntry(HASH)]]),
+        meta,
+      });
+      await orchestrator.getRomsMetadata('SNES', ['/p/x.sfc']);
+      await orchestrator.getRomsMetadata('SNES', ['/p/x.sfc']);
+      // First call ran; second call ran (no in-flight to coalesce
+      // with). 2 separate underlying calls.
+      expect(metadataService.getMetadata).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('readCachedRomsMetadata (PR-D1 round 2 — optimistic-render path)', () => {
