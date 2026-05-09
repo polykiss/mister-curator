@@ -4,6 +4,8 @@ import type { JSX, ReactNode } from 'react';
 import type { RomMetadata } from '@shared/metadata-types';
 import type { Rom } from '@shared/types';
 
+import { diagLog } from '@shared/diag-log';
+
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
 import { TableCell } from '@app/renderer/src/components/ui/table';
 import { cn } from '@app/renderer/src/lib/cn';
@@ -75,6 +77,27 @@ export function RomThumbnailCell(props: RomMetadataCellProps): JSX.Element {
           // sources undistorted.
           loading="lazy"
           decoding="async"
+          // Round 7 — surface broken-image events. If the bytes
+          // arrived from main but the browser can't decode them
+          // (e.g. main returned an HTML error page that ImageCache
+          // accepted as 200 OK), the `<img>` fires onError and we
+          // log it instead of silently rendering a blank box.
+          onError={(event) => {
+            const img = event.currentTarget;
+            diagLog('error', 'boxart', '✗', 'img-load-failed', {
+              path: shortName(props.rom.path),
+              naturalW: img.naturalWidth,
+              naturalH: img.naturalHeight,
+            });
+          }}
+          onLoad={(event) => {
+            const img = event.currentTarget;
+            diagLog('info', 'boxart', '←', 'img-loaded', {
+              path: shortName(props.rom.path),
+              w: img.naturalWidth,
+              h: img.naturalHeight,
+            });
+          }}
         />
       ) : (
         <div
@@ -132,26 +155,22 @@ export function RomNameYearStack(
   );
 }
 
-/** System / Genre / Rating cells. Sit right of the Name cell. */
+/** Genre / Rating cells. Sit right of the Name cell.
+ *
+ * Round 7 dropped the System cell: every row inside a single-core
+ * view rendered the same system label, so the column was redundant
+ * noise. The `system` field stays in RomMetadata for the round-8
+ * expanded-row state where it provides useful context. */
 export function RomMetadataInfoCells(
   props: RomMetadataCellProps,
 ): JSX.Element {
-  const { rom, dimmed, metadata, error } = props;
+  const { dimmed, metadata, error } = props;
   const loading = metadata === undefined && !error;
-  const systemLabel =
-    metadata?.system && metadata.system.length > 0
-      ? metadata.system
-      : rom.coreId;
   const primaryGenre = pickPrimaryGenre(metadata?.genre ?? null);
   const rating = formatRating(metadata?.rating ?? null);
 
   return (
     <>
-      <TableCell className="w-28 truncate">
-        <span className={cn('truncate text-body-sm', !dimmed && 'text-fg')}>
-          {loading ? <DashSkeleton width="w-20" /> : systemLabel}
-        </span>
-      </TableCell>
       <TableCell className="w-28 truncate">
         <span
           className={cn('truncate text-body-sm', !dimmed && 'text-fg-muted')}
@@ -183,4 +202,10 @@ export function RomMetadataInfoCells(
 
 function DashSkeleton(props: { readonly width: string }): JSX.Element {
   return <Skeleton className={cn('inline-block h-3', props.width)} />;
+}
+
+/** Last path segment, used in diag logs to keep lines readable. */
+function shortName(path: string): string {
+  const i = path.lastIndexOf('/');
+  return i < 0 ? path : path.slice(i + 1);
 }

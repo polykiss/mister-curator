@@ -406,10 +406,25 @@ export class MetadataOrchestrator {
    */
   async getBoxArtBytes(url: string): Promise<Uint8Array | null> {
     const path = await this.getBoxArtLocal(url);
-    if (path === null) return null;
+    if (path === null) {
+      diagLog('warn', 'boxart', '✗', 'no-cached-path', {
+        // url goes through the redactor at the cache layer; here we
+        // just note that the resolution path returned null.
+      });
+      return null;
+    }
     try {
-      return await readFile(path);
-    } catch {
+      const bytes = await readFile(path);
+      diagLog('info', 'boxart', '·', 'bytes-read', {
+        path,
+        bytes: bytes.byteLength,
+      });
+      return bytes;
+    } catch (err) {
+      diagLog('error', 'boxart', '✗', 'bytes-read-failed', {
+        path,
+        err: err instanceof Error ? err.message : String(err),
+      });
       return null;
     }
   }

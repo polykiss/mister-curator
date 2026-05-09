@@ -900,15 +900,17 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                 </TableHead>
                 {/* PR #20 round 1: list-view enrichment. Four new
                     columns flank the existing Name + actions:
-                    thumbnail, system, primary genre, rating. The Name
-                    cell now stacks the SS-canonical name on top with
-                    the year underneath. The Size column from v0 is
-                    retired — the density bar already encodes size
-                    visually, and dropping the numeric column buys back
-                    horizontal room for the metadata payload. */}
+                    thumbnail, primary genre, rating. The Name cell
+                    stacks the SS-canonical name on top with the year
+                    underneath. Round 7 dropped the System column —
+                    inside a single-core view every row's system is
+                    the same (the core's canonical name), so the
+                    column was redundant noise. The `system` field
+                    stays in RomMetadata for the expanded-row state
+                    (round 8). The Size column from v0 was retired in
+                    round 1 — the density bar encodes size visually. */}
                 <TableHead className="w-16" aria-label="Box art" />
                 <TableHead>Name</TableHead>
-                <TableHead className="w-28">System</TableHead>
                 <TableHead className="w-28">Genre</TableHead>
                 <TableHead className="w-14 text-right">Rating</TableHead>
                 {/* MoreHorizontal column. Sits left of the density+eye
@@ -945,7 +947,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                   aria-label={`Back to ${backRow.parentLabel}`}
                   title={`Back to ${backRow.parentLabel}`}
                 >
-                  <TableCell colSpan={8} className="pl-4">
+                  <TableCell colSpan={7} className="pl-4">
                     <span className="inline-flex items-center gap-2 font-mono text-body-sm text-fg-muted">
                       <ArrowLeft className="size-3.5 shrink-0" strokeWidth={1.5} aria-hidden />
                       <span className="truncate">

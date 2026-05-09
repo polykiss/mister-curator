@@ -34,7 +34,12 @@ export type DiagSubsystem =
   // sentinel? mtime-validated cache hit? skipped for some other
   // reason?). Distinct subsystem so a single grep `[meta]` isolates
   // the whole decision chain for one prefetch.
-  | 'meta';
+  | 'meta'
+  // Round 7 (PR #20) — box-art fetch + render trace. Spans the
+  // ImageCache fetch, the orchestrator's bytes wrapper, the IPC
+  // hop, and the renderer's useBoxArt → <img> render path. Grep
+  // `[boxart]` to follow one URL from request to display.
+  | 'boxart';
 export type DiagGlyph = '→' | '←' | '✗' | '·';
 
 /**

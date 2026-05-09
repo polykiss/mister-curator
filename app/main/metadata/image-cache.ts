@@ -2,6 +2,9 @@ import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
 
+import { diagLog } from '@shared/diag-log';
+import { redactScreenScraperUrl } from '@app/main/metadata/screenscraper-service';
+
 const DEFAULT_TIMEOUT_MS = 20_000;
 
 /**
@@ -67,11 +70,23 @@ export class ImageCache {
     opts?: { readonly maxWidth?: number },
   ): Promise<string | null> {
     void opts; // maxWidth is reserved for the post-#15 resize path
+    const safeUrl = redactScreenScraperUrl(url);
+    diagLog('info', 'boxart', '·', 'request', { url: safeUrl });
     const cached = await this.getLocal(url);
-    if (cached !== null) return cached;
+    if (cached !== null) {
+      diagLog('info', 'boxart', '·', 'cache-hit', {
+        url: safeUrl,
+        path: cached,
+      });
+      return cached;
+    }
+    diagLog('info', 'boxart', '·', 'cache-miss', { url: safeUrl });
 
     const inFlight = this.inflight.get(url);
-    if (inFlight !== undefined) return inFlight;
+    if (inFlight !== undefined) {
+      diagLog('info', 'boxart', '·', 'awaiting-inflight', { url: safeUrl });
+      return inFlight;
+    }
 
     const promise = this.doFetch(url).finally(() => {
       this.inflight.delete(url);
@@ -93,21 +108,60 @@ export class ImageCache {
   // ─── internals ─────────────────────────────────────────────────────
 
   private async doFetch(url: string): Promise<string | null> {
+    const safeUrl = redactScreenScraperUrl(url);
+    const startMs = Date.now();
+    diagLog('info', 'boxart', '→', 'fetch-start', { url: safeUrl });
     let res: Response;
     try {
       res = await this.fetchWithTimeout(url);
-    } catch {
+    } catch (err) {
+      diagLog('error', 'boxart', '✗', 'fetch-network-error', {
+        url: safeUrl,
+        ms: Date.now() - startMs,
+        err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
       return null;
     }
-    if (!res.ok) return null;
+    diagLog('info', 'boxart', '·', 'fetch-response', {
+      url: safeUrl,
+      status: res.status,
+      contentType: res.headers.get('content-type') ?? undefined,
+      contentLength: res.headers.get('content-length') ?? undefined,
+      ms: Date.now() - startMs,
+    });
+    if (!res.ok) {
+      diagLog('warn', 'boxart', '✗', 'fetch-non-2xx', {
+        url: safeUrl,
+        status: res.status,
+      });
+      return null;
+    }
 
     let buf: ArrayBuffer;
     try {
       buf = await res.arrayBuffer();
-    } catch {
+    } catch (err) {
+      diagLog('error', 'boxart', '✗', 'fetch-body-error', {
+        url: safeUrl,
+        err: err instanceof Error ? err.message : String(err),
+      });
       return null;
     }
-    if (buf.byteLength === 0) return null;
+    if (buf.byteLength === 0) {
+      diagLog('warn', 'boxart', '✗', 'fetch-empty-body', { url: safeUrl });
+      return null;
+    }
+
+    // Magic-bytes diagnostic: surface the first few bytes as hex so
+    // we can tell PNG / JPEG / GIF / WebP from an HTML error page or
+    // a JSON-shaped error body. PNG=89504E47, JPEG=FFD8FF, GIF=47494638,
+    // WebP=52494646…57454250, HTML often starts with 3C21444F (`<!DO`).
+    const magic = Buffer.from(buf.slice(0, 8)).toString('hex');
+    diagLog('info', 'boxart', '·', 'fetch-bytes', {
+      url: safeUrl,
+      bytes: buf.byteLength,
+      magic,
+    });
 
     const path = this.cachePath(url);
     await fs.mkdir(dirname(path), { recursive: true });
@@ -115,13 +169,23 @@ export class ImageCache {
     try {
       await fs.writeFile(tmp, Buffer.from(buf), { mode: 0o600 });
       await fs.rename(tmp, path);
-    } catch {
+    } catch (err) {
+      diagLog('error', 'boxart', '✗', 'cache-write-failed', {
+        url: safeUrl,
+        path,
+        err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
       // Best-effort cleanup of the tmp file. Caller still gets null.
       await fs.unlink(tmp).catch(() => {
         /* swallow */
       });
       return null;
     }
+    diagLog('info', 'boxart', '·', 'cache-write', {
+      url: safeUrl,
+      path,
+      bytes: buf.byteLength,
+    });
     return path;
   }
 

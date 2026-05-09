@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 
+import { diagLog } from '@shared/diag-log';
+
 /**
  * Fetches box-art bytes via the main-process image cache and exposes
  * a Blob objectURL the renderer can hand to `<img src>`. The cache
@@ -27,10 +29,21 @@ export function useBoxArt(url: string | null): string | null {
     }
     let cancelled = false;
     let createdUrl: string | null = null;
+    diagLog('info', 'boxart', '→', 'use-hook fetching', {
+      // No url field — main-side logs the redacted url and we want
+      // to keep this side free of unredacted SS creds.
+    });
     void window.mister
       .getBoxArtBytes(url)
       .then((bytes) => {
-        if (cancelled || bytes === null || bytes.byteLength === 0) {
+        if (cancelled) return;
+        if (bytes === null) {
+          diagLog('warn', 'boxart', '✗', 'use-hook null-bytes');
+          setObjectUrl(null);
+          return;
+        }
+        if (bytes.byteLength === 0) {
+          diagLog('warn', 'boxart', '✗', 'use-hook empty-bytes');
           setObjectUrl(null);
           return;
         }
@@ -42,10 +55,16 @@ export function useBoxArt(url: string | null): string | null {
         // same either way.
         const blob = new Blob([new Uint8Array(bytes)]);
         createdUrl = URL.createObjectURL(blob);
+        diagLog('info', 'boxart', '←', 'use-hook ready', {
+          bytes: bytes.byteLength,
+        });
         setObjectUrl(createdUrl);
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (cancelled) return;
+        diagLog('error', 'boxart', '✗', 'use-hook ipc-error', {
+          err: err instanceof Error ? err.message : String(err),
+        });
         setObjectUrl(null);
       });
     return () => {
