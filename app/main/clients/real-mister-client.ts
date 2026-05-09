@@ -123,6 +123,14 @@ const SSH_OP_TIMEOUT_MS = 60_000;
 const SSH_HASH_OP_TIMEOUT_MS = 120_000;
 
 /**
+ * Max number of rename ops per single SSH `execCommand` script in
+ * `setBulkRomVisibility`. See the comment inside that method for the
+ * dropbear-buffer-truncation incident this guards against. Exported
+ * for the regression test that asserts the chunking math.
+ */
+export const BULK_ROM_RENAME_CHUNK_SIZE = 100;
+
+/**
  * SSH-level keepalive cadence. ssh2 sends an empty keepalive packet
  * every `keepaliveInterval` ms; after `keepaliveCountMax` missed
  * responses the socket fires its own `'close'` / `'error'` event and
@@ -903,27 +911,47 @@ export class RealMisterClient implements IMisterClient {
       return { succeeded: [], failed: [] };
     }
 
+    // Chunk the batch so each SSH `execCommand` stays under Dropbear's
+    // command-channel buffer. Pre-fix this code built a single script
+    // for every pending rename — for 1455 rows that script ran ~555KB,
+    // which Dropbear silently truncated/dropped on the MiSTer end. The
+    // execCommand call returned with `stdout === ''`, the bulk parser
+    // produced `{ succeeded: [], failed: [] }`, and the renderer's
+    // toast read "Nothing to do" — confusing on a directory the user
+    // had just confirmed contains hundreds of visible ROMs.
+    //
+    // 100 paths/chunk → ~38KB per script with worst-case 380-char rows,
+    // well under common SSH exec buffer limits. Sequential dispatch
+    // (NOT parallel) keeps semantics simple: failures stay attributed
+    // to specific filenames and the per-op timeout applies per chunk.
     const coreDir =
       subPath === ''
         ? `${MISTER_GAMES_DIR}/${coreId}`
         : `${MISTER_GAMES_DIR}/${coreId}/${subPath}`;
-    const lines: string[] = [`cd ${shellQuote(coreDir)}`];
-    for (const p of pending) {
-      const id = shellQuote(p.filename);
-      lines.push(
-        `if err=$(mv ${shellQuote(p.src)} ${shellQuote(p.dst)} 2>&1); then`,
-        `  printf 'OK\\t%s\\n' ${id}`,
-        `else`,
-        `  printf 'FAIL\\t%s\\t%s\\n' ${id} "$(printf '%s' "$err" | tr '\\n\\t' '  ' | head -c 200)"`,
-        `fi`,
+    const succeeded: string[] = [];
+    const failed: { readonly filename: string; readonly reason: string }[] = [];
+    for (let i = 0; i < pending.length; i += BULK_ROM_RENAME_CHUNK_SIZE) {
+      const chunk = pending.slice(i, i + BULK_ROM_RENAME_CHUNK_SIZE);
+      const lines: string[] = [`cd ${shellQuote(coreDir)}`];
+      for (const p of chunk) {
+        const id = shellQuote(p.filename);
+        lines.push(
+          `if err=$(mv ${shellQuote(p.src)} ${shellQuote(p.dst)} 2>&1); then`,
+          `  printf 'OK\\t%s\\n' ${id}`,
+          `else`,
+          `  printf 'FAIL\\t%s\\t%s\\n' ${id} "$(printf '%s' "$err" | tr '\\n\\t' '  ' | head -c 200)"`,
+          `fi`,
+        );
+      }
+      const script = lines.join('\n');
+      const result = await this.runSshOp(script, () =>
+        this.ssh.execCommand(script),
       );
+      const parsed = parseBulkResult<BulkRomResult>(result.stdout, 'filename');
+      succeeded.push(...parsed.succeeded);
+      failed.push(...parsed.failed);
     }
-
-    const script = lines.join('\n');
-    const result = await this.runSshOp(script, () =>
-      this.ssh.execCommand(script),
-    );
-    return parseBulkResult<BulkRomResult>(result.stdout, 'filename');
+    return { succeeded, failed };
   }
 
   async hideCore(core: CoreEntry): Promise<void> {
