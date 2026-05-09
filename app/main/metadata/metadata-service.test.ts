@@ -133,14 +133,17 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     expect(result?.boxArtUrl).toContain('Some%20Game.png');
   });
 
-  it('writes a cache file in v4 shape', async () => {
+  it('writes a cache file in the current schema version', async () => {
+    // PR-D2 (PR #29) bumped the schema from 4 → 5 (added the
+    // userOverride block). New writes always use the current
+    // ROM_METADATA_SCHEMA_VERSION; v4 records on disk still parse.
     const m = makeMocks({ dbReturns: buildDbHit() });
     const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     await svc.getMetadata(HASH);
 
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
     const onDisk = JSON.parse(await fs.readFile(path, 'utf-8')) as RomMetadata;
-    expect(onDisk.version).toBe(4);
+    expect(onDisk.version).toBe(5);
     expect(onDisk.source).toBe('openvgdb');
     expect(onDisk.system).toBe('Super Nintendo Entertainment System');
   });
@@ -154,7 +157,8 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
     const onDisk = JSON.parse(await fs.readFile(path, 'utf-8')) as RomMetadata;
     expect(onDisk.source).toBe('none');
-    expect(onDisk.version).toBe(4);
+    // PR-D2 (PR #29): writes use current schema (v5).
+    expect(onDisk.version).toBe(5);
   });
 
   it('hit on a system not in the libretro map → null thumbnail URLs but full metadata', async () => {

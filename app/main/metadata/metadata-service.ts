@@ -18,6 +18,7 @@ import { diagLog } from '@shared/diag-log';
 import {
   NO_MATCH_TTL_MS,
   ROM_METADATA_SCHEMA_VERSION,
+  ROM_METADATA_SUPPORTED_SCHEMA_VERSIONS,
   SENTINEL_AUTHORITATIVE_TTL_MS,
   type MetadataHint,
   type RomMetadata,
@@ -781,8 +782,20 @@ function isNodeError(err: unknown): err is NodeJS.ErrnoException {
 function isRomMetadata(v: unknown): v is RomMetadata {
   if (v === null || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
+  // PR-D2 (PR #29) — accept both v4 and v5 records on read so the
+  // userOverride-block schema bump doesn't invalidate existing
+  // cache files. Writes always use the current
+  // `ROM_METADATA_SCHEMA_VERSION` (v5); v4 records get upgraded
+  // naturally on the next write that touches them.
+  if (
+    typeof o.version !== 'number' ||
+    !ROM_METADATA_SUPPORTED_SCHEMA_VERSIONS.includes(
+      o.version as 4 | 5,
+    )
+  ) {
+    return false;
+  }
   return (
-    o.version === ROM_METADATA_SCHEMA_VERSION &&
     typeof o.hash === 'string' &&
     typeof o.name === 'string' &&
     typeof o.system === 'string' &&
@@ -790,6 +803,8 @@ function isRomMetadata(v: unknown): v is RomMetadata {
     (o.source === 'screenscraper' ||
       // PR-D1 (PR #27): name-search hits are valid cache entries.
       o.source === 'screenscraper-name-search' ||
+      // PR-D2 (PR #29): user-picked SS jeuid bind.
+      o.source === 'manual-override' ||
       o.source === 'openvgdb' ||
       o.source === 'none')
   );
