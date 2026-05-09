@@ -1,5 +1,7 @@
 import {
   ArrowLeft,
+  ChevronDown,
+  ChevronUp,
   Eye,
   EyeOff,
   Folder,
@@ -37,9 +39,17 @@ import {
 } from '@app/renderer/src/components/RomRowMenu';
 import {
   RomMetadataInfoCells,
-  RomNameYearStack,
+  RomNameInner,
   RomThumbnailCell,
+  RomYearCell,
 } from '@app/renderer/src/components/RomMetadataCells';
+import {
+  DEFAULT_SORT,
+  nextSortState,
+  sortRoms,
+  type SortKey,
+  type SortState,
+} from '@app/renderer/src/lib/rom-sort';
 import type { RomMetadata } from '@shared/metadata-types';
 import { Button } from '@app/renderer/src/components/ui/button';
 import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
@@ -126,11 +136,16 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   // the [core.id] reset effect committed — that call fails with
   // "Unknown core: Saturn" in the main-process log.
   // Pattern reference: https://react.dev/reference/react/useState#storing-information-from-previous-renders
+  // PR-A item 8: per-pane sort state, no persistence. Switching
+  // cores resets to the default (`name asc`) along with subPath /
+  // selection / etc.
+  const [sortState, setSortState] = useState<SortState>(DEFAULT_SORT);
   const [trackedCoreId, setTrackedCoreId] = useState(core.id);
   if (trackedCoreId !== core.id) {
     setTrackedCoreId(core.id);
     setSubPath('');
     setSelected(new Set());
+    setSortState(DEFAULT_SORT);
   }
 
   const cacheKey = romsKey(core.id, subPath);
@@ -321,12 +336,22 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   // `showSystem` is off.
   const presentableRoms = useMemo(() => {
     if (!roms) return null;
-    return roms.filter((r) => {
+    const filtered = roms.filter((r) => {
       if (!showHidden && r.hidden) return false;
       if (!showSystem && systemFlags.get(r.filename) === true) return false;
       return true;
     });
-  }, [roms, showHidden, showSystem, systemFlags]);
+    // PR-A item 8: apply the per-pane sort. Folder rows pin to the
+    // top alphabetical, file rows follow `sortState`. We project to
+    // the sortRoms input shape (rom + metadata), let the pure sort
+    // do its work, then project back to the Rom array the rest of
+    // the pane consumes.
+    const withMeta = filtered.map((rom) => ({
+      rom,
+      metadata: metadataByPath[rom.path]?.metadata,
+    }));
+    return sortRoms(withMeta, sortState).map((r) => r.rom);
+  }, [roms, showHidden, showSystem, systemFlags, metadataByPath, sortState]);
 
   // Density-bar denominator for the size column — peer max across the
   // rows actually being rendered. SYSTEM.md §10: ROMs use file size /
@@ -898,21 +923,50 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                     onChange={(e) => onToggleAll(e.target.checked)}
                   />
                 </TableHead>
-                {/* PR #20 round 1: list-view enrichment. Four new
-                    columns flank the existing Name + actions:
-                    thumbnail, primary genre, rating. The Name cell
-                    stacks the SS-canonical name on top with the year
-                    underneath. Round 7 dropped the System column —
-                    inside a single-core view every row's system is
-                    the same (the core's canonical name), so the
-                    column was redundant noise. The `system` field
-                    stays in RomMetadata for the expanded-row state
-                    (round 8). The Size column from v0 was retired in
-                    round 1 — the density bar encodes size visually. */}
+                {/* PR-A item 8 layout: [Box art] [Name] [Year]
+                    [Genre] [Rating]. Year promoted out of the
+                    name-stack into its own sortable column. Each
+                    sortable header is clickable; the active column
+                    shows a chevron. Folder rows pin to the top
+                    regardless of sort. */}
                 <TableHead className="w-16" aria-label="Box art" />
-                <TableHead>Name</TableHead>
-                <TableHead className="w-28">Genre</TableHead>
-                <TableHead className="w-14 text-right">Rating</TableHead>
+                <SortableHeader
+                  label="Name"
+                  sortKey="name"
+                  sortState={sortState}
+                  onSort={(k) =>
+                    setSortState((prev) => nextSortState(prev, k))
+                  }
+                />
+                <SortableHeader
+                  label="Year"
+                  sortKey="year"
+                  align="right"
+                  className="w-16"
+                  sortState={sortState}
+                  onSort={(k) =>
+                    setSortState((prev) => nextSortState(prev, k))
+                  }
+                />
+                <SortableHeader
+                  label="Genre"
+                  sortKey="genre"
+                  className="w-28"
+                  sortState={sortState}
+                  onSort={(k) =>
+                    setSortState((prev) => nextSortState(prev, k))
+                  }
+                />
+                <SortableHeader
+                  label="Rating"
+                  sortKey="rating"
+                  align="right"
+                  className="w-14"
+                  sortState={sortState}
+                  onSort={(k) =>
+                    setSortState((prev) => nextSortState(prev, k))
+                  }
+                />
                 {/* MoreHorizontal column. Sits left of the density+eye
                     right-edge stack so the row's primary visibility
                     toggle owns the far-right slot. */}
@@ -947,7 +1001,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                   aria-label={`Back to ${backRow.parentLabel}`}
                   title={`Back to ${backRow.parentLabel}`}
                 >
-                  <TableCell colSpan={7} className="pl-4">
+                  <TableCell colSpan={8} className="pl-4">
                     <span className="inline-flex items-center gap-2 font-mono text-body-sm text-fg-muted">
                       <ArrowLeft className="size-3.5 shrink-0" strokeWidth={1.5} aria-hidden />
                       <span className="truncate">
@@ -1033,7 +1087,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                           decoration; the click handler stays on the
                           parent TableCell so folder-container drill
                           behavior is unchanged. */}
-                      <RomNameYearStack
+                      <RomNameInner
                         rom={rom}
                         dimmed={isDimmed}
                         metadata={metadata}
@@ -1061,10 +1115,14 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         }
                       />
                     </TableCell>
-                    {/* PR #20 round 1: system / genre / rating cells.
-                        The v0 numeric Size column is retired — the
-                        density bar already encodes size visually,
-                        which buys back horizontal room for these. */}
+                    {/* PR-A item 8: year promoted out of the name
+                        stack into its own column for sort. */}
+                    <RomYearCell
+                      rom={rom}
+                      dimmed={isDimmed}
+                      metadata={metadata}
+                      error={fetchError}
+                    />
                     <RomMetadataInfoCells
                       rom={rom}
                       dimmed={isDimmed}
@@ -1179,5 +1237,58 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
         />
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Clickable column header (PR-A item 8). Active column shows a
+ * chevron indicating direction; inactive columns show no chevron
+ * (kept clean per spec — "your call, just be consistent"). The
+ * underlying `<th>` becomes a button so keyboard activation works.
+ */
+function SortableHeader(props: {
+  readonly label: string;
+  readonly sortKey: SortKey;
+  readonly sortState: SortState;
+  readonly onSort: (key: SortKey) => void;
+  readonly align?: 'left' | 'right';
+  readonly className?: string;
+}): JSX.Element {
+  const { label, sortKey, sortState, onSort, align = 'left', className } = props;
+  const active = sortState.key === sortKey;
+  const dir = active ? sortState.dir : null;
+  return (
+    <TableHead className={cn(align === 'right' && 'text-right', className)}>
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className={cn(
+          'inline-flex items-center gap-1 text-inherit transition-colors hover:text-fg',
+          align === 'right' && 'flex-row-reverse',
+          active && 'text-fg',
+        )}
+        aria-label={`Sort by ${label}${active ? ` (currently ${dir})` : ''}`}
+        aria-sort={
+          active ? (dir === 'asc' ? 'ascending' : 'descending') : 'none'
+        }
+      >
+        <span>{label}</span>
+        {active ? (
+          dir === 'asc' ? (
+            <ChevronUp
+              className="size-3 shrink-0"
+              strokeWidth={1.5}
+              aria-hidden
+            />
+          ) : (
+            <ChevronDown
+              className="size-3 shrink-0"
+              strokeWidth={1.5}
+              aria-hidden
+            />
+          )
+        ) : null}
+      </button>
+    </TableHead>
   );
 }

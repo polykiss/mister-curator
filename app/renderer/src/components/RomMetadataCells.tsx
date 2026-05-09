@@ -19,14 +19,11 @@ import { useBoxArt } from '@app/renderer/src/lib/use-box-art';
  * Per-row metadata-driven cells. Round 2 (PR #20): switched from a
  * per-row `useRomMetadata` hook to prop-driven rendering. The parent
  * `RomsPane` runs ONE batched `prefetchRomsMetadata` per pane mount
- * and streams per-path results back as they settle; the round-1
- * pattern of N parallel `getRomMetadata(coreId, romPath)` calls
- * tipped over WiFi-attached MiSTers (32 sequential SSH
- * `statWitnesses` round-trips per render).
+ * and streams per-path results back as they settle.
  *
  * Three states the parent can pass:
- *   - `undefined` → loading (skeletons for thumbnail / system / genre /
- *     rating; filename shown for name; year skeletoned)
+ *   - `undefined` → loading (skeletons in metadata fields; filename
+ *     for the name)
  *   - `null` → unmatched (filename for name; em-dash everywhere else)
  *   - `RomMetadata` → loaded (real values)
  *
@@ -34,9 +31,12 @@ import { useBoxArt } from '@app/renderer/src/lib/use-box-art';
  * (e.g., SSH dropped). Renders an AlertCircle indicator in the
  * thumbnail slot; other fields fall back to em-dashes.
  *
- * Cell layout in the parent:
- *   [Checkbox] [Thumbnail] [Name+Year] [System] [Genre] [Rating]
+ * PR-A item 8 column layout in the parent:
+ *   [Checkbox] [Thumbnail] [Name] [Year] [Genre] [Rating]
  *   [More] [Density+Eye]
+ *
+ * (Year promoted out of the name stack into its own sortable
+ * column.)
  */
 export interface RomMetadataCellProps {
   readonly rom: Rom;
@@ -72,16 +72,8 @@ export function RomThumbnailCell(props: RomMetadataCellProps): JSX.Element {
           src={boxArtObjectUrl}
           alt={metadata?.name ?? props.rom.displayName}
           className="h-12 w-auto max-w-16 rounded-sm object-contain"
-          // Box art varies in aspect — `object-contain` keeps both
-          // portrait (cartridge box) and landscape (jewel case)
-          // sources undistorted.
           loading="lazy"
           decoding="async"
-          // Round 7 — surface broken-image events. If the bytes
-          // arrived from main but the browser can't decode them
-          // (e.g. main returned an HTML error page that ImageCache
-          // accepted as 200 OK), the `<img>` fires onError and we
-          // log it instead of silently rendering a blank box.
           onError={(event) => {
             const img = event.currentTarget;
             diagLog('error', 'boxart', '✗', 'img-load-failed', {
@@ -112,55 +104,64 @@ export function RomThumbnailCell(props: RomMetadataCellProps): JSX.Element {
 }
 
 /**
- * Inner content for the Name TableCell — the metadata-derived name
- * stacked over the year. The parent owns the surrounding `<TableCell>`
- * so the existing icons (system / folder), click handlers, and dim
- * styling stay where they were. Pass `leadingIcon` to render an icon
- * (Settings / FolderOpen / Folder) flush-left of the name.
- *
- * Loading shows the filename (per spec — the user can read it now and
- * the metadata name pops in when ready). Year skeletons until settled.
+ * Inner content for the Name TableCell — single-line, with optional
+ * leading icon. PR-A item 8 promoted year out of this stack into a
+ * dedicated `RomYearCell`. The parent owns the surrounding
+ * `<TableCell>` so the existing icons (system / folder), click
+ * handlers, and dim styling stay where they were.
  */
-export function RomNameYearStack(
+export function RomNameInner(
   props: RomMetadataCellProps & { readonly leadingIcon?: ReactNode },
 ): JSX.Element {
-  const { rom, dimmed, leadingIcon, metadata, error } = props;
-  const loading = metadata === undefined && !error;
+  const { rom, dimmed, leadingIcon, metadata } = props;
   const displayName = metadata?.name ?? rom.displayName;
-  const year = metadata?.year ?? null;
 
   return (
     <span className="flex min-w-0 items-center gap-2">
       {leadingIcon}
-      <span className="flex min-w-0 flex-col leading-tight">
-        <span
-          className={cn(
-            'truncate text-body-sm',
-            !dimmed && 'text-fg',
-          )}
-        >
-          {displayName}
-        </span>
-        <span className="truncate font-mono text-body-xs text-fg-muted tabular">
-          {loading ? (
-            <DashSkeleton width="w-12" />
-          ) : year !== null ? (
-            String(year)
-          ) : (
-            ''
-          )}
-        </span>
+      <span className={cn('truncate text-body-sm', !dimmed && 'text-fg')}>
+        {displayName}
       </span>
     </span>
   );
 }
 
-/** Genre / Rating cells. Sit right of the Name cell.
+/**
+ * Year cell (PR-A item 8). Right-aligned, mono, `—` for missing
+ * year. Skeletoned during the loading state. The width pairs with
+ * the YEAR column header in the parent.
+ */
+export function RomYearCell(props: RomMetadataCellProps): JSX.Element {
+  const { dimmed, metadata, error } = props;
+  const loading = metadata === undefined && !error;
+  const year = metadata?.year ?? null;
+
+  return (
+    <TableCell className="w-16 text-right">
+      <span
+        className={cn(
+          'font-mono text-body-sm tabular',
+          !dimmed && 'text-fg-muted',
+        )}
+      >
+        {loading ? (
+          <DashSkeleton width="w-10" />
+        ) : year !== null ? (
+          String(year)
+        ) : (
+          <span className="text-fg-disabled">—</span>
+        )}
+      </span>
+    </TableCell>
+  );
+}
+
+/** Genre / Rating cells. Sit right of the Year cell.
  *
- * Round 7 dropped the System cell: every row inside a single-core
- * view rendered the same system label, so the column was redundant
- * noise. The `system` field stays in RomMetadata for the round-8
- * expanded-row state where it provides useful context. */
+ * Round 7 dropped the System cell. PR-A item 8 promoted Year into
+ * its own cell (`RomYearCell`); this component now emits just
+ * Genre + Rating.
+ */
 export function RomMetadataInfoCells(
   props: RomMetadataCellProps,
 ): JSX.Element {
