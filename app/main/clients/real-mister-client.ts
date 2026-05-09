@@ -2092,8 +2092,45 @@ function pickPrimaryRomFile(
   return `${folderPath}/${launchable[0]!}`;
 }
 
-function assertSafeSegment(label: string, value: string): void {
-  if (value === '' || value.includes('/') || value.includes('..') || value.includes('\0')) {
+/**
+ * Reject a path segment that's unsafe to splice into an SSH command
+ * built around `/media/fat/games/<seg>/...`. This is path-correctness
+ * only — command-injection defense lives in `shellQuote` (single-
+ * quoted shell args). Keep the rules narrow and explicit so legitimate
+ * filenames aren't false-rejected.
+ *
+ * Rules:
+ *   • Empty string                — invalid (no segment)
+ *   • Exactly `..` or `.`         — path-traversal attempt
+ *   • Contains `/` (forward) or
+ *     `\\` (backslash)            — multiple segments in one input
+ *   • Contains a null byte (\\0)  — would terminate the C string the
+ *                                   shell hands to its filesystem
+ *                                   syscalls, smuggling truncation
+ *
+ * NOT rejected:
+ *   • `..` as a SUBSTRING of a longer name. The previous `'.includes('..')`
+ *     rule false-rejected ROM titles with literal triple-dot ellipses
+ *     ("Nights Into Dreams...", "Yu Gi Oh... GX") because `'...'`
+ *     contains `'..'`. Path traversal needs the segment to BE `..` —
+ *     a substring inside a longer filename routes to that filename
+ *     verbatim, not up a directory.
+ *
+ * Exported (round 2 — fix/safe-segment-ellipsis) so the test suite
+ * can pin every rule directly without going through a higher-level
+ * caller.
+ */
+export function assertSafeSegment(label: string, value: string): void {
+  if (value === '') {
+    throw new Error(`Invalid ${label}: (empty)`);
+  }
+  if (value === '..' || value === '.') {
+    throw new Error(`Invalid ${label}: ${value}`);
+  }
+  if (value.includes('/') || value.includes('\\')) {
+    throw new Error(`Invalid ${label}: ${value}`);
+  }
+  if (value.includes('\0')) {
     throw new Error(`Invalid ${label}: ${value}`);
   }
 }

@@ -38,7 +38,9 @@ vi.mock('node-ssh', () => ({
   })),
 }));
 
-const { RealMisterClient } = await import('@app/main/clients/real-mister-client');
+const { RealMisterClient, assertSafeSegment } = await import(
+  '@app/main/clients/real-mister-client'
+);
 
 const profile: MisterProfile = {
   id: 'test-mister',
@@ -2622,6 +2624,108 @@ describe('RealMisterClient', () => {
       mocks.execCommand.mockResolvedValueOnce(execFail(2, 'shell broke'));
       await expect(client.hashPaths(['/x'])).rejects.toThrow(
         /Failed to hash paths/,
+      );
+    });
+  });
+});
+
+describe('assertSafeSegment — fix/safe-segment-ellipsis', () => {
+  // Live bug from a Saturn ROM hide:
+  //
+  //   Error: Invalid filename: Nights Into Dreams... (USA) (DW0453)
+  //     at assertSafeSegment
+  //     at RealMisterClient.setBulkRomVisibility
+  //
+  // The previous `value.includes('..')` rule rejected any filename
+  // with a literal triple-dot ellipsis. The fix: only reject when
+  // the segment IS exactly `..` or `.`. Substrings like `...` inside
+  // a longer name are routed verbatim by the shell, never up a dir.
+
+  describe('allowed (regression fixtures)', () => {
+    it('accepts the original Saturn fixture', () => {
+      expect(() =>
+        assertSafeSegment(
+          'filename',
+          'Nights Into Dreams... (USA) (DW0453)',
+        ),
+      ).not.toThrow();
+    });
+
+    it.each([
+      'Nights Into Dreams...',
+      'Yu Gi Oh... GX',
+      'Trailing Triple Dots...',
+      'Filename...with...multiple...ellipses.zip',
+      '...', // three literal dots — not `..` exactly
+      '....', // four dots
+      '..foo', // starts with two dots but isn't path-traversal
+      'foo..',
+      'foo..bar',
+    ])('accepts %s', (value) => {
+      expect(() => assertSafeSegment('filename', value)).not.toThrow();
+    });
+
+    it('accepts a normal filename', () => {
+      expect(() =>
+        assertSafeSegment('filename', 'Normal File Name (USA).zip'),
+      ).not.toThrow();
+    });
+
+    it('accepts a single dot prefix (hidden file convention)', () => {
+      // Hidden files start with one dot but the segment isn't `.`
+      // exactly. Used by the visibility-toggle path.
+      expect(() =>
+        assertSafeSegment('filename', '.hidden-game.zip'),
+      ).not.toThrow();
+    });
+  });
+
+  describe('rejected — path traversal exact-match', () => {
+    it('rejects the literal `..`', () => {
+      expect(() => assertSafeSegment('filename', '..')).toThrow(/Invalid/);
+    });
+
+    it('rejects the literal `.`', () => {
+      expect(() => assertSafeSegment('filename', '.')).toThrow(/Invalid/);
+    });
+  });
+
+  describe('rejected — path separators', () => {
+    it('rejects forward slash (multiple segments in one input)', () => {
+      expect(() =>
+        assertSafeSegment('filename', '../etc/passwd'),
+      ).toThrow(/Invalid/);
+      expect(() =>
+        assertSafeSegment('filename', 'test/file.zip'),
+      ).toThrow(/Invalid/);
+    });
+
+    it('rejects backslash (Windows-style path separator + shell escape risk)', () => {
+      expect(() =>
+        assertSafeSegment('filename', 'test\\file.zip'),
+      ).toThrow(/Invalid/);
+    });
+  });
+
+  describe('rejected — control characters', () => {
+    it('rejects null byte (would truncate the syscall string)', () => {
+      expect(() =>
+        assertSafeSegment('filename', 'file\0.zip'),
+      ).toThrow(/Invalid/);
+    });
+  });
+
+  describe('rejected — empty', () => {
+    it('rejects the empty string', () => {
+      expect(() => assertSafeSegment('filename', '')).toThrow(/Invalid/);
+    });
+  });
+
+  describe('error message includes the label', () => {
+    it('reports the label in the error message for diagnosis', () => {
+      expect(() => assertSafeSegment('coreId', '..')).toThrow(/coreId/);
+      expect(() => assertSafeSegment('gamesDirBasename', '..')).toThrow(
+        /gamesDirBasename/,
       );
     });
   });
