@@ -179,15 +179,16 @@ describe('DensityBar — render shape (PR-A item 9)', () => {
     expect(cn).toContain('shrink-0');
   });
 
-  it('caller-supplied height className overrides the default h-full (PR #23 round 2)', () => {
-    // Live verification of PR-A item 9 caught a regression: the
-    // ROM row chain `<tr>` → `<td>` → `<div h-full items-stretch>`
-    // doesn't propagate height the way the cores-pane `<li
-    // h-10>` does, so `h-full` on DensityBar resolved to 0 and the
-    // indicator disappeared. The fix passes `className="h-10"`
-    // from the ROM row callsite. This test pins that the override
-    // wins via tailwind-merge — if `cn` ever stops merging
-    // height utilities the regression would silently re-fire.
+  it('caller-supplied height className overrides the default h-full', () => {
+    // Contract test on `cn` / tailwind-merge: a caller-passed
+    // height utility wins over the default `h-full`. Round 2 used
+    // this override on the ROM row to dodge a height-propagation
+    // bug; round 3 reverted to the default after fixing the parent
+    // chain (TableCell `relative` + inner `absolute inset-0`), so
+    // no production callsite uses this anymore. The test stays as
+    // a regression guard: if `cn` ever stops merging height
+    // utilities, callers losing the ability to override would be
+    // a silent surprise.
     const result = DensityBar({
       value: 50,
       max: 100,

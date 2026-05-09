@@ -1167,31 +1167,35 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         skip the rectangle; the gear icon + dimming
                         already says "read-only", so the eye-icon
                         slot reads as "read-only" copy. */}
-                    <TableCell className="p-0">
+                    <TableCell className="h-full p-0">
+                      {/* PR #23 round 3: `h-full` on the <td> is
+                          what unlocks the height-stretch chain.
+                          Round 2 used a hardcoded `h-10` (40px)
+                          override on DensityBar to dodge a
+                          propagation issue, but the row's actual
+                          height is ~56px (the 48px thumbnail +
+                          4px p-1 padding pushes it past the
+                          design-token 40px), leaving ~16px of gap
+                          above + below the bar and breaking the
+                          continuous-strip read.
+                          In Chromium (Electron's renderer) a
+                          percentage height on a `<td>` resolves
+                          against the row's *computed* height —
+                          which is the actual rendered height,
+                          not the declared `h-10`. Adding `h-full`
+                          here lets the inner div's `h-full`
+                          resolve to the real ~56px, which then
+                          lets DensityBar's default `h-full`
+                          stretch to fill it. Bars on consecutive
+                          rows now touch with just the row's 1px
+                          border-b between them. */}
                       <div className="flex h-full shrink-0 items-stretch">
                         {!isSystem ? (
-                          // PR #23 round 2: explicit h-10 override.
-                          // The cores-pane render of DensityBar
-                          // works with `h-full` because its parent
-                          // `<li>` has an explicit `h-10` for
-                          // h-full to resolve against. The ROM row
-                          // chain is `<tr>` → `<td>` → `<div h-full
-                          // items-stretch>` → DensityBar — `<td>`
-                          // height is content-dependent without an
-                          // explicit `<tr>`/`<td>` height, so the
-                          // h-full chain resolves to 0. PR-A item 9
-                          // missed that asymmetry and the indicator
-                          // disappeared on the ROM row. h-10 is
-                          // honest: row design is 40px, bar is 40px.
-                          // tailwind-merge in `cn` makes the
-                          // override win cleanly over the default
-                          // h-full.
                           <DensityBar
                             floor="bg-elevated"
                             value={rom.sizeBytes}
                             max={maxSizeBytes}
                             ariaLabel={`${formatBytes(rom.sizeBytes)} of peer max ${formatBytes(maxSizeBytes)}`}
-                            className="h-10"
                           />
                         ) : null}
                         {isSystem ? (
