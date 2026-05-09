@@ -12,30 +12,24 @@ import { cn } from '@app/renderer/src/lib/cn';
 
 /**
  * Bottom-of-window status bar. Two halves:
- *   - Left: the most recent in-flight operation message, or an idle
- *     summary ("Connected to <host>" / "Reconnecting (1 of 3)…" /
- *     "Disconnected").
+ *   - Left: the most recent in-flight operation message, or — when
+ *     no operation is in flight — a transient-state idle string
+ *     ("Connecting…", "Reconnecting (1 of 3)…", "Connection error").
+ *     The steady-state connected case renders empty: the right-pill
+ *     already communicates that, and the host address lives in the
+ *     top header (PR-A item 7 dropped the redundant footer echo).
  *   - Right: a small colored dot reflecting the connection status,
  *     mirroring the four-state machine from ConnectionStatus —
  *     except an in-flight auto-retry overrides the dot to amber
  *     pulse so the user sees "we're working on it" even though the
  *     underlying status flipped to 'disconnected'.
- *
- * PR #20 round 3: surfaces a visible reconnecting state during
- * transient drops. Round 1/2 left the user staring at "Disconnected"
- * with no signal that auto-retry was happening.
  */
 export function StatusBar(): JSX.Element {
   const { current, currentProgress } = useOperationStatus();
-  const {
-    status,
-    currentProfile,
-    lostConnection,
-    autoRetry,
-    autoRetryFailed,
-  } = useConnection();
+  const { status, lostConnection, autoRetry, autoRetryFailed } =
+    useConnection();
 
-  const idleMessage = idleMessageFor(status, currentProfile?.host, {
+  const idleMessage = idleMessageFor(status, {
     lostConnection,
     autoRetry,
     autoRetryFailed,
@@ -111,16 +105,24 @@ export function StatusBar(): JSX.Element {
 }
 
 /**
- * Idle-message picker. Splits cleanly:
+ * Idle-message picker. PR-A item 7 dropped the host string from
+ * every branch — the top header (`HostHeader`) carries the address
+ * and the right-pill carries the steady-state connection state, so
+ * the footer-left only renders messages that add NEW information
+ * (transient transitions + in-flight ops surfaced elsewhere).
+ *
+ * Branches:
  *   - reconnecting      → "Reconnecting (N of M)…" or "Connection lost,
  *                          retrying…" before the first auto-retry
  *                          attempt event arrives.
  *   - autoRetryFailed   → "Connection lost. Reconnect or disconnect."
- *   - default           → the four-state ConnectionStatus copy.
+ *   - connecting        → "Connecting…"
+ *   - error             → "Connection error"
+ *   - disconnected      → "Disconnected"
+ *   - connected         → "" (steady state — pill suffices)
  */
 export function idleMessageFor(
   status: ConnectionStatus,
-  host: string | undefined,
   resilience: {
     readonly lostConnection: boolean;
     readonly autoRetry: AutoRetryProgress | null;
@@ -129,25 +131,19 @@ export function idleMessageFor(
 ): string {
   if (resilience.autoRetry !== null) {
     const { attempt, totalAttempts } = resilience.autoRetry;
-    return host === undefined
-      ? `Reconnecting (${String(attempt)} of ${String(totalAttempts)})…`
-      : `Reconnecting to ${host} (${String(attempt)} of ${String(totalAttempts)})…`;
+    return `Reconnecting (${String(attempt)} of ${String(totalAttempts)})…`;
   }
   if (resilience.lostConnection && !resilience.autoRetryFailed) {
-    return host === undefined
-      ? 'Connection lost, retrying…'
-      : `Connection lost, retrying ${host}…`;
+    return 'Connection lost, retrying…';
   }
   if (resilience.autoRetryFailed) {
-    return host === undefined
-      ? 'Connection lost. Reconnect or disconnect.'
-      : `Connection lost to ${host}. Reconnect or disconnect.`;
+    return 'Connection lost. Reconnect or disconnect.';
   }
   switch (status) {
     case 'connected':
-      return host === undefined ? 'Connected' : `Connected to ${host}`;
+      return '';
     case 'connecting':
-      return host === undefined ? 'Connecting…' : `Connecting to ${host}…`;
+      return 'Connecting…';
     case 'error':
       return 'Connection error';
     case 'disconnected':
