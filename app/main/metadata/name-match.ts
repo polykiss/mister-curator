@@ -164,7 +164,7 @@ function isLeadingPrefixWithSeparator(
   // Allowed separator chars: whitespace, colon, semicolon, dash,
   // open paren, open bracket. End-of-string is impossible here
   // (searchTerm.length < candidate.length, checked above).
-  return /[\s:;\-(\[]/.test(next);
+  return /[\s:;\-([]/.test(next);
 }
 
 /**

@@ -423,7 +423,17 @@ export interface MisterApi {
   prefetchRomsMetadata(
     coreId: string,
     paths: readonly string[],
-    options?: { readonly operationId?: string },
+    options?: {
+      readonly operationId?: string;
+      /**
+       * PR-D1 round 2 (PR #27 round 2): subset of `paths` whose
+       * immediate parent dir is a `folder-atomic` single-game
+       * folder. Tells the orchestrator which paths should get the
+       * parent-folder name-search hint. Organizational containers
+       * (NEOGEO `1 World A-Z`) MUST NOT appear here.
+       */
+      readonly atomicFolderPaths?: readonly string[];
+    },
   ): Promise<void>;
   /**
    * Subscribe to per-path resolution events from

@@ -185,6 +185,11 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     // Container folders stay out — they're drilled into for their
     // contents.
     const filePaths: string[] = [];
+    // PR-D1 round 2 (PR #27 round 2): track the subset that lives
+    // inside atomic folders so the orchestrator emits a parent-folder
+    // name-search hint only for those — organizational folders
+    // (NEOGEO `1 World A-Z`, NES `Hacks`) would waste API calls.
+    const atomicFolderPaths: string[] = [];
     for (const r of roms) {
       if (r.kind === 'file') {
         filePaths.push(r.path);
@@ -193,6 +198,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
         r.containedRomPath !== undefined
       ) {
         filePaths.push(r.containedRomPath);
+        atomicFolderPaths.push(r.containedRomPath);
       }
     }
     if (filePaths.length === 0) return;
@@ -223,6 +229,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     });
     void window.mister.prefetchRomsMetadata(core.id, filePaths, {
       operationId,
+      atomicFolderPaths,
     });
     return () => {
       diagLog('info', 'roms-pane', '·', 'unsubscribed', {
@@ -267,7 +274,10 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     // PR-D1 (PR #27): same containedRomPath inclusion as the
     // initial-prefetch path. Atomic-folder rows resume their
     // metadata fetch via the contained file's hash on reconnect.
+    // Round 2: track atomic subset for the parent-folder hint
+    // gating, same as the initial-prefetch path.
     const filePaths: string[] = [];
+    const atomicFolderPathsAll: string[] = [];
     for (const r of roms) {
       if (r.kind === 'file') {
         filePaths.push(r.path);
@@ -276,12 +286,17 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
         r.containedRomPath !== undefined
       ) {
         filePaths.push(r.containedRomPath);
+        atomicFolderPathsAll.push(r.containedRomPath);
       }
     }
     const pending = filePaths.filter((p) => {
       const entry = metadataByPath[p];
       return entry === undefined || entry.error;
     });
+    const pendingSet = new Set(pending);
+    const atomicFolderPaths = atomicFolderPathsAll.filter((p) =>
+      pendingSet.has(p),
+    );
     if (pending.length === 0) {
       diagLog('info', 'roms-pane', '·', 'resume-skip-no-pending', {
         coreId: core.id,
@@ -320,6 +335,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     });
     void window.mister.prefetchRomsMetadata(core.id, pending, {
       operationId,
+      atomicFolderPaths,
     });
     return () => {
       diagLog('info', 'roms-pane', '·', 'resume-unsubscribed', {

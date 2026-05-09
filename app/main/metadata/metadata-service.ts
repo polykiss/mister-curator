@@ -341,6 +341,10 @@ export class MetadataService {
     const hints = extractNameHints({
       filename: hint.filename,
       parentFolder: hint.parentFolder,
+      // Round 2 (PR #27 round 2): only emit folder hint when parent
+      // is atomic. Browsable folders (NEOGEO `1 World A-Z`, NES
+      // `Hacks`) would waste API calls returning no candidates.
+      parentFolderIsAtomic: hint.parentFolderIsAtomic,
     });
     if (hints.length === 0) return null;
     for (const h of hints) {

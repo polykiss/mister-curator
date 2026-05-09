@@ -1261,18 +1261,18 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
         },
       });
       const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
-      const first = await svc.getMetadata(
-        HASH,
-        { filename: 'mslug2.neo', parentFolder: 'Metal Slug 2' },
-        SS_HINT,
-      );
+      // Round 2 (PR #27 round 2): mark parent atomic so the folder
+      // hint actually emits — round 1's tests assumed unconditional
+      // emission; round 2 gates it on parentFolderIsAtomic.
+      const hint = {
+        filename: 'mslug2.neo',
+        parentFolder: 'Metal Slug 2',
+        parentFolderIsAtomic: true,
+      };
+      const first = await svc.getMetadata(HASH, hint, SS_HINT);
       expect(first?.source).toBe('screenscraper-name-search');
       const before = ss.searchCalls.length;
-      const second = await svc.getMetadata(
-        HASH,
-        { filename: 'mslug2.neo', parentFolder: 'Metal Slug 2' },
-        SS_HINT,
-      );
+      const second = await svc.getMetadata(HASH, hint, SS_HINT);
       expect(second?.source).toBe('screenscraper-name-search');
       // Cache hit on the second call — no additional searchByName.
       expect(ss.searchCalls.length).toBe(before);
@@ -1299,10 +1299,12 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       expect(result).toBeNull();
     });
 
-    it('parent-folder hint wins over paren-shortname when both score equally', async () => {
+    it('parent-folder hint wins over paren-shortname when both score equally (atomic)', async () => {
       // Engine fires hints in priority order. Parent-folder is
       // first; if it gets a high-confidence match, paren-shortname
       // is never queried (saves an API call).
+      // Round 2: must mark parentFolderIsAtomic so the folder hint
+      // actually fires.
       const m = makeMocks({ dbReturns: null });
       const ss = makeSearchSS({
         lookupResult: null,
@@ -1319,6 +1321,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
         {
           filename: 'Metal Slug 2 (mslug2).neo',
           parentFolder: 'Metal Slug 2',
+          parentFolderIsAtomic: true,
         },
         SS_HINT,
       );
@@ -1328,9 +1331,11 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       ]);
     });
 
-    it('falls through to next hint when first returns no candidates', () => {
+    it('falls through to next hint when first returns no candidates (atomic)', () => {
       // Atomic-folder shape: parent folder doesn't search-hit, but
       // paren-shortname does.
+      // Round 2: must mark parentFolderIsAtomic for folder hint to
+      // fire at all.
       return (async () => {
         const m = makeMocks({ dbReturns: null });
         const ss = makeSearchSS({
@@ -1348,6 +1353,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
           {
             filename: 'Metal Slug 2 (mslug2).neo',
             parentFolder: 'Cleaned Folder Name',
+            parentFolderIsAtomic: true,
           },
           SS_HINT,
         );
@@ -1357,6 +1363,31 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
           'mslug2',
         ]);
       })();
+    });
+
+    it('round 2: parent folder NOT atomic → folder hint suppressed (avoids 1 World A-Z waste)', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({
+        lookupResult: null,
+        searchResults: {
+          // Even if the org-folder name happened to match a real game,
+          // we don't query for it.
+          '1 World A-Z': [buildSsHit({ name: '1 World A-Z' })],
+          mslug2: [buildSsHit({ name: 'mslug2' })],
+        },
+      });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      await svc.getMetadata(
+        HASH,
+        {
+          filename: 'Metal Slug 2 (mslug2).neo',
+          parentFolder: '1 World A-Z',
+          parentFolderIsAtomic: false,
+        },
+        SS_HINT,
+      );
+      // Only paren-shortname searched — folder hint suppressed.
+      expect(ss.searchCalls.map((c) => c.searchTerm)).toEqual(['mslug2']);
     });
 
     it('skips name-search when filename hint is missing', async () => {

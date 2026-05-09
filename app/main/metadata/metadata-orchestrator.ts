@@ -232,6 +232,20 @@ export class MetadataOrchestrator {
      * scope per the PR-C spec); the abort surfaces between paths.
      */
     shouldAbort?: () => boolean,
+    /**
+     * PR-D1 round 2 (PR #27 round 2): paths whose immediate parent
+     * dir is a `folder-atomic` single-game folder. Only these paths
+     * get the parent-folder name passed as a name-search hint —
+     * organizational containers (NEOGEO `1 World A-Z`, NES `Hacks`)
+     * would waste API budget on hints returning no candidates.
+     *
+     * Optional. When omitted, no path is treated as atomic — the
+     * caller (engine) doesn't currently track classification, so
+     * the safe default is "no folder hints anywhere". The renderer's
+     * per-pane prefetch passes the atomic-folder containedRomPaths
+     * it knows about.
+     */
+    atomicFolderPaths?: ReadonlySet<string>,
   ): Promise<void> {
     if (romPaths.length === 0) return;
     diagLog('info', 'prefetch', '→', 'start', {
@@ -454,10 +468,14 @@ export class MetadataOrchestrator {
       // recovery signal.
       const filename = basename(path);
       const parentFolder = parentBasename(path);
+      // PR-D1 round 2 (PR #27 round 2): only forward `parentFolderIsAtomic=true`
+      // for paths the caller marked atomic. Default false so
+      // organizational folders don't waste API budget.
+      const parentFolderIsAtomic = atomicFolderPaths?.has(path) === true;
       try {
         const metadata = await this.metadataService.getMetadata(
           entry.md5,
-          { filename, parentFolder },
+          { filename, parentFolder, parentFolderIsAtomic },
           ssHint,
         );
         diagLog('info', 'prefetch', '·', 'lookup', {

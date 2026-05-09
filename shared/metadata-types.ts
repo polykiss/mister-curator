@@ -121,6 +121,13 @@ export interface MetadataHint {
    * top level.
    */
   readonly parentFolder?: string;
+  /**
+   * Round 2 (PR #27 round 2): true iff `parentFolder` names an
+   * atomic single-game folder. Only then is the folder name used as
+   * a search hint — organizational folders like NEOGEO's
+   * `1 World A-Z` would waste API calls returning no candidates.
+   */
+  readonly parentFolderIsAtomic?: boolean;
 }
 
 /**

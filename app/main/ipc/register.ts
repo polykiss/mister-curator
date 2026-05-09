@@ -283,14 +283,34 @@ export function registerIpcHandlers(
     [
       string,
       readonly string[],
-      { readonly operationId?: string } | undefined,
+      {
+        readonly operationId?: string;
+        /**
+         * PR-D1 round 2 (PR #27 round 2): paths the renderer knows
+         * to be inside `folder-atomic` single-game folders. Forwarded
+         * to the orchestrator's `parentFolderIsAtomic` per-path
+         * decision so only those paths get the parent-folder
+         * name-search hint. Undefined / omitted = no atomic paths.
+         */
+        readonly atomicFolderPaths?: readonly string[];
+      } | undefined,
     ],
     void
   >(IPC_CHANNELS.prefetchRomsMetadata, async (coreId, paths, options) => {
     const operationId = options?.operationId ?? newOpId();
-    await metadata.getRomsMetadata(coreId, paths, (event) => {
-      emitRomMetadataResolved({ operationId, ...event });
-    });
+    const atomicSet =
+      options?.atomicFolderPaths === undefined
+        ? undefined
+        : new Set(options.atomicFolderPaths);
+    await metadata.getRomsMetadata(
+      coreId,
+      paths,
+      (event) => {
+        emitRomMetadataResolved({ operationId, ...event });
+      },
+      undefined,
+      atomicSet,
+    );
   });
 
   // PR-C (PR #26): renderer-driven pivot. The CoresPane click handler

@@ -231,7 +231,10 @@ const api: MisterApi = {
   prefetchRomsMetadata: (
     coreId: string,
     paths: readonly string[],
-    options?: { readonly operationId?: string },
+    options?: {
+      readonly operationId?: string;
+      readonly atomicFolderPaths?: readonly string[];
+    },
   ) =>
     invoke<void>(
       IPC_CHANNELS.prefetchRomsMetadata,

@@ -47,13 +47,34 @@ export function extractNameHints(args: {
   readonly filename: string;
   /** Basename of the immediate parent dir, or undefined if at core root. */
   readonly parentFolder?: string;
+  /**
+   * Round 2 (PR #27 round 2): true iff the parent folder is an
+   * atomic single-game folder (`folder-atomic` shape — X68000-style
+   * `Metal Slug 2 (USA)/mslug2.neo`). The folder name is then a
+   * curated game title and is the strongest hint.
+   *
+   * For organizational / browsable container folders (NEOGEO's
+   * `1 World A-Z/`, NES's `Hacks/`), the folder name is a category
+   * grouping, not a game title — emitting it as a hint wastes API
+   * calls returning no candidates.
+   *
+   * Default `false` (or undefined): treat the parent as
+   * organizational. Caller MUST set true explicitly when it knows
+   * the folder is atomic. Conservative — wrong-direction defaults
+   * burn rate-limit budget; right-direction defaults silently
+   * suppress a useful hint that the file-stem fallback usually
+   * recovers.
+   */
+  readonly parentFolderIsAtomic?: boolean;
 }): readonly NameHint[] {
   const hints: NameHint[] = [];
 
   // 1. parentFolder — strongest signal for atomic folders. The folder
   //    name is human-curated (`Metal Slug 2 (USA)`) and survives
   //    rename / re-dump cycles better than the inner file name.
-  if (args.parentFolder !== undefined) {
+  //    Round 2: gated on `parentFolderIsAtomic` so organizational
+  //    folders (`1 World A-Z`, `Hacks`) don't waste API budget.
+  if (args.parentFolder !== undefined && args.parentFolderIsAtomic === true) {
     const cleaned = cleanForSearch(args.parentFolder);
     if (cleaned !== '') {
       hints.push({ source: 'folder', value: cleaned });

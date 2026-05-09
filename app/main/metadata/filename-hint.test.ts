@@ -21,11 +21,12 @@ function findSource(
   return hints.find((h) => h.source === source);
 }
 
-describe('extractNameHints — parentFolder', () => {
-  it('uses the parent folder name verbatim when given (atomic-folder shape)', () => {
+describe('extractNameHints — parentFolder (round 2: atomic-only gate)', () => {
+  it('uses the parent folder name verbatim when atomic + given (atomic-folder shape)', () => {
     const hints = extractNameHints({
       filename: 'mslug2.neo',
       parentFolder: 'Metal Slug 2 (USA)',
+      parentFolderIsAtomic: true,
     });
     expect(findSource(hints, 'folder')?.value).toBe('Metal Slug 2');
   });
@@ -34,10 +35,31 @@ describe('extractNameHints — parentFolder', () => {
     const hints = extractNameHints({
       filename: 'game.zip',
       parentFolder: 'Castlevania - Symphony of the Night [Beta] (USA)',
+      parentFolderIsAtomic: true,
     });
     expect(findSource(hints, 'folder')?.value).toBe(
       'Castlevania - Symphony of the Night',
     );
+  });
+
+  it('round 2: skips the folder hint when parentFolderIsAtomic=false (organizational folder)', () => {
+    // Bug from round 1: organizational folders like NEOGEO's
+    // `1 World A-Z` and NES's `Hacks` were emitting folder hints,
+    // wasting one API call per ROM returning no candidates.
+    const hints = extractNameHints({
+      filename: 'mslug.zip',
+      parentFolder: '1 World A-Z',
+      parentFolderIsAtomic: false,
+    });
+    expect(findSource(hints, 'folder')).toBeUndefined();
+  });
+
+  it('round 2: defaults to atomic=false when omitted (conservative — no API budget waste)', () => {
+    const hints = extractNameHints({
+      filename: 'mslug.zip',
+      parentFolder: 'Some Folder',
+    });
+    expect(findSource(hints, 'folder')).toBeUndefined();
   });
 
   it('skips the folder hint when parentFolder is undefined', () => {
@@ -45,25 +67,34 @@ describe('extractNameHints — parentFolder', () => {
     expect(findSource(hints, 'folder')).toBeUndefined();
   });
 
-  it('skips the folder hint when parentFolder is empty / whitespace', () => {
+  it('skips the folder hint when parentFolder is empty / whitespace (even when atomic)', () => {
     expect(
       findSource(
-        extractNameHints({ filename: 'g.nes', parentFolder: '' }),
+        extractNameHints({
+          filename: 'g.nes',
+          parentFolder: '',
+          parentFolderIsAtomic: true,
+        }),
         'folder',
       ),
     ).toBeUndefined();
     expect(
       findSource(
-        extractNameHints({ filename: 'g.nes', parentFolder: '   ' }),
+        extractNameHints({
+          filename: 'g.nes',
+          parentFolder: '   ',
+          parentFolderIsAtomic: true,
+        }),
         'folder',
       ),
     ).toBeUndefined();
   });
 
-  it('returns the folder hint FIRST in the priority list', () => {
+  it('returns the folder hint FIRST in the priority list when atomic', () => {
     const hints = extractNameHints({
       filename: 'Metal Slug 2 (USA).nes',
       parentFolder: 'Metal Slug 2',
+      parentFolderIsAtomic: true,
     });
     expect(hints[0]?.source).toBe('folder');
   });
@@ -229,13 +260,26 @@ describe('extractNameHints — filename-stem', () => {
 });
 
 describe('extractNameHints — priority + ordering', () => {
-  it('returns hints in priority order: folder > paren-shortname > stem', () => {
+  it('returns hints in priority order: folder > paren-shortname > stem (when atomic)', () => {
     const hints = extractNameHints({
       filename: 'Metal Slug 2 (mslug2).neo',
       parentFolder: 'Metal Slug 2 Folder',
+      parentFolderIsAtomic: true,
     });
     expect(hints.map((h) => h.source)).toEqual([
       'folder',
+      'paren-shortname',
+      'filename-stem',
+    ]);
+  });
+
+  it('round 2: when parent is non-atomic, folder hint is omitted; rest still in priority order', () => {
+    const hints = extractNameHints({
+      filename: 'Metal Slug 2 (mslug2).neo',
+      parentFolder: '1 World A-Z',
+      parentFolderIsAtomic: false,
+    });
+    expect(hints.map((h) => h.source)).toEqual([
       'paren-shortname',
       'filename-stem',
     ]);
