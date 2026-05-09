@@ -245,7 +245,16 @@
   .scroll-themed {
     scrollbar-gutter: stable;
     scrollbar-color: hsl(var(--scrollbar-thumb)) hsl(var(--scrollbar-track));
-    scrollbar-width: thin;
+    /* PR #23 round 6: deliberately do NOT set `scrollbar-width:
+       thin` here. With the `::-webkit-scrollbar { width: 10px }`
+       override below, modern Chromium uses the webkit value for
+       both layout AND visual when no `scrollbar-width` is set —
+       gutter reservation matches the actual drawn width. Setting
+       `scrollbar-width: thin` reserves a NARROWER gutter (~6-7px
+       in some Chromium configurations) than the 10px webkit
+       visual, which leaves the scrollbar overflowing the gutter
+       into content area and overlapping the rightmost column (eye
+       buttons) — that was the round-5 bug. */
   }
 
   .scroll-themed::-webkit-scrollbar {

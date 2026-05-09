@@ -291,7 +291,15 @@ function renderCoreList(args: RenderArgs): JSX.Element {
       // PR #23 round 5 commit 1: `scroll-themed` reserves a stable
       // scrollbar gutter and paints a permanent themed bar so native
       // overlay scrollbars on macOS can't fade in over the eye column.
-      className="scroll-themed flex-1 overflow-auto"
+      // PR #23 round 6: `pr-2.5` (10px) forces explicit breathing
+      // room on the right of the row content so the eye buttons sit
+      // ≥10px from the scroll container's padding-box right edge —
+      // well clear of the scrollbar's drawn position regardless of
+      // how the gutter reservation actually resolves (overlay vs
+      // classic, etc.). The right-edge density bar shifts inward
+      // by the same 10px; the "continuous strip on the right" still
+      // reads as continuous against the visible list edge.
+      className="scroll-themed flex-1 overflow-auto pr-2.5"
       role="listbox"
       aria-label="MiSTer cores"
     >

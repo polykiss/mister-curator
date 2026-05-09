@@ -894,8 +894,15 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
       {/* PR #23 round 5 commit 1: `scroll-themed` reserves a stable
           scrollbar gutter and paints a permanent themed bar so native
           overlay scrollbars on macOS can't fade in over the eye
-          column on the right. */}
-      <div className="scroll-themed flex-1 overflow-auto">
+          column on the right.
+          PR #23 round 6: `pr-2.5` (10px) explicit right padding —
+          scrollbar-gutter alone wasn't reliable in this Chromium /
+          macOS configuration (eye icons still visually overlapped
+          the drawn scrollbar). Pinning a 10px gap between the row
+          content and the container's right edge guarantees the
+          rightmost cell (density + eye stack) sits well clear of
+          the scrollbar regardless of how the gutter resolves. */}
+      <div className="scroll-themed flex-1 overflow-auto pr-2.5">
         {loading && !roms ? (
           <div className="space-y-1 p-4">
             {Array.from({ length: 8 }).map((_, i) => (
