@@ -99,6 +99,77 @@ describe('filenameToSearchTerm', () => {
       ).toBe('Aero Fighters 3');
     });
   });
+
+  // chore/search-and-filter-cleanup commit 2
+  describe('rotate trailing ", The"/"A"/"An" to leading article', () => {
+    // Bug: No-Intro / TOSEC names put the article after a comma —
+    // "Legend of Zelda, The". SS indexes by the natural "The Legend
+    // of Zelda" form so the comma shape returned zero matches.
+    it('"Legend of Zelda, The" → "The Legend of Zelda"', () => {
+      expect(filenameToSearchTerm('Legend of Zelda, The (USA).sfc')).toBe(
+        'The Legend of Zelda',
+      );
+    });
+
+    it('preserves apostrophes and digits in the body', () => {
+      expect(
+        filenameToSearchTerm("King of Fighters '99, The (Japan).neo"),
+      ).toBe("The King of Fighters '99");
+    });
+
+    it('reorders ", A"', () => {
+      expect(filenameToSearchTerm('Game, A.zip')).toBe('A Game');
+    });
+
+    it('reorders ", An"', () => {
+      expect(filenameToSearchTerm('Octopus, An.zip')).toBe('An Octopus');
+    });
+
+    it('article match is case-insensitive (input case preserved)', () => {
+      expect(filenameToSearchTerm('Game, THE.zip')).toBe('THE Game');
+      expect(filenameToSearchTerm('Game, the.zip')).toBe('the Game');
+    });
+
+    it('no reorder when no trailing article', () => {
+      expect(filenameToSearchTerm('Final Fantasy.sfc')).toBe('Final Fantasy');
+    });
+
+    it('mid-string "The" is NOT mistaken for a trailing article', () => {
+      // "Adams, The Family" has a comma mid-string but the body
+      // continues after — "The" is mid-string, not end-of-string.
+      // Pin that the regex anchors to end-of-string only.
+      expect(filenameToSearchTerm('Adams, The Family.zip')).toBe(
+        'Adams, The Family',
+      );
+    });
+
+    it('multiple commas: only the trailing one matters', () => {
+      // Real example shape: "Doom II, Hell on Earth, The". The
+      // trailing ", The" is the article comma; the earlier comma
+      // is part of the title and stays put.
+      expect(
+        filenameToSearchTerm('Doom II, Hell on Earth, The.zip'),
+      ).toBe('The Doom II, Hell on Earth');
+    });
+
+    it('runs AFTER paren strip — article right before parens still rotates', () => {
+      // Pin the pipeline order: paren strip happens first so the
+      // trailing-article matcher sees the bare title. If paren
+      // strip ran AFTER, "Legend of Zelda, The (USA)" would never
+      // match the trailing-article regex.
+      expect(
+        filenameToSearchTerm('Legend of Zelda, The (USA) (Rev 1).sfc'),
+      ).toBe('The Legend of Zelda');
+    });
+
+    it('does not match a trailing article without a comma', () => {
+      // "The" needs a leading ", " separator. Bare "Legend of
+      // Zelda The" stays as-is.
+      expect(filenameToSearchTerm('Legend of Zelda The.sfc')).toBe(
+        'Legend of Zelda The',
+      );
+    });
+  });
 });
 
 describe('SearchResultItem — every result is selectable (PR-D2 r2 c3)', () => {
