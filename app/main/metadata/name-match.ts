@@ -42,6 +42,24 @@ export function scoreMatch(searchTerm: string, candidateName: string): number {
   const b = normalizeForMatch(candidateName);
   if (a === '' || b === '') return 0;
 
+  // Round 2 (PR #27 round 2): digit-mismatch hard rejection. Numbers
+  // in titles distinguish sequels and DLC ("Real Bout Fatal Fury 2"
+  // vs "Real Bout Fatal Fury", "Mega Man X3" vs "Mega Man X"). Round
+  // 1 wrong-bound the former at 0.9 because token-overlap treated
+  // the missing "2" as one absent token among five (4/5 = 80%, then
+  // boosted to 0.9 by some downstream rule).
+  //
+  // Hard rule: if the search term contains arabic digit groups, the
+  // candidate MUST contain every one of them (as a subset; extra
+  // digits in the candidate are fine — `Galaga 88` matches
+  // `Galaga '88`). Returns 0 immediately on any missing digit group.
+  //
+  // Roman numerals are NOT handled — Samurai Shodown IV will
+  // continue to miss against an arabic-digit candidate, which is
+  // the conservative choice. PR-D2's manual override is the
+  // recovery path.
+  if (!digitsAreCompatible(a, b)) return 0;
+
   if (a === b) return 1;
 
   // Round 2 (PR #27 round 2): leading-prefix tier. The search term
@@ -91,6 +109,33 @@ export function scoreMatch(searchTerm: string, candidateName: string): number {
  */
 function normalizeForMatch(input: string): string {
   return input.toLowerCase().replace(/\s+/gu, ' ').trim();
+}
+
+/**
+ * Round 2 (PR #27 round 2): true iff every arabic digit group in
+ * `a` (the search term) also appears in `b` (the candidate). Extra
+ * digit groups in `b` are fine — the rule is one-directional. An
+ * empty digit set in `a` always passes (no constraint to enforce).
+ *
+ * Examples:
+ *   • "Real Bout Fatal Fury 2" → ["2"] vs "Real Bout Fatal Fury" → []
+ *     → "2" missing in candidate → false (REJECT)
+ *   • "Galaga 88" → ["88"] vs "Galaga '88" → ["88"] → true (ALLOW)
+ *   • "Final Fantasy III" → [] vs "Final Fantasy II" → [] → true
+ *     (Roman numerals not extracted; falls through to other tiers)
+ */
+function digitsAreCompatible(a: string, b: string): boolean {
+  const aDigits = extractDigitGroups(a);
+  if (aDigits.length === 0) return true;
+  const bDigits = new Set(extractDigitGroups(b));
+  for (const g of aDigits) {
+    if (!bDigits.has(g)) return false;
+  }
+  return true;
+}
+
+function extractDigitGroups(s: string): readonly string[] {
+  return s.match(/\d+/g) ?? [];
 }
 
 /**
