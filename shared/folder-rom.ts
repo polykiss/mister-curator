@@ -103,6 +103,30 @@ const CART_EXTENSIONS: ReadonlySet<string> = new Set([
   '.uef', // BBC Micro / Acorn cassette
   '.cdx', // Multiple
   '.bbc', // BBC
+  // PR-B (PR #24) additions: cartridge / disk formats observed in
+  // real-MiSTer libraries that the original cart list missed and
+  // that the cores-list count needs to recognize. The wider
+  // `isLaunchableRomExtension` filter in this module is what
+  // surfaces these — `classifyFolder` also picks them up but the
+  // additions don't change folder-classification outcomes in
+  // practice (single-cart folders already classified atomic via
+  // the unknown→atomic fallback).
+  '.d64', // Commodore 64 disk image
+  '.t64', // Commodore 64 tape archive
+  '.crt', // Commodore 64 cartridge
+  '.prg', // Commodore 64 program
+  '.rom', // Generic ROM extension (BIOS-shaped names still
+          // filtered by `shouldCountAsRom`'s SYSTEM_FILE_SUFFIXES
+          // — `bios.rom` / `boot.rom` etc.)
+  '.fds', // Famicom Disk System
+  '.unf', // NES UNIF format
+  '.unif',// NES UNIF format (long extension)
+  '.vhd', // Apple II / various computer hard disk
+  '.do',  // Apple II DOS disk image
+  '.po',  // Apple II ProDOS disk image
+  '.atr', // Atari 8-bit disk image
+  '.atx', // Atari 8-bit disk image (extended)
+  '.xex', // Atari 8-bit executable
 ]);
 
 /**
@@ -218,4 +242,35 @@ function extensionOf(name: string): string {
   const dot = name.lastIndexOf('.');
   if (dot < 0) return '';
   return name.slice(dot).toLowerCase();
+}
+
+/**
+ * PR-B (PR #24) — positive launchable-extension filter for the cores-
+ * list ROM count. The existing `shouldCountAsRom` in
+ * `shared/system-files.ts` is a NEGATIVE filter: it excludes files
+ * inside system folders (`Palettes`, `Overlays`, `Filters`, `old`)
+ * and BIOS-named files, but doesn't check that the leaf extension is
+ * something the MiSTer can actually launch. The result was visible
+ * in the sidebar: NES counted ~680 ROMs because `.png` screenshots
+ * inside `Hacks/`, `.ips` patches, `.nfo` notes, etc. all passed
+ * through (the parent folder isn't in the system-folder list, the
+ * file extension isn't BIOS-shaped).
+ *
+ * This helper layers a POSITIVE filter on top: a file counts only if
+ * its extension is a known launchable cartridge / archive format
+ * (`CART_EXTENSIONS`) or a disc image (`DISC_EXTENSIONS`). Both lists
+ * already exist in this module — `classifyFolder` uses them — and
+ * cover the full set of formats the project enumerates today.
+ *
+ * Returns `false` for files with no extension, files whose extension
+ * isn't in either set, and dot-prefixed-only names (like `.DS_Store`).
+ * The check is case-insensitive (`extensionOf` lowercases). Combine
+ * with `shouldCountAsRom` at the count call sites — see
+ * `app/main/clients/real-mister-client.ts` (F-line aggregation) and
+ * `shared/core-matching.ts` (top-level file filter).
+ */
+export function isLaunchableRomExtension(filename: string): boolean {
+  const ext = extensionOf(filename);
+  if (ext === '') return false;
+  return CART_EXTENSIONS.has(ext) || DISC_EXTENSIONS.has(ext);
 }

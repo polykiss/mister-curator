@@ -26,6 +26,7 @@ import {
   makeIdGen,
   truncateForLog,
 } from '@shared/diag-log';
+import { isLaunchableRomExtension } from '@shared/folder-rom';
 import { isOsMetadataDir, isOsMetadataFile } from '@shared/library-filter';
 import { shouldCountAsRom } from '@shared/system-files';
 import {
@@ -451,6 +452,18 @@ export class RealMisterClient implements IMisterClient {
             marks: systemFilesMarks,
           })
         ) {
+          continue;
+        }
+        // PR-B (PR #24): positive launchable-extension filter on top
+        // of the negative system-file filter. Without this, anything
+        // not BIOS-shaped + not inside a system folder counted —
+        // .png screenshots, .ips ROM-hack patches, .nfo notes,
+        // .sav save states, .nsf music files all inflated counts
+        // (NES showed ~680 vs 25 actual ROMs). Same `CART/DISC`
+        // extension lists `classifyFolder` already uses, so the
+        // two pipelines stay in sync.
+        const leafName = segs[segs.length - 1]!;
+        if (!isLaunchableRomExtension(leafName)) {
           continue;
         }
         const sub = ensureSubFolder(ensureDirBuilder(topLevelDir), subName);
