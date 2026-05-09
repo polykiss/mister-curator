@@ -334,6 +334,18 @@ export class MetadataOrchestrator {
         continue;
       }
       const systemId = this.resolveSystemId({ romPath: path, coreId });
+      if (systemId === null) {
+        // Round 10 (PR #20) — surface unmapped coreIds in the diag
+        // log. Without this, the only signal is the downstream
+        // `[meta] · ss-skip reason=no-hint` line, which doesn't make
+        // it obvious that the coreId is the missing piece (vs SS
+        // being unavailable). Adds a coreId to the
+        // `screenscraper-system-map` should make this stop firing.
+        diagLog('info', 'meta', '·', 'system-map-miss', {
+          coreId,
+          path: basename(path),
+        });
+      }
       const ssHint =
         systemId === null
           ? undefined

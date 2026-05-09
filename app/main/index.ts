@@ -13,6 +13,7 @@ import { registerIpcHandlers } from '@app/main/ipc/register';
 import { HashService } from '@app/main/metadata/hash-service';
 import { ImageCache } from '@app/main/metadata/image-cache';
 import { LibretroThumbnailsFetcher } from '@app/main/metadata/libretro-thumbnails';
+import { lookupScreenScraperSystemId } from '@app/main/metadata/screenscraper-system-map';
 import {
   MetadataOrchestrator,
   type SystemIdResolver,
@@ -26,75 +27,11 @@ function resolveClientMode(): 'real' | 'fake' {
   return process.env['MISTERCURATOR_CLIENT_MODE'] === 'fake' ? 'fake' : 'real';
 }
 
-/**
- * Map a MiSTer core id (the directory name under `/media/fat/games/`)
- * to ScreenScraper's `systemeid`. The id is required for SS's jeuInfos
- * hash-search; the canonical system *name* comes from the SS response
- * (`response.jeu.systeme.nom`), so this map carries the id only.
- *
- * SS ids verified against `systemesListe.php`. The set below covers
- * every cartridge core in the live test library plus a reasonable
- * broader set; missing entries return null and SS lookup is bypassed
- * for those cores (the OpenVGDB+libretro path still runs).
- */
-const SCREENSCRAPER_SYSTEM_ID_BY_CORE_ID: ReadonlyMap<string, number> =
-  new Map([
-    // ─── Nintendo ────────────────────────────────────────────────────
-    ['NES', 3],
-    ['SNES', 4],
-    ['GAMEBOY', 9],
-    ['GAMEBOYCOLOR', 10],
-    ['GAMEBOYADVANCE', 12],
-    ['GBA', 12],
-    ['VIRTUALBOY', 11],
-    ['NINTENDO64', 14],
-    ['N64', 14],
-    // ─── Sega ────────────────────────────────────────────────────────
-    ['Genesis', 1],
-    ['MegaDrive', 1],
-    ['SMS', 2],
-    ['MasterSystem', 2],
-    ['GameGear', 21],
-    ['Sega32X', 19],
-    ['SegaCD', 20],
-    ['MegaCD', 20],
-    ['Saturn', 22],
-    ['SG1000', 109],
-    // ─── Atari ───────────────────────────────────────────────────────
-    ['Atari2600', 26],
-    ['Atari5200', 40],
-    ['Atari7800', 41],
-    ['AtariLynx', 28],
-    ['Lynx', 28],
-    // ─── NEC ─────────────────────────────────────────────────────────
-    ['TurboGrafx16', 31],
-    ['TGFX16', 31],
-    ['PCEngine', 31],
-    ['TGFX16-CD', 114],
-    ['PCEngineCD', 114],
-    // ─── SNK ─────────────────────────────────────────────────────────
-    ['NEOGEO', 142],
-    ['NeoGeo', 142],
-    ['NeoGeoPocket', 25],
-    ['NEOGEOPocket', 25],
-    ['NeoGeoPocketColor', 82],
-    // ─── Sony ────────────────────────────────────────────────────────
-    ['PSX', 57],
-    ['PlayStation', 57],
-    // ─── Misc ───────────────────────────────────────────────────────
-    ['ColecoVision', 48],
-    ['Coleco', 48],
-    ['Intellivision', 115],
-    ['Vectrex', 102],
-    ['WonderSwan', 45],
-    ['WonderSwanColor', 46],
-    ['Odyssey2', 104],
-  ]);
-
-const resolveScreenScraperSystemId: SystemIdResolver = ({ coreId }) => {
-  if (coreId === undefined) return null;
-  return SCREENSCRAPER_SYSTEM_ID_BY_CORE_ID.get(coreId) ?? null;
-};
+// Round 10 (PR #20) — extracted to `screenscraper-system-map.ts` so
+// the live coreId→systemeid mappings stay unit-testable. Add entries
+// there, not here.
+const resolveScreenScraperSystemId: SystemIdResolver = ({ coreId }) =>
+  lookupScreenScraperSystemId(coreId);
 
 /**
  * Build the dev-time cache event logger. Off by default; enable with
