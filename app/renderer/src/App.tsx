@@ -4,6 +4,7 @@ import { Toaster } from 'sonner';
 import { AppErrorBoundary } from '@app/renderer/src/components/AppErrorBoundary';
 import { BrowserScreen } from '@app/renderer/src/components/BrowserScreen';
 import { ConnectionScreen } from '@app/renderer/src/components/ConnectionScreen';
+import { AutoScrapeProvider } from '@app/renderer/src/contexts/AutoScrapeContext';
 import { ConnectionProvider, useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import { CoresProvider } from '@app/renderer/src/contexts/CoresContext';
 import { OperationStatusProvider } from '@app/renderer/src/contexts/OperationStatusContext';
@@ -42,14 +43,20 @@ export function App(): JSX.Element {
       <OperationStatusProvider>
         <ConnectionProvider>
           <CoresProvider>
-            <Routes />
-            <Toaster
-              position="bottom-right"
-              theme="dark"
-              richColors
-              closeButton
-              toastOptions={{ style: TOAST_TOKENS, className: 'font-sans' }}
-            />
+            {/* PR-C (PR #26): AutoScrapeProvider sits inside the
+                connection chain so its IPC subscription mounts after
+                the bridge is ready. The footer is the only consumer
+                today; placing it here keeps the surface narrow. */}
+            <AutoScrapeProvider>
+              <Routes />
+              <Toaster
+                position="bottom-right"
+                theme="dark"
+                richColors
+                closeButton
+                toastOptions={{ style: TOAST_TOKENS, className: 'font-sans' }}
+              />
+            </AutoScrapeProvider>
           </CoresProvider>
         </ConnectionProvider>
       </OperationStatusProvider>

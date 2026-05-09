@@ -29,6 +29,7 @@ import type {
 
 import type { ConnectionManager } from '@app/main/ipc/connection-manager';
 import type { MetadataOrchestrator } from '@app/main/metadata/metadata-orchestrator';
+import type { AutoScrapeEngine } from '@app/main/services/auto-scrape-engine';
 import type { ProfileStore } from '@app/main/storage/profile-store';
 
 type IpcHandler<TArgs extends readonly unknown[], TResult> = (
@@ -128,6 +129,7 @@ export function registerIpcHandlers(
   emitMetadataProgress: MetadataPrefetchEmitter,
   emitMetadataDatabaseProgress: MetadataDatabaseEmitter,
   emitRomMetadataResolved: RomMetadataResolvedEmitter,
+  autoScrapeEngine: AutoScrapeEngine,
 ): void {
   handle<[], MisterProfile[]>(IPC_CHANNELS.listProfiles, () => store.list());
 
@@ -289,6 +291,14 @@ export function registerIpcHandlers(
     await metadata.getRomsMetadata(coreId, paths, (event) => {
       emitRomMetadataResolved({ operationId, ...event });
     });
+  });
+
+  // PR-C (PR #26): renderer-driven pivot. The CoresPane click handler
+  // calls this on every core selection so the auto-scrape engine
+  // jumps to the user's focus. No-op if the focused core is already
+  // active.
+  handle<[string], void>(IPC_CHANNELS.setAutoScrapeFocus, (coreId) => {
+    autoScrapeEngine.setFocus(coreId);
   });
 
   handle<[], { readonly ready: boolean; readonly downloadInProgress: boolean }>(

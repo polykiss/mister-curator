@@ -221,6 +221,17 @@ export class MetadataOrchestrator {
     coreId: string,
     romPaths: readonly string[],
     onResolved?: (event: RomMetadataResolvedEvent) => void,
+    /**
+     * PR-C (PR #26): cooperative cancellation for the auto-scrape
+     * engine. Checked at the top of each per-path iteration —
+     * returns early if true, leaving partial work in the metadata
+     * cache (which is the source of truth for "this path is
+     * scanned"). The engine flips this flag from setFocus / pause
+     * so the user's pivot lands within ~one path's wall time. SSH
+     * round-trips themselves aren't aborted (separate refactor
+     * scope per the PR-C spec); the abort surfaces between paths.
+     */
+    shouldAbort?: () => boolean,
   ): Promise<void> {
     if (romPaths.length === 0) return;
     diagLog('info', 'prefetch', '→', 'start', {
@@ -306,6 +317,19 @@ export class MetadataOrchestrator {
     }
 
     for (const path of romPaths) {
+      // PR-C (PR #26): cooperative cancellation point. The check
+      // sits at the very top of each iteration so the engine's
+      // setFocus pivot lands within one path's wall time. Partial
+      // work stays in the cache; the next time this core scrapes
+      // (engine queue resume OR user-driven RomsPane prefetch),
+      // the warm-cache fast path picks up where we left off.
+      if (shouldAbort?.()) {
+        diagLog('info', 'prefetch', '·', 'aborted', {
+          coreId,
+          remaining: romPaths.length - resolved - errors,
+        });
+        break;
+      }
       const perRomStart = Date.now();
       diagLog('info', 'meta', '·', 'path-start', {
         coreId,
