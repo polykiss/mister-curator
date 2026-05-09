@@ -237,6 +237,15 @@ function SearchResultItem(props: {
         ) : null}
       </div>
       <div className="flex shrink-0 items-start">
+        {/*
+          PR-D2 r2 c3: every result is selectable. The ONLY disable
+          condition is `binding` (this exact result's bind is in
+          flight) — never a cache-state check, never a "jeuid already
+          bound elsewhere" check, never an "already matches the
+          current row" check. Manual override is for exactly the
+          cases where the auto-pipeline got it wrong, so we never
+          second-guess the user's pick.
+        */}
         <Button variant="primary" onClick={onUse} disabled={binding}>
           {binding ? (
             <Loader2 className="size-3 animate-spin" strokeWidth={1.5} />
