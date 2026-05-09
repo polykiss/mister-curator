@@ -251,6 +251,10 @@ export class MetadataOrchestrator {
     // updates (rows populate one by one as they resolve).
     for (const path of romPaths) {
       const perRomStart = Date.now();
+      diagLog('info', 'meta', '·', 'path-start', {
+        coreId,
+        path: basename(path),
+      });
       let entry: HashEntry | undefined;
       try {
         const hashes = await this.hashService.getHash(
@@ -266,6 +270,12 @@ export class MetadataOrchestrator {
           ms: Date.now() - perRomStart,
           err: err instanceof Error ? err.message : String(err),
         });
+        diagLog('info', 'meta', '·', 'path-end', {
+          coreId,
+          path: basename(path),
+          source: 'error',
+          ms: Date.now() - perRomStart,
+        });
         onResolved?.({ path, metadata: null, error: true });
         errors += 1;
         continue;
@@ -275,6 +285,12 @@ export class MetadataOrchestrator {
           coreId,
           path: basename(path),
           reason: 'no-hash',
+        });
+        diagLog('info', 'meta', '·', 'path-end', {
+          coreId,
+          path: basename(path),
+          source: 'unmatched',
+          ms: Date.now() - perRomStart,
         });
         onResolved?.({ path, metadata: null, error: false });
         resolved += 1;
@@ -306,6 +322,12 @@ export class MetadataOrchestrator {
           ms: Date.now() - lookupStart,
           totalMs: Date.now() - perRomStart,
         });
+        diagLog('info', 'meta', '·', 'path-end', {
+          coreId,
+          path: basename(path),
+          source: metadata?.source ?? 'none',
+          ms: Date.now() - perRomStart,
+        });
         onResolved?.({ path, metadata, error: false });
         resolved += 1;
       } catch (err) {
@@ -314,6 +336,12 @@ export class MetadataOrchestrator {
           path: basename(path),
           ms: Date.now() - lookupStart,
           err: err instanceof Error ? err.message : String(err),
+        });
+        diagLog('info', 'meta', '·', 'path-end', {
+          coreId,
+          path: basename(path),
+          source: 'error',
+          ms: Date.now() - perRomStart,
         });
         onResolved?.({ path, metadata: null, error: true });
         errors += 1;

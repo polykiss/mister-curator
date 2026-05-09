@@ -12,6 +12,7 @@ import {
   type ScreenScraperLookupQuery,
   type ScreenScraperService,
 } from '@app/main/metadata/screenscraper-service';
+import { diagLog } from '@shared/diag-log';
 import {
   NO_MATCH_TTL_MS,
   ROM_METADATA_SCHEMA_VERSION,
@@ -161,29 +162,95 @@ export class MetadataService {
   ): Promise<RomMetadata | null> {
     const ssAvailable = this.canQueryScreenScraper(ssHint);
     const cached = await this.readCache(hash);
+    diagLog('info', 'meta', '·', 'metadata-cache', {
+      hash: hash.slice(0, 12),
+      hit: cached !== null ? 1 : 0,
+      source: cached?.source,
+    });
     if (cached !== null && !this.shouldRefetchCached(cached, ssAvailable)) {
+      // Round 6 — distinguish "cache hit served as null" (sentinel)
+      // from "cache hit returned the cached record" (matched). The
+      // user's round-5 observation was 32 paths returning source=
+      // none in 0-1ms; this log line tells us which of those were
+      // sentinels (action=use-cache reason=fresh-sentinel) vs
+      // genuine misses elsewhere in the chain.
+      diagLog('info', 'meta', '·', 'metadata-decision', {
+        hash: hash.slice(0, 12),
+        action: 'use-cache',
+        source: cached.source,
+        reason:
+          cached.source === 'none'
+            ? ssAvailable
+              ? 'sentinel-no-ss-upgrade'
+              : 'fresh-sentinel-no-ss'
+            : 'cached-hit',
+      });
       return cached.source === 'none' ? null : cached;
+    }
+    if (cached !== null) {
+      diagLog('info', 'meta', '·', 'metadata-decision', {
+        hash: hash.slice(0, 12),
+        action: 'refetch',
+        reason:
+          cached.source === 'openvgdb'
+            ? 'cache-upgrade-ss-available'
+            : cached.source === 'none' && this.isStaleSentinel(cached)
+              ? 'sentinel-stale'
+              : 'sentinel-ss-now-available',
+        cachedSource: cached.source,
+      });
+    } else {
+      diagLog('info', 'meta', '·', 'metadata-decision', {
+        hash: hash.slice(0, 12),
+        action: 'fetch',
+        reason: 'cold-cache',
+        ssAvailable: ssAvailable ? 1 : 0,
+      });
     }
 
     // Source priority 1: ScreenScraper.
     if (this.screenScraper !== null && ssHint !== undefined) {
       const status = this.screenScraper.getStatus();
+      diagLog('info', 'meta', '·', 'ss-attempt', {
+        hash: hash.slice(0, 12),
+        status,
+      });
       if (status === 'available') {
         const ssResult = await this.tryScreenScraper(hash, ssHint);
         if (ssResult !== null) {
+          diagLog('info', 'meta', '·', 'ss-result', {
+            hash: hash.slice(0, 12),
+            outcome: 'hit',
+          });
           await this.writeCache(hash, ssResult);
           return ssResult;
         }
+        diagLog('info', 'meta', '·', 'ss-result', {
+          hash: hash.slice(0, 12),
+          outcome: 'miss-or-fail',
+        });
         // SS returned null (legitimate no-match OR a transient
         // failure that latched the service). Fall through to
         // OpenVGDB — same outcome path as the SS-unavailable case.
       }
       // status is 'unavailable' / 'rate-limited' / 'quota-exceeded' →
       // skip SS silently and let OpenVGDB try.
+    } else {
+      diagLog('info', 'meta', '·', 'ss-skip', {
+        hash: hash.slice(0, 12),
+        reason:
+          this.screenScraper === null
+            ? 'no-service'
+            : 'no-hint',
+      });
     }
 
     // Source priority 2: OpenVGDB + libretro thumbnails.
     const fromDb = await this.openVgdb.getMetadataByHash(hash);
+    diagLog('info', 'meta', '·', 'openvgdb-result', {
+      hash: hash.slice(0, 12),
+      outcome: fromDb !== null ? 'hit' : 'miss',
+    });
     if (fromDb !== null) {
       const composed = this.composeFromOpenVgdb(hash, fromDb);
       await this.writeCache(hash, composed);
@@ -191,6 +258,11 @@ export class MetadataService {
     }
 
     // Both sources missed — sentinel.
+    diagLog('info', 'meta', '·', 'metadata-decision', {
+      hash: hash.slice(0, 12),
+      action: 'write-sentinel',
+      reason: 'both-sources-miss',
+    });
     const sentinel = this.buildSentinel(hash);
     await this.writeCache(hash, sentinel);
     return null;

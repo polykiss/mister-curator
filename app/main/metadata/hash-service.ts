@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { sanitiseFsSegment } from '@app/main/cache/cache-types';
+import { diagLog } from '@shared/diag-log';
 import type { HashRecord } from '@shared/mister-client';
 
 const HASH_CACHE_SCHEMA_VERSION = 1 as const;
@@ -181,6 +182,19 @@ export class HashService {
     const cachedPaths = paths.filter((p) => entries[p] !== undefined);
     const needsHash: string[] = paths.filter((p) => entries[p] === undefined);
 
+    // Round 6 diag — per-path cache-check decision. For the round-6
+    // investigation we only ever run with paths.length === 1 from
+    // the orchestrator's per-ROM loop, so logging per-path here is
+    // exactly the granularity the user wants.
+    for (const p of paths) {
+      const cached = entries[p];
+      diagLog('info', 'meta', '·', 'hash-cache', {
+        path: pathBasename(p),
+        hit: cached !== undefined ? 1 : 0,
+        md5: cached?.md5,
+      });
+    }
+
     if (cachedPaths.length > 0) {
       const mtimes = await client.statWitnesses(cachedPaths);
       for (const p of cachedPaths) {
@@ -192,17 +206,46 @@ export class HashService {
           current !== 0 &&
           current === entry.mtime
         ) {
+          diagLog('info', 'meta', '·', 'hash-decision', {
+            path: pathBasename(p),
+            action: 'use-cache',
+            reason: 'mtime-match',
+            mtime: current,
+          });
           result.set(p, entry);
         } else {
           // Either missing-on-device, or mtime drifted. Either way,
           // re-hash. (If the file is genuinely gone the hash call
           // will silently drop it and we'll just not return the path.)
+          diagLog('info', 'meta', '·', 'hash-decision', {
+            path: pathBasename(p),
+            action: 'stale-revalidate',
+            reason:
+              current === undefined || current === 0
+                ? 'missing-on-device'
+                : 'mtime-drift',
+            cachedMtime: entry?.mtime,
+            currentMtime: current,
+          });
           needsHash.push(p);
         }
       }
     }
 
     if (needsHash.length === 0) return result;
+
+    // Round 6 — log the compute decision for every path that's about
+    // to hash. `cache-miss` for never-seen-before, `stale-revalidate`
+    // already logged above (we don't re-log here).
+    for (const p of needsHash) {
+      if (entries[p] === undefined) {
+        diagLog('info', 'meta', '·', 'hash-decision', {
+          path: pathBasename(p),
+          action: 'compute',
+          reason: 'cache-miss',
+        });
+      }
+    }
 
     // Hash uncached / stale paths in bounded chunks. We update the
     // in-memory map per chunk so a partial failure later in the
@@ -224,6 +267,11 @@ export class HashService {
         result.set(r.path, entry);
         next[r.path] = entry;
         dirty = true;
+        diagLog('info', 'meta', '·', 'hash-computed', {
+          path: pathBasename(r.path),
+          md5: r.md5,
+          size: r.size,
+        });
       }
     }
 
@@ -338,4 +386,10 @@ function isHashEntry(v: unknown): v is HashEntry {
     typeof o.mtime === 'number' &&
     typeof o.hashedAt === 'string'
   );
+}
+
+/** Last path segment, used in diag logs to keep lines readable. */
+function pathBasename(path: string): string {
+  const i = path.lastIndexOf('/');
+  return i < 0 ? path : path.slice(i + 1);
 }

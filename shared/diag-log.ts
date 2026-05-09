@@ -27,7 +27,14 @@ export type DiagSubsystem =
   | 'ipc'
   | 'prefetch'
   | 'roms-pane'
-  | 'conn';
+  | 'conn'
+  // Round 6 (PR #20) — per-path decision tree across the orchestrator,
+  // HashService, and MetadataService. Tells us why a particular ROM
+  // resolved to source=none with no SSH hash command (cache hit on a
+  // sentinel? mtime-validated cache hit? skipped for some other
+  // reason?). Distinct subsystem so a single grep `[meta]` isolates
+  // the whole decision chain for one prefetch.
+  | 'meta';
 export type DiagGlyph = '→' | '←' | '✗' | '·';
 
 /**
