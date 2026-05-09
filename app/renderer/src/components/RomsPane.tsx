@@ -7,7 +7,7 @@ import {
   MoreHorizontal,
   Settings,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
@@ -186,6 +186,63 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
       unsubscribe();
     };
   }, [roms, core.id]);
+
+  // PR #20 round 3 — resume after reconnect. When the connection comes
+  // back up (status flips to 'connected') AFTER a mid-prefetch drop,
+  // re-fire the prefetch for paths that still haven't settled OR
+  // that errored on the prior attempt. The orchestrator's hash and
+  // metadata caches are durable on disk, so the second pass hits warm
+  // cache for anything that DID resolve before the drop — this loop
+  // is genuinely just the still-pending residue.
+  //
+  // Triggered on the [status, roms, core.id] tuple — `status` is the
+  // signal that we just transitioned, and the ref guards against
+  // re-firing while still on the same connected session.
+  const wasConnectedRef = useRef(status === 'connected');
+  useEffect(() => {
+    const wasConnected = wasConnectedRef.current;
+    wasConnectedRef.current = status === 'connected';
+    if (status !== 'connected') return;
+    if (wasConnected) return; // already on a live session, no resume
+    if (!roms || roms.length === 0) return;
+    const filePaths = roms.filter((r) => r.kind === 'file').map((r) => r.path);
+    const pending = filePaths.filter((p) => {
+      const entry = metadataByPath[p];
+      return entry === undefined || entry.error;
+    });
+    if (pending.length === 0) return;
+    // Clear error flags on the residue so rows flip back to skeleton
+    // while the re-fetch is in flight.
+    setMetadataByPath((prev) => {
+      const next = { ...prev };
+      for (const p of pending) {
+        if (next[p]?.error) delete next[p];
+      }
+      return next;
+    });
+    const operationId = `resume-${core.id}-${String(Date.now())}-${String(
+      Math.random(),
+    )}`;
+    const unsubscribe = window.mister.onRomMetadataResolved((event) => {
+      if (event.operationId !== operationId) return;
+      setMetadataByPath((prev) => ({
+        ...prev,
+        [event.path]: { metadata: event.metadata, error: event.error },
+      }));
+    });
+    void window.mister.prefetchRomsMetadata(core.id, pending, {
+      operationId,
+    });
+    return () => {
+      unsubscribe();
+    };
+    // metadataByPath is intentionally OMITTED from deps — including it
+    // would re-fire this effect every time a single resolved event
+    // landed (since setMetadataByPath in the parent prefetch effect
+    // mutates it), starting a new resume prefetch on every per-row
+    // settle. We only want to resume on the connected-transition.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, roms, core.id]);
 
   // System-file classification is keyed on (filename, kind). Cache for
   // the current rom list so the renderer doesn't re-classify on every

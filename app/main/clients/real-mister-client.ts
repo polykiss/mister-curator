@@ -91,38 +91,61 @@ import type {
 const CONNECT_TIMEOUT_MS = 8000;
 
 /**
- * Per-operation SSH timeout. Live testing showed that pulling the
- * MiSTer's network cable mid-session left ROM-list calls hanging for
- * 30+ seconds before the OS-level TCP timeout fired. 10 s is generous
- * enough not to false-positive against a slow MiSTer (the
- * `listAllCoresWithFiles` benchmark on a real device is ~7 s) but
- * tight enough that "unplug, click, see frozen UI" never lasts a
- * full 30 s.
+ * Per-operation SSH timeout. PR #20 round 3 raised this 10s → 60s
+ * after WiFi-attached MiSTers with larger libraries (~8k files)
+ * tipped the original 10s ceiling on legitimate first-call work
+ * (the connection-prime path stats every games dir, which on a slow
+ * SD card + busybox + USB WiFi adapter genuinely takes longer than
+ * 10s sometimes even when the underlying ssh / find calls each take
+ * <2s). 60s catches a truly stuck transport without false-firing
+ * on a busy-but-progressing MiSTer.
+ *
+ * Hash commands get a separate higher cap — see
+ * `SSH_HASH_OP_TIMEOUT_MS` below.
  */
-const SSH_OP_TIMEOUT_MS = 10_000;
+const SSH_OP_TIMEOUT_MS = 60_000;
+
+/**
+ * Hash-command timeout, raised separately from the default. Each
+ * `hashPaths(N)` call streams every byte of N ROM files through
+ * `unzip -p | md5sum/sha1sum/wc -c`. A single 32MB SNES ROM on a
+ * slow SD card can take ~5s; a batch of 100 paths can run minutes
+ * legitimately. 120s covers the realistic batch sizes the renderer
+ * sends today (one prefetch per pane, capped at the visible ROM
+ * count) without false-firing.
+ */
+const SSH_HASH_OP_TIMEOUT_MS = 120_000;
 
 /**
  * SSH-level keepalive cadence. ssh2 sends an empty keepalive packet
  * every `keepaliveInterval` ms; after `keepaliveCountMax` missed
  * responses the socket fires its own `'close'` / `'error'` event and
- * `RealMisterClient.handleUnexpectedDisconnect` kicks in. With
- * 5s × 2, an idle but dead connection is detected within ~10–15 s
- * even if no user action is happening — complementing the per-op
- * timeout above for the active-call case. Round 2 used 10s × 2
- * (~30s); live testing pushed for tighter detection.
+ * `RealMisterClient.handleUnexpectedDisconnect` kicks in.
+ *
+ * PR #20 round 3 widened this from 5s × 2 (10s detection) to
+ * 15s × 4 (60s detection). The aggressive 10s cadence false-fired
+ * on idle WiFi where intermittent latency spikes (6ms baseline →
+ * 194ms transient per the live-test ping data) caused the keepalive
+ * to miss two responses in a row even though the link was fine.
+ * 60s before declaring the transport dead matches the per-op
+ * timeout cap and lets normal WiFi jitter pass through.
  */
-const SSH_KEEPALIVE_INTERVAL_MS = 5_000;
-const SSH_KEEPALIVE_COUNT_MAX = 2;
+const SSH_KEEPALIVE_INTERVAL_MS = 15_000;
+const SSH_KEEPALIVE_COUNT_MAX = 4;
 
 /**
  * Marker error thrown by the per-op timeout race. Internal-only —
  * caught by `runSshOp` and converted to a typed
- * `MisterConnectionError` before it leaves the client.
+ * `MisterConnectionError` before it leaves the client. Carries the
+ * actual timeout in ms so the user-facing error message reports the
+ * right number for the call shape that fired.
  */
 class SshOpTimeoutError extends Error {
-  constructor() {
-    super(`SSH operation timed out after ${String(SSH_OP_TIMEOUT_MS)}ms`);
+  readonly timeoutMs: number;
+  constructor(timeoutMs: number) {
+    super(`SSH operation timed out after ${String(timeoutMs)}ms`);
     this.name = 'SshOpTimeoutError';
+    this.timeoutMs = timeoutMs;
   }
 }
 
@@ -1211,7 +1234,14 @@ export class RealMisterClient implements IMisterClient {
     this.assertConnected();
     if (paths.length === 0) return [];
     const script = buildHashScript(paths);
-    const result = await this.runSshOp(() => this.ssh.execCommand(script));
+    // Hash batches stream every byte through `unzip -p | md5sum`,
+    // which legitimately runs minutes for a large batch on a slow
+    // SD card. Use the higher hash-specific timeout so we don't
+    // false-fire on real progress.
+    const result = await this.runSshOp(
+      () => this.ssh.execCommand(script),
+      SSH_HASH_OP_TIMEOUT_MS,
+    );
     if (result.code !== 0) {
       throw new Error(
         `Failed to hash paths: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
@@ -1268,31 +1298,40 @@ export class RealMisterClient implements IMisterClient {
   }
 
   /**
-   * Wraps an SSH operation in a 10-second total-time race. If the
-   * operation doesn't finish in time we treat the transport as dead:
-   * tear down the socket, fire `handleUnexpectedDisconnect` (so the
+   * Wraps an SSH operation in a total-time race. If the operation
+   * doesn't finish within `timeoutMs` (default `SSH_OP_TIMEOUT_MS`,
+   * raised to 60s in round 3) we treat the transport as dead: tear
+   * down the socket, fire `handleUnexpectedDisconnect` (so the
    * manager kicks off auto-retry + the renderer paints the banner),
    * and surface a typed `MisterConnectionError` to the caller. Other
    * errors propagate untouched — we only own the timeout case.
+   *
+   * Per-call override: hash commands pass `SSH_HASH_OP_TIMEOUT_MS`
+   * (120s) because a single batched `unzip -p | md5sum` over many
+   * ROMs can legitimately run for minutes without being stuck.
    */
-  private async runSshOp<T>(fn: () => Promise<T>): Promise<T> {
+  private async runSshOp<T>(
+    fn: () => Promise<T>,
+    timeoutMs: number = SSH_OP_TIMEOUT_MS,
+  ): Promise<T> {
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         fn(),
         new Promise<never>((_, reject) => {
           timeoutHandle = setTimeout(() => {
-            reject(new SshOpTimeoutError());
-          }, SSH_OP_TIMEOUT_MS);
+            reject(new SshOpTimeoutError(timeoutMs));
+          }, timeoutMs);
         }),
       ]);
     } catch (err) {
       if (err instanceof SshOpTimeoutError) {
         this.handleUnexpectedDisconnect();
         this.safelyDispose();
+        const seconds = Math.round(err.timeoutMs / 1000);
         throw new MisterConnectionError(
           'unknown',
-          'The MiSTer stopped responding (no reply within 10s). Reconnecting…',
+          `The MiSTer stopped responding (no reply within ${String(seconds)}s). Reconnecting…`,
         );
       }
       throw err;
@@ -1321,12 +1360,12 @@ export class RealMisterClient implements IMisterClient {
       const sinceLast = Date.now() - lastActivity;
       const remaining = SSH_OP_TIMEOUT_MS - sinceLast;
       if (remaining <= 0) {
-        aborter.reject?.(new SshOpTimeoutError());
+        aborter.reject?.(new SshOpTimeoutError(SSH_OP_TIMEOUT_MS));
         return;
       }
       timeoutHandle = setTimeout(() => {
         if (Date.now() - lastActivity >= SSH_OP_TIMEOUT_MS) {
-          aborter.reject?.(new SshOpTimeoutError());
+          aborter.reject?.(new SshOpTimeoutError(SSH_OP_TIMEOUT_MS));
         } else {
           arm();
         }
@@ -1360,9 +1399,10 @@ export class RealMisterClient implements IMisterClient {
       if (err instanceof SshOpTimeoutError) {
         this.handleUnexpectedDisconnect();
         this.safelyDispose();
+        const seconds = Math.round(err.timeoutMs / 1000);
         throw new MisterConnectionError(
           'unknown',
-          'The MiSTer stopped responding (no progress for 10s). Reconnecting…',
+          `The MiSTer stopped responding (no progress for ${String(seconds)}s). Reconnecting…`,
         );
       }
       throw err;
