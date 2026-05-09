@@ -20,6 +20,7 @@ import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
 import { TableCell } from '@app/renderer/src/components/ui/table';
 import { cn } from '@app/renderer/src/lib/cn';
 import { formatBytes } from '@app/renderer/src/lib/format';
+import { abbreviateGenre } from '@app/renderer/src/lib/genre-format';
 import {
   formatRating,
   pickPrimaryGenre,
@@ -285,6 +286,14 @@ export function RomMetadataInfoCells(
   const { dimmed, metadata, error } = props;
   const loading = metadata === undefined && !error;
   const primaryGenre = pickPrimaryGenre(metadata?.genre ?? null);
+  // PR-C round 2: abbreviate the well-known long genre names
+  // ("Role Playing Game" → "RPG" etc.) so they fit the w-28 (112px)
+  // column without truncation. The full pre-abbreviated form goes
+  // into `title=` for the hover tooltip — same pattern PR #25 uses
+  // for the truncated ROM name cell. Unmapped long genres pass
+  // through verbatim and the existing table-fixed truncation
+  // ellipses overflow.
+  const displayGenre = abbreviateGenre(primaryGenre);
   const rating = formatRating(metadata?.rating ?? null);
 
   return (
@@ -292,11 +301,14 @@ export function RomMetadataInfoCells(
       <TableCell className="w-28 truncate">
         <span
           className={cn('truncate text-body-sm', !dimmed && 'text-fg-muted')}
+          title={primaryGenre ?? undefined}
         >
           {loading ? (
             <DashSkeleton width="w-16" />
+          ) : displayGenre !== '' ? (
+            displayGenre
           ) : (
-            primaryGenre ?? <span className="text-fg-disabled">—</span>
+            <span className="text-fg-disabled">—</span>
           )}
         </span>
       </TableCell>

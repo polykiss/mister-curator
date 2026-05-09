@@ -170,8 +170,10 @@ export function idleMessageFor(
  * yet). Returns null when there's nothing to surface, so the caller
  * can fall through to `idleMessageFor`.
  *
- * Format per the PR-C spec: `<core display label> · <done>/<total>`.
- * No "ROMs" word, no `~`, no padding.
+ * Format per the PR-C round 2 spec: `Scraping <core label> · <done>/<total>`.
+ * Round 1 used just `<label> · <done>/<total>` — the "Scraping" verb
+ * makes the state legible at a glance and matches the user's mental
+ * model. No "ROMs" word, no `~`, no padding.
  */
 export function autoScrapeMessageFor(
   event: AutoScrapeProgressEvent,
@@ -179,7 +181,7 @@ export function autoScrapeMessageFor(
 ): string | null {
   if (event.state !== 'active') return null;
   if (status !== 'connected') return null;
-  return `${event.coreLabel} · ${String(event.done)}/${String(event.total)}`;
+  return `Scraping ${event.coreLabel} · ${String(event.done)}/${String(event.total)}`;
 }
 
 function statusDotClass(state: ConnectionStatus | 'reconnecting'): string {

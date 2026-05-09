@@ -79,7 +79,7 @@ describe('autoScrapeMessageFor — PR-C (PR #26) footer-left progress', () => {
         { state: 'active', coreId: 'SNES', coreLabel: 'SNES', done: 234, total: 566 },
         'connected',
       ),
-    ).toBe('SNES · 234/566');
+    ).toBe('Scraping SNES · 234/566');
   });
 
   it('uses coreLabel verbatim — engine pre-resolves mame → "Arcade"', () => {
@@ -88,7 +88,7 @@ describe('autoScrapeMessageFor — PR-C (PR #26) footer-left progress', () => {
         { state: 'active', coreId: 'mame', coreLabel: 'Arcade', done: 650, total: 650 },
         'connected',
       ),
-    ).toBe('Arcade · 650/650');
+    ).toBe('Scraping Arcade · 650/650');
   });
 
   it('returns null when the engine is idle (caller falls through to idleMessageFor)', () => {
@@ -127,7 +127,7 @@ describe('autoScrapeMessageFor — PR-C (PR #26) footer-left progress', () => {
       { state: 'active', coreId: 'N64', coreLabel: 'N64', done: 12, total: 79 },
       'connected',
     );
-    expect(message).toBe('N64 · 12/79');
+    expect(message).toBe('Scraping N64 · 12/79');
     expect(message).not.toContain('ROMs');
     expect(message).not.toContain('%');
   });
