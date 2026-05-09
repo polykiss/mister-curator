@@ -493,11 +493,14 @@ export interface MisterApi {
   ): Promise<RomMetadata | null>;
   /**
    * PR-D2 (PR #29) — name-search for the search modal. Returns SS
-   * candidate games for a free-form term + system. Reuses the
-   * existing `jeuRecherche` client (PR-D1).
+   * candidate games for a free-form term scoped to the core's
+   * SS systemeid. The handler resolves coreId → systemeid via
+   * `lookupScreenScraperSystemId` (the renderer doesn't import
+   * the map directly). Returns an empty array when the core
+   * isn't mapped to a SS system or SS isn't configured.
    */
   searchScreenScraperByName(
-    systemId: number,
+    coreId: string,
     searchTerm: string,
   ): Promise<readonly ScreenScraperGame[]>;
   /**

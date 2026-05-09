@@ -265,10 +265,10 @@ const api: MisterApi = {
       path,
       game,
     ),
-  searchScreenScraperByName: (systemId: number, searchTerm: string) =>
+  searchScreenScraperByName: (coreId: string, searchTerm: string) =>
     invoke<readonly ScreenScraperGame[]>(
       IPC_CHANNELS.searchScreenScraperByName,
-      systemId,
+      coreId,
       searchTerm,
     ),
   onRomMetadataResolved: (

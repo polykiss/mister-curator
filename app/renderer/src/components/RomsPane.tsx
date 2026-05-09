@@ -9,6 +9,7 @@ import type { JSX } from 'react';
 import { toast } from 'sonner';
 
 import { diagLog } from '@shared/diag-log';
+import { coreDisplayName } from '@shared/core-matching';
 import { isAutoDetectedSystemFile, isSystemFile } from '@shared/system-files';
 import type { CoreEntry, Rom } from '@shared/types';
 
@@ -29,6 +30,7 @@ function shortName(path: string): string {
 }
 
 import { RomEditMetadataDialog } from '@app/renderer/src/components/RomEditMetadataDialog';
+import { RomSearchScreenScraperDialog } from '@app/renderer/src/components/RomSearchScreenScraperDialog';
 import {
   RomRowMenu,
   type RomRowMenuItem,
@@ -131,6 +133,11 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   const [editMetadataFor, setEditMetadataFor] = useState<{
     readonly path: string;
     readonly displayName: string;
+  } | null>(null);
+  // PR-D2 (PR #29): search-on-ScreenScraper modal state.
+  const [searchScreenScraperFor, setSearchScreenScraperFor] = useState<{
+    readonly path: string;
+    readonly filename: string;
   } | null>(null);
 
   // Reset drill state SYNCHRONOUSLY when the visible core changes so
@@ -836,6 +843,22 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
         ? 'Override the name, year, genre, rating, tags, or note for this row.'
         : 'No metadata to edit yet — wait for the prefetch to land.',
     });
+    // "Find on ScreenScraper..." — always available. The search modal
+    // can run even on rows with no cached metadata yet (the bind path
+    // requires a cached hash, gated by hasMetadata; the modal still
+    // surfaces a helpful error in that edge case).
+    items.push({
+      label: 'Find on ScreenScraper...',
+      onSelect: () =>
+        setSearchScreenScraperFor({
+          path: lookupPath,
+          filename: rom.filename,
+        }),
+      disabled: !hasMetadata,
+      title: hasMetadata
+        ? 'Search ScreenScraper for the right match — useful when the auto-binder missed or got it wrong.'
+        : 'No cached hash yet — wait for the prefetch to land.',
+    });
 
     return items;
   }
@@ -1373,6 +1396,28 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             setMetadataByPath((prev) => ({
               ...prev,
               [editMetadataFor.path]: { metadata: updated, error: false },
+            }));
+          }}
+        />
+      ) : null}
+      {/* PR-D2 (PR #29) — search-on-ScreenScraper modal. */}
+      {searchScreenScraperFor !== null ? (
+        <RomSearchScreenScraperDialog
+          path={searchScreenScraperFor.path}
+          filename={searchScreenScraperFor.filename}
+          coreId={core.id}
+          coreLabel={coreDisplayName(core.id)}
+          open
+          onOpenChange={(open) => {
+            if (!open) setSearchScreenScraperFor(null);
+          }}
+          onSaved={(updated) => {
+            setMetadataByPath((prev) => ({
+              ...prev,
+              [searchScreenScraperFor.path]: {
+                metadata: updated,
+                error: false,
+              },
             }));
           }}
         />

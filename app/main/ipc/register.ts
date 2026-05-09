@@ -31,6 +31,7 @@ import type {
 
 import type { ConnectionManager } from '@app/main/ipc/connection-manager';
 import type { MetadataOrchestrator } from '@app/main/metadata/metadata-orchestrator';
+import { lookupScreenScraperSystemId } from '@app/main/metadata/screenscraper-system-map';
 import type { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
 import type { AutoScrapeEngine } from '@app/main/services/auto-scrape-engine';
 import type { ProfileStore } from '@app/main/storage/profile-store';
@@ -353,14 +354,20 @@ export function registerIpcHandlers(
     (path, game) => metadata.bindManualMetadataOverride(path, game),
   );
 
-  // PR-D2 (PR #29) — name-search for the search modal. Pure
-  // pass-through to `screenScraper.searchByName`. Returns empty
-  // array when SS isn't configured (matches the auto-scrape
-  // pipeline's silent-skip semantics).
-  handle<[number, string], readonly ScreenScraperGame[]>(
+  // PR-D2 (PR #29) — name-search for the search modal. Resolves
+  // coreId → SS systemeid via the same map the auto-scrape
+  // pipeline uses. Returns empty array when:
+  //   • SS isn't configured (matches auto-scrape's silent-skip);
+  //   • the core isn't mapped to a SS systemeid (Arcade hbmame /
+  //     AO486 / etc. — search modal will show "no matches" and
+  //     the user can still try the edit modal for free-form
+  //     overrides).
+  handle<[string, string], readonly ScreenScraperGame[]>(
     IPC_CHANNELS.searchScreenScraperByName,
-    async (systemId, searchTerm) => {
+    async (coreId, searchTerm) => {
       if (screenScraper === null) return [];
+      const systemId = lookupScreenScraperSystemId(coreId);
+      if (systemId === null) return [];
       return screenScraper.searchByName({ systemId, searchTerm });
     },
   );
