@@ -138,6 +138,51 @@ export class HashService {
   }
 
   /**
+   * Round 9 (PR #20) — batched mtime validation. Returns a map
+   * keyed by every input path; the value is the cached `HashEntry`
+   * when the cache hit is mtime-validated, or `null` when the path
+   * is uncached or the recorded mtime no longer matches.
+   *
+   * One SSH `statWitnesses` call validates all cached paths at
+   * once. Replaces the round-5 pattern of N per-ROM `getHash([
+   * single])` calls — each of those was issuing its own per-path
+   * stat round-trip, which serialized through `runGated` at one-
+   * concurrent and produced a 32 × ~470 ms = 15 s wall on a
+   * fully-cached SNES core.
+   *
+   * Pairs with `computeHash(client, host, path)` for the residue:
+   * the orchestrator iterates the result map, uses the cached
+   * entry where present, and calls `computeHash` only for the
+   * `null` rows.
+   */
+  async checkCachedMtimes(
+    client: HashClient,
+    host: string,
+    paths: readonly string[],
+  ): Promise<Map<string, HashEntry | null>> {
+    if (paths.length === 0) return new Map();
+    return this.runGated(host, () =>
+      this.doCheckCachedMtimes(client, host, paths),
+    );
+  }
+
+  /**
+   * Round 9 — single-path hash compute that bypasses the cache
+   * lookup + mtime check (the caller already did those via
+   * `checkCachedMtimes`). Issues one SSH `hashPaths` exec for the
+   * one path, updates the cache with the result, returns the
+   * entry. Returns `undefined` when the device drops the path
+   * (vanished mid-flight).
+   */
+  async computeHash(
+    client: HashClient,
+    host: string,
+    path: string,
+  ): Promise<HashEntry | undefined> {
+    return this.runGated(host, () => this.doComputeHash(client, host, path));
+  }
+
+  /**
    * Drop a single path's cache entry. Used after a hide/show rename
    * so the next hash request walks fresh. Best-effort — a missing
    * entry is a no-op.
@@ -281,6 +326,72 @@ export class HashService {
     }
 
     return result;
+  }
+
+  private async doCheckCachedMtimes(
+    client: HashClient,
+    host: string,
+    paths: readonly string[],
+  ): Promise<Map<string, HashEntry | null>> {
+    const entries = await this.loadEntries(host);
+    const result = new Map<string, HashEntry | null>();
+    const cachedPaths = paths.filter((p) => entries[p] !== undefined);
+    for (const p of paths) {
+      if (entries[p] === undefined) result.set(p, null);
+    }
+    if (cachedPaths.length === 0) return result;
+    let mtimes: Awaited<ReturnType<HashClient['statWitnesses']>>;
+    try {
+      mtimes = await client.statWitnesses(cachedPaths);
+    } catch {
+      // Stat batch failed (transport error, etc.) — return all
+      // cached paths as null so the caller falls through to
+      // computeHash for each. The orchestrator's per-path error
+      // handling is the right shape for this.
+      for (const p of cachedPaths) result.set(p, null);
+      return result;
+    }
+    for (const p of cachedPaths) {
+      const entry = entries[p];
+      const current = mtimes[p];
+      if (
+        entry !== undefined &&
+        current !== undefined &&
+        current !== 0 &&
+        current === entry.mtime
+      ) {
+        result.set(p, entry);
+      } else {
+        // Either missing on device or mtime drifted. Caller will
+        // re-hash (or skip if vanished).
+        result.set(p, null);
+      }
+    }
+    return result;
+  }
+
+  private async doComputeHash(
+    client: HashClient,
+    host: string,
+    path: string,
+  ): Promise<HashEntry | undefined> {
+    const records = await client.hashPaths([path]);
+    if (records.length === 0) return undefined;
+    // hashPaths can return multiple records on one input only when
+    // the script aliases (it doesn't); take the first / only one.
+    const r = records[0]!;
+    const entry: HashEntry = {
+      md5: r.md5,
+      sha1: r.sha1,
+      size: r.size,
+      mtime: r.mtime,
+      hashedAt: this.now().toISOString(),
+    };
+    const entries = await this.loadEntries(host);
+    const next = { ...entries, [r.path]: entry };
+    this.memCache.set(host, next);
+    await this.writeEntries(host, next);
+    return entry;
   }
 
   /**

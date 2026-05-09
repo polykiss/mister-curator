@@ -67,6 +67,23 @@ export interface RomMetadata {
   readonly source: MetadataSource;
   /** ISO 8601 — when the record was written to cache. Drives TTL. */
   readonly fetchedAt: string;
+  /**
+   * Round 9 (PR #20) — for `source: 'none'` sentinels only, records
+   * whether ScreenScraper was actually available at write-time. The
+   * cache-priority decision splits sentinel handling on this bit:
+   *
+   *   - `true`  — SS was queried and returned no match. Treat as
+   *     authoritative for `SENTINEL_AUTHORITATIVE_TTL_MS` (7 days);
+   *     past that, retry once.
+   *   - `false` — SS was unavailable at write-time, so the sentinel
+   *     is "poisoning" rather than authoritative. Refetch as soon
+   *     as SS becomes available.
+   *   - `undefined` — legacy record (pre-round-9) OR a non-sentinel
+   *     source. For sentinels, treated as poisoned so existing v4
+   *     entries get an opportunistic upgrade on first SS-available
+   *     read. Optional so old v4 records still parse.
+   */
+  readonly ssAvailableAtWrite?: boolean;
 }
 
 /**
@@ -79,8 +96,25 @@ export interface MetadataHint {
   readonly system?: string;
 }
 
-/** TTL for `source: 'none'` sentinels. Matched metadata never expires. */
+/**
+ * Backstop TTL for `source: 'none'` sentinels. Round 9 (PR #20)
+ * reframed sentinel handling: poisoned sentinels (written when SS
+ * was unavailable) refetch immediately on SS availability — no
+ * TTL needed for the common case. This 30-day cap is the FALLBACK
+ * for poisoned sentinels that NEVER see SS become available
+ * (user without SS creds), so the cache doesn't pile up forever.
+ * Authoritative sentinels (genuine SS misses) use the shorter
+ * `SENTINEL_AUTHORITATIVE_TTL_MS` instead.
+ */
 export const NO_MATCH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * TTL for sentinels written WHEN SS WAS AVAILABLE (genuine no-match,
+ * authoritative). Round 9 (PR #20) — 7 days balances "don't keep
+ * re-asking SS for hashes it definitely doesn't know" against "do
+ * eventually retry, in case SS adds the entry to its index later".
+ */
+export const SENTINEL_AUTHORITATIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export const ROM_METADATA_SCHEMA_VERSION = 4 as const;
 

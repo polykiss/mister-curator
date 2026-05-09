@@ -84,6 +84,33 @@ function makeOrchestrator(opts: {
         return out;
       },
     ),
+    // Round 9 — `getRomsMetadata` now drives the hash phase via
+    // these two methods. The fixture treats `hashEntries` as the
+    // mtime-validated cache: any path present is "warm" and gets
+    // back its entry from `checkCachedMtimes`; any missing path is
+    // "needs hash" and would route to `computeHash` (which the
+    // default fixture says drops on the device → returns undefined).
+    checkCachedMtimes: vi.fn(
+      async (
+        _client: unknown,
+        _host: string,
+        paths: readonly string[],
+      ): Promise<Map<string, HashEntry | null>> => {
+        const out = new Map<string, HashEntry | null>();
+        for (const p of paths) {
+          const entry = opts.hashEntries?.get(p);
+          out.set(p, entry ?? null);
+        }
+        return out;
+      },
+    ),
+    computeHash: vi.fn(
+      async (
+        _client: unknown,
+        _host: string,
+        path: string,
+      ): Promise<HashEntry | undefined> => opts.hashEntries?.get(path),
+    ),
     invalidate: vi.fn(async () => undefined),
     clearForHost: vi.fn(async () => undefined),
   } as unknown as HashService;
@@ -291,16 +318,14 @@ describe('MetadataOrchestrator', () => {
   });
 
   describe('getRomsMetadata (PR #20 round 2 — list-view streaming prefetch)', () => {
-    it('hashes per-ROM through HashService.runGated, emits one event per path in order (round 5)', async () => {
-      // Round 5 reverted round 2's "ONE batched hashService call"
-      // shape because a single multi-GB ROM in the batch (e.g. a
-      // SNES translation collection) blew past the 120s hash timeout
-      // and took down ALL N paths. Per-ROM hashing keeps the failure
-      // surface to one row at a time, and the existing per-host
-      // serialization (`HashService.runGated`) ensures we still issue
-      // at most one concurrent SSH command per host. The renderer-
-      // side IPC fan-in (one prefetchRomsMetadata call per pane mount)
-      // from round 2 stays intact.
+    it('warm-cache: ONE batched mtime check for all paths, NO per-row computeHash (round 9)', async () => {
+      // Round 9 split the hash phase: ONE `checkCachedMtimes` for
+      // all paths (single SSH `statWitnesses` exec), then per-path
+      // `computeHash` ONLY for the residue. For a fully-cached
+      // pane (the common case after first scan), no per-row
+      // computeHash fires at all — the wall drops from round-5's
+      // 32 × per-row stat (~15 s) to a single batched stat
+      // (~200 ms).
       const paths: string[] = [];
       const hashEntries = new Map<string, HashEntry>();
       for (let i = 0; i < 32; i += 1) {
@@ -320,17 +345,102 @@ describe('MetadataOrchestrator', () => {
         error: boolean;
       }[] = [];
       await orchestrator.getRomsMetadata('SNES', paths, (e) => events.push(e));
-      // One hashService.getHash call per path — each with a single-
-      // path argument. NOT one batched call for the whole list.
-      expect(hashService.getHash).toHaveBeenCalledTimes(32);
-      for (let i = 0; i < paths.length; i += 1) {
-        const call = (hashService.getHash as ReturnType<typeof vi.fn>).mock
-          .calls[i];
-        expect(call?.[1]).toBe('host-1');
-        expect(call?.[2]).toEqual([paths[i]]);
-      }
+      // ONE batched mtime call, ZERO per-row compute calls.
+      expect(hashService.checkCachedMtimes).toHaveBeenCalledTimes(1);
+      const call = (
+        hashService.checkCachedMtimes as ReturnType<typeof vi.fn>
+      ).mock.calls[0];
+      expect(call?.[1]).toBe('host-1');
+      expect(call?.[2]).toEqual(paths);
+      expect(hashService.computeHash).not.toHaveBeenCalled();
       // One event per path, in order.
       expect(events).toHaveLength(32);
+      expect(events.map((e) => e.path)).toEqual(paths);
+      expect(events.every((e) => !e.error)).toBe(true);
+    });
+
+    it('cold-cache residue: batched mtime + per-row computeHash for the uncached subset (round 9)', async () => {
+      // Mixed scenario: 3 paths cached + 2 uncached. We want
+      // ONE checkCachedMtimes call followed by exactly 2
+      // computeHash calls (one per uncached path).
+      const paths = [
+        '/p/cached-1.sfc',
+        '/p/cached-2.sfc',
+        '/p/cold-a.sfc',
+        '/p/cached-3.sfc',
+        '/p/cold-b.sfc',
+      ];
+      const hashEntries = new Map<string, HashEntry>();
+      for (const p of paths) hashEntries.set(p, buildHashEntry(HASH));
+      const { orchestrator, hashService } = makeOrchestrator({
+        hashEntries: new Map([
+          ['/p/cached-1.sfc', buildHashEntry(HASH)],
+          ['/p/cached-2.sfc', buildHashEntry(HASH)],
+          ['/p/cached-3.sfc', buildHashEntry(HASH)],
+        ]),
+        meta: buildMeta(HASH, 'X'),
+      });
+      // Override checkCachedMtimes to leave the cold paths null
+      // (the default fixture uses `hashEntries` for both
+      // checkCachedMtimes and computeHash, so we need to split).
+      (hashService.checkCachedMtimes as ReturnType<typeof vi.fn>).mockReset();
+      (
+        hashService.checkCachedMtimes as ReturnType<typeof vi.fn>
+      ).mockImplementation(async (_c, _h, ps: readonly string[]) => {
+        const out = new Map<string, HashEntry | null>();
+        for (const p of ps) {
+          out.set(p, p.includes('cached') ? buildHashEntry(HASH) : null);
+        }
+        return out;
+      });
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockReset();
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => buildHashEntry(HASH),
+      );
+
+      const events: {
+        path: string;
+        metadata: unknown;
+        error: boolean;
+      }[] = [];
+      await orchestrator.getRomsMetadata('SNES', paths, (e) => events.push(e));
+
+      expect(hashService.checkCachedMtimes).toHaveBeenCalledTimes(1);
+      expect(hashService.computeHash).toHaveBeenCalledTimes(2);
+      // Compute called only for the cold paths, in order.
+      const computeCalls = (
+        hashService.computeHash as ReturnType<typeof vi.fn>
+      ).mock.calls.map((c) => c[2] as string);
+      expect(computeCalls).toEqual(['/p/cold-a.sfc', '/p/cold-b.sfc']);
+      expect(events).toHaveLength(5);
+      expect(events.every((e) => !e.error)).toBe(true);
+    });
+
+    it('mtime-batch failure falls back to per-row computeHash for every path (round 9)', async () => {
+      // If statWitnesses throws (e.g. transport hiccup), the batch
+      // returns null for every path so the loop transparently
+      // routes each to per-row computeHash — same shape as the
+      // round-5 worst case.
+      const paths = ['/p/a.sfc', '/p/b.sfc', '/p/c.sfc'];
+      const { orchestrator, hashService } = makeOrchestrator({
+        hashEntries: new Map(paths.map((p) => [p, buildHashEntry(HASH)])),
+        meta: buildMeta(HASH, 'X'),
+      });
+      (hashService.checkCachedMtimes as ReturnType<typeof vi.fn>).mockReset();
+      (
+        hashService.checkCachedMtimes as ReturnType<typeof vi.fn>
+      ).mockRejectedValue(new Error('SSH closed'));
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockReset();
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => buildHashEntry(HASH),
+      );
+
+      const events: { path: string; error: boolean }[] = [];
+      await orchestrator.getRomsMetadata('SNES', paths, (e) =>
+        events.push({ path: e.path, error: e.error }),
+      );
+
+      expect(hashService.computeHash).toHaveBeenCalledTimes(3);
       expect(events.map((e) => e.path)).toEqual(paths);
       expect(events.every((e) => !e.error)).toBe(true);
     });
@@ -339,26 +449,34 @@ describe('MetadataOrchestrator', () => {
       // The big-collection-ROM scenario: one path's hash throws (e.g.
       // 120s timeout from `runSshOp`), the rest must keep flowing.
       // Pre-round-5, the single batched hash call would emit error for
-      // ALL paths on any throw.
+      // ALL paths on any throw. Round 9 reshaped this: mtime is
+      // batched (which would NOT see the per-file hash timeout since
+      // it only stats), then per-row computeHash for paths the mtime
+      // batch said need re-hashing. The selective throw moves to
+      // computeHash.
       const paths = ['/p/small.sfc', '/p/HUGE-collection.zip', '/p/ok.sfc'];
-      const hashEntries = new Map<string, HashEntry>();
-      for (const p of paths) hashEntries.set(p, buildHashEntry(HASH));
       const { orchestrator, hashService, metadataService } = makeOrchestrator({
-        hashEntries,
         meta: buildMeta(HASH, 'X'),
       });
-      // Reset and replace getHash so we can throw selectively.
-      (hashService.getHash as ReturnType<typeof vi.fn>).mockReset();
-      (hashService.getHash as ReturnType<typeof vi.fn>).mockImplementation(
-        async (_client: unknown, _host: string, hashed: readonly string[]) => {
-          if (hashed[0] === '/p/HUGE-collection.zip') {
+      // mtime batch: all paths uncached → all need computeHash.
+      (hashService.checkCachedMtimes as ReturnType<typeof vi.fn>).mockReset();
+      (
+        hashService.checkCachedMtimes as ReturnType<typeof vi.fn>
+      ).mockImplementation(async (_c, _h, ps: readonly string[]) => {
+        const out = new Map<string, HashEntry | null>();
+        for (const p of ps) out.set(p, null);
+        return out;
+      });
+      // computeHash throws for the collection path; succeeds otherwise.
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockReset();
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_c: unknown, _h: string, p: string) => {
+          if (p === '/p/HUGE-collection.zip') {
             throw new Error(
               'Command timed out after 120s; SSH session preserved.',
             );
           }
-          const out = new Map<string, HashEntry>();
-          for (const p of hashed) out.set(p, buildHashEntry(HASH));
-          return out;
+          return buildHashEntry(HASH);
         },
       );
       const events: { path: string; error: boolean }[] = [];
@@ -387,7 +505,8 @@ describe('MetadataOrchestrator', () => {
       await orchestrator.getRomsMetadata('SNES', ['/p/a', '/p/b'], (e) =>
         events.push(e),
       );
-      expect(hashService.getHash).not.toHaveBeenCalled();
+      expect(hashService.checkCachedMtimes).not.toHaveBeenCalled();
+      expect(hashService.computeHash).not.toHaveBeenCalled();
       expect(events).toHaveLength(2);
       for (const e of events) {
         expect(e.metadata).toBeNull();
@@ -395,34 +514,40 @@ describe('MetadataOrchestrator', () => {
       }
     });
 
-    it('emits error=true for every path when the hash batch throws (SSH dropped mid-flight)', async () => {
-      const { orchestrator } = makeOrchestrator({
-        hashEntries: new Map([['/p/a', buildHashEntry(HASH)]]),
+    it('emits error=true per-path when computeHash throws after a mtime miss (round 9)', async () => {
+      // Round 9: mtime batch returns null for an uncached path,
+      // computeHash throws (e.g. the per-ROM 120s timeout fires).
+      // That path emits error=true; siblings keep flowing.
+      const paths = ['/p/a', '/p/b', '/p/c'];
+      const { orchestrator, hashService } = makeOrchestrator({
+        meta: buildMeta(HASH, 'X'),
       });
-      // Override the stub to simulate a mid-flight SSH failure.
+      (hashService.checkCachedMtimes as ReturnType<typeof vi.fn>).mockReset();
       (
-        (orchestrator as unknown as {
-          hashService: { getHash: ReturnType<typeof vi.fn> };
-        }).hashService.getHash
-      ).mockReset();
-      (
-        (orchestrator as unknown as {
-          hashService: { getHash: ReturnType<typeof vi.fn> };
-        }).hashService.getHash
-      ).mockRejectedValue(new Error('RealMisterClient is not connected'));
-      const events: {
-        path: string;
-        metadata: unknown;
-        error: boolean;
-      }[] = [];
-      await orchestrator.getRomsMetadata('SNES', ['/p/a', '/p/b', '/p/c'], (e) =>
-        events.push(e),
+        hashService.checkCachedMtimes as ReturnType<typeof vi.fn>
+      ).mockImplementation(async (_c, _h, ps: readonly string[]) => {
+        const out = new Map<string, HashEntry | null>();
+        for (const p of ps) out.set(p, null); // all need compute
+        return out;
+      });
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockReset();
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_c: unknown, _h: string, p: string) => {
+          if (p === '/p/b') {
+            throw new Error('Command timed out after 120s; SSH session preserved.');
+          }
+          return buildHashEntry(HASH);
+        },
       );
-      expect(events).toHaveLength(3);
-      for (const e of events) {
-        expect(e.metadata).toBeNull();
-        expect(e.error).toBe(true);
-      }
+      const events: { path: string; error: boolean }[] = [];
+      await orchestrator.getRomsMetadata('SNES', paths, (e) =>
+        events.push({ path: e.path, error: e.error }),
+      );
+      expect(events).toEqual([
+        { path: '/p/a', error: false },
+        { path: '/p/b', error: true },
+        { path: '/p/c', error: false },
+      ]);
     });
 
     it('per-path metadata failure is isolated — subsequent paths still emit', async () => {

@@ -238,17 +238,49 @@ export class MetadataOrchestrator {
       return;
     }
 
-    // Round 5: per-ROM hash + lookup, end-to-end per path. Round 4
-    // batched the hash into one big SSH exec for all N paths; a
-    // single multi-GB ROM (e.g. a Super Famicom translation
-    // collection) would push that batch past the 120s hash timeout
-    // and take down ALL N paths' metadata. Now: one ROM at a time
-    // through the per-host serialized HashService, with ssh2's
-    // `disposeOnTimeout: false` (set in `hashPaths`) so a single
-    // bad ROM only fails its own row instead of the SSH session.
-    // Trade-off: ~100-200ms of SSH channel-setup overhead per ROM.
-    // Cheap price for the resilience win and the progressive UI
-    // updates (rows populate one by one as they resolve).
+    // Round 9 (PR #20): batched mtime check + per-path compute.
+    // Round 5 collapsed the hash phase to per-ROM `getHash([single])`
+    // because a batched hash exec containing a multi-GB ROM would
+    // push the whole batch past the 120s hash timeout. That fix
+    // worked, but EVERY per-ROM call still cost a per-path SSH
+    // `statWitnesses` round-trip (32 paths × ~470 ms = 15 s wall on
+    // a fully-cached SNES core).
+    //
+    // Round 9 splits the cheap-and-batchable (mtime stat) from the
+    // expensive-and-isolatable (hash compute):
+    //   1. ONE batched `checkCachedMtimes` for all paths — single
+    //      SSH `statWitnesses` exec.
+    //   2. Per-path `computeHash` only for the residue (uncached
+    //      paths or ones whose mtime drifted).
+    // Cached cores collapse to ~200 ms wall; cold cores keep the
+    // round-5 per-ROM isolation (so the multi-GB Collection still
+    // only fails its own row).
+    const mtimeCheckStart = Date.now();
+    let mtimeMap: Map<string, HashEntry | null>;
+    try {
+      mtimeMap = await this.hashService.checkCachedMtimes(
+        session.client,
+        session.host,
+        romPaths,
+      );
+      diagLog('info', 'prefetch', '·', 'mtime-batch done', {
+        coreId,
+        ms: Date.now() - mtimeCheckStart,
+        validated: [...mtimeMap.values()].filter((v) => v !== null).length,
+        needsHash: [...mtimeMap.values()].filter((v) => v === null).length,
+      });
+    } catch (err) {
+      // Batched stat failed — fall back to per-ROM compute (same
+      // shape as round 5). Mark all paths as "needs hash" so the
+      // loop below treats each individually.
+      diagLog('error', 'prefetch', '✗', 'mtime-batch failed', {
+        coreId,
+        ms: Date.now() - mtimeCheckStart,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      mtimeMap = new Map(romPaths.map((p) => [p, null]));
+    }
+
     for (const path of romPaths) {
       const perRomStart = Date.now();
       diagLog('info', 'meta', '·', 'path-start', {
@@ -256,29 +288,34 @@ export class MetadataOrchestrator {
         path: basename(path),
       });
       let entry: HashEntry | undefined;
-      try {
-        const hashes = await this.hashService.getHash(
-          session.client,
-          session.host,
-          [path],
-        );
-        entry = hashes.get(path);
-      } catch (err) {
-        diagLog('error', 'prefetch', '✗', 'hash failed', {
-          coreId,
-          path: basename(path),
-          ms: Date.now() - perRomStart,
-          err: err instanceof Error ? err.message : String(err),
-        });
-        diagLog('info', 'meta', '·', 'path-end', {
-          coreId,
-          path: basename(path),
-          source: 'error',
-          ms: Date.now() - perRomStart,
-        });
-        onResolved?.({ path, metadata: null, error: true });
-        errors += 1;
-        continue;
+      const cachedEntry = mtimeMap.get(path);
+      if (cachedEntry !== null && cachedEntry !== undefined) {
+        // Mtime-validated cache hit — no SSH for this path.
+        entry = cachedEntry;
+      } else {
+        try {
+          entry = await this.hashService.computeHash(
+            session.client,
+            session.host,
+            path,
+          );
+        } catch (err) {
+          diagLog('error', 'prefetch', '✗', 'hash failed', {
+            coreId,
+            path: basename(path),
+            ms: Date.now() - perRomStart,
+            err: err instanceof Error ? err.message : String(err),
+          });
+          diagLog('info', 'meta', '·', 'path-end', {
+            coreId,
+            path: basename(path),
+            source: 'error',
+            ms: Date.now() - perRomStart,
+          });
+          onResolved?.({ path, metadata: null, error: true });
+          errors += 1;
+          continue;
+        }
       }
       if (entry === undefined) {
         diagLog('info', 'prefetch', '·', 'unmatched', {
