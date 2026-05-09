@@ -11,6 +11,7 @@ import type {
   OpenVGDBProgressEvent,
   OpenVGDBService,
 } from '@app/main/metadata/openvgdb-service';
+import { diagLog } from '@shared/diag-log';
 import type {
   MetadataHint,
   PrefetchProgress,
@@ -221,14 +222,27 @@ export class MetadataOrchestrator {
     onResolved?: (event: RomMetadataResolvedEvent) => void,
   ): Promise<void> {
     if (romPaths.length === 0) return;
+    diagLog('info', 'prefetch', '→', 'start', {
+      coreId,
+      paths: romPaths.length,
+    });
+    const startWall = Date.now();
+    let resolved = 0;
+    let errors = 0;
     const session = this.getActiveSession();
     if (session === null) {
+      diagLog('warn', 'prefetch', '·', 'no-session', { coreId });
       for (const path of romPaths) {
         onResolved?.({ path, metadata: null, error: false });
       }
       return;
     }
 
+    diagLog('info', 'prefetch', '·', 'hash-batch start', {
+      coreId,
+      paths: romPaths.length,
+    });
+    const hashStart = Date.now();
     let hashes: Map<string, HashEntry>;
     try {
       hashes = await this.hashService.getHash(
@@ -236,17 +250,40 @@ export class MetadataOrchestrator {
         session.host,
         romPaths,
       );
-    } catch {
+      diagLog('info', 'prefetch', '·', 'hash-batch done', {
+        coreId,
+        ms: Date.now() - hashStart,
+        hashed: hashes.size,
+      });
+    } catch (err) {
+      diagLog('error', 'prefetch', '✗', 'hash-batch failed', {
+        coreId,
+        ms: Date.now() - hashStart,
+        err: err instanceof Error ? err.message : String(err),
+      });
       for (const path of romPaths) {
         onResolved?.({ path, metadata: null, error: true });
+        errors += 1;
       }
+      diagLog('error', 'prefetch', '✗', 'complete', {
+        coreId,
+        ms: Date.now() - startWall,
+        resolved: 0,
+        errors,
+      });
       return;
     }
 
     for (const path of romPaths) {
       const entry = hashes.get(path);
       if (entry === undefined) {
+        diagLog('info', 'prefetch', '·', 'unmatched', {
+          coreId,
+          path: basename(path),
+          reason: 'no-hash',
+        });
         onResolved?.({ path, metadata: null, error: false });
+        resolved += 1;
         continue;
       }
       const systemId = this.resolveSystemId({ romPath: path, coreId });
@@ -261,17 +298,40 @@ export class MetadataOrchestrator {
               romName: basename(path),
               romSize: entry.size,
             };
+      const lookupStart = Date.now();
       try {
         const metadata = await this.metadataService.getMetadata(
           entry.md5,
           {},
           ssHint,
         );
+        diagLog('info', 'prefetch', '·', 'lookup', {
+          coreId,
+          path: basename(path),
+          source: metadata?.source ?? 'none',
+          ms: Date.now() - lookupStart,
+        });
         onResolved?.({ path, metadata, error: false });
-      } catch {
+        resolved += 1;
+      } catch (err) {
+        diagLog('error', 'prefetch', '✗', 'lookup failed', {
+          coreId,
+          path: basename(path),
+          ms: Date.now() - lookupStart,
+          err: err instanceof Error ? err.message : String(err),
+        });
         onResolved?.({ path, metadata: null, error: true });
+        errors += 1;
       }
     }
+
+    diagLog('info', 'prefetch', '←', 'complete', {
+      coreId,
+      ms: Date.now() - startWall,
+      resolved,
+      errors,
+      total: romPaths.length,
+    });
   }
 
   /**

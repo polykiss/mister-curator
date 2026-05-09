@@ -11,6 +11,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
+import { diagLog } from '@shared/diag-log';
 import { isAutoDetectedSystemFile, isSystemFile } from '@shared/system-files';
 import type { CoreEntry, Rom } from '@shared/types';
 
@@ -22,6 +23,12 @@ import type { CoreEntry, Rom } from '@shared/types';
  */
 function romKindForSystemCheck(kind: Rom['kind']): 'file' | 'folder' {
   return kind === 'file' ? 'file' : 'folder';
+}
+
+/** Last path segment, used in diagnostic logs to keep lines readable. */
+function shortName(path: string): string {
+  const i = path.lastIndexOf('/');
+  return i < 0 ? path : path.slice(i + 1);
 }
 
 import {
@@ -172,8 +179,19 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     const operationId = `pane-${core.id}-${String(Date.now())}-${String(
       Math.random(),
     )}`;
+    diagLog('info', 'roms-pane', '·', 'subscribed', {
+      opId: operationId,
+      coreId: core.id,
+      paths: filePaths.length,
+    });
     const unsubscribe = window.mister.onRomMetadataResolved((event) => {
       if (event.operationId !== operationId) return;
+      diagLog('info', 'roms-pane', '←', 'resolved-event', {
+        opId: operationId,
+        path: shortName(event.path),
+        source: event.metadata?.source ?? 'none',
+        error: event.error ? 1 : undefined,
+      });
       setMetadataByPath((prev) => ({
         ...prev,
         [event.path]: { metadata: event.metadata, error: event.error },
@@ -183,6 +201,9 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
       operationId,
     });
     return () => {
+      diagLog('info', 'roms-pane', '·', 'unsubscribed', {
+        opId: operationId,
+      });
       unsubscribe();
     };
   }, [roms, core.id]);
@@ -223,8 +244,19 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     const operationId = `resume-${core.id}-${String(Date.now())}-${String(
       Math.random(),
     )}`;
+    diagLog('info', 'roms-pane', '·', 'resume-subscribed', {
+      opId: operationId,
+      coreId: core.id,
+      paths: pending.length,
+    });
     const unsubscribe = window.mister.onRomMetadataResolved((event) => {
       if (event.operationId !== operationId) return;
+      diagLog('info', 'roms-pane', '←', 'resolved-event', {
+        opId: operationId,
+        path: shortName(event.path),
+        source: event.metadata?.source ?? 'none',
+        error: event.error ? 1 : undefined,
+      });
       setMetadataByPath((prev) => ({
         ...prev,
         [event.path]: { metadata: event.metadata, error: event.error },
@@ -234,6 +266,9 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
       operationId,
     });
     return () => {
+      diagLog('info', 'roms-pane', '·', 'resume-unsubscribed', {
+        opId: operationId,
+      });
       unsubscribe();
     };
     // metadataByPath is intentionally OMITTED from deps — including it

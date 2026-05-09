@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import { BrowserWindow, dialog, ipcMain } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
 
+import { diagLog, makeIdGen } from '@shared/diag-log';
 import { encodeIpcError, IPC_CHANNELS } from '@shared/preload-api';
 import type {
   ConnectResult,
@@ -34,14 +35,42 @@ type IpcHandler<TArgs extends readonly unknown[], TResult> = (
   ...args: TArgs
 ) => Promise<TResult> | TResult;
 
+/**
+ * Round 4 — module-level IPC call-id generator. Each handler invocation
+ * gets a unique id so the start / resolve / reject log lines correlate.
+ */
+const nextIpcCallId = makeIdGen('ipc-');
+
 function handle<TArgs extends readonly unknown[], TResult>(
   channel: string,
   handler: IpcHandler<TArgs, TResult>,
 ): void {
   ipcMain.handle(channel, async (_event: IpcMainInvokeEvent, ...args: unknown[]) => {
+    const callId = nextIpcCallId();
+    const start = Date.now();
+    diagLog('info', 'ipc', '→', 'invoke', {
+      callId,
+      method: channel,
+      args: args.length,
+    });
     try {
-      return await handler(...(args as unknown as TArgs));
+      const result = await handler(...(args as unknown as TArgs));
+      diagLog('info', 'ipc', '←', 'resolved', {
+        callId,
+        method: channel,
+        ms: Date.now() - start,
+      });
+      return result;
     } catch (err) {
+      diagLog('error', 'ipc', '✗', 'rejected', {
+        callId,
+        method: channel,
+        ms: Date.now() - start,
+        err:
+          err instanceof Error
+            ? `${err.name}: ${err.message}`
+            : String(err),
+      });
       // Re-throw with structured fields encoded in the message so the
       // preload can rebuild a typed `MisterConnectionError` on the
       // other side (Electron strips custom `Error` subclass fields).
