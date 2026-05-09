@@ -97,12 +97,14 @@ describe('RealMisterClient', () => {
       await client.connect(profile, secret);
 
       const args = mocks.connect.mock.calls[0]?.[0] as Record<string, unknown>;
-      // Round 3 of PR #8: tightened from 10s × 2 (~30s detection)
-      // to 5s × 2 (~10–15s detection). ssh2 sends a packet every
-      // `keepaliveInterval`; after `keepaliveCountMax` missed replies
-      // it fires `'close'` / `'error'`.
-      expect(args.keepaliveInterval).toBe(5_000);
-      expect(args.keepaliveCountMax).toBe(2);
+      // PR #20 round 3 widened this from 5s × 2 (10s detection) to
+      // 15s × 4 (60s detection). The aggressive cadence false-fired
+      // on idle WiFi where intermittent latency spikes (6ms → 194ms)
+      // caused two consecutive missed responses even on a healthy
+      // link. 60s before declaring transport dead lets normal WiFi
+      // jitter pass while still catching real drops.
+      expect(args.keepaliveInterval).toBe(15_000);
+      expect(args.keepaliveCountMax).toBe(4);
     });
 
     it('passes the private key (not the path) when authMethod is key', async () => {
@@ -1928,9 +1930,14 @@ describe('RealMisterClient', () => {
   });
 
   describe('per-op timeout (round 2)', () => {
+    // PR #20 round 3 raised the default per-op timeout 10s → 60s
+    // and added a separate 120s cap for hash commands. Tests below
+    // walk past 60s by default; the hash-specific test walks past
+    // 120s. Tests use fake timers so wall time stays trivial.
+
     /**
      * Helper: makes the next `ssh.execCommand` call hang forever.
-     * The runSshOp wrapper should fire its 10 s timeout and bail out.
+     * The runSshOp wrapper should fire its 60 s timeout and bail out.
      */
     function hangOnce(): void {
       mocks.execCommand.mockImplementationOnce(
@@ -1941,7 +1948,7 @@ describe('RealMisterClient', () => {
       );
     }
 
-    it('rejects with a typed MisterConnectionError after 10 s of silence', async () => {
+    it('rejects with a typed MisterConnectionError after 60 s of silence (round 3)', async () => {
       vi.useFakeTimers();
       const client = new RealMisterClient();
       try {
@@ -1949,13 +1956,13 @@ describe('RealMisterClient', () => {
         hangOnce();
 
         const promise = client.listRoms('NES').catch((err: unknown) => err);
-        await vi.advanceTimersByTimeAsync(10_001);
+        await vi.advanceTimersByTimeAsync(60_001);
         const result = await promise;
 
         expect(result).toBeInstanceOf(MisterConnectionError);
         if (result instanceof MisterConnectionError) {
           expect(result.code).toBe('unknown');
-          expect(result.message).toMatch(/no reply within 10s/);
+          expect(result.message).toMatch(/no reply within 60s/);
         }
       } finally {
         vi.useRealTimers();
@@ -1972,7 +1979,7 @@ describe('RealMisterClient', () => {
 
         hangOnce();
         const promise = client.listRoms('NES').catch(() => undefined);
-        await vi.advanceTimersByTimeAsync(10_001);
+        await vi.advanceTimersByTimeAsync(60_001);
         await promise;
 
         expect(listener).toHaveBeenCalledTimes(1);
@@ -1993,12 +2000,90 @@ describe('RealMisterClient', () => {
         client.onUnexpectedDisconnect(listener);
 
         // listRoms uses execCommand; the default mock resolves
-        // immediately. We then walk past the 10s window to confirm
+        // immediately. We then walk past the 60s window to confirm
         // the dangling timer has been cleared.
         await client.listRoms('NES');
-        await vi.advanceTimersByTimeAsync(15_000);
+        await vi.advanceTimersByTimeAsync(65_000);
 
         expect(listener).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('hashPaths uses the higher 120s timeout AND preserves the SSH session on timeout (round 3 + round 5)', async () => {
+      vi.useFakeTimers();
+      const client = new RealMisterClient();
+      try {
+        await client.connect(profile, secret);
+        const listener = vi.fn();
+        client.onUnexpectedDisconnect(listener);
+        // Hang the hash command forever.
+        mocks.execCommand.mockImplementationOnce(
+          () =>
+            new Promise(() => {
+              /* never resolves */
+            }),
+        );
+
+        const promise = client
+          .hashPaths(['/media/fat/games/NES/foo.nes'])
+          .catch((err: unknown) => err);
+
+        // 60s shouldn't trip the hash-specific timeout.
+        await vi.advanceTimersByTimeAsync(60_001);
+        expect(listener).not.toHaveBeenCalled();
+
+        // 120s does.
+        await vi.advanceTimersByTimeAsync(60_000);
+        const result = await promise;
+
+        expect(result).toBeInstanceOf(MisterConnectionError);
+        if (result instanceof MisterConnectionError) {
+          // Round 5 — hash-timeout uses the "session preserved"
+          // message because `runSshOp(..., disposeOnTimeout: false)`
+          // doesn't tear down the transport. A single multi-GB ROM
+          // exceeding 120s only fails its own row; the orchestrator
+          // catches and emits per-path error.
+          expect(result.message).toMatch(
+            /Command timed out after 120s; SSH session preserved\./,
+          );
+        }
+        // Round 5 — unexpected-disconnect listener does NOT fire on
+        // a hash timeout, because the SSH transport stays alive.
+        expect(listener).not.toHaveBeenCalled();
+        expect(mocks.dispose).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('disposeOnTimeout: true (default) still tears down on a non-hash timeout', async () => {
+      // Confirms round-5 behavior didn't accidentally weaken the
+      // default. listRoms uses the default-timeout path.
+      vi.useFakeTimers();
+      const client = new RealMisterClient();
+      try {
+        await client.connect(profile, secret);
+        const listener = vi.fn();
+        client.onUnexpectedDisconnect(listener);
+        mocks.execCommand.mockImplementationOnce(
+          () =>
+            new Promise(() => {
+              /* never resolves */
+            }),
+        );
+
+        const promise = client.listRoms('NES').catch((err: unknown) => err);
+        await vi.advanceTimersByTimeAsync(60_001);
+        const result = await promise;
+
+        expect(result).toBeInstanceOf(MisterConnectionError);
+        if (result instanceof MisterConnectionError) {
+          expect(result.message).toMatch(/no reply within 60s/);
+        }
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect(mocks.dispose).toHaveBeenCalled();
       } finally {
         vi.useRealTimers();
       }
@@ -2053,11 +2138,11 @@ describe('RealMisterClient', () => {
           )
           .catch((err: unknown) => err);
 
-        // 8s in, push a progress chunk; deadline resets.
-        await vi.advanceTimersByTimeAsync(8_000);
+        // 50s in, push a progress chunk; deadline resets.
+        await vi.advanceTimersByTimeAsync(50_000);
         onStdoutHolder.current?.(Buffer.from('PROGRESS\t1\t1\tNES\n'));
-        // Another 8s — would have fired without the touch().
-        await vi.advanceTimersByTimeAsync(8_000);
+        // Another 50s — would have fired without the touch().
+        await vi.advanceTimersByTimeAsync(50_000);
         // Resolve cleanly.
         streamResolveHolder.current?.();
         await vi.advanceTimersByTimeAsync(0);
@@ -2070,7 +2155,7 @@ describe('RealMisterClient', () => {
       }
     });
 
-    it('streaming bulk exec fires the timeout after 10s with no chunks', async () => {
+    it('streaming bulk exec fires the timeout after 60s with no chunks (round 3)', async () => {
       vi.useFakeTimers();
       const client = new RealMisterClient();
       try {
@@ -2102,7 +2187,7 @@ describe('RealMisterClient', () => {
             cores.map((core) => ({ core: core as never, hidden: true })),
           )
           .catch((err: unknown) => err);
-        await vi.advanceTimersByTimeAsync(10_001);
+        await vi.advanceTimersByTimeAsync(60_001);
         const result = await promise;
 
         expect(result).toBeInstanceOf(MisterConnectionError);

@@ -84,6 +84,33 @@ function makeOrchestrator(opts: {
         return out;
       },
     ),
+    // Round 9 — `getRomsMetadata` now drives the hash phase via
+    // these two methods. The fixture treats `hashEntries` as the
+    // mtime-validated cache: any path present is "warm" and gets
+    // back its entry from `checkCachedMtimes`; any missing path is
+    // "needs hash" and would route to `computeHash` (which the
+    // default fixture says drops on the device → returns undefined).
+    checkCachedMtimes: vi.fn(
+      async (
+        _client: unknown,
+        _host: string,
+        paths: readonly string[],
+      ): Promise<Map<string, HashEntry | null>> => {
+        const out = new Map<string, HashEntry | null>();
+        for (const p of paths) {
+          const entry = opts.hashEntries?.get(p);
+          out.set(p, entry ?? null);
+        }
+        return out;
+      },
+    ),
+    computeHash: vi.fn(
+      async (
+        _client: unknown,
+        _host: string,
+        path: string,
+      ): Promise<HashEntry | undefined> => opts.hashEntries?.get(path),
+    ),
     invalidate: vi.fn(async () => undefined),
     clearForHost: vi.fn(async () => undefined),
   } as unknown as HashService;
@@ -290,6 +317,300 @@ describe('MetadataOrchestrator', () => {
     expect(hashService.getHash).not.toHaveBeenCalled();
   });
 
+  describe('getRomsMetadata (PR #20 round 2 — list-view streaming prefetch)', () => {
+    it('warm-cache: ONE batched mtime check for all paths, NO per-row computeHash (round 9)', async () => {
+      // Round 9 split the hash phase: ONE `checkCachedMtimes` for
+      // all paths (single SSH `statWitnesses` exec), then per-path
+      // `computeHash` ONLY for the residue. For a fully-cached
+      // pane (the common case after first scan), no per-row
+      // computeHash fires at all — the wall drops from round-5's
+      // 32 × per-row stat (~15 s) to a single batched stat
+      // (~200 ms).
+      const paths: string[] = [];
+      const hashEntries = new Map<string, HashEntry>();
+      for (let i = 0; i < 32; i += 1) {
+        const p = `/p/snes-${String(i)}.sfc`;
+        const md5 = String(i).padStart(32, '0');
+        paths.push(p);
+        hashEntries.set(p, buildHashEntry(md5));
+      }
+      const meta = buildMeta(HASH, 'X');
+      const { orchestrator, hashService } = makeOrchestrator({
+        hashEntries,
+        meta,
+      });
+      const events: {
+        path: string;
+        metadata: unknown;
+        error: boolean;
+      }[] = [];
+      await orchestrator.getRomsMetadata('SNES', paths, (e) => events.push(e));
+      // ONE batched mtime call, ZERO per-row compute calls.
+      expect(hashService.checkCachedMtimes).toHaveBeenCalledTimes(1);
+      const call = (
+        hashService.checkCachedMtimes as ReturnType<typeof vi.fn>
+      ).mock.calls[0];
+      expect(call?.[1]).toBe('host-1');
+      expect(call?.[2]).toEqual(paths);
+      expect(hashService.computeHash).not.toHaveBeenCalled();
+      // One event per path, in order.
+      expect(events).toHaveLength(32);
+      expect(events.map((e) => e.path)).toEqual(paths);
+      expect(events.every((e) => !e.error)).toBe(true);
+    });
+
+    it('cold-cache residue: batched mtime + per-row computeHash for the uncached subset (round 9)', async () => {
+      // Mixed scenario: 3 paths cached + 2 uncached. We want
+      // ONE checkCachedMtimes call followed by exactly 2
+      // computeHash calls (one per uncached path).
+      const paths = [
+        '/p/cached-1.sfc',
+        '/p/cached-2.sfc',
+        '/p/cold-a.sfc',
+        '/p/cached-3.sfc',
+        '/p/cold-b.sfc',
+      ];
+      const hashEntries = new Map<string, HashEntry>();
+      for (const p of paths) hashEntries.set(p, buildHashEntry(HASH));
+      const { orchestrator, hashService } = makeOrchestrator({
+        hashEntries: new Map([
+          ['/p/cached-1.sfc', buildHashEntry(HASH)],
+          ['/p/cached-2.sfc', buildHashEntry(HASH)],
+          ['/p/cached-3.sfc', buildHashEntry(HASH)],
+        ]),
+        meta: buildMeta(HASH, 'X'),
+      });
+      // Override checkCachedMtimes to leave the cold paths null
+      // (the default fixture uses `hashEntries` for both
+      // checkCachedMtimes and computeHash, so we need to split).
+      (hashService.checkCachedMtimes as ReturnType<typeof vi.fn>).mockReset();
+      (
+        hashService.checkCachedMtimes as ReturnType<typeof vi.fn>
+      ).mockImplementation(async (_c, _h, ps: readonly string[]) => {
+        const out = new Map<string, HashEntry | null>();
+        for (const p of ps) {
+          out.set(p, p.includes('cached') ? buildHashEntry(HASH) : null);
+        }
+        return out;
+      });
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockReset();
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => buildHashEntry(HASH),
+      );
+
+      const events: {
+        path: string;
+        metadata: unknown;
+        error: boolean;
+      }[] = [];
+      await orchestrator.getRomsMetadata('SNES', paths, (e) => events.push(e));
+
+      expect(hashService.checkCachedMtimes).toHaveBeenCalledTimes(1);
+      expect(hashService.computeHash).toHaveBeenCalledTimes(2);
+      // Compute called only for the cold paths, in order.
+      const computeCalls = (
+        hashService.computeHash as ReturnType<typeof vi.fn>
+      ).mock.calls.map((c) => c[2] as string);
+      expect(computeCalls).toEqual(['/p/cold-a.sfc', '/p/cold-b.sfc']);
+      expect(events).toHaveLength(5);
+      expect(events.every((e) => !e.error)).toBe(true);
+    });
+
+    it('mtime-batch failure falls back to per-row computeHash for every path (round 9)', async () => {
+      // If statWitnesses throws (e.g. transport hiccup), the batch
+      // returns null for every path so the loop transparently
+      // routes each to per-row computeHash — same shape as the
+      // round-5 worst case.
+      const paths = ['/p/a.sfc', '/p/b.sfc', '/p/c.sfc'];
+      const { orchestrator, hashService } = makeOrchestrator({
+        hashEntries: new Map(paths.map((p) => [p, buildHashEntry(HASH)])),
+        meta: buildMeta(HASH, 'X'),
+      });
+      (hashService.checkCachedMtimes as ReturnType<typeof vi.fn>).mockReset();
+      (
+        hashService.checkCachedMtimes as ReturnType<typeof vi.fn>
+      ).mockRejectedValue(new Error('SSH closed'));
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockReset();
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => buildHashEntry(HASH),
+      );
+
+      const events: { path: string; error: boolean }[] = [];
+      await orchestrator.getRomsMetadata('SNES', paths, (e) =>
+        events.push({ path: e.path, error: e.error }),
+      );
+
+      expect(hashService.computeHash).toHaveBeenCalledTimes(3);
+      expect(events.map((e) => e.path)).toEqual(paths);
+      expect(events.every((e) => !e.error)).toBe(true);
+    });
+
+    it('one ROM\'s hash failure is isolated — subsequent ROMs still resolve (round 5)', async () => {
+      // The big-collection-ROM scenario: one path's hash throws (e.g.
+      // 120s timeout from `runSshOp`), the rest must keep flowing.
+      // Pre-round-5, the single batched hash call would emit error for
+      // ALL paths on any throw. Round 9 reshaped this: mtime is
+      // batched (which would NOT see the per-file hash timeout since
+      // it only stats), then per-row computeHash for paths the mtime
+      // batch said need re-hashing. The selective throw moves to
+      // computeHash.
+      const paths = ['/p/small.sfc', '/p/HUGE-collection.zip', '/p/ok.sfc'];
+      const { orchestrator, hashService, metadataService } = makeOrchestrator({
+        meta: buildMeta(HASH, 'X'),
+      });
+      // mtime batch: all paths uncached → all need computeHash.
+      (hashService.checkCachedMtimes as ReturnType<typeof vi.fn>).mockReset();
+      (
+        hashService.checkCachedMtimes as ReturnType<typeof vi.fn>
+      ).mockImplementation(async (_c, _h, ps: readonly string[]) => {
+        const out = new Map<string, HashEntry | null>();
+        for (const p of ps) out.set(p, null);
+        return out;
+      });
+      // computeHash throws for the collection path; succeeds otherwise.
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockReset();
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_c: unknown, _h: string, p: string) => {
+          if (p === '/p/HUGE-collection.zip') {
+            throw new Error(
+              'Command timed out after 120s; SSH session preserved.',
+            );
+          }
+          return buildHashEntry(HASH);
+        },
+      );
+      const events: { path: string; error: boolean }[] = [];
+      await orchestrator.getRomsMetadata('SNES', paths, (e) =>
+        events.push({ path: e.path, error: e.error }),
+      );
+      expect(events).toEqual([
+        { path: '/p/small.sfc', error: false },
+        { path: '/p/HUGE-collection.zip', error: true },
+        { path: '/p/ok.sfc', error: false },
+      ]);
+      // Two metadata lookups happened (the two non-erroring paths) —
+      // the third was skipped because hash failed.
+      expect(metadataService.getMetadata).toHaveBeenCalledTimes(2);
+    });
+
+    it('emits unmatched (no error) for every path when no session is active', async () => {
+      const { orchestrator, hashService } = makeOrchestrator({
+        session: null,
+      });
+      const events: {
+        path: string;
+        metadata: unknown;
+        error: boolean;
+      }[] = [];
+      await orchestrator.getRomsMetadata('SNES', ['/p/a', '/p/b'], (e) =>
+        events.push(e),
+      );
+      expect(hashService.checkCachedMtimes).not.toHaveBeenCalled();
+      expect(hashService.computeHash).not.toHaveBeenCalled();
+      expect(events).toHaveLength(2);
+      for (const e of events) {
+        expect(e.metadata).toBeNull();
+        expect(e.error).toBe(false);
+      }
+    });
+
+    it('emits error=true per-path when computeHash throws after a mtime miss (round 9)', async () => {
+      // Round 9: mtime batch returns null for an uncached path,
+      // computeHash throws (e.g. the per-ROM 120s timeout fires).
+      // That path emits error=true; siblings keep flowing.
+      const paths = ['/p/a', '/p/b', '/p/c'];
+      const { orchestrator, hashService } = makeOrchestrator({
+        meta: buildMeta(HASH, 'X'),
+      });
+      (hashService.checkCachedMtimes as ReturnType<typeof vi.fn>).mockReset();
+      (
+        hashService.checkCachedMtimes as ReturnType<typeof vi.fn>
+      ).mockImplementation(async (_c, _h, ps: readonly string[]) => {
+        const out = new Map<string, HashEntry | null>();
+        for (const p of ps) out.set(p, null); // all need compute
+        return out;
+      });
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockReset();
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_c: unknown, _h: string, p: string) => {
+          if (p === '/p/b') {
+            throw new Error('Command timed out after 120s; SSH session preserved.');
+          }
+          return buildHashEntry(HASH);
+        },
+      );
+      const events: { path: string; error: boolean }[] = [];
+      await orchestrator.getRomsMetadata('SNES', paths, (e) =>
+        events.push({ path: e.path, error: e.error }),
+      );
+      expect(events).toEqual([
+        { path: '/p/a', error: false },
+        { path: '/p/b', error: true },
+        { path: '/p/c', error: false },
+      ]);
+    });
+
+    it('per-path metadata failure is isolated — subsequent paths still emit', async () => {
+      const paths = ['/p/a', '/p/b', '/p/c'];
+      const hashEntries = new Map<string, HashEntry>();
+      for (const p of paths) hashEntries.set(p, buildHashEntry(HASH));
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries,
+        meta: buildMeta(HASH, 'X'),
+      });
+      // Throw on the SECOND call only.
+      let call = 0;
+      (metadataService.getMetadata as ReturnType<typeof vi.fn>).mockReset();
+      (metadataService.getMetadata as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          call += 1;
+          if (call === 2) throw new Error('boom');
+          return buildMeta(HASH, 'X');
+        },
+      );
+      const events: {
+        path: string;
+        metadata: unknown;
+        error: boolean;
+      }[] = [];
+      await orchestrator.getRomsMetadata('SNES', paths, (e) => events.push(e));
+      expect(events).toHaveLength(3);
+      expect(events[0]?.error).toBe(false);
+      expect(events[1]?.error).toBe(true);
+      expect(events[2]?.error).toBe(false);
+    });
+
+    it('emits unmatched (no error) for paths not present in the hash result', async () => {
+      // E.g., file vanished from the device between scan and hash.
+      const { orchestrator } = makeOrchestrator({
+        hashEntries: new Map([['/p/present', buildHashEntry(HASH)]]),
+        meta: buildMeta(HASH, 'X'),
+      });
+      const events: {
+        path: string;
+        metadata: unknown;
+        error: boolean;
+      }[] = [];
+      await orchestrator.getRomsMetadata(
+        'SNES',
+        ['/p/present', '/p/missing'],
+        (e) => events.push(e),
+      );
+      expect(events).toHaveLength(2);
+      const missingEvent = events.find((e) => e.path === '/p/missing');
+      expect(missingEvent?.metadata).toBeNull();
+      expect(missingEvent?.error).toBe(false);
+    });
+
+    it('no-op on empty paths', async () => {
+      const { orchestrator, hashService } = makeOrchestrator();
+      const events: unknown[] = [];
+      await orchestrator.getRomsMetadata('SNES', [], (e) => events.push(e));
+      expect(hashService.getHash).not.toHaveBeenCalled();
+      expect(events).toHaveLength(0);
+    });
+  });
+
   it('prefetchMetadata: walks every hash and emits progress per call', async () => {
     const meta = buildMeta(HASH, 'X');
     const { orchestrator, metadataService } = makeOrchestrator({ meta });
@@ -314,6 +635,66 @@ describe('MetadataOrchestrator', () => {
     const { orchestrator, imageCache } = makeOrchestrator();
     expect(await orchestrator.getBoxArtLocal('')).toBeNull();
     expect(imageCache.fetch).not.toHaveBeenCalled();
+  });
+
+  describe('getBoxArtBytes (PR #20 round 1)', () => {
+    it('reads bytes from the cached file path returned by ImageCache', async () => {
+      // Write a known-bytes file, point ImageCache.fetch at it, and
+      // assert getBoxArtBytes returns its bytes verbatim.
+      const { promises: fs } = await import('node:fs');
+      const os = await import('node:os');
+      const path = await import('node:path');
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-boxart-'));
+      const filePath = path.join(dir, 'art.bin');
+      const expected = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]); // PNG-ish
+      await fs.writeFile(filePath, expected);
+      try {
+        const { orchestrator } = makeOrchestrator();
+        // Override the imageCache.fetch mock to return our temp path.
+        const stub = (orchestrator as unknown as {
+          imageCache: { fetch: ReturnType<typeof vi.fn> };
+        }).imageCache;
+        stub.fetch.mockReset();
+        stub.fetch.mockResolvedValue(filePath);
+        const bytes = await orchestrator.getBoxArtBytes('https://cdn/box.png');
+        expect(bytes).not.toBeNull();
+        expect(Array.from(bytes!)).toEqual(Array.from(expected));
+      } finally {
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('returns null when ImageCache reports no cached file', async () => {
+      const { orchestrator } = makeOrchestrator();
+      const stub = (orchestrator as unknown as {
+        imageCache: { fetch: ReturnType<typeof vi.fn> };
+      }).imageCache;
+      stub.fetch.mockReset();
+      stub.fetch.mockResolvedValue(null);
+      const bytes = await orchestrator.getBoxArtBytes('https://cdn/box.png');
+      expect(bytes).toBeNull();
+    });
+
+    it('returns null when the cached file vanished between fetch and read', async () => {
+      // ImageCache.fetch resolves with a path, but the file was wiped
+      // (e.g., user cleared the cache) before readFile got to it.
+      const { orchestrator } = makeOrchestrator();
+      const stub = (orchestrator as unknown as {
+        imageCache: { fetch: ReturnType<typeof vi.fn> };
+      }).imageCache;
+      stub.fetch.mockReset();
+      stub.fetch.mockResolvedValue('/nonexistent/path/art.bin');
+      const bytes = await orchestrator.getBoxArtBytes('https://cdn/box.png');
+      expect(bytes).toBeNull();
+    });
+
+    it('skips ImageCache entirely for an empty URL', async () => {
+      const { orchestrator, imageCache } = makeOrchestrator();
+      (imageCache.fetch as ReturnType<typeof vi.fn>).mockReset();
+      const bytes = await orchestrator.getBoxArtBytes('');
+      expect(bytes).toBeNull();
+      expect(imageCache.fetch).not.toHaveBeenCalled();
+    });
   });
 
   it('clearMetadataCache: wipes both metadata and image caches', async () => {
@@ -379,6 +760,115 @@ describe('MetadataOrchestrator', () => {
         'downloading',
         'ready',
       ]);
+    });
+  });
+
+  describe('getRomsMetadata — unmappable-coreId short-circuit (round 11)', () => {
+    /**
+     * For coreIds with no SS systemeid mapping (mame, hbmame,
+     * AO486, etc.), round 11 short-circuits the hash phase entirely:
+     * no checkCachedMtimes batch, no per-row computeHash, no hash-
+     * based metadataService.getMetadata. Synthetic-keyed sentinels
+     * via the existing cache machinery handle "we saw this path
+     * once" semantics.
+     */
+    it('mame: no checkCachedMtimes, no computeHash, hashSkipped equals path count', async () => {
+      const paths = Array.from({ length: 10 }, (_, i) => `/p/mame/${String(i)}.zip`);
+      const { orchestrator, hashService, metadataService } =
+        makeOrchestrator({
+          systemId: null, // mame is unmapped
+          meta: null,
+        });
+      const events: { path: string; metadata: unknown; error: boolean }[] = [];
+      await orchestrator.getRomsMetadata('mame', paths, (e) =>
+        events.push(e),
+      );
+      // The big assertion: no hash work AT ALL.
+      expect(hashService.checkCachedMtimes).not.toHaveBeenCalled();
+      expect(hashService.computeHash).not.toHaveBeenCalled();
+      // Per-path metadataService.getMetadata IS called (with the
+      // synthetic key) so the cache machinery records the no-coverage
+      // result.
+      expect(metadataService.getMetadata).toHaveBeenCalledTimes(10);
+      // Every getMetadata call uses a synthetic `noss-` key, NOT a
+      // real md5 hash. This is the marker that distinguishes the
+      // round-11 short-circuit from the regular flow on disk.
+      const calls = (metadataService.getMetadata as ReturnType<typeof vi.fn>)
+        .mock.calls;
+      for (const c of calls) {
+        expect(c?.[0]).toMatch(/^noss-[0-9a-f]{40}$/);
+        expect(c?.[2]).toBeUndefined(); // no ssHint — synthetic flow
+      }
+      expect(events).toHaveLength(10);
+      expect(events.every((e) => !e.error && e.metadata === null)).toBe(true);
+    });
+
+    it('synthetic key is deterministic per (coreId, path)', async () => {
+      // Same path → same synthetic key. Two prefetches of the same
+      // mame core ask getMetadata with the same key, so the cache
+      // hit on the second prefetch is a literal cache hit (not a
+      // miss + re-write).
+      const { orchestrator, metadataService } = makeOrchestrator({
+        systemId: null,
+      });
+      await orchestrator.getRomsMetadata('mame', ['/p/mame/foo.zip']);
+      await orchestrator.getRomsMetadata('mame', ['/p/mame/foo.zip']);
+      const calls = (metadataService.getMetadata as ReturnType<typeof vi.fn>)
+        .mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[0]?.[0]).toBe(calls[1]?.[0]);
+    });
+
+    it('different (coreId, path) tuples produce different synthetic keys', async () => {
+      const { orchestrator, metadataService } = makeOrchestrator({
+        systemId: null,
+      });
+      await orchestrator.getRomsMetadata('mame', [
+        '/p/mame/a.zip',
+        '/p/mame/b.zip',
+      ]);
+      await orchestrator.getRomsMetadata('hbmame', ['/p/hbmame/a.zip']);
+      const keys = (metadataService.getMetadata as ReturnType<typeof vi.fn>)
+        .mock.calls.map((c) => c[0] as string);
+      expect(new Set(keys).size).toBe(3); // all distinct
+    });
+
+    it('mappable core (SNES) still flows through the hash phase (round 11 doesn\'t regress round 9/10)', async () => {
+      const paths = ['/p/snes/sonic.sfc'];
+      const hashEntries = new Map<string, HashEntry>();
+      hashEntries.set(paths[0]!, buildHashEntry(HASH));
+      const { orchestrator, hashService, metadataService } =
+        makeOrchestrator({
+          systemId: 4, // SNES is mapped
+          hashEntries,
+          meta: buildMeta(HASH, 'Sonic'),
+        });
+      await orchestrator.getRomsMetadata('SNES', paths);
+      expect(hashService.checkCachedMtimes).toHaveBeenCalledTimes(1);
+      // getMetadata receives a real md5 hash (32 hex chars), not the
+      // synthetic `noss-` key.
+      const call = (
+        metadataService.getMetadata as ReturnType<typeof vi.fn>
+      ).mock.calls[0];
+      expect(call?.[0]).toMatch(/^[0-9a-f]{32}$/);
+      // ssHint is supplied (round-2 shape).
+      expect(call?.[2]).toBeDefined();
+    });
+
+    it('unmappable core with 200 paths completes without any hash SSH calls', async () => {
+      // Reproduces the user's mame-650 scenario at unit scale. The
+      // perf claim: zero hash SSH cost, only N getMetadata calls
+      // (which read/write the local cache file synchronously).
+      const paths = Array.from(
+        { length: 200 },
+        (_, i) => `/p/mame/rom-${String(i)}.zip`,
+      );
+      const { orchestrator, hashService } = makeOrchestrator({
+        systemId: null,
+      });
+      await orchestrator.getRomsMetadata('mame', paths);
+      expect(hashService.checkCachedMtimes).not.toHaveBeenCalled();
+      expect(hashService.computeHash).not.toHaveBeenCalled();
     });
   });
 });

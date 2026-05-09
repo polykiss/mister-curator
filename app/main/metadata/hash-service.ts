@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { sanitiseFsSegment } from '@app/main/cache/cache-types';
+import { diagLog } from '@shared/diag-log';
 import type { HashRecord } from '@shared/mister-client';
 
 const HASH_CACHE_SCHEMA_VERSION = 1 as const;
@@ -137,6 +138,51 @@ export class HashService {
   }
 
   /**
+   * Round 9 (PR #20) — batched mtime validation. Returns a map
+   * keyed by every input path; the value is the cached `HashEntry`
+   * when the cache hit is mtime-validated, or `null` when the path
+   * is uncached or the recorded mtime no longer matches.
+   *
+   * One SSH `statWitnesses` call validates all cached paths at
+   * once. Replaces the round-5 pattern of N per-ROM `getHash([
+   * single])` calls — each of those was issuing its own per-path
+   * stat round-trip, which serialized through `runGated` at one-
+   * concurrent and produced a 32 × ~470 ms = 15 s wall on a
+   * fully-cached SNES core.
+   *
+   * Pairs with `computeHash(client, host, path)` for the residue:
+   * the orchestrator iterates the result map, uses the cached
+   * entry where present, and calls `computeHash` only for the
+   * `null` rows.
+   */
+  async checkCachedMtimes(
+    client: HashClient,
+    host: string,
+    paths: readonly string[],
+  ): Promise<Map<string, HashEntry | null>> {
+    if (paths.length === 0) return new Map();
+    return this.runGated(host, () =>
+      this.doCheckCachedMtimes(client, host, paths),
+    );
+  }
+
+  /**
+   * Round 9 — single-path hash compute that bypasses the cache
+   * lookup + mtime check (the caller already did those via
+   * `checkCachedMtimes`). Issues one SSH `hashPaths` exec for the
+   * one path, updates the cache with the result, returns the
+   * entry. Returns `undefined` when the device drops the path
+   * (vanished mid-flight).
+   */
+  async computeHash(
+    client: HashClient,
+    host: string,
+    path: string,
+  ): Promise<HashEntry | undefined> {
+    return this.runGated(host, () => this.doComputeHash(client, host, path));
+  }
+
+  /**
    * Drop a single path's cache entry. Used after a hide/show rename
    * so the next hash request walks fresh. Best-effort — a missing
    * entry is a no-op.
@@ -181,6 +227,19 @@ export class HashService {
     const cachedPaths = paths.filter((p) => entries[p] !== undefined);
     const needsHash: string[] = paths.filter((p) => entries[p] === undefined);
 
+    // Round 6 diag — per-path cache-check decision. For the round-6
+    // investigation we only ever run with paths.length === 1 from
+    // the orchestrator's per-ROM loop, so logging per-path here is
+    // exactly the granularity the user wants.
+    for (const p of paths) {
+      const cached = entries[p];
+      diagLog('info', 'meta', '·', 'hash-cache', {
+        path: pathBasename(p),
+        hit: cached !== undefined ? 1 : 0,
+        md5: cached?.md5,
+      });
+    }
+
     if (cachedPaths.length > 0) {
       const mtimes = await client.statWitnesses(cachedPaths);
       for (const p of cachedPaths) {
@@ -192,17 +251,46 @@ export class HashService {
           current !== 0 &&
           current === entry.mtime
         ) {
+          diagLog('info', 'meta', '·', 'hash-decision', {
+            path: pathBasename(p),
+            action: 'use-cache',
+            reason: 'mtime-match',
+            mtime: current,
+          });
           result.set(p, entry);
         } else {
           // Either missing-on-device, or mtime drifted. Either way,
           // re-hash. (If the file is genuinely gone the hash call
           // will silently drop it and we'll just not return the path.)
+          diagLog('info', 'meta', '·', 'hash-decision', {
+            path: pathBasename(p),
+            action: 'stale-revalidate',
+            reason:
+              current === undefined || current === 0
+                ? 'missing-on-device'
+                : 'mtime-drift',
+            cachedMtime: entry?.mtime,
+            currentMtime: current,
+          });
           needsHash.push(p);
         }
       }
     }
 
     if (needsHash.length === 0) return result;
+
+    // Round 6 — log the compute decision for every path that's about
+    // to hash. `cache-miss` for never-seen-before, `stale-revalidate`
+    // already logged above (we don't re-log here).
+    for (const p of needsHash) {
+      if (entries[p] === undefined) {
+        diagLog('info', 'meta', '·', 'hash-decision', {
+          path: pathBasename(p),
+          action: 'compute',
+          reason: 'cache-miss',
+        });
+      }
+    }
 
     // Hash uncached / stale paths in bounded chunks. We update the
     // in-memory map per chunk so a partial failure later in the
@@ -224,6 +312,11 @@ export class HashService {
         result.set(r.path, entry);
         next[r.path] = entry;
         dirty = true;
+        diagLog('info', 'meta', '·', 'hash-computed', {
+          path: pathBasename(r.path),
+          md5: r.md5,
+          size: r.size,
+        });
       }
     }
 
@@ -233,6 +326,72 @@ export class HashService {
     }
 
     return result;
+  }
+
+  private async doCheckCachedMtimes(
+    client: HashClient,
+    host: string,
+    paths: readonly string[],
+  ): Promise<Map<string, HashEntry | null>> {
+    const entries = await this.loadEntries(host);
+    const result = new Map<string, HashEntry | null>();
+    const cachedPaths = paths.filter((p) => entries[p] !== undefined);
+    for (const p of paths) {
+      if (entries[p] === undefined) result.set(p, null);
+    }
+    if (cachedPaths.length === 0) return result;
+    let mtimes: Awaited<ReturnType<HashClient['statWitnesses']>>;
+    try {
+      mtimes = await client.statWitnesses(cachedPaths);
+    } catch {
+      // Stat batch failed (transport error, etc.) — return all
+      // cached paths as null so the caller falls through to
+      // computeHash for each. The orchestrator's per-path error
+      // handling is the right shape for this.
+      for (const p of cachedPaths) result.set(p, null);
+      return result;
+    }
+    for (const p of cachedPaths) {
+      const entry = entries[p];
+      const current = mtimes[p];
+      if (
+        entry !== undefined &&
+        current !== undefined &&
+        current !== 0 &&
+        current === entry.mtime
+      ) {
+        result.set(p, entry);
+      } else {
+        // Either missing on device or mtime drifted. Caller will
+        // re-hash (or skip if vanished).
+        result.set(p, null);
+      }
+    }
+    return result;
+  }
+
+  private async doComputeHash(
+    client: HashClient,
+    host: string,
+    path: string,
+  ): Promise<HashEntry | undefined> {
+    const records = await client.hashPaths([path]);
+    if (records.length === 0) return undefined;
+    // hashPaths can return multiple records on one input only when
+    // the script aliases (it doesn't); take the first / only one.
+    const r = records[0]!;
+    const entry: HashEntry = {
+      md5: r.md5,
+      sha1: r.sha1,
+      size: r.size,
+      mtime: r.mtime,
+      hashedAt: this.now().toISOString(),
+    };
+    const entries = await this.loadEntries(host);
+    const next = { ...entries, [r.path]: entry };
+    this.memCache.set(host, next);
+    await this.writeEntries(host, next);
+    return entry;
   }
 
   /**
@@ -338,4 +497,10 @@ function isHashEntry(v: unknown): v is HashEntry {
     typeof o.mtime === 'number' &&
     typeof o.hashedAt === 'string'
   );
+}
+
+/** Last path segment, used in diag logs to keep lines readable. */
+function pathBasename(path: string): string {
+  const i = path.lastIndexOf('/');
+  return i < 0 ? path : path.slice(i + 1);
 }

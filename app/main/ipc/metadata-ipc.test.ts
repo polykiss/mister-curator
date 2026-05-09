@@ -64,10 +64,13 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
     prefetchMetadata: ReturnType<typeof vi.fn>;
     clearMetadataCache: ReturnType<typeof vi.fn>;
     getBoxArtLocal: ReturnType<typeof vi.fn>;
+    getBoxArtBytes: ReturnType<typeof vi.fn>;
+    getRomsMetadata: ReturnType<typeof vi.fn>;
     ensureMetadataDatabase: ReturnType<typeof vi.fn>;
   };
   let emitProgress: ReturnType<typeof vi.fn>;
   let emitDbProgress: ReturnType<typeof vi.fn>;
+  let emitRomMetadataResolved: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     handlers.clear();
@@ -91,6 +94,22 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
       }),
       clearMetadataCache: vi.fn(async () => undefined),
       getBoxArtLocal: vi.fn(async (url: string) => `/cache/${url}`),
+      getBoxArtBytes: vi.fn(async () => new Uint8Array([1, 2, 3])),
+      getRomsMetadata: vi.fn(
+        async (
+          _coreId: string,
+          paths: readonly string[],
+          onResolved?: (e: {
+            path: string;
+            metadata: RomMetadata | null;
+            error: boolean;
+          }) => void,
+        ) => {
+          for (const p of paths) {
+            onResolved?.({ path: p, metadata: SAMPLE_META, error: false });
+          }
+        },
+      ),
       ensureMetadataDatabase: vi.fn(
         async (cb?: (e: { kind: string }) => void) => {
           cb?.({ kind: 'started' });
@@ -101,6 +120,7 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
     };
     emitProgress = vi.fn();
     emitDbProgress = vi.fn();
+    emitRomMetadataResolved = vi.fn();
 
     registerIpcHandlers(
       stubManager as never,
@@ -108,6 +128,7 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
       stubOrchestrator as never,
       emitProgress as never,
       emitDbProgress as never,
+      emitRomMetadataResolved as never,
     );
   });
 
@@ -117,6 +138,8 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
     expect(handlers.has(IPC_CHANNELS.prefetchMetadata)).toBe(true);
     expect(handlers.has(IPC_CHANNELS.clearMetadataCache)).toBe(true);
     expect(handlers.has(IPC_CHANNELS.getBoxArtLocal)).toBe(true);
+    expect(handlers.has(IPC_CHANNELS.getBoxArtBytes)).toBe(true);
+    expect(handlers.has(IPC_CHANNELS.prefetchRomsMetadata)).toBe(true);
     expect(handlers.has(IPC_CHANNELS.ensureMetadataDatabase)).toBe(true);
   });
 
@@ -198,6 +221,44 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
     );
   });
 
+  it('mister:getBoxArtBytes returns Uint8Array bytes for the renderer Blob path (PR #20)', async () => {
+    const h = handlers.get(IPC_CHANNELS.getBoxArtBytes);
+    const result = (await h!.handler({}, 'https://cdn/box.png')) as Uint8Array;
+    expect(result).toBeInstanceOf(Uint8Array);
+    expect(Array.from(result)).toEqual([1, 2, 3]);
+    expect(stubOrchestrator.getBoxArtBytes).toHaveBeenCalledWith(
+      'https://cdn/box.png',
+    );
+  });
+
+  it('mister:prefetchRomsMetadata streams one resolved event per path (PR #20 round 2)', async () => {
+    const h = handlers.get(IPC_CHANNELS.prefetchRomsMetadata);
+    await h!.handler({}, 'SNES', ['/p/a', '/p/b'], { operationId: 'op-1' });
+    expect(stubOrchestrator.getRomsMetadata).toHaveBeenCalledTimes(1);
+    expect(emitRomMetadataResolved).toHaveBeenCalledTimes(2);
+    const events = emitRomMetadataResolved.mock.calls.map(
+      (c) => c[0] as {
+        operationId: string;
+        path: string;
+        metadata: RomMetadata | null;
+        error: boolean;
+      },
+    );
+    expect(events.map((e) => e.path)).toEqual(['/p/a', '/p/b']);
+    expect(events.every((e) => e.operationId === 'op-1')).toBe(true);
+    expect(events.every((e) => !e.error)).toBe(true);
+  });
+
+  it('mister:prefetchRomsMetadata synthesises an operationId when caller omits one', async () => {
+    const h = handlers.get(IPC_CHANNELS.prefetchRomsMetadata);
+    await h!.handler({}, 'SNES', ['/p/a'], undefined);
+    const event = emitRomMetadataResolved.mock.calls[0]?.[0] as {
+      operationId: string;
+    };
+    expect(typeof event.operationId).toBe('string');
+    expect(event.operationId.length).toBeGreaterThan(0);
+  });
+
   it('mister:ensureMetadataDatabase returns the state and forwards progress', async () => {
     const h = handlers.get(IPC_CHANNELS.ensureMetadataDatabase);
     const result = (await h!.handler({})) as {
@@ -230,6 +291,7 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
       stubOrchestrator as never,
       emitProgress as never,
       emitDbProgress as never,
+      emitRomMetadataResolved as never,
     );
     const h = handlers.get(IPC_CHANNELS.ensureMetadataDatabase);
     await h!.handler({});

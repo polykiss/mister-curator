@@ -12,18 +12,41 @@ import {
   type ScreenScraperLookupQuery,
   type ScreenScraperService,
 } from '@app/main/metadata/screenscraper-service';
+import { diagLog } from '@shared/diag-log';
 import {
   NO_MATCH_TTL_MS,
   ROM_METADATA_SCHEMA_VERSION,
+  SENTINEL_AUTHORITATIVE_TTL_MS,
   type MetadataHint,
   type RomMetadata,
 } from '@shared/metadata-types';
 
+/**
+ * Round 9 (PR #20) — within-session SS-attempt dedup window. After
+ * a SS lookup fires for a given hash, subsequent lookups for the
+ * same hash within this window skip the SS network call and serve
+ * from disk. Defends against tight prefetch loops where the cache
+ * priority logic correctly says "refetch from SS" but the user
+ * triggers many prefetches in succession (folder-classification
+ * toggle, rapid core-switching). 60s is short enough to retry on
+ * any meaningful state change but long enough to break the loop.
+ */
+const SS_ATTEMPT_DEDUP_MS = 60_000;
+
 export interface MetadataServiceOptions {
   /** Test seam — defaults to `Date.now`. */
   readonly now?: () => number;
-  /** Expiry for `source: 'none'` sentinels. */
+  /** Backstop expiry for `source: 'none'` sentinels (default 30 days). */
   readonly noMatchTtlMs?: number;
+  /**
+   * Authoritative TTL for sentinels written when SS was available
+   * (default 7 days — see `SENTINEL_AUTHORITATIVE_TTL_MS`).
+   */
+  readonly authoritativeSentinelTtlMs?: number;
+  /**
+   * SS-attempt session dedup window (default 60s). Test seam.
+   */
+  readonly ssAttemptDedupMs?: number;
   /**
    * Single-line warning sink for ScreenScraper auth failures and
    * other diagnostics. Default: no log.
@@ -78,10 +101,20 @@ export interface ScreenScraperHint {
  */
 export class MetadataService {
   private readonly noMatchTtlMs: number;
+  private readonly authoritativeSentinelTtlMs: number;
+  private readonly ssAttemptDedupMs: number;
   private readonly now: () => number;
   private readonly logger: (message: string) => void;
   /** Per-hash in-flight gate. */
   private readonly inflight = new Map<string, Promise<RomMetadata | null>>();
+  /**
+   * Round 9 — within-process SS-attempt timestamps. Defends against
+   * the prefetch-loop scenario where a hash's authoritative-miss
+   * cache could in theory be re-asked of SS within seconds (e.g.
+   * legacy v4 records, or future logic changes). Reset on process
+   * restart; not persisted to disk.
+   */
+  private readonly lastSsAttemptByHash = new Map<string, number>();
 
   constructor(
     private readonly rootDir: string,
@@ -91,6 +124,9 @@ export class MetadataService {
     options: MetadataServiceOptions = {},
   ) {
     this.noMatchTtlMs = options.noMatchTtlMs ?? NO_MATCH_TTL_MS;
+    this.authoritativeSentinelTtlMs =
+      options.authoritativeSentinelTtlMs ?? SENTINEL_AUTHORITATIVE_TTL_MS;
+    this.ssAttemptDedupMs = options.ssAttemptDedupMs ?? SS_ATTEMPT_DEDUP_MS;
     this.now = options.now ?? Date.now;
     this.logger = options.logger ?? ((): void => {
       /* default: no log */
@@ -161,37 +197,100 @@ export class MetadataService {
   ): Promise<RomMetadata | null> {
     const ssAvailable = this.canQueryScreenScraper(ssHint);
     const cached = await this.readCache(hash);
-    if (cached !== null && !this.shouldRefetchCached(cached, ssAvailable)) {
+    diagLog('info', 'meta', '·', 'metadata-cache', {
+      hash: hash.slice(0, 12),
+      hit: cached !== null ? 1 : 0,
+      source: cached?.source,
+    });
+    const decision =
+      cached !== null
+        ? this.decideForCached(cached, ssAvailable)
+        : null;
+    if (cached !== null && decision !== null && !decision.refetch) {
+      diagLog('info', 'meta', '·', 'metadata-decision', {
+        hash: hash.slice(0, 12),
+        action: 'use-cache',
+        source: cached.source,
+        reason: decision.reason,
+      });
       return cached.source === 'none' ? null : cached;
+    }
+    if (cached !== null && decision !== null) {
+      diagLog('info', 'meta', '·', 'metadata-decision', {
+        hash: hash.slice(0, 12),
+        action: 'refetch',
+        reason: decision.reason,
+        cachedSource: cached.source,
+      });
+    } else {
+      diagLog('info', 'meta', '·', 'metadata-decision', {
+        hash: hash.slice(0, 12),
+        action: 'fetch',
+        reason: 'cold-cache',
+        ssAvailable: ssAvailable ? 1 : 0,
+      });
     }
 
     // Source priority 1: ScreenScraper.
     if (this.screenScraper !== null && ssHint !== undefined) {
       const status = this.screenScraper.getStatus();
+      diagLog('info', 'meta', '·', 'ss-attempt', {
+        hash: hash.slice(0, 12),
+        status,
+      });
       if (status === 'available') {
         const ssResult = await this.tryScreenScraper(hash, ssHint);
         if (ssResult !== null) {
+          diagLog('info', 'meta', '·', 'ss-result', {
+            hash: hash.slice(0, 12),
+            outcome: 'hit',
+          });
           await this.writeCache(hash, ssResult);
           return ssResult;
         }
+        diagLog('info', 'meta', '·', 'ss-result', {
+          hash: hash.slice(0, 12),
+          outcome: 'miss-or-fail',
+        });
         // SS returned null (legitimate no-match OR a transient
         // failure that latched the service). Fall through to
         // OpenVGDB — same outcome path as the SS-unavailable case.
       }
       // status is 'unavailable' / 'rate-limited' / 'quota-exceeded' →
       // skip SS silently and let OpenVGDB try.
+    } else {
+      diagLog('info', 'meta', '·', 'ss-skip', {
+        hash: hash.slice(0, 12),
+        reason:
+          this.screenScraper === null
+            ? 'no-service'
+            : 'no-hint',
+      });
     }
 
     // Source priority 2: OpenVGDB + libretro thumbnails.
     const fromDb = await this.openVgdb.getMetadataByHash(hash);
+    diagLog('info', 'meta', '·', 'openvgdb-result', {
+      hash: hash.slice(0, 12),
+      outcome: fromDb !== null ? 'hit' : 'miss',
+    });
     if (fromDb !== null) {
       const composed = this.composeFromOpenVgdb(hash, fromDb);
       await this.writeCache(hash, composed);
       return composed;
     }
 
-    // Both sources missed — sentinel.
-    const sentinel = this.buildSentinel(hash);
+    // Both sources missed — sentinel. Round 9 records the
+    // ssAvailable bit at write-time so the next read can distinguish
+    // "definitive SS no-match" (authoritative TTL) from "we couldn't
+    // even ask SS" (refetch on next opportunity).
+    diagLog('info', 'meta', '·', 'metadata-decision', {
+      hash: hash.slice(0, 12),
+      action: 'write-sentinel',
+      reason: 'both-sources-miss',
+      ssAvailableAtWrite: ssAvailable ? 1 : 0,
+    });
+    const sentinel = this.buildSentinel(hash, ssAvailable);
     await this.writeCache(hash, sentinel);
     return null;
   }
@@ -207,6 +306,24 @@ export class MetadataService {
     ssHint: ScreenScraperHint,
   ): Promise<RomMetadata | null> {
     if (this.screenScraper === null) return null;
+    // Round 9 — within-session SS-attempt dedup. If we asked SS
+    // about this hash within the dedup window already, skip the
+    // network call and return null (caller falls through to
+    // OpenVGDB or the cached sentinel). Defends against tight
+    // prefetch loops that bypass the disk cache layer.
+    const lastAttempt = this.lastSsAttemptByHash.get(hash);
+    if (
+      lastAttempt !== undefined &&
+      this.now() - lastAttempt < this.ssAttemptDedupMs
+    ) {
+      diagLog('info', 'meta', '·', 'ss-attempt-deduped', {
+        hash: hash.slice(0, 12),
+        ageMs: this.now() - lastAttempt,
+        windowMs: this.ssAttemptDedupMs,
+      });
+      return null;
+    }
+    this.lastSsAttemptByHash.set(hash, this.now());
     const query: ScreenScraperLookupQuery = {
       systemId: ssHint.systemId,
       md5: ssHint.md5,
@@ -303,7 +420,7 @@ export class MetadataService {
     };
   }
 
-  private buildSentinel(hash: string): RomMetadata {
+  private buildSentinel(hash: string, ssAvailableAtWrite: boolean): RomMetadata {
     return {
       version: ROM_METADATA_SCHEMA_VERSION,
       hash,
@@ -322,14 +439,20 @@ export class MetadataService {
       screenshotUrl: null,
       source: 'none',
       fetchedAt: new Date(this.now()).toISOString(),
+      ssAvailableAtWrite,
     };
   }
 
-  private isStaleSentinel(meta: RomMetadata): boolean {
-    if (meta.source !== 'none') return false;
+  /**
+   * Age of a sentinel in ms, or `null` for non-sentinel records or
+   * unparseable timestamps. `null` is treated as "infinitely old"
+   * by the callers (refetch).
+   */
+  private sentinelAgeMs(meta: RomMetadata): number | null {
+    if (meta.source !== 'none') return null;
     const fetchedAt = Date.parse(meta.fetchedAt);
-    if (!Number.isFinite(fetchedAt)) return true;
-    return this.now() - fetchedAt > this.noMatchTtlMs;
+    if (!Number.isFinite(fetchedAt)) return null;
+    return this.now() - fetchedAt;
   }
 
   /**
@@ -347,37 +470,63 @@ export class MetadataService {
   }
 
   /**
-   * Round 3: a cached record from a lower-priority source should be
-   * treated as a miss when a higher-priority source is currently
-   * reachable. Priority: `'screenscraper' > 'openvgdb' > 'none'`.
+   * Cache-priority decision. Round 9 inverted the sentinel handling
+   * from rounds 3–8.
    *
-   * The four cases:
-   *   - cached SS  → always a hit (highest priority — never downgrade
-   *     to OpenVGDB even when SS becomes unavailable; we'd rather
-   *     serve stable SS data than degrade with later libretro art).
-   *   - cached OpenVGDB → re-fetch when SS is currently queryable,
-   *     because we'd prefer SS's richer data on this call.
-   *   - cached `'none'` sentinel → re-fetch when stale (existing 30-
-   *     day TTL) OR when SS just became queryable (lets the user's
-   *     newly-configured creds reach a previously-unmatched ROM
-   *     without manually clearing the cache).
-   *   - cached SS but service now unavailable → still hit (the
-   *     screenscraper-first arm above guards on availability before
-   *     issuing a request; with no SS available we'd fall through to
-   *     OpenVGDB anyway, and degrading from SS data to OpenVGDB
-   *     data on every read is worse than serving the SS data we have).
+   * Non-sentinel sources:
+   *   - cached SS         → never refetch (highest priority).
+   *   - cached OpenVGDB   → refetch iff SS is currently queryable
+   *                         (upgrade path).
+   *
+   * Sentinels (`source === 'none'`) split on
+   * `ssAvailableAtWrite`:
+   *   - `true` (authoritative — SS was queried, returned no match)
+   *     → use cache for `authoritativeSentinelTtlMs` (default 7
+   *     days), then refetch once. Prevents the round-9 "boot.rom
+   *     loop" where every prefetch re-asked SS for a hash SS had
+   *     definitively said it didn't know.
+   *   - `false` (poisoned — SS was unavailable at write) → refetch
+   *     iff SS is currently queryable. With no SS, fall through to
+   *     the `noMatchTtlMs` backstop (default 30 days) so a
+   *     forever-credless setup doesn't pile up forever-stale
+   *     sentinels.
+   *   - `undefined` (legacy v4 record, pre-round-9) → treated as
+   *     poisoned. First-read after upgrade will refetch when SS is
+   *     available, and the rewrite carries the new bit forward.
+   *
+   * Returns `{ refetch, reason }` so the caller can log the
+   * decision without re-evaluating it.
    */
-  private shouldRefetchCached(
+  private decideForCached(
     cached: RomMetadata,
     ssAvailable: boolean,
-  ): boolean {
-    if (cached.source === 'screenscraper') return false;
-    if (cached.source === 'openvgdb') {
-      return ssAvailable;
+  ): { readonly refetch: boolean; readonly reason: string } {
+    if (cached.source === 'screenscraper') {
+      return { refetch: false, reason: 'cached-screenscraper' };
     }
-    // cached.source === 'none' (sentinel)
-    if (this.isStaleSentinel(cached)) return true;
-    return ssAvailable;
+    if (cached.source === 'openvgdb') {
+      return ssAvailable
+        ? { refetch: true, reason: 'cache-upgrade-ss-available' }
+        : { refetch: false, reason: 'cached-openvgdb-no-ss' };
+    }
+    // cached.source === 'none' — sentinel.
+    const age = this.sentinelAgeMs(cached);
+    const authoritative = cached.ssAvailableAtWrite === true;
+    if (authoritative) {
+      if (age === null || age > this.authoritativeSentinelTtlMs) {
+        return { refetch: true, reason: 'sentinel-authoritative-stale' };
+      }
+      return { refetch: false, reason: 'cached-ss-miss-authoritative' };
+    }
+    // Poisoned (false) or legacy (undefined) — refetch when SS
+    // becomes available, otherwise keep until the 30-day backstop.
+    if (ssAvailable) {
+      return { refetch: true, reason: 'sentinel-poisoned-refetch' };
+    }
+    if (age === null || age > this.noMatchTtlMs) {
+      return { refetch: true, reason: 'sentinel-poisoned-stale-30d' };
+    }
+    return { refetch: false, reason: 'sentinel-poisoned-no-ss' };
   }
 
   private async readCache(hash: string): Promise<RomMetadata | null> {

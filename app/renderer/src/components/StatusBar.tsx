@@ -3,27 +3,51 @@ import type { JSX } from 'react';
 
 import type { ConnectionStatus } from '@shared/types';
 
-import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
+import {
+  useConnection,
+  type AutoRetryProgress,
+} from '@app/renderer/src/contexts/ConnectionContext';
 import { useOperationStatus } from '@app/renderer/src/contexts/OperationStatusContext';
 import { cn } from '@app/renderer/src/lib/cn';
 
 /**
  * Bottom-of-window status bar. Two halves:
  *   - Left: the most recent in-flight operation message, or an idle
- *     summary ("Connected to <host>" / "Disconnected").
+ *     summary ("Connected to <host>" / "Reconnecting (1 of 3)…" /
+ *     "Disconnected").
  *   - Right: a small colored dot reflecting the connection status,
- *     mirroring the four-state machine from ConnectionStatus.
+ *     mirroring the four-state machine from ConnectionStatus —
+ *     except an in-flight auto-retry overrides the dot to amber
+ *     pulse so the user sees "we're working on it" even though the
+ *     underlying status flipped to 'disconnected'.
  *
- * Designed to be cheap to mount — both contexts are already in the
- * tree for everything else.
+ * PR #20 round 3: surfaces a visible reconnecting state during
+ * transient drops. Round 1/2 left the user staring at "Disconnected"
+ * with no signal that auto-retry was happening.
  */
 export function StatusBar(): JSX.Element {
   const { current, currentProgress } = useOperationStatus();
-  const { status, currentProfile } = useConnection();
+  const {
+    status,
+    currentProfile,
+    lostConnection,
+    autoRetry,
+    autoRetryFailed,
+  } = useConnection();
 
-  const idleMessage = idleMessageFor(status, currentProfile?.host);
+  const idleMessage = idleMessageFor(status, currentProfile?.host, {
+    lostConnection,
+    autoRetry,
+    autoRetryFailed,
+  });
   const baseMessage = current ?? idleMessage;
   const isBusy = current !== null;
+  // Reconnecting overrides the underlying disconnected dot so the
+  // user sees the progress signal instead of a "we gave up" gray.
+  const dotState: ConnectionStatus | 'reconnecting' =
+    autoRetry !== null || (lostConnection && !autoRetryFailed)
+      ? 'reconnecting'
+      : status;
 
   // Determinate progress when the active op is reporting ticks; falls
   // back to the indeterminate spinner otherwise.
@@ -77,16 +101,48 @@ export function StatusBar(): JSX.Element {
           aria-hidden
           className={cn(
             'inline-block size-1.5 shrink-0 rounded-full',
-            statusDotClass(status),
+            statusDotClass(dotState),
           )}
         />
-        <span aria-label={`Connection status: ${status}`}>{status}</span>
+        <span aria-label={`Connection status: ${dotState}`}>{dotState}</span>
       </div>
     </footer>
   );
 }
 
-function idleMessageFor(status: ConnectionStatus, host: string | undefined): string {
+/**
+ * Idle-message picker. Splits cleanly:
+ *   - reconnecting      → "Reconnecting (N of M)…" or "Connection lost,
+ *                          retrying…" before the first auto-retry
+ *                          attempt event arrives.
+ *   - autoRetryFailed   → "Connection lost. Reconnect or disconnect."
+ *   - default           → the four-state ConnectionStatus copy.
+ */
+export function idleMessageFor(
+  status: ConnectionStatus,
+  host: string | undefined,
+  resilience: {
+    readonly lostConnection: boolean;
+    readonly autoRetry: AutoRetryProgress | null;
+    readonly autoRetryFailed: boolean;
+  } = { lostConnection: false, autoRetry: null, autoRetryFailed: false },
+): string {
+  if (resilience.autoRetry !== null) {
+    const { attempt, totalAttempts } = resilience.autoRetry;
+    return host === undefined
+      ? `Reconnecting (${String(attempt)} of ${String(totalAttempts)})…`
+      : `Reconnecting to ${host} (${String(attempt)} of ${String(totalAttempts)})…`;
+  }
+  if (resilience.lostConnection && !resilience.autoRetryFailed) {
+    return host === undefined
+      ? 'Connection lost, retrying…'
+      : `Connection lost, retrying ${host}…`;
+  }
+  if (resilience.autoRetryFailed) {
+    return host === undefined
+      ? 'Connection lost. Reconnect or disconnect.'
+      : `Connection lost to ${host}. Reconnect or disconnect.`;
+  }
   switch (status) {
     case 'connected':
       return host === undefined ? 'Connected' : `Connected to ${host}`;
@@ -99,11 +155,12 @@ function idleMessageFor(status: ConnectionStatus, host: string | undefined): str
   }
 }
 
-function statusDotClass(status: ConnectionStatus): string {
-  switch (status) {
+function statusDotClass(state: ConnectionStatus | 'reconnecting'): string {
+  switch (state) {
     case 'connected':
       return 'bg-success';
     case 'connecting':
+    case 'reconnecting':
       return 'bg-warning animate-status-pulse';
     case 'error':
       return 'bg-destructive';

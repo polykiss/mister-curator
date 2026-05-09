@@ -7,10 +7,11 @@ import {
   MoreHorizontal,
   Settings,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
+import { diagLog } from '@shared/diag-log';
 import { isAutoDetectedSystemFile, isSystemFile } from '@shared/system-files';
 import type { CoreEntry, Rom } from '@shared/types';
 
@@ -24,10 +25,22 @@ function romKindForSystemCheck(kind: Rom['kind']): 'file' | 'folder' {
   return kind === 'file' ? 'file' : 'folder';
 }
 
+/** Last path segment, used in diagnostic logs to keep lines readable. */
+function shortName(path: string): string {
+  const i = path.lastIndexOf('/');
+  return i < 0 ? path : path.slice(i + 1);
+}
+
 import {
   RomRowMenu,
   type RomRowMenuItem,
 } from '@app/renderer/src/components/RomRowMenu';
+import {
+  RomMetadataInfoCells,
+  RomNameYearStack,
+  RomThumbnailCell,
+} from '@app/renderer/src/components/RomMetadataCells';
+import type { RomMetadata } from '@shared/metadata-types';
 import { Button } from '@app/renderer/src/components/ui/button';
 import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
@@ -136,6 +149,154 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   useEffect(() => {
     void ensureRoms(core.id, subPath);
   }, [core.id, subPath, ensureRoms]);
+
+  // PR #20 round 2 — list-view streaming prefetch. ONE batched IPC
+  // call per `roms` change, with per-path results streamed back as
+  // they settle. Replaces the round-1 per-row hooks that fired N
+  // parallel `getRomMetadata` calls and tipped over WiFi-attached
+  // MiSTers (each call cost a sequential SSH `statWitnesses`
+  // round-trip).
+  //
+  // State shape: undefined-by-key = not-yet-resolved (loading);
+  // present = settled (matched / unmatched / error).
+  const [metadataByPath, setMetadataByPath] = useState<
+    Record<string, { metadata: RomMetadata | null; error: boolean }>
+  >({});
+  useEffect(() => {
+    setMetadataByPath({});
+    if (!roms || roms.length === 0) return;
+    // Folder-kind ROMs aren't hashed by the metadata pipeline; the
+    // prefetch can skip them and the renderer falls through to
+    // filename rendering for them.
+    const filePaths = roms
+      .filter((r) => r.kind === 'file')
+      .map((r) => r.path);
+    if (filePaths.length === 0) return;
+    // Operation id scopes the streamed events to THIS pane mount —
+    // a quick navigation away starts a fresh prefetch with a new
+    // operationId; events from the in-flight prior prefetch are
+    // ignored by the listener filter.
+    const operationId = `pane-${core.id}-${String(Date.now())}-${String(
+      Math.random(),
+    )}`;
+    diagLog('info', 'roms-pane', '·', 'subscribed', {
+      opId: operationId,
+      coreId: core.id,
+      paths: filePaths.length,
+    });
+    const unsubscribe = window.mister.onRomMetadataResolved((event) => {
+      if (event.operationId !== operationId) return;
+      diagLog('info', 'roms-pane', '←', 'resolved-event', {
+        opId: operationId,
+        path: shortName(event.path),
+        source: event.metadata?.source ?? 'none',
+        error: event.error ? 1 : undefined,
+      });
+      setMetadataByPath((prev) => ({
+        ...prev,
+        [event.path]: { metadata: event.metadata, error: event.error },
+      }));
+    });
+    void window.mister.prefetchRomsMetadata(core.id, filePaths, {
+      operationId,
+    });
+    return () => {
+      diagLog('info', 'roms-pane', '·', 'unsubscribed', {
+        opId: operationId,
+      });
+      unsubscribe();
+    };
+  }, [roms, core.id]);
+
+  // PR #20 round 3 — resume after reconnect. When the connection comes
+  // back up (status flips to 'connected') AFTER a mid-prefetch drop,
+  // re-fire the prefetch for paths that still haven't settled OR
+  // that errored on the prior attempt. The orchestrator's hash and
+  // metadata caches are durable on disk, so the second pass hits warm
+  // cache for anything that DID resolve before the drop — this loop
+  // is genuinely just the still-pending residue.
+  //
+  // Triggered on the [status, roms, core.id] tuple — `status` is the
+  // signal that we just transitioned, and the ref guards against
+  // re-firing while still on the same connected session.
+  const wasConnectedRef = useRef(status === 'connected');
+  useEffect(() => {
+    const wasConnected = wasConnectedRef.current;
+    wasConnectedRef.current = status === 'connected';
+    // Round 5 — log every fire of the resume effect, before the
+    // early-return guards. Tells us whether the effect runs at all
+    // on reconnect and which guard (if any) blocks the resume.
+    diagLog('info', 'roms-pane', '·', 'resume-effect-fired', {
+      status,
+      wasConnected: wasConnected ? 1 : 0,
+      coreId: core.id,
+      romsCount: roms?.length ?? 0,
+    });
+    if (status !== 'connected') return;
+    if (wasConnected) return; // already on a live session, no resume
+    if (!roms || roms.length === 0) {
+      diagLog('info', 'roms-pane', '·', 'resume-skip-no-roms', {
+        coreId: core.id,
+      });
+      return;
+    }
+    const filePaths = roms.filter((r) => r.kind === 'file').map((r) => r.path);
+    const pending = filePaths.filter((p) => {
+      const entry = metadataByPath[p];
+      return entry === undefined || entry.error;
+    });
+    if (pending.length === 0) {
+      diagLog('info', 'roms-pane', '·', 'resume-skip-no-pending', {
+        coreId: core.id,
+      });
+      return;
+    }
+    // Clear error flags on the residue so rows flip back to skeleton
+    // while the re-fetch is in flight.
+    setMetadataByPath((prev) => {
+      const next = { ...prev };
+      for (const p of pending) {
+        if (next[p]?.error) delete next[p];
+      }
+      return next;
+    });
+    const operationId = `resume-${core.id}-${String(Date.now())}-${String(
+      Math.random(),
+    )}`;
+    diagLog('info', 'roms-pane', '·', 'resume-subscribed', {
+      opId: operationId,
+      coreId: core.id,
+      paths: pending.length,
+    });
+    const unsubscribe = window.mister.onRomMetadataResolved((event) => {
+      if (event.operationId !== operationId) return;
+      diagLog('info', 'roms-pane', '←', 'resolved-event', {
+        opId: operationId,
+        path: shortName(event.path),
+        source: event.metadata?.source ?? 'none',
+        error: event.error ? 1 : undefined,
+      });
+      setMetadataByPath((prev) => ({
+        ...prev,
+        [event.path]: { metadata: event.metadata, error: event.error },
+      }));
+    });
+    void window.mister.prefetchRomsMetadata(core.id, pending, {
+      operationId,
+    });
+    return () => {
+      diagLog('info', 'roms-pane', '·', 'resume-unsubscribed', {
+        opId: operationId,
+      });
+      unsubscribe();
+    };
+    // metadataByPath is intentionally OMITTED from deps — including it
+    // would re-fire this effect every time a single resolved event
+    // landed (since setMetadataByPath in the parent prefetch effect
+    // mutates it), starting a new resume prefetch on every per-row
+    // settle. We only want to resume on the connected-transition.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, roms, core.id]);
 
   // System-file classification is keyed on (filename, kind). Cache for
   // the current rom list so the renderer doesn't re-classify on every
@@ -737,8 +898,21 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                     onChange={(e) => onToggleAll(e.target.checked)}
                   />
                 </TableHead>
+                {/* PR #20 round 1: list-view enrichment. Four new
+                    columns flank the existing Name + actions:
+                    thumbnail, primary genre, rating. The Name cell
+                    stacks the SS-canonical name on top with the year
+                    underneath. Round 7 dropped the System column —
+                    inside a single-core view every row's system is
+                    the same (the core's canonical name), so the
+                    column was redundant noise. The `system` field
+                    stays in RomMetadata for the expanded-row state
+                    (round 8). The Size column from v0 was retired in
+                    round 1 — the density bar encodes size visually. */}
+                <TableHead className="w-16" aria-label="Box art" />
                 <TableHead>Name</TableHead>
-                <TableHead className="w-32 text-right">Size</TableHead>
+                <TableHead className="w-28">Genre</TableHead>
+                <TableHead className="w-14 text-right">Rating</TableHead>
                 {/* MoreHorizontal column. Sits left of the density+eye
                     right-edge stack so the row's primary visibility
                     toggle owns the far-right slot. */}
@@ -773,7 +947,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                   aria-label={`Back to ${backRow.parentLabel}`}
                   title={`Back to ${backRow.parentLabel}`}
                 >
-                  <TableCell colSpan={5} className="pl-4">
+                  <TableCell colSpan={7} className="pl-4">
                     <span className="inline-flex items-center gap-2 font-mono text-body-sm text-fg-muted">
                       <ArrowLeft className="size-3.5 shrink-0" strokeWidth={1.5} aria-hidden />
                       <span className="truncate">
@@ -787,6 +961,13 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                 const isSelected = selected.has(rom.filename);
                 const isSystem = systemFlags.get(rom.filename) === true;
                 const isDimmed = rom.hidden || isSystem;
+                // PR #20 round 2: metadata streamed from the parent's
+                // prefetch effect. undefined = loading; entry present
+                // = settled (metadata may be null = unmatched, or
+                // error = true = fetch failed).
+                const metadataState = metadataByPath[rom.path];
+                const metadata = metadataState?.metadata;
+                const fetchError = metadataState?.error ?? false;
                 return (
                   <TableRow
                     key={rom.filename}
@@ -814,6 +995,16 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         onChange={(e) => onToggleSelect(rom.filename, e.target.checked)}
                       />
                     </TableCell>
+                    {/* PR #20 round 2: thumbnail cell. Metadata
+                        streamed from the parent prefetch; box-art
+                        bytes still fetched per-row via useBoxArt
+                        once the URL resolves. */}
+                    <RomThumbnailCell
+                      rom={rom}
+                      dimmed={isDimmed}
+                      metadata={metadata}
+                      error={fetchError}
+                    />
                     <TableCell
                       className={cn(
                         'truncate',
@@ -834,46 +1025,52 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                           : undefined
                       }
                     >
-                      <span className="inline-flex items-center gap-2">
-                        {/* System rows carry a 14px gear icon on the
-                            left of the name. It inherits the row's
-                            current text color, so it dims along with
-                            the rest of the row. The SYSTEM/HIDDEN
-                            pill badges from PR #7 are gone. */}
-                        {isSystem ? (
-                          <Settings
-                            className="size-3.5 shrink-0"
-                            strokeWidth={1.5}
-                            aria-label="system file"
-                          />
-                        ) : rom.kind === 'folder-container' ? (
-                          <FolderOpen
-                            className="size-3.5 shrink-0 text-fg-muted"
-                            strokeWidth={1.5}
-                            aria-label="container folder"
-                          />
-                        ) : rom.kind === 'folder-atomic' ? (
-                          <Folder
-                            className="size-3.5 shrink-0 text-fg-muted"
-                            strokeWidth={1.5}
-                            aria-label="folder ROM"
-                          />
-                        ) : null}
-                        <span
-                          className={cn(
-                            'truncate',
-                            !isDimmed && 'text-fg',
-                          )}
-                        >
-                          {rom.displayName}
-                        </span>
-                      </span>
+                      {/* PR #20 round 1: name+year stack replaces the
+                          plain displayName. The metadata-derived name
+                          wins when present (SS canonical), falling
+                          back to the on-disk filename. The leading-
+                          icon slot keeps the existing system / folder
+                          decoration; the click handler stays on the
+                          parent TableCell so folder-container drill
+                          behavior is unchanged. */}
+                      <RomNameYearStack
+                        rom={rom}
+                        dimmed={isDimmed}
+                        metadata={metadata}
+                        error={fetchError}
+                        leadingIcon={
+                          isSystem ? (
+                            <Settings
+                              className="size-3.5 shrink-0"
+                              strokeWidth={1.5}
+                              aria-label="system file"
+                            />
+                          ) : rom.kind === 'folder-container' ? (
+                            <FolderOpen
+                              className="size-3.5 shrink-0 text-fg-muted"
+                              strokeWidth={1.5}
+                              aria-label="container folder"
+                            />
+                          ) : rom.kind === 'folder-atomic' ? (
+                            <Folder
+                              className="size-3.5 shrink-0 text-fg-muted"
+                              strokeWidth={1.5}
+                              aria-label="folder ROM"
+                            />
+                          ) : null
+                        }
+                      />
                     </TableCell>
-                    <TableCell className="text-right">
-                      <span className="font-mono text-body-sm text-fg-muted tabular">
-                        {formatBytes(rom.sizeBytes)}
-                      </span>
-                    </TableCell>
+                    {/* PR #20 round 1: system / genre / rating cells.
+                        The v0 numeric Size column is retired — the
+                        density bar already encodes size visually,
+                        which buys back horizontal room for these. */}
+                    <RomMetadataInfoCells
+                      rom={rom}
+                      dimmed={isDimmed}
+                      metadata={metadata}
+                      error={fetchError}
+                    />
                     {/* MoreHorizontal lives left of the density+eye
                         right-edge stack (Round 3 / SYSTEM.md §5). The
                         eye toggle owns the far-right slot so the

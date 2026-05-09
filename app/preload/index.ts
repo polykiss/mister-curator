@@ -15,6 +15,7 @@ import type {
   MetadataPrefetchEvent,
   MisterApi,
   PickedKeyFile,
+  RomMetadataResolvedEvent,
   RomVisibilityChangeWire,
   SystemFileMarkChangeWire,
 } from '@shared/preload-api';
@@ -188,6 +189,8 @@ const api: MisterApi = {
   clearMetadataCache: () => invoke<void>(IPC_CHANNELS.clearMetadataCache),
   getBoxArtLocal: (url: string) =>
     invoke<string | null>(IPC_CHANNELS.getBoxArtLocal, url),
+  getBoxArtBytes: (url: string) =>
+    invoke<Uint8Array | null>(IPC_CHANNELS.getBoxArtBytes, url),
   onMetadataPrefetchProgress: (
     handler: (event: MetadataPrefetchEvent) => void,
   ) => {
@@ -222,6 +225,31 @@ const api: MisterApi = {
         IPC_CHANNELS.metadataDatabaseProgress,
         listener,
       );
+    };
+  },
+  prefetchRomsMetadata: (
+    coreId: string,
+    paths: readonly string[],
+    options?: { readonly operationId?: string },
+  ) =>
+    invoke<void>(
+      IPC_CHANNELS.prefetchRomsMetadata,
+      coreId,
+      paths,
+      options,
+    ),
+  onRomMetadataResolved: (
+    handler: (event: RomMetadataResolvedEvent) => void,
+  ) => {
+    const listener = (
+      _event: unknown,
+      payload: RomMetadataResolvedEvent,
+    ): void => {
+      handler(payload);
+    };
+    ipcRenderer.on(IPC_CHANNELS.romMetadataResolved, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.romMetadataResolved, listener);
     };
   },
 };

@@ -30,6 +30,7 @@ import type {
   RomVisibilityChange,
   SystemFileMarkChange,
 } from '@shared/mister-client';
+import { diagLog } from '@shared/diag-log';
 import { EMPTY_FOLDER_CLASSIFICATIONS } from '@shared/folder-classifications';
 import { EMPTY_SYSTEM_FILES_MARKS } from '@shared/system-files-marks';
 import { witnessesMatch } from '@app/main/cache/cache-types';
@@ -227,7 +228,16 @@ export class ConnectionManager {
         throw new Error(`Profile not found: ${profileId}`);
       }
       const secret: MisterSecret = await this.store.getSecret(profileId);
+      diagLog('info', 'conn', '→', 'connecting', {
+        profileId,
+        host: profile.host,
+      });
       await this.client.connect(profile, secret);
+      diagLog('info', 'conn', '·', 'transport-ready', {
+        profileId,
+        host: profile.host,
+        ms: Date.now() - startedAt,
+      });
       this.currentProfileId = profileId;
 
       // Hook the unexpected-disconnect channel from the freshly-
@@ -301,8 +311,19 @@ export class ConnectionManager {
       }
 
       this.setStatus('connected');
+      diagLog('info', 'conn', '←', 'connected', {
+        profileId,
+        host: profile.host,
+        ms: Date.now() - startedAt,
+        reappliedCount,
+      });
       return { reappliedCount };
     } catch (err) {
+      diagLog('error', 'conn', '✗', 'connect-failed', {
+        profileId,
+        ms: Date.now() - startedAt,
+        err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
       this.currentProfileId = null;
       this.setStatus('error');
       throw err;
@@ -315,6 +336,9 @@ export class ConnectionManager {
     // Clean disconnect — cancel any in-flight auto-retry first so a
     // pending reconnect doesn't race the user's intent.
     this.autoRetryToken += 1;
+    diagLog('info', 'conn', '·', 'user-disconnect', {
+      profileId: this.currentProfileId ?? undefined,
+    });
     if (this.unsubscribeUnexpectedDisconnect) {
       this.unsubscribeUnexpectedDisconnect();
       this.unsubscribeUnexpectedDisconnect = null;
@@ -969,8 +993,23 @@ export class ConnectionManager {
   private handleUnexpectedDisconnect(): void {
     const profileId = this.currentProfileId;
     if (profileId === null) return;
-    this.setStatus('disconnected');
+    diagLog('warn', 'conn', '✗', 'unexpected-disconnect', { profileId });
+    // Round 5 — emit the event BEFORE flipping status. The renderer
+    // delivers IPC events as separate tasks, so a `setStatus(...)`-
+    // before-event order produces a brief render where the renderer
+    // sees `status='disconnected' && lostConnection=false`. The
+    // CoresContext wipe-effect's transient-drop guard checks
+    // `lostConnection`, so that inter-event window passed the wipe
+    // guard and nullified `romsByCore` even on transient drops —
+    // which in turn tore down the initial-prefetch effect (logged
+    // `roms-pane unsubscribed` in round 4) and prevented the resume
+    // effect from re-firing on reconnect (no `roms` to enumerate).
+    //
+    // Emitting the event first means the renderer sees
+    // `lostConnection=true` BEFORE `status='disconnected'`, so the
+    // wipe guard holds across the cycle.
     this.emitConnectionEvent({ type: 'disconnected-unexpected', profileId });
+    this.setStatus('disconnected');
     void this.runAutoRetry(profileId);
   }
 
@@ -1013,6 +1052,12 @@ export class ConnectionManager {
         setTimeout(resolve, delay);
       });
       if (token !== this.autoRetryToken) return;
+      diagLog('info', 'conn', '→', 'reconnect-attempt', {
+        profileId,
+        attempt: attempt + 1,
+        totalAttempts: RECONNECT_BACKOFF_MS.length,
+        delayMs: delay,
+      });
       this.emitConnectionEvent({
         type: 'auto-retry-attempt',
         profileId,
@@ -1074,14 +1119,28 @@ export class ConnectionManager {
           // explicit refresh will catch anything we missed.
         }
         this.setStatus('connected');
+        diagLog('info', 'conn', '←', 'reconnect-success', {
+          profileId,
+          attempt: attempt + 1,
+        });
         this.emitConnectionEvent({ type: 'reconnected', profileId });
         return;
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
+        diagLog('warn', 'conn', '✗', 'reconnect-attempt-failed', {
+          profileId,
+          attempt: attempt + 1,
+          err: lastError,
+        });
       }
     }
 
     if (token !== this.autoRetryToken) return;
+    diagLog('error', 'conn', '✗', 'reconnect-exhausted', {
+      profileId,
+      attempts: RECONNECT_BACKOFF_MS.length,
+      err: lastError,
+    });
     this.emitConnectionEvent({
       type: 'auto-retry-failed',
       profileId,

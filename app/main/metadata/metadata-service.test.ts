@@ -921,4 +921,252 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       expect(result?.name).toBe('Super Mario World (cached OpenVGDB)');
     });
   });
+
+  describe('round 9 — sentinel ssAvailableAtWrite split', () => {
+    /**
+     * Helpers reused by every round-9 test. SS_HINT carries the
+     * shape an SS-eligible call would supply; the SS service stub's
+     * `lookup` is how we observe whether SS was queried.
+     */
+    function makeSS(opts: {
+      status?: 'available' | 'unavailable' | 'rate-limited' | 'quota-exceeded';
+      result?: ScreenScraperGame | null;
+    } = {}): {
+      svc: ScreenScraperService;
+      lookupCalls: ScreenScraperLookupQuery[];
+    } {
+      const lookupCalls: ScreenScraperLookupQuery[] = [];
+      const stub = {
+        getStatus: vi.fn(() => opts.status ?? 'available'),
+        lookup: vi.fn(async (q: ScreenScraperLookupQuery) => {
+          lookupCalls.push(q);
+          return opts.result ?? null;
+        }),
+      } as unknown as ScreenScraperService;
+      return { svc: stub, lookupCalls };
+    }
+
+    const SS_HINT_R9 = {
+      systemId: 4,
+      md5: HASH,
+      sha1: 'b'.repeat(40),
+      crc32: undefined,
+      romName: 'Some ROM.sfc',
+      romSize: 1024,
+    };
+
+    async function seedCache(meta: RomMetadata): Promise<void> {
+      const dirHash = HASH.slice(0, 2);
+      await fs.mkdir(join(dir, 'by-hash', dirHash), { recursive: true });
+      await fs.writeFile(
+        join(dir, 'by-hash', dirHash, `${HASH}.json`),
+        JSON.stringify(meta),
+      );
+    }
+
+    function buildSentinel(
+      ssAvailableAtWrite: boolean | undefined,
+      fetchedAt = new Date().toISOString(),
+    ): RomMetadata {
+      const base: RomMetadata = {
+        version: 4,
+        hash: HASH,
+        name: '(no match)',
+        system: '',
+        year: null,
+        publisher: null,
+        developer: null,
+        genre: null,
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: null,
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        source: 'none',
+        fetchedAt,
+      };
+      if (ssAvailableAtWrite === undefined) return base;
+      return { ...base, ssAvailableAtWrite };
+    }
+
+    it('authoritative sentinel (ssAvailableAtWrite=true) within TTL → use cache, no SS call', async () => {
+      // The boot.rom-loop fix: a sentinel written when SS was
+      // available is a definitive no-match. Within 7 days we serve
+      // the cached null without re-asking SS.
+      await seedCache(buildSentinel(true));
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ result: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      const result = await svc.getMetadata(HASH, {}, SS_HINT_R9);
+      expect(result).toBeNull();
+      expect(ss.lookupCalls).toHaveLength(0);
+      expect(m.dbCalls).toHaveLength(0);
+    });
+
+    it('authoritative sentinel past TTL → refetch (retry once)', async () => {
+      // Past 7 days, give SS another chance — the upstream might
+      // have indexed the ROM in the meantime.
+      const oldFetchedAt = new Date(
+        Date.now() - 8 * 24 * 60 * 60 * 1000,
+      ).toISOString();
+      await seedCache(buildSentinel(true, oldFetchedAt));
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ result: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      await svc.getMetadata(HASH, {}, SS_HINT_R9);
+      expect(ss.lookupCalls).toHaveLength(1);
+    });
+
+    it('poisoned sentinel (ssAvailableAtWrite=false), SS now available → refetch', async () => {
+      // The "user added SS creds after a credless run" recovery
+      // path. Sentinels written without SS get the next available
+      // SS call.
+      await seedCache(buildSentinel(false));
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ result: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      await svc.getMetadata(HASH, {}, SS_HINT_R9);
+      expect(ss.lookupCalls).toHaveLength(1);
+    });
+
+    it('legacy sentinel (ssAvailableAtWrite=undefined) treated as poisoned', async () => {
+      // Pre-round-9 v4 records lack the bit. Treat them as poisoned
+      // so first-read after upgrade gets an opportunistic SS call.
+      await seedCache(buildSentinel(undefined));
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ result: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      await svc.getMetadata(HASH, {}, SS_HINT_R9);
+      expect(ss.lookupCalls).toHaveLength(1);
+    });
+
+    it('poisoned sentinel, SS still unavailable → use cache (no upgrade path)', async () => {
+      await seedCache(buildSentinel(false));
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ status: 'unavailable' });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      const result = await svc.getMetadata(HASH, {}, SS_HINT_R9);
+      expect(result).toBeNull();
+      expect(ss.lookupCalls).toHaveLength(0);
+      expect(m.dbCalls).toHaveLength(0);
+    });
+
+    it('newly-written sentinel records ssAvailableAtWrite=true when SS was available and missed', async () => {
+      // Cold path: cache empty, SS available + misses, OpenVGDB
+      // empty. The written sentinel must carry true so the next
+      // read uses the authoritative TTL path.
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ result: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      await svc.getMetadata(HASH, {}, SS_HINT_R9);
+      const cachePath = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
+      const written = JSON.parse(
+        await fs.readFile(cachePath, 'utf-8'),
+      ) as RomMetadata;
+      expect(written.source).toBe('none');
+      expect(written.ssAvailableAtWrite).toBe(true);
+    });
+
+    it('newly-written sentinel records ssAvailableAtWrite=false when SS was unavailable', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ status: 'unavailable' });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      await svc.getMetadata(HASH, {}, SS_HINT_R9);
+      const cachePath = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
+      const written = JSON.parse(
+        await fs.readFile(cachePath, 'utf-8'),
+      ) as RomMetadata;
+      expect(written.source).toBe('none');
+      expect(written.ssAvailableAtWrite).toBe(false);
+    });
+  });
+
+  describe('round 9 — within-session SS-attempt dedup', () => {
+    function makeSS(): {
+      svc: ScreenScraperService;
+      lookupCalls: number;
+    } {
+      const state = { calls: 0 };
+      const stub = {
+        getStatus: vi.fn(() => 'available' as const),
+        lookup: vi.fn(async () => {
+          state.calls += 1;
+          return null;
+        }),
+      } as unknown as ScreenScraperService;
+      return {
+        svc: stub,
+        get lookupCalls() {
+          return state.calls;
+        },
+      };
+    }
+
+    const SS_HINT_R9 = {
+      systemId: 4,
+      md5: HASH,
+      sha1: 'b'.repeat(40),
+      crc32: undefined,
+      romName: 'Some ROM.sfc',
+      romSize: 1024,
+    };
+
+    it('two consecutive getMetadata calls within window → only one SS network call', async () => {
+      // Test seam: time stays put across both calls so the second is
+      // unambiguously inside the dedup window.
+      const fixedNow = 1_700_000_000_000;
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS();
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+        { now: () => fixedNow, ssAttemptDedupMs: 60_000 },
+      );
+      await svc.getMetadata(HASH, {}, SS_HINT_R9);
+      // Wipe the disk cache so the second call would otherwise
+      // re-enter the SS path.
+      await fs.rm(join(dir, 'by-hash'), { recursive: true, force: true });
+      await svc.getMetadata(HASH, {}, SS_HINT_R9);
+      expect(ss.lookupCalls).toBe(1);
+    });
+
+    it('past the dedup window → next call hits SS again', async () => {
+      let now = 1_700_000_000_000;
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS();
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+        { now: () => now, ssAttemptDedupMs: 60_000 },
+      );
+      await svc.getMetadata(HASH, {}, SS_HINT_R9);
+      await fs.rm(join(dir, 'by-hash'), { recursive: true, force: true });
+      now += 60_001; // step just past the window
+      await svc.getMetadata(HASH, {}, SS_HINT_R9);
+      expect(ss.lookupCalls).toBe(2);
+    });
+
+    it('different hashes are deduped independently', async () => {
+      const otherHash = 'c'.repeat(32);
+      const fixedNow = 1_700_000_000_000;
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS();
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        ss.svc,
+        { now: () => fixedNow, ssAttemptDedupMs: 60_000 },
+      );
+      await svc.getMetadata(HASH, {}, SS_HINT_R9);
+      await svc.getMetadata(otherHash, {}, { ...SS_HINT_R9, md5: otherHash });
+      expect(ss.lookupCalls).toBe(2);
+    });
+  });
 });

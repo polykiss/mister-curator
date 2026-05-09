@@ -130,7 +130,7 @@ interface CoresContextValue {
 const CoresContext = createContext<CoresContextValue | null>(null);
 
 export function CoresProvider({ children }: { children: ReactNode }): JSX.Element {
-  const { status } = useConnection();
+  const { status, lostConnection, autoRetry, autoRetryFailed } = useConnection();
   const { run: runWithStatus, runWithProgress } = useOperationStatus();
   const [cores, setCores] = useState<readonly CoreEntry[] | null>(null);
   const [coresLoading, setCoresLoading] = useState(false);
@@ -710,20 +710,28 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     [systemFilesMarks, runWithStatus],
   );
 
-  // Reset whenever we leave the connected state.
+  // Reset whenever we leave the connected state for a NON-transient
+  // reason. PR #20 round 3: a mid-session SSH drop with auto-retry in
+  // flight (`lostConnection || autoRetry`) keeps the cached cores +
+  // selected core + ROM list alive so a successful auto-reconnect
+  // returns the user to exactly where they were. Only wipe on a
+  // user-initiated disconnect (back to profile picker) or after the
+  // auto-retry budget is exhausted (`autoRetryFailed`) — either way
+  // the cached state has lost its session anchor and the user has to
+  // restart the connect flow.
   useEffect(() => {
-    if (status !== 'connected') {
-      setCores(null);
-      setSelectedCoreId(null);
-      setRomsByCore({});
-      setRomsLoading({});
-      setCoresError(null);
-      setCoresLoading(false);
-      setSystemFilesMarks(EMPTY_SYSTEM_FILES_MARKS);
-      setPendingCoreIds(new Set());
-      setLedgerCoreIds(new Set());
-    }
-  }, [status]);
+    if (status === 'connected') return;
+    if (lostConnection || autoRetry !== null) return;
+    setCores(null);
+    setSelectedCoreId(null);
+    setRomsByCore({});
+    setRomsLoading({});
+    setCoresError(null);
+    setCoresLoading(false);
+    setSystemFilesMarks(EMPTY_SYSTEM_FILES_MARKS);
+    setPendingCoreIds(new Set());
+    setLedgerCoreIds(new Set());
+  }, [status, lostConnection, autoRetry, autoRetryFailed]);
 
   // Load cores on entering the connected state.
   //

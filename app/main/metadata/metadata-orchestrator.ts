@@ -1,10 +1,18 @@
-import type { HashClient, HashService } from '@app/main/metadata/hash-service';
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+
+import type {
+  HashClient,
+  HashEntry,
+  HashService,
+} from '@app/main/metadata/hash-service';
 import type { ImageCache } from '@app/main/metadata/image-cache';
 import type { MetadataService } from '@app/main/metadata/metadata-service';
 import type {
   OpenVGDBProgressEvent,
   OpenVGDBService,
 } from '@app/main/metadata/openvgdb-service';
+import { diagLog } from '@shared/diag-log';
 import type {
   MetadataHint,
   PrefetchProgress,
@@ -42,6 +50,17 @@ export interface ActiveSession {
 export interface MetadataDatabaseState {
   readonly ready: boolean;
   readonly downloadInProgress: boolean;
+}
+
+/**
+ * One per-path event emitted by `getRomsMetadata` as each ROM
+ * settles. `error: true` distinguishes a fetch failure (e.g., SSH
+ * disconnect) from a clean no-match (`metadata: null, error: false`).
+ */
+export interface RomMetadataResolvedEvent {
+  readonly path: string;
+  readonly metadata: RomMetadata | null;
+  readonly error: boolean;
 }
 
 /**
@@ -166,6 +185,293 @@ export class MetadataOrchestrator {
   }
 
   /**
+   * PR #20 round 2 — list-view streaming prefetch. Hashes ALL paths in
+   * one SSH round-trip via the existing batched `hashService.getHash`,
+   * then iterates per-path metadata sequentially, emitting one
+   * `onResolved` event as each path settles.
+   *
+   * The shape replaces the round-1 per-row IPC pattern that fired
+   * N parallel `getRomMetadata(coreId, romPath)` calls. Each of those
+   * called `hashService.getHash([single])` which serialized through
+   * the per-host gate but still issued one SSH `statWitnesses`
+   * round-trip per row — 32 sequential SSH commands for a 32-row pane,
+   * which overwhelmed WiFi-attached MiSTers and tripped the 10s op
+   * deadline.
+   *
+   * Now: one batched `statWitnesses(allPaths)` (and at most one
+   * `hashPaths(allPaths)` for cold paths) + N local-cache metadata
+   * lookups. The SS rate-limit (1 req/sec) still gates cold metadata
+   * fetches, so a cohort of 30 unmatched ROMs takes ~30s to fully
+   * resolve — but every row that hits warm cache (the common case
+   * after first scan) emits its event within milliseconds, and
+   * cold-path SS rate-limiting is a property of the upstream API
+   * rather than something we should fight here.
+   *
+   * Failure modes:
+   *   - No active session → emit `{ metadata: null, error: false }`
+   *     for every path. Treat the whole batch as unmatched.
+   *   - Hash batch throws (e.g., SSH dropped mid-flight) → emit
+   *     `{ metadata: null, error: true }` for every path so the
+   *     renderer can show a per-row error indicator instead of
+   *     perpetual skeletons.
+   *   - Per-path metadata throws → emit `{ ..., error: true }` for
+   *     just that path; subsequent paths still get a chance.
+   */
+  async getRomsMetadata(
+    coreId: string,
+    romPaths: readonly string[],
+    onResolved?: (event: RomMetadataResolvedEvent) => void,
+  ): Promise<void> {
+    if (romPaths.length === 0) return;
+    diagLog('info', 'prefetch', '→', 'start', {
+      coreId,
+      paths: romPaths.length,
+    });
+    const startWall = Date.now();
+    let resolved = 0;
+    let errors = 0;
+    let hashSkipped = 0;
+    const session = this.getActiveSession();
+    if (session === null) {
+      diagLog('warn', 'prefetch', '·', 'no-session', { coreId });
+      for (const path of romPaths) {
+        onResolved?.({ path, metadata: null, error: false });
+      }
+      return;
+    }
+
+    // Round 11 (PR #20): probe whether THIS coreId resolves to any
+    // metadata source. If not (mame, hbmame, AO486, etc.) the hash
+    // buys us nothing — SS won't be queried (no systemeid) and
+    // OpenVGDB is hash-keyed but only covers cartridge consoles
+    // we already map to SS. Skip BOTH the mtime batch AND the
+    // per-path hash compute; emit synthetic-keyed sentinels via
+    // the existing MetadataService cache machinery so we don't
+    // re-decide on every prefetch. For mame's 650 paths this
+    // collapses ~5 minutes of cold hash compute to a single SSH
+    // skip + 650 cache reads/writes (~600 ms total).
+    const wholeCoreUnmappable =
+      this.resolveSystemId({ romPath: romPaths[0]!, coreId }) === null;
+
+    // Round 9 (PR #20): batched mtime check + per-path compute.
+    // Round 5 collapsed the hash phase to per-ROM `getHash([single])`
+    // because a batched hash exec containing a multi-GB ROM would
+    // push the whole batch past the 120s hash timeout. That fix
+    // worked, but EVERY per-ROM call still cost a per-path SSH
+    // `statWitnesses` round-trip (32 paths × ~470 ms = 15 s wall on
+    // a fully-cached SNES core).
+    //
+    // Round 9 splits the cheap-and-batchable (mtime stat) from the
+    // expensive-and-isolatable (hash compute):
+    //   1. ONE batched `checkCachedMtimes` for all paths — single
+    //      SSH `statWitnesses` exec.
+    //   2. Per-path `computeHash` only for the residue (uncached
+    //      paths or ones whose mtime drifted).
+    // Cached cores collapse to ~200 ms wall; cold cores keep the
+    // round-5 per-ROM isolation (so the multi-GB Collection still
+    // only fails its own row).
+    let mtimeMap: Map<string, HashEntry | null>;
+    if (wholeCoreUnmappable) {
+      diagLog('info', 'prefetch', '·', 'skip-hash-batch', {
+        coreId,
+        reason: 'no-coverage',
+        paths: romPaths.length,
+      });
+      mtimeMap = new Map(romPaths.map((p) => [p, null]));
+    } else {
+      const mtimeCheckStart = Date.now();
+      try {
+        mtimeMap = await this.hashService.checkCachedMtimes(
+          session.client,
+          session.host,
+          romPaths,
+        );
+        diagLog('info', 'prefetch', '·', 'mtime-batch done', {
+          coreId,
+          ms: Date.now() - mtimeCheckStart,
+          validated: [...mtimeMap.values()].filter((v) => v !== null).length,
+          needsHash: [...mtimeMap.values()].filter((v) => v === null).length,
+        });
+      } catch (err) {
+        // Batched stat failed — fall back to per-ROM compute (same
+        // shape as round 5). Mark all paths as "needs hash" so the
+        // loop below treats each individually.
+        diagLog('error', 'prefetch', '✗', 'mtime-batch failed', {
+          coreId,
+          ms: Date.now() - mtimeCheckStart,
+          err: err instanceof Error ? err.message : String(err),
+        });
+        mtimeMap = new Map(romPaths.map((p) => [p, null]));
+      }
+    }
+
+    for (const path of romPaths) {
+      const perRomStart = Date.now();
+      diagLog('info', 'meta', '·', 'path-start', {
+        coreId,
+        path: basename(path),
+      });
+
+      // Round 11 short-circuit: no metadata source can use a hash
+      // for this core, so skip the compute and let the
+      // synthetic-key sentinel write/read via the existing cache.
+      // The synthetic key is `noss-<sha1(coreId:path)>` — clearly
+      // distinguishable from a real md5 (which is 32 hex chars
+      // with no prefix), so cache files can be greppe'd to find
+      // synthetic-only entries.
+      const systemId = this.resolveSystemId({ romPath: path, coreId });
+      if (systemId === null) {
+        diagLog('info', 'meta', '·', 'system-map-miss', {
+          coreId,
+          path: basename(path),
+        });
+        diagLog('info', 'prefetch', '·', 'skip-hash', {
+          coreId,
+          path: basename(path),
+          reason: 'no-coverage',
+        });
+        const syntheticKey = makeSyntheticCacheKey(coreId, path);
+        let metadata: RomMetadata | null;
+        try {
+          metadata = await this.metadataService.getMetadata(
+            syntheticKey,
+            {},
+            undefined,
+          );
+        } catch (err) {
+          diagLog('error', 'prefetch', '✗', 'synthetic-lookup failed', {
+            coreId,
+            path: basename(path),
+            ms: Date.now() - perRomStart,
+            err: err instanceof Error ? err.message : String(err),
+          });
+          diagLog('info', 'meta', '·', 'path-end', {
+            coreId,
+            path: basename(path),
+            source: 'error',
+            ms: Date.now() - perRomStart,
+          });
+          onResolved?.({ path, metadata: null, error: true });
+          errors += 1;
+          continue;
+        }
+        diagLog('info', 'meta', '·', 'path-end', {
+          coreId,
+          path: basename(path),
+          source: 'synthetic-sentinel',
+          ms: Date.now() - perRomStart,
+        });
+        onResolved?.({ path, metadata, error: false });
+        resolved += 1;
+        hashSkipped += 1;
+        continue;
+      }
+
+      let entry: HashEntry | undefined;
+      const cachedEntry = mtimeMap.get(path);
+      if (cachedEntry !== null && cachedEntry !== undefined) {
+        // Mtime-validated cache hit — no SSH for this path.
+        entry = cachedEntry;
+      } else {
+        try {
+          entry = await this.hashService.computeHash(
+            session.client,
+            session.host,
+            path,
+          );
+        } catch (err) {
+          diagLog('error', 'prefetch', '✗', 'hash failed', {
+            coreId,
+            path: basename(path),
+            ms: Date.now() - perRomStart,
+            err: err instanceof Error ? err.message : String(err),
+          });
+          diagLog('info', 'meta', '·', 'path-end', {
+            coreId,
+            path: basename(path),
+            source: 'error',
+            ms: Date.now() - perRomStart,
+          });
+          onResolved?.({ path, metadata: null, error: true });
+          errors += 1;
+          continue;
+        }
+      }
+      if (entry === undefined) {
+        diagLog('info', 'prefetch', '·', 'unmatched', {
+          coreId,
+          path: basename(path),
+          reason: 'no-hash',
+        });
+        diagLog('info', 'meta', '·', 'path-end', {
+          coreId,
+          path: basename(path),
+          source: 'unmatched',
+          ms: Date.now() - perRomStart,
+        });
+        onResolved?.({ path, metadata: null, error: false });
+        resolved += 1;
+        continue;
+      }
+      const ssHint = {
+        systemId,
+        md5: entry.md5,
+        sha1: entry.sha1,
+        crc32: undefined,
+        romName: basename(path),
+        romSize: entry.size,
+      };
+      const lookupStart = Date.now();
+      try {
+        const metadata = await this.metadataService.getMetadata(
+          entry.md5,
+          {},
+          ssHint,
+        );
+        diagLog('info', 'prefetch', '·', 'lookup', {
+          coreId,
+          path: basename(path),
+          source: metadata?.source ?? 'none',
+          ms: Date.now() - lookupStart,
+          totalMs: Date.now() - perRomStart,
+        });
+        diagLog('info', 'meta', '·', 'path-end', {
+          coreId,
+          path: basename(path),
+          source: metadata?.source ?? 'none',
+          ms: Date.now() - perRomStart,
+        });
+        onResolved?.({ path, metadata, error: false });
+        resolved += 1;
+      } catch (err) {
+        diagLog('error', 'prefetch', '✗', 'lookup failed', {
+          coreId,
+          path: basename(path),
+          ms: Date.now() - lookupStart,
+          err: err instanceof Error ? err.message : String(err),
+        });
+        diagLog('info', 'meta', '·', 'path-end', {
+          coreId,
+          path: basename(path),
+          source: 'error',
+          ms: Date.now() - perRomStart,
+        });
+        onResolved?.({ path, metadata: null, error: true });
+        errors += 1;
+      }
+    }
+
+    diagLog('info', 'prefetch', '←', 'complete', {
+      coreId,
+      ms: Date.now() - startWall,
+      resolved,
+      errors,
+      hashSkipped,
+      total: romPaths.length,
+    });
+  }
+
+  /**
    * Make the OpenVGDB database available. Returns the current state
    * synchronously after kicking off a download (if needed) — the
    * renderer subscribes to `onProgress` for streaming updates rather
@@ -205,6 +511,38 @@ export class MetadataOrchestrator {
     return this.imageCache.fetch(url);
   }
 
+  /**
+   * Same as `getBoxArtLocal` but returns the file bytes so a sandboxed
+   * renderer (where `file://` is blocked) can wrap them in a Blob /
+   * objectURL for `<img src>`. Lazy-downloads on first call via the
+   * shared image cache. Returns null on fetch failure or when the URL
+   * is empty.
+   */
+  async getBoxArtBytes(url: string): Promise<Uint8Array | null> {
+    const path = await this.getBoxArtLocal(url);
+    if (path === null) {
+      diagLog('warn', 'boxart', '✗', 'no-cached-path', {
+        // url goes through the redactor at the cache layer; here we
+        // just note that the resolution path returned null.
+      });
+      return null;
+    }
+    try {
+      const bytes = await readFile(path);
+      diagLog('info', 'boxart', '·', 'bytes-read', {
+        path,
+        bytes: bytes.byteLength,
+      });
+      return bytes;
+    } catch (err) {
+      diagLog('error', 'boxart', '✗', 'bytes-read-failed', {
+        path,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
   /** Wipe the metadata cache + image cache. Hash cache is independent. */
   async clearMetadataCache(): Promise<void> {
     await Promise.all([
@@ -212,6 +550,27 @@ export class MetadataOrchestrator {
       this.imageCache.clearAll(),
     ]);
   }
+}
+
+/**
+ * Round 11 — deterministic synthetic cache key for paths whose
+ * coreId has no metadata source. The `noss-` prefix marks the key
+ * as synthetic (a real md5 is 32 hex chars with no prefix), so cache
+ * files can be `grep`'d for synthetic-only entries. The hash input
+ * is `<coreId>:<path>` so two distinct paths under the same core
+ * produce distinct keys, and re-clicking the same core is
+ * idempotent.
+ *
+ * Mtime is intentionally NOT included: if the user replaces the
+ * file's bytes the metadata answer doesn't change (still no
+ * coverage), and including mtime would orphan the previous
+ * synthetic record on every file modification with no benefit.
+ */
+function makeSyntheticCacheKey(coreId: string, path: string): string {
+  return (
+    'noss-' +
+    createHash('sha1').update(`${coreId}:${path}`).digest('hex')
+  );
 }
 
 function basename(path: string): string {
