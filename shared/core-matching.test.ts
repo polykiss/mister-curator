@@ -3,13 +3,12 @@ import { describe, expect, it } from 'vitest';
 import type { CoreEntry, HideLedger } from '@shared/types';
 
 import {
-  ARCADE_PLACEHOLDER_ID,
   canonicalize,
   computeAutoReapplyChanges,
   computeCoreRenames,
+  coreDisplayName,
   dottedPath,
   extractCorePrefix,
-  isArcadePlaceholder,
   isCoreFile,
   isCoreHidden,
   isRealCore,
@@ -309,7 +308,13 @@ describe('matchRbfsToGamesDirs', () => {
     expect(result[0]?.gamesDirExists).toBe(true);
   });
 
-  it('collapses every arcade rbf into one synthetic placeholder row', () => {
+  it('drops Arcade-categorised rbfs entirely from the output (PR-A item 1)', () => {
+    // Pre-PR-A the matcher collapsed every Arcade rbf into a
+    // synthetic "Arcade — coming later" placeholder row. PR-A
+    // dropped the placeholder; the actual `mame` core surfaces in
+    // the sidebar under the "Arcade" display label via
+    // `coreDisplayName`. Per-rbf Arcade cores still get filtered
+    // out so we don't pollute the cores list with one row per .mra.
     const result = matchRbfsToGamesDirs({
       rbfs: [
         {
@@ -334,67 +339,25 @@ describe('matchRbfsToGamesDirs', () => {
       gamesDirs: [],
     });
 
-    const arcadeEntries = result.filter((c) => c.category === 'Arcade');
-    expect(arcadeEntries).toHaveLength(1);
-    expect(arcadeEntries[0]?.id).toBe(ARCADE_PLACEHOLDER_ID);
-    expect(arcadeEntries[0]?.name).toBe('Arcade');
-    expect(arcadeEntries[0]?.rbfPaths).toEqual([]);
-    expect(isArcadePlaceholder(arcadeEntries[0]!)).toBe(true);
-
-    // Non-arcade cores are unaffected by the collapse.
-    expect(result.find((c) => c.id === 'NES')?.category).toBe('Console');
-    // Individual arcade core ids are NOT in the output.
-    expect(result.map((c) => c.id)).not.toContain('Galaga');
-    expect(result.map((c) => c.id)).not.toContain('Pacman');
-  });
-
-  it('emits no arcade placeholder when no arcade signal at all', () => {
-    const result = matchRbfsToGamesDirs({
-      rbfs: [
-        {
-          category: 'Console',
-          filename: 'NES_20240115.rbf',
-          fullPath: '/media/fat/_Console/NES_20240115.rbf',
-          isFolder: false,
-        },
-      ],
-      gamesDirs: [],
-      arcadeDirExists: false,
-    });
+    // No Arcade-category rows at all; no synthetic placeholder.
     expect(result.find((c) => c.category === 'Arcade')).toBeUndefined();
+    expect(result.find((c) => c.id === 'Galaga')).toBeUndefined();
+    expect(result.find((c) => c.id === 'Pacman')).toBeUndefined();
+    // Non-arcade cores survive unchanged.
+    expect(result.find((c) => c.id === 'NES')?.category).toBe('Console');
   });
 
-  it('emits the arcade placeholder when arcadeDirExists, even with no arcade rbfs', () => {
-    // Real MiSTers populate /media/fat/_Arcade/ with .mra files, not
-    // .rbf or .mgl. The placeholder must still appear so users see
-    // "Arcade" in the cores list.
+  it('emits no arcade entries even when arcadeDirExists is set (PR-A item 1)', () => {
+    // Pre-PR-A this case emitted the placeholder even when no
+    // Arcade rbfs were present. Post-PR-A, the matcher ignores
+    // arcadeDirExists entirely.
     const result = matchRbfsToGamesDirs({
       rbfs: [],
       gamesDirs: [],
       arcadeDirExists: true,
     });
-    const arcade = result.find((c) => c.category === 'Arcade');
-    expect(arcade).toBeDefined();
-    expect(arcade?.id).toBe(ARCADE_PLACEHOLDER_ID);
-    expect(arcade?.name).toBe('Arcade');
-    expect(arcade?.rbfPaths).toEqual([]);
-  });
-
-  it('emits exactly one placeholder when both arcadeDirExists AND arcade rbfs are present', () => {
-    const result = matchRbfsToGamesDirs({
-      rbfs: [
-        {
-          category: 'Arcade',
-          filename: 'Galaga_20240115.rbf',
-          fullPath: '/media/fat/_Arcade/Galaga_20240115.rbf',
-          isFolder: false,
-        },
-      ],
-      gamesDirs: [],
-      arcadeDirExists: true,
-    });
-    const arcadeRows = result.filter((c) => c.category === 'Arcade');
-    expect(arcadeRows).toHaveLength(1);
+    expect(result.find((c) => c.category === 'Arcade')).toBeUndefined();
+    expect(result).toHaveLength(0);
   });
 
   it('sorts the result by core id, case-insensitive', () => {
@@ -1588,12 +1551,6 @@ describe('isRealCore', () => {
     expect(isRealCore(makeCore({ id: '_alternatives' }))).toBe(false);
   });
 
-  it('returns false for the synthetic Arcade placeholder', () => {
-    expect(
-      isRealCore(makeCore({ id: ARCADE_PLACEHOLDER_ID, category: 'Arcade' })),
-    ).toBe(false);
-  });
-
   it('returns false for any Arcade-category entry', () => {
     expect(
       isRealCore(
@@ -2036,5 +1993,58 @@ describe('computeAutoReapplyChanges', () => {
       makeCore('SNES', { gamesDirHidden: true, rbfPaths: ['/x/.SNES_20240115.rbf'] }),
     ]);
     expect(result).toEqual([]);
+  });
+});
+
+describe('coreDisplayName (PR-A item 1)', () => {
+  it('maps mame → Arcade', () => {
+    expect(coreDisplayName('mame')).toBe('Arcade');
+  });
+
+  it('returns the coreId verbatim for any other core', () => {
+    expect(coreDisplayName('SNES')).toBe('SNES');
+    expect(coreDisplayName('Genesis')).toBe('Genesis');
+    expect(coreDisplayName('GBA')).toBe('GBA');
+    expect(coreDisplayName('S32X')).toBe('S32X');
+  });
+
+  it('is case-sensitive on the override key (mame, not MAME)', () => {
+    // The MiSTer firmware ships the core with the lowercase
+    // directory name `mame`. Pinning case-sensitivity here so a
+    // future MAME-uppercase core (if one existed) wouldn't
+    // accidentally inherit the rename.
+    expect(coreDisplayName('MAME')).toBe('MAME');
+    expect(coreDisplayName('Mame')).toBe('Mame');
+  });
+});
+
+describe('matchRbfsToGamesDirs — sort by display name (PR-A item 1)', () => {
+  it('sorts mame to the start because its display label is "Arcade"', () => {
+    const result = matchRbfsToGamesDirs({
+      rbfs: [
+        {
+          category: 'Console',
+          filename: 'NES_20240115.rbf',
+          fullPath: '/media/fat/_Console/NES_20240115.rbf',
+          isFolder: false,
+        },
+        {
+          category: 'Computer',
+          filename: 'mame_20240310.rbf',
+          fullPath: '/media/fat/_Computer/mame_20240310.rbf',
+          isFolder: false,
+        },
+        {
+          category: 'Console',
+          filename: 'SNES_20240115.rbf',
+          fullPath: '/media/fat/_Console/SNES_20240115.rbf',
+          isFolder: false,
+        },
+      ],
+      gamesDirs: [],
+    });
+    // ID order would be [NES, SNES, mame] (case-insensitive). The
+    // display-name sort puts "Arcade" (mame's label) first.
+    expect(result.map((c) => c.id)).toEqual(['mame', 'NES', 'SNES']);
   });
 });

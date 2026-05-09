@@ -360,11 +360,11 @@ describe('RealMisterClient', () => {
       const gameGear = cores.find((c) => c.id === 'Game Gear');
       expect(gameGear?.rbfPaths).toEqual(['/media/fat/_Console/Game Gear.mgl']);
 
-      // Both arcade entries collapse into one synthetic placeholder.
+      // PR-A item 1: arcade rbfs are dropped entirely from the
+      // matcher output; no synthetic placeholder either.
       expect(ids).not.toContain('Galaga');
       expect(ids).not.toContain('Pacman');
-      const arcade = cores.find((c) => c.category === 'Arcade');
-      expect(arcade?.name).toBe('Arcade');
+      expect(cores.find((c) => c.category === 'Arcade')).toBeUndefined();
 
       const nes = cores.find((c) => c.id === 'NES');
       expect(nes?.category).toBe('Console');
@@ -441,7 +441,12 @@ describe('RealMisterClient', () => {
       expect(script).not.toContain('_Console (autoboot)');
     });
 
-    it('emits an arcade-dir probe so the placeholder appears whenever _Arcade exists', async () => {
+    it('still emits the arcade-dir probe (PR-A item 1 dropped the placeholder, not the probe)', async () => {
+      // The A sentinel is harmless leftover plumbing — the shell
+      // script keeps emitting it; the matcher just ignores it now.
+      // Leaving the probe in place keeps the script stable; a
+      // follow-up cleanup can drop it once we're sure no other
+      // consumer cares.
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -454,27 +459,21 @@ describe('RealMisterClient', () => {
       expect(script).toContain(`printf 'A\\n'`);
     });
 
-    it('parses the A sentinel into a synthetic Arcade placeholder row', async () => {
+    it('parses the A sentinel without emitting an Arcade row (PR-A item 1)', async () => {
+      // Pre-PR-A the A sentinel triggered a synthetic placeholder
+      // row. PR-A dropped the placeholder; the sentinel is still
+      // emitted by the shell (the probe is harmless) but the
+      // matcher ignores it.
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
 
-      // Real-MiSTer shape: _Arcade exists but contains only .mra files,
-      // so no R-Arcade lines are emitted — only the A sentinel.
       mocks.execCommand.mockResolvedValueOnce(
-        execOk(
-          [
-            'R\tConsole\tfile\tNES_20240115.rbf',
-            'A',
-            '',
-          ].join('\n'),
-        ),
+        execOk(['A', ''].join('\n')),
       );
 
       const cores = await client.listAllCoresWithFiles();
-      const arcade = cores.find((c) => c.category === 'Arcade');
-      expect(arcade).toBeDefined();
-      expect(arcade?.name).toBe('Arcade');
+      expect(cores.find((c) => c.category === 'Arcade')).toBeUndefined();
     });
 
     it('emits a games-dir glob that picks up dot-prefixed (hidden) games dirs', async () => {
