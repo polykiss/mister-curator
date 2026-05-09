@@ -44,6 +44,20 @@ export function scoreMatch(searchTerm: string, candidateName: string): number {
 
   if (a === b) return 1;
 
+  // Round 2 (PR #27 round 2): leading-prefix tier. The search term
+  // appears at the START of the candidate, followed by a separator
+  // (colon, dash, paren, etc.) — meaning the candidate is a longer
+  // form of the search ("Kizuna Encounter" → "Kizuna Encounter :
+  // Super Tag Battle"). Live ScreenScraper data ranks these as the
+  // top result for the short search term; the scorer needs to credit
+  // the prefix relationship even when token overlap maxes out at
+  // 0.85.
+  //
+  // Sits ABOVE Levenshtein because a 2-word search prefixing a 6-word
+  // candidate has Levenshtein distance ~30 — the typo tier doesn't
+  // apply, but the match is still authoritative.
+  if (isLeadingPrefixWithSeparator(a, b)) return 0.95;
+
   // Levenshtein tier — typo / region-suffix / minor-variant tolerance.
   const dist = levenshtein(a, b);
   if (dist <= 1) return 0.95;
@@ -77,6 +91,35 @@ export function scoreMatch(searchTerm: string, candidateName: string): number {
  */
 function normalizeForMatch(input: string): string {
   return input.toLowerCase().replace(/\s+/gu, ' ').trim();
+}
+
+/**
+ * Round 2 (PR #27 round 2): true iff `searchTerm` is a leading
+ * prefix of `candidate` followed by a separator (colon, dash,
+ * paren, semicolon, or whitespace) OR end-of-string. Both inputs
+ * must already be normalized (lowercase + whitespace-collapsed).
+ *
+ * The separator gate avoids false positives like "Bobs" matching
+ * "Bobsleigh" (no separator after the prefix → not a hierarchical
+ * extension). A genuine extended-form has its discriminator after
+ * a separator: "Kizuna Encounter : Super Tag Battle".
+ *
+ * Empty / equal strings return false here — those cases are handled
+ * by the exact-match tier above this check.
+ */
+function isLeadingPrefixWithSeparator(
+  searchTerm: string,
+  candidate: string,
+): boolean {
+  if (searchTerm.length === 0 || searchTerm.length >= candidate.length) {
+    return false;
+  }
+  if (!candidate.startsWith(searchTerm)) return false;
+  const next = candidate.charAt(searchTerm.length);
+  // Allowed separator chars: whitespace, colon, semicolon, dash,
+  // open paren, open bracket. End-of-string is impossible here
+  // (searchTerm.length < candidate.length, checked above).
+  return /[\s:;\-(\[]/.test(next);
 }
 
 /**
