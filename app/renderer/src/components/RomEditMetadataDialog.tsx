@@ -157,7 +157,7 @@ export function RomEditMetadataDialog(
           <Field label="Name">
             <input
               type="text"
-              className="w-full rounded border border-default bg-bg px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+              className="w-full rounded border border-default bg-canvas px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder={metadata.name}
@@ -168,7 +168,7 @@ export function RomEditMetadataDialog(
             <Field label="Year">
               <input
                 type="number"
-                className="w-full rounded border border-default bg-bg px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                className="w-full rounded border border-default bg-canvas px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
                 value={year}
                 onChange={(e) => setYear(e.target.value)}
                 placeholder={metadata.year !== null ? String(metadata.year) : '—'}
@@ -179,7 +179,7 @@ export function RomEditMetadataDialog(
             <Field label="Rating (0-10)">
               <input
                 type="number"
-                className="w-full rounded border border-default bg-bg px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                className="w-full rounded border border-default bg-canvas px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
                 value={rating}
                 onChange={(e) => setRating(e.target.value)}
                 placeholder={metadata.rating !== null ? String(metadata.rating) : '—'}
@@ -193,7 +193,7 @@ export function RomEditMetadataDialog(
           <Field label="Genre">
             <input
               type="text"
-              className="w-full rounded border border-default bg-bg px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+              className="w-full rounded border border-default bg-canvas px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
               value={genre}
               onChange={(e) => setGenre(e.target.value)}
               placeholder={metadata.genre ?? '—'}
@@ -206,7 +206,7 @@ export function RomEditMetadataDialog(
           >
             <input
               type="text"
-              className="w-full rounded border border-default bg-bg px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+              className="w-full rounded border border-default bg-canvas px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
               value={tagsText}
               onChange={(e) => setTagsText(e.target.value)}
               placeholder="hack, fan-translation"
@@ -216,7 +216,7 @@ export function RomEditMetadataDialog(
           <Field label="Note">
             <textarea
               rows={3}
-              className="w-full resize-none rounded border border-default bg-bg px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+              className="w-full resize-none rounded border border-default bg-canvas px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
               value={note}
               onChange={(e) => setNote(e.target.value)}
             />

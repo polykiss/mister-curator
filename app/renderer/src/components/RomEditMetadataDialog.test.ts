@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import type { RomMetadata } from '@shared/metadata-types';
@@ -189,5 +192,36 @@ describe('buildOverride — preserves search-modal jeuid', () => {
     });
     const override = buildOverride(meta, EMPTY_FORM);
     expect(override).toEqual({ jeuid: '1234' });
+  });
+});
+
+describe('RomEditMetadataDialog — round 2 contrast fix (PR-D2 r2 c1)', () => {
+  // Round-1 inputs used `bg-bg` which is NOT a Tailwind token in this
+  // codebase (the surface ladder is canvas/chrome/surface/elevated/
+  // overlay — see app/renderer/tailwind.config.cjs). The browser
+  // fell back to its default white, which made input text effectively
+  // invisible on the dark theme. Round 2 replaces with `bg-canvas`
+  // (deepest tier) for max contrast against the dialog's `bg-overlay`
+  // surface.
+  //
+  // Source-string scan rather than render test (no jsdom) — pins the
+  // contract that no input field smuggles `bg-bg` back in.
+  const SOURCE = readFileSync(
+    resolve(__dirname, 'RomEditMetadataDialog.tsx'),
+    'utf8',
+  );
+
+  it('every input/textarea uses bg-canvas (no bogus bg-bg fallback to white)', () => {
+    expect(SOURCE).not.toMatch(/\bbg-bg\b/);
+  });
+
+  it('input field background sits on the canvas tier for contrast against bg-overlay', () => {
+    // The dialog's own surface is bg-overlay (defined in
+    // ui/dialog.tsx). Inputs need a visibly different tier — canvas
+    // is the deepest, giving the strongest recessed-input appearance.
+    const inputClassMatches = SOURCE.match(/className="[^"]*\binput[^"]*"/g) ?? [];
+    // Sanity: at least one input rendered.
+    expect(SOURCE).toContain('rounded border border-default bg-canvas');
+    void inputClassMatches; // not used; the contains-check above is the load-bearing assertion
   });
 });

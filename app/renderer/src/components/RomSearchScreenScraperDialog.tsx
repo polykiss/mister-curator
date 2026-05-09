@@ -149,7 +149,7 @@ export function RomSearchScreenScraperDialog(
         >
           <input
             type="text"
-            className="flex-1 rounded border border-default bg-bg px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+            className="flex-1 rounded border border-default bg-canvas px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             placeholder="Game name"
