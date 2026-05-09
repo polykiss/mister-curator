@@ -217,6 +217,48 @@ export class MetadataOrchestrator {
    *   - Per-path metadata throws → emit `{ ..., error: true }` for
    *     just that path; subsequent paths still get a chance.
    */
+  /**
+   * PR-D1 round 2 (PR #27 round 2): pure-disk cache snapshot for the
+   * optimistic-render path. Reads the hash service's path → hash
+   * cache (no SSH stat) and the metadata cache (no SS / OpenVGDB
+   * fetch). Returns whatever's already on disk so the renderer can
+   * paint rows immediately on click — the normal `getRomsMetadata`
+   * follow-up validates mtimes and refetches anything stale.
+   *
+   * Returns a record keyed by path. A `null` value means either:
+   *   • the hash for this path isn't cached locally (cold), OR
+   *   • the metadata for the cached hash is a sentinel
+   *     (`source: 'none'` — no useful render data).
+   * Either way the renderer should show a loading state for that
+   * row until the validation pass populates it.
+   */
+  async readCachedRomsMetadata(
+    coreId: string,
+    romPaths: readonly string[],
+  ): Promise<Record<string, RomMetadata | null>> {
+    void coreId; // present for diag-log symmetry; not used yet
+    const out: Record<string, RomMetadata | null> = {};
+    if (romPaths.length === 0) return out;
+    const session = this.getActiveSession();
+    if (session === null) {
+      for (const p of romPaths) out[p] = null;
+      return out;
+    }
+    const hashEntries = await this.hashService.readCachedEntries(
+      session.host,
+      romPaths,
+    );
+    for (const p of romPaths) {
+      const entry = hashEntries.get(p);
+      if (entry === null || entry === undefined) {
+        out[p] = null;
+        continue;
+      }
+      out[p] = await this.metadataService.readCachedMetadata(entry.md5);
+    }
+    return out;
+  }
+
   async getRomsMetadata(
     coreId: string,
     romPaths: readonly string[],

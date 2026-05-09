@@ -713,6 +713,19 @@ export class MetadataService {
     return { refetch: false, reason: 'sentinel-poisoned-no-ss' };
   }
 
+  /**
+   * PR-D1 round 2 (PR #27 round 2): public read-only cache lookup
+   * for the optimistic-render path. Reads from disk; never queries
+   * SS / OpenVGDB; never writes. Returns null when the hash isn't
+   * cached OR the cached record is a sentinel (`source: 'none'`).
+   */
+  async readCachedMetadata(hash: string): Promise<RomMetadata | null> {
+    const cached = await this.readCache(hash);
+    if (cached === null) return null;
+    if (cached.source === 'none') return null;
+    return cached;
+  }
+
   private async readCache(hash: string): Promise<RomMetadata | null> {
     const path = this.cachePath(hash);
     let raw: string;

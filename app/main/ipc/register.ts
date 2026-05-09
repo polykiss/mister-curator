@@ -321,6 +321,15 @@ export function registerIpcHandlers(
     autoScrapeEngine.setFocus(coreId);
   });
 
+  // PR-D1 round 2 (PR #27 round 2): pure-disk cache snapshot for the
+  // optimistic-render path. RomsPane fires this on mount/click for
+  // immediate row paint, then dispatches the normal validation
+  // prefetch in the background.
+  handle<[string, readonly string[]], Record<string, RomMetadata | null>>(
+    IPC_CHANNELS.getCachedRomsMetadata,
+    (coreId, paths) => metadata.readCachedRomsMetadata(coreId, paths),
+  );
+
   handle<[], { readonly ready: boolean; readonly downloadInProgress: boolean }>(
     IPC_CHANNELS.ensureMetadataDatabase,
     () =>

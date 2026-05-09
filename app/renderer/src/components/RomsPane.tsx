@@ -202,6 +202,35 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
       }
     }
     if (filePaths.length === 0) return;
+    // PR-D1 round 2 (PR #27 round 2): optimistic-render path. Read
+    // the disk cache snapshot first (no SSH, no SS — instant) and
+    // hydrate `metadataByPath` so rows paint immediately. Then the
+    // normal validation prefetch fires below; mtime-batch + per-path
+    // refetch update only the rows that changed on-device. Most
+    // rows don't change between sessions, so the optimistic paint
+    // is correct for the common case.
+    let cancelled = false;
+    void window.mister
+      .getCachedRomsMetadata(core.id, filePaths)
+      .then((cached) => {
+        if (cancelled) return;
+        const seed: Record<
+          string,
+          { metadata: RomMetadata | null; error: boolean }
+        > = {};
+        for (const [path, metadata] of Object.entries(cached)) {
+          if (metadata !== null) {
+            seed[path] = { metadata, error: false };
+          }
+        }
+        // Merge — don't overwrite events that arrived faster than the
+        // cache read (rare race; preserve fresher data).
+        setMetadataByPath((prev) => ({ ...seed, ...prev }));
+      })
+      .catch(() => {
+        // Cache snapshot failed — not fatal; the validation prefetch
+        // below still runs and fills rows the slow way.
+      });
     // Operation id scopes the streamed events to THIS pane mount —
     // a quick navigation away starts a fresh prefetch with a new
     // operationId; events from the in-flight prior prefetch are
@@ -232,6 +261,10 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
       atomicFolderPaths,
     });
     return () => {
+      // Round 2 (PR #27 round 2): cancel the optimistic-cache hydrate
+      // if the user navigates away before it lands. Prevents stale
+      // cache snapshot from clobbering a fresh pane's metadata.
+      cancelled = true;
       diagLog('info', 'roms-pane', '·', 'unsubscribed', {
         opId: operationId,
       });

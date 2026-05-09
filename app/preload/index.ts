@@ -242,6 +242,12 @@ const api: MisterApi = {
       paths,
       options,
     ),
+  getCachedRomsMetadata: (coreId: string, paths: readonly string[]) =>
+    invoke<Record<string, RomMetadata | null>>(
+      IPC_CHANNELS.getCachedRomsMetadata,
+      coreId,
+      paths,
+    ),
   onRomMetadataResolved: (
     handler: (event: RomMetadataResolvedEvent) => void,
   ) => {

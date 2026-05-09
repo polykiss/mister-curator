@@ -113,10 +113,35 @@ function makeOrchestrator(opts: {
     ),
     invalidate: vi.fn(async () => undefined),
     clearForHost: vi.fn(async () => undefined),
+    // Round 2 (PR #27 round 2): pure-disk read for the optimistic-
+    // render path. Same fixture data as `checkCachedMtimes` but
+    // without the SSH stat — every cached entry is returned as-is.
+    readCachedEntries: vi.fn(
+      async (
+        _host: string,
+        paths: readonly string[],
+      ): Promise<Map<string, HashEntry | null>> => {
+        const out = new Map<string, HashEntry | null>();
+        for (const p of paths) {
+          out.set(p, opts.hashEntries?.get(p) ?? null);
+        }
+        return out;
+      },
+    ),
   } as unknown as HashService;
 
   const metadataService = {
     getMetadata: vi.fn(async () => opts.meta ?? null),
+    // Round 2: synchronous-feeling cache read for the optimistic-
+    // render path. Returns the same `opts.meta` as `getMetadata`
+    // unless the test overrides — sentinel records (source='none')
+    // collapse to null here so the renderer doesn't paint a "no
+    // match" row eagerly.
+    readCachedMetadata: vi.fn(async (): Promise<RomMetadata | null> => {
+      const m = opts.meta ?? null;
+      if (m === null || m.source === 'none') return null;
+      return m;
+    }),
     clearAll: vi.fn(async () => undefined),
     invalidate: vi.fn(async () => undefined),
   } as unknown as MetadataService;
@@ -221,6 +246,45 @@ describe('MetadataOrchestrator', () => {
       .calls[0];
     expect(call?.[0]).toBe(HASH);
     expect(call?.[1]).toEqual({ name: 'Super', system: 'snes' });
+  });
+
+  describe('readCachedRomsMetadata (PR-D1 round 2 — optimistic-render path)', () => {
+    it('returns metadata for paths whose hash + metadata are both cached', async () => {
+      const meta = buildMeta(HASH, 'X');
+      const { orchestrator } = makeOrchestrator({
+        hashEntries: new Map([['/p/x.sfc', buildHashEntry(HASH)]]),
+        meta,
+      });
+      const result = await orchestrator.readCachedRomsMetadata('SNES', [
+        '/p/x.sfc',
+      ]);
+      expect(result['/p/x.sfc']?.name).toBe('X');
+    });
+
+    it('returns null for paths whose hash is NOT cached (cold)', async () => {
+      const { orchestrator } = makeOrchestrator({
+        hashEntries: new Map(), // no cached hash for /p/y.sfc
+      });
+      const result = await orchestrator.readCachedRomsMetadata('SNES', [
+        '/p/y.sfc',
+      ]);
+      expect(result['/p/y.sfc']).toBeNull();
+    });
+
+    it('returns null when no active session (defensive — never throws)', async () => {
+      const { orchestrator } = makeOrchestrator({ session: null });
+      const result = await orchestrator.readCachedRomsMetadata('SNES', [
+        '/p/x.sfc',
+      ]);
+      expect(result['/p/x.sfc']).toBeNull();
+    });
+
+    it('returns empty record for empty input — no IO', async () => {
+      const { orchestrator, hashService } = makeOrchestrator({});
+      const result = await orchestrator.readCachedRomsMetadata('SNES', []);
+      expect(result).toEqual({});
+      expect(hashService.readCachedEntries).not.toHaveBeenCalled();
+    });
   });
 
   describe('round 2 — SS hint threading', () => {
