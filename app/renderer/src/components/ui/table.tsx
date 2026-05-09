@@ -16,8 +16,21 @@ import { cn } from '@app/renderer/src/lib/cn';
 
 export const Table = forwardRef<HTMLTableElement, HTMLAttributes<HTMLTableElement>>(
   function Table({ className, ...props }, ref) {
+    // PR #23 round 5 commit 2: the wrapper used to carry
+    // `overflow-auto`, which made it a scroll context. That broke the
+    // sticky header on `<thead>` — sticky resolves against the
+    // *nearest* scroll ancestor, so the header would have been pinned
+    // to a wrapper that itself isn't scrolling (the actual scrolling
+    // happens in the outer `<div className="scroll-themed flex-1
+    // overflow-auto">` in RomsPane). Dropping `overflow-auto` here
+    // collapses the nested scroll context so sticky resolves against
+    // the outer pane scroll, which is what the user sees moving.
+    // Tables in this app never exceed the pane width (columns are
+    // sized to fit), so we don't lose useful horizontal-scroll
+    // behavior. `relative` stays as a positioning anchor for any
+    // future absolute descendants.
     return (
-      <div className="relative w-full overflow-auto">
+      <div className="relative w-full">
         <table
           ref={ref}
           className={cn('w-full text-body text-fg', className)}
@@ -38,8 +51,13 @@ export const TableHeader = forwardRef<
       // Header sits on `bg-elevated` to match the ROMs pane surface
       // (the only consumer of this Table primitive) so it doesn't
       // create a seam at the sticky edge.
+      // PR #23 round 5 commit 2: `sticky top-0` on `<thead>` works in
+      // recent Chromium; the per-`<th>` `sticky` in `TableHead`
+      // below is the defensive belt-and-braces layer. `z-10` lifts
+      // the header above scrolling row content (rows have no z) but
+      // stays well below modal layers.
       className={cn(
-        'sticky top-0 z-[1] bg-elevated [&_tr]:border-b [&_tr]:border-subtle',
+        'sticky top-0 z-10 bg-elevated [&_tr]:border-b [&_tr]:border-subtle',
         className,
       )}
       {...props}
@@ -83,8 +101,17 @@ export const TableHead = forwardRef<
   return (
     <th
       ref={ref}
+      // PR #23 round 5 commit 2: `sticky top-0 bg-elevated` on each
+      // `<th>` is the defensive layer — `position: sticky` on
+      // `<thead>` is reliable in recent Chromium but per-cell sticky
+      // is the safest fallback (it's what shadcn/ui recommends in
+      // their sticky-header pattern). `bg-elevated` here also
+      // guarantees each cell paints its own opaque background so
+      // scrolling row content can't bleed through the header even
+      // if the `<thead>`-level `bg-elevated` is treated as
+      // transparent by some renderer path.
       className={cn(
-        'h-9 px-3 text-left align-middle font-medium uppercase tracking-[0.08em] text-caption text-fg-muted [&:has([role=checkbox])]:pr-0',
+        'sticky top-0 z-10 h-9 bg-elevated px-3 text-left align-middle font-medium uppercase tracking-[0.08em] text-caption text-fg-muted [&:has([role=checkbox])]:pr-0',
         className,
       )}
       {...props}

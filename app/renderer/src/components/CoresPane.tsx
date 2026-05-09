@@ -3,7 +3,7 @@ import { useMemo, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
-import { isArcadePlaceholder, isCoreHidden } from '@shared/core-matching';
+import { coreDisplayName, isCoreHidden } from '@shared/core-matching';
 import type { CoreEntry } from '@shared/types';
 
 import { Button } from '@app/renderer/src/components/ui/button';
@@ -79,14 +79,14 @@ export function CoresPane(): JSX.Element {
   const onHide = async (core: CoreEntry): Promise<void> => {
     try {
       await hideCore(core.id);
-      toast.success(`Hid ${core.name}`, {
+      toast.success(`Hid ${coreDisplayName(core.id)}`, {
         action: {
           label: 'Undo',
           onClick: () => {
             void (async () => {
               try {
                 await showCore(core.id);
-                toast.success(`Restored ${core.name}`);
+                toast.success(`Restored ${coreDisplayName(core.id)}`);
               } catch (err) {
                 toast.error('Could not restore core', {
                   description: err instanceof Error ? err.message : 'Unexpected error.',
@@ -98,7 +98,7 @@ export function CoresPane(): JSX.Element {
         duration: 10000,
       });
     } catch (err) {
-      toast.error(`Could not hide ${core.name}`, {
+      toast.error(`Could not hide ${coreDisplayName(core.id)}`, {
         description: err instanceof Error ? err.message : 'Unexpected error.',
       });
     }
@@ -107,7 +107,7 @@ export function CoresPane(): JSX.Element {
   const onShow = async (core: CoreEntry): Promise<void> => {
     try {
       await showCore(core.id);
-      toast.success(`Restored ${core.name}`, {
+      toast.success(`Restored ${coreDisplayName(core.id)}`, {
         action: {
           label: 'Undo',
           onClick: () => {
@@ -123,7 +123,7 @@ export function CoresPane(): JSX.Element {
         duration: 10000,
       });
     } catch (err) {
-      toast.error(`Could not show ${core.name}`, {
+      toast.error(`Could not show ${coreDisplayName(core.id)}`, {
         description: err instanceof Error ? err.message : 'Unexpected error.',
       });
     }
@@ -288,7 +288,18 @@ function renderCoreList(args: RenderArgs): JSX.Element {
 
   return (
     <ul
-      className="flex-1 overflow-auto"
+      // PR #23 round 5 commit 1: `scroll-themed` reserves a stable
+      // scrollbar gutter and paints a permanent themed bar so native
+      // overlay scrollbars on macOS can't fade in over the eye column.
+      // PR #23 round 6: `pr-2.5` (10px) forces explicit breathing
+      // room on the right of the row content so the eye buttons sit
+      // ≥10px from the scroll container's padding-box right edge —
+      // well clear of the scrollbar's drawn position regardless of
+      // how the gutter reservation actually resolves (overlay vs
+      // classic, etc.). The right-edge density bar shifts inward
+      // by the same 10px; the "continuous strip on the right" still
+      // reads as continuous against the visible list edge.
+      className="scroll-themed flex-1 overflow-auto pr-2.5"
       role="listbox"
       aria-label="MiSTer cores"
     >
@@ -296,8 +307,8 @@ function renderCoreList(args: RenderArgs): JSX.Element {
         const isSelected = core.id === args.selectedCoreId;
         const isHiddenCore = isCoreHidden(core);
         const isArcade = core.category === 'Arcade';
-        const isPlaceholder = isArcadePlaceholder(core);
         const isPending = args.pendingCoreIds.has(core.id);
+        const displayName = coreDisplayName(core.id);
 
         return (
           <li
@@ -306,10 +317,9 @@ function renderCoreList(args: RenderArgs): JSX.Element {
               'group/row relative flex h-10 items-center gap-2 border-b border-subtle pl-4 text-body transition-colors',
               !isSelected && 'hover:bg-elevated',
               isSelected && 'bg-overlay',
-              // Hidden + arcade-placeholder rows lean entirely on
-              // dimming: opacity + italic + a darker text color.
+              // Hidden rows lean entirely on dimming: opacity +
+              // italic + a darker text color.
               isHiddenCore && 'opacity-50 italic text-fg-disabled',
-              isPlaceholder && 'italic text-fg-disabled',
             )}
           >
             {/* Active row: 2px accent edge per SYSTEM.md §5. Renders
@@ -335,16 +345,12 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                     isSelected && !isHiddenCore && 'font-medium text-fg',
                   )}
                 >
-                  {core.name}
+                  {displayName}
                 </span>
               </span>
 
               <span className="flex shrink-0 items-center gap-2 font-mono text-body-sm text-fg-muted tabular">
-                {isPlaceholder ? (
-                  <span className="text-fg-disabled">coming later</span>
-                ) : (
-                  <CoreCountSummary core={core} />
-                )}
+                <CoreCountSummary core={core} />
               </span>
             </button>
 
@@ -356,14 +362,12 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                 surrounding `<li>` keeps `gap-2` for the spacing
                 between the name area and this stack. */}
             <div className="flex h-full shrink-0 items-stretch">
-              {!isPlaceholder ? (
-                <DensityBar
-                  floor="bg-surface"
-                  value={densityValueFor(core)}
-                  max={maxRomCount}
-                  ariaLabel={`${String(densityValueFor(core))} ROMs of peer max ${String(maxRomCount)}`}
-                />
-              ) : null}
+              <DensityBar
+                floor="bg-surface"
+                value={densityValueFor(core)}
+                max={maxRomCount}
+                ariaLabel={`${String(densityValueFor(core))} ROMs of peer max ${String(maxRomCount)}`}
+              />
               {isArcade ? (
                 <span
                   className="flex shrink-0 items-center px-2 font-mono text-body-sm text-fg-disabled"
@@ -381,7 +385,7 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                 <span
                   role="status"
                   aria-label={
-                    isHiddenCore ? `Showing ${core.name}…` : `Hiding ${core.name}…`
+                    isHiddenCore ? `Showing ${coreDisplayName(core.id)}…` : `Hiding ${coreDisplayName(core.id)}…`
                   }
                   className="flex h-8 w-8 shrink-0 items-center justify-center self-center text-fg-muted"
                 >
@@ -394,9 +398,9 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                   onClick={() => void args.onShow(core)}
                   disabled={!args.canMutate}
                   title={
-                    args.canMutate ? `Show ${core.name}` : DISCONNECTED_TOOLTIP
+                    args.canMutate ? `Show ${coreDisplayName(core.id)}` : DISCONNECTED_TOOLTIP
                   }
-                  aria-label={`Show ${core.name}`}
+                  aria-label={`Show ${coreDisplayName(core.id)}`}
                   className="self-center opacity-70 transition-opacity group-hover/row:opacity-100 focus-visible:opacity-100"
                 >
                   <EyeOff strokeWidth={1.5} />
@@ -408,9 +412,9 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                   onClick={() => void args.onHide(core)}
                   disabled={!args.canMutate}
                   title={
-                    args.canMutate ? `Hide ${core.name}` : DISCONNECTED_TOOLTIP
+                    args.canMutate ? `Hide ${coreDisplayName(core.id)}` : DISCONNECTED_TOOLTIP
                   }
-                  aria-label={`Hide ${core.name}`}
+                  aria-label={`Hide ${coreDisplayName(core.id)}`}
                   className={cn(
                     'self-center transition-opacity',
                     !isSelected &&

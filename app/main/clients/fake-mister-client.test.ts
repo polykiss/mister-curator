@@ -67,8 +67,9 @@ describe('FakeMisterClient', () => {
   it('lists the expected cores from fixtures', async () => {
     const cores = await client.listAllCoresWithFiles();
     const ids = cores.map((c) => c.id);
-    // Joins games/ with _Console / _Computer / _Other / _Utility, plus a
-    // single placeholder for _Arcade (individual arcade cores collapse).
+    // Joins games/ with _Console / _Computer / _Other / _Utility.
+    // PR-A item 1 dropped the synthetic Arcade placeholder; the
+    // matcher now drops Arcade-category rbfs entirely.
     expect(ids).toContain('NES');
     expect(ids).toContain('SNES');
     expect(ids).toContain('Genesis');
@@ -79,12 +80,11 @@ describe('FakeMisterClient', () => {
     expect(ids).toContain('SMS'); // rbf-only, no games dir
     expect(ids).toContain('Orphan'); // games dir without a matching rbf
 
-    // Individual arcade cores never appear; one synthetic placeholder does.
+    // Individual arcade cores never appear; PR-A also dropped the
+    // synthetic placeholder, so no Arcade-category row at all.
     expect(ids).not.toContain('Galaga');
     expect(ids).not.toContain('Pacman');
-    const arcadeRow = cores.find((c) => c.category === 'Arcade');
-    expect(arcadeRow).toBeDefined();
-    expect(arcadeRow?.name).toBe('Arcade');
+    expect(cores.find((c) => c.category === 'Arcade')).toBeUndefined();
 
     // .mgl cores must be discovered alongside .rbf cores.
     expect(ids).toContain('Game Gear');
@@ -332,14 +332,6 @@ describe('FakeMisterClient', () => {
     expect(nesShown?.rbfPaths.some((p) => p.includes('/.'))).toBe(false);
   });
 
-  it('hideCore refuses the arcade placeholder', async () => {
-    const before = await client.listAllCoresWithFiles();
-    const arcade = before.find((c) => c.category === 'Arcade');
-    expect(arcade).toBeDefined();
-    expect(arcade?.name).toBe('Arcade');
-    await expect(client.hideCore(arcade!)).rejects.toThrow(/Arcade/);
-  });
-
   it('setBulkCoreVisibility applies many changes', async () => {
     const before = await client.listAllCoresWithFiles();
     const nes = before.find((c) => c.id === 'NES');
@@ -414,21 +406,14 @@ describe('FakeMisterClient', () => {
       ).rejects.toThrow(/not a real core/i);
     });
 
-    it('emits exactly one Arcade placeholder whenever _Arcade/ exists (regression)', async () => {
-    // The cores list in `fixtures/sample-mister/_Arcade/` carries .rbf
-    // entries. Real MiSTers carry hundreds of .mra files instead, but
-    // either way the placeholder must appear exactly once.
-    const cores = await client.listAllCoresWithFiles();
-    const arcades = cores.filter((c) => c.category === 'Arcade');
-    expect(arcades).toHaveLength(1);
-    expect(arcades[0]?.name).toBe('Arcade');
-  });
-
-  it('hideCore refuses the synthetic Arcade placeholder', async () => {
+    it('emits no Arcade-category rows even when _Arcade/ exists (PR-A item 1)', async () => {
+      // PR-A dropped the synthetic placeholder. The matcher now
+      // filters Arcade-category rbfs out entirely; the user's
+      // actual `mame` core surfaces as "Arcade" via
+      // `coreDisplayName` instead.
       const cores = await client.listAllCoresWithFiles();
-      const arcade = cores.find((c) => c.category === 'Arcade');
-      expect(arcade).toBeDefined();
-      await expect(client.hideCore(arcade!)).rejects.toThrow(/Arcade|not a real/i);
+      const arcades = cores.filter((c) => c.category === 'Arcade');
+      expect(arcades).toHaveLength(0);
     });
   });
 

@@ -3,83 +3,68 @@ import { describe, expect, it } from 'vitest';
 import { idleMessageFor } from '@app/renderer/src/components/StatusBar';
 
 /**
- * StatusBar's `idleMessageFor` is the pure copy-picker for the
- * left-side text. Round 3 (PR #20) extended it with three
- * resilience signals — `lostConnection`, `autoRetry`, and
- * `autoRetryFailed` — so the user sees a visible "Reconnecting…"
- * during transient drops instead of a flat "Disconnected" while
- * auto-retry is in flight.
+ * `idleMessageFor` is the pure copy-picker for the footer-left
+ * text. PR-A item 7 dropped the host string from every branch:
+ * the top header carries the address and the right-pill carries
+ * the steady-state. The footer-left now ONLY surfaces transient
+ * transitions that add new information.
  */
-describe('idleMessageFor — base ConnectionStatus copy', () => {
-  it('returns connected copy with host', () => {
-    expect(idleMessageFor('connected', 'mister.local')).toBe(
-      'Connected to mister.local',
-    );
+describe('idleMessageFor — base ConnectionStatus copy (PR-A item 7)', () => {
+  it('returns empty string for the steady-state connected case', () => {
+    // The right-pill says "connected"; the footer-left adds
+    // nothing. Keeps the chrome clean when the app is idle and
+    // happy.
+    expect(idleMessageFor('connected')).toBe('');
   });
 
-  it('falls back to host-less copy when host is undefined', () => {
-    expect(idleMessageFor('connected', undefined)).toBe('Connected');
-    expect(idleMessageFor('disconnected', undefined)).toBe('Disconnected');
-  });
-
-  it('returns connecting / error / disconnected copy', () => {
-    expect(idleMessageFor('connecting', 'm.lan')).toBe('Connecting to m.lan…');
-    expect(idleMessageFor('error', 'm.lan')).toBe('Connection error');
-    expect(idleMessageFor('disconnected', 'm.lan')).toBe('Disconnected');
+  it('returns transient-state copy without host', () => {
+    expect(idleMessageFor('connecting')).toBe('Connecting…');
+    expect(idleMessageFor('error')).toBe('Connection error');
+    expect(idleMessageFor('disconnected')).toBe('Disconnected');
   });
 });
 
-describe('idleMessageFor — resilience signals (round 3)', () => {
-  it('autoRetry overrides everything else with attempt-count copy', () => {
+describe('idleMessageFor — resilience signals', () => {
+  it('autoRetry overrides everything else with attempt-count copy (no host)', () => {
     expect(
-      idleMessageFor('disconnected', 'mister.local', {
+      idleMessageFor('disconnected', {
         lostConnection: true,
         autoRetry: { attempt: 2, totalAttempts: 3 },
         autoRetryFailed: false,
       }),
-    ).toBe('Reconnecting to mister.local (2 of 3)…');
+    ).toBe('Reconnecting (2 of 3)…');
   });
 
-  it('autoRetry without host gracefully omits it', () => {
-    expect(
-      idleMessageFor('disconnected', undefined, {
-        lostConnection: true,
-        autoRetry: { attempt: 1, totalAttempts: 3 },
-        autoRetryFailed: false,
-      }),
-    ).toBe('Reconnecting (1 of 3)…');
-  });
-
-  it('lostConnection without an active retry reads as "retrying"', () => {
+  it('lostConnection without an active retry reads as "retrying" (no host)', () => {
     // Brief gap between `disconnected-unexpected` and the first
     // `auto-retry-attempt` event — the renderer paints this hint so
     // the user sees we noticed.
     expect(
-      idleMessageFor('disconnected', 'mister.local', {
+      idleMessageFor('disconnected', {
         lostConnection: true,
         autoRetry: null,
         autoRetryFailed: false,
       }),
-    ).toBe('Connection lost, retrying mister.local…');
+    ).toBe('Connection lost, retrying…');
   });
 
-  it('autoRetryFailed surfaces the terminal copy with action prompt', () => {
+  it('autoRetryFailed surfaces the terminal copy with action prompt (no host)', () => {
     expect(
-      idleMessageFor('disconnected', 'mister.local', {
+      idleMessageFor('disconnected', {
         lostConnection: true,
         autoRetry: null,
         autoRetryFailed: true,
       }),
-    ).toBe('Connection lost to mister.local. Reconnect or disconnect.');
+    ).toBe('Connection lost. Reconnect or disconnect.');
   });
 
-  it('falls through to base copy when no resilience signals are set', () => {
+  it('connected with no resilience signals returns empty string', () => {
     expect(
-      idleMessageFor('connected', 'mister.local', {
+      idleMessageFor('connected', {
         lostConnection: false,
         autoRetry: null,
         autoRetryFailed: false,
       }),
-    ).toBe('Connected to mister.local');
+    ).toBe('');
   });
 });

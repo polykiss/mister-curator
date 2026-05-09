@@ -93,7 +93,24 @@ export function canonicalize(name: string): string {
  * Arcade category in the cores list. Real arcade core ids never use this
  * prefix (real ids come from filename parsing).
  */
-export const ARCADE_PLACEHOLDER_ID = '__mister:arcade_placeholder__';
+/**
+ * Render a user-facing label for a core. Default returns the coreId
+ * verbatim. The override case maps `mame` → `Arcade` so the user's
+ * actual MAME core surfaces in the sidebar under the friendlier
+ * arcade label (since the v0.1 build deliberately stopped emitting
+ * a separate `_Arcade/` placeholder row).
+ *
+ * Internal coreId stays unchanged — IPC calls (`listRoms`,
+ * `prefetchRomsMetadata`, etc.), ledger entries, classification
+ * overrides, and system-id resolution all key off the real
+ * coreId. This helper is the single seam for a future user-
+ * renaming feature; if that lands it'll plug in here, reading from
+ * a per-profile rename map.
+ */
+export function coreDisplayName(coreId: string): string {
+  if (coreId === 'mame') return 'Arcade';
+  return coreId;
+}
 
 export interface RawRbfInput {
   readonly category: CoreCategory;
@@ -455,28 +472,26 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     return c.romCount > 0 && recursive > 0;
   });
 
-  // Collapse arcade into a single placeholder row. Arcade is out of scope
-  // for the hide feature (per AGENTS.md), but users still expect to see
-  // "Arcade" in the cores list. The placeholder is emitted whenever the
-  // device has an `_Arcade/` directory at all — most real MiSTers populate
-  // it with `.mra` files, not `.rbf` / `.mgl`, so we can't infer presence
-  // from the rbfs list.
+  // PR-A item 1: drop the synthetic Arcade placeholder. The v0.1
+  // build ships with the actual `mame` core surfacing as "Arcade" in
+  // the sidebar (via `coreDisplayName`), so the placeholder row is
+  // redundant noise. The `_Arcade/` directory's `.mra` files stay
+  // visible to the MiSTer firmware unchanged — this app simply
+  // doesn't enumerate them.
+  //
+  // `arcadeDirExists` stays on `MatchInput` (it's still computed by
+  // the device-scan layer) but the matcher no longer reads it.
   const nonArcade = filtered.filter((c) => c.category !== 'Arcade');
-  const arcadeFromRbfs = filtered.some((c) => c.category === 'Arcade');
-  if (input.arcadeDirExists === true || arcadeFromRbfs) {
-    nonArcade.push({
-      id: ARCADE_PLACEHOLDER_ID,
-      name: 'Arcade',
-      romCount: 0,
-      hiddenCount: 0,
-      category: 'Arcade',
-      rbfPaths: [],
-      gamesDirExists: false,
-      gamesDirHidden: false,
-    });
-  }
 
-  nonArcade.sort((a, b) => a.id.localeCompare(b.id, 'en-US', { sensitivity: 'base' }));
+  // Sort by display label so any rename via `coreDisplayName` (today
+  // just `mame` → `Arcade`) lands in its alphabetical slot rather
+  // than the coreId's. Stable across the rest of the list — no other
+  // overrides apply.
+  nonArcade.sort((a, b) =>
+    coreDisplayName(a.id).localeCompare(coreDisplayName(b.id), 'en-US', {
+      sensitivity: 'base',
+    }),
+  );
 
   for (const c of nonArcade) {
     const hasAnyVisibleRbf = c.rbfPaths.some(
@@ -500,10 +515,6 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
   }
 
   return nonArcade;
-}
-
-export function isArcadePlaceholder(core: CoreEntry): boolean {
-  return core.id === ARCADE_PLACEHOLDER_ID;
 }
 
 /**

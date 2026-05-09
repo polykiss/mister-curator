@@ -2,7 +2,7 @@ import { LogOut, RefreshCw } from 'lucide-react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
-import { isArcadePlaceholder } from '@shared/core-matching';
+import { coreDisplayName } from '@shared/core-matching';
 
 import { Button } from '@app/renderer/src/components/ui/button';
 import { CoresPane } from '@app/renderer/src/components/CoresPane';
@@ -132,17 +132,11 @@ export function BrowserScreen(): JSX.Element {
         </div>
         <main className="min-w-0 flex-1 bg-elevated">
           {selectedCore ? (
-            isArcadePlaceholder(selectedCore) ? (
+            !selectedCore.gamesDirExists ? (
               <div className="flex h-full flex-col items-center justify-center gap-3 p-12 text-center">
-                <h2 className="text-heading text-fg">Arcade</h2>
-                <p className="max-w-md text-body-lg text-fg-muted">
-                  Arcade core management is coming in a later release. For now, your
-                  .mra files are visible to MiSTer as normal.
-                </p>
-              </div>
-            ) : !selectedCore.gamesDirExists ? (
-              <div className="flex h-full flex-col items-center justify-center gap-3 p-12 text-center">
-                <h2 className="text-heading text-fg">{selectedCore.name}</h2>
+                <h2 className="text-heading text-fg">
+                  {coreDisplayName(selectedCore.id)}
+                </h2>
                 <p className="max-w-md text-body-lg text-fg-muted">
                   This core has no games directory. ROMs go in{' '}
                   <code className="rounded border border-default bg-overlay px-1.5 py-0.5 font-mono text-body-sm text-fg-body">

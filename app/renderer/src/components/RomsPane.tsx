@@ -1,9 +1,6 @@
 import {
-  ArrowLeft,
-  Eye,
-  EyeOff,
-  Folder,
-  FolderOpen,
+  ChevronDown,
+  ChevronUp,
   MoreHorizontal,
   Settings,
 } from 'lucide-react';
@@ -36,13 +33,23 @@ import {
   type RomRowMenuItem,
 } from '@app/renderer/src/components/RomRowMenu';
 import {
+  BackThumbnailCell,
+  RomDensityEyeCell,
   RomMetadataInfoCells,
-  RomNameYearStack,
+  RomNameInner,
   RomThumbnailCell,
+  RomYearCell,
 } from '@app/renderer/src/components/RomMetadataCells';
+import {
+  DEFAULT_SORT,
+  nextSortState,
+  sortRoms,
+  type SortKey,
+  type SortState,
+} from '@app/renderer/src/lib/rom-sort';
+import { classifyRow } from '@app/renderer/src/lib/row-type';
 import type { RomMetadata } from '@shared/metadata-types';
 import { Button } from '@app/renderer/src/components/ui/button';
-import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
 import {
   Table,
@@ -60,7 +67,7 @@ import {
   subPathAtDepth,
 } from '@app/renderer/src/lib/breadcrumb';
 import { cn } from '@app/renderer/src/lib/cn';
-import { formatBytes, summarizeBulkResult } from '@app/renderer/src/lib/format';
+import { summarizeBulkResult } from '@app/renderer/src/lib/format';
 import type { VisibilityChange } from '@app/renderer/src/lib/optimistic';
 import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
 
@@ -126,11 +133,16 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   // the [core.id] reset effect committed — that call fails with
   // "Unknown core: Saturn" in the main-process log.
   // Pattern reference: https://react.dev/reference/react/useState#storing-information-from-previous-renders
+  // PR-A item 8: per-pane sort state, no persistence. Switching
+  // cores resets to the default (`name asc`) along with subPath /
+  // selection / etc.
+  const [sortState, setSortState] = useState<SortState>(DEFAULT_SORT);
   const [trackedCoreId, setTrackedCoreId] = useState(core.id);
   if (trackedCoreId !== core.id) {
     setTrackedCoreId(core.id);
     setSubPath('');
     setSelected(new Set());
+    setSortState(DEFAULT_SORT);
   }
 
   const cacheKey = romsKey(core.id, subPath);
@@ -321,12 +333,22 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   // `showSystem` is off.
   const presentableRoms = useMemo(() => {
     if (!roms) return null;
-    return roms.filter((r) => {
+    const filtered = roms.filter((r) => {
       if (!showHidden && r.hidden) return false;
       if (!showSystem && systemFlags.get(r.filename) === true) return false;
       return true;
     });
-  }, [roms, showHidden, showSystem, systemFlags]);
+    // PR-A item 8: apply the per-pane sort. Folder rows pin to the
+    // top alphabetical, file rows follow `sortState`. We project to
+    // the sortRoms input shape (rom + metadata), let the pure sort
+    // do its work, then project back to the Rom array the rest of
+    // the pane consumes.
+    const withMeta = filtered.map((rom) => ({
+      rom,
+      metadata: metadataByPath[rom.path]?.metadata,
+    }));
+    return sortRoms(withMeta, sortState).map((r) => r.rom);
+  }, [roms, showHidden, showSystem, systemFlags, metadataByPath, sortState]);
 
   // Density-bar denominator for the size column — peer max across the
   // rows actually being rendered. SYSTEM.md §10: ROMs use file size /
@@ -869,7 +891,18 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
         </div>
       </header>
 
-      <div className="flex-1 overflow-auto">
+      {/* PR #23 round 5 commit 1: `scroll-themed` reserves a stable
+          scrollbar gutter and paints a permanent themed bar so native
+          overlay scrollbars on macOS can't fade in over the eye
+          column on the right.
+          PR #23 round 6: `pr-2.5` (10px) explicit right padding —
+          scrollbar-gutter alone wasn't reliable in this Chromium /
+          macOS configuration (eye icons still visually overlapped
+          the drawn scrollbar). Pinning a 10px gap between the row
+          content and the container's right edge guarantees the
+          rightmost cell (density + eye stack) sits well clear of
+          the scrollbar regardless of how the gutter resolves. */}
+      <div className="scroll-themed flex-1 overflow-auto pr-2.5">
         {loading && !roms ? (
           <div className="space-y-1 p-4">
             {Array.from({ length: 8 }).map((_, i) => (
@@ -898,21 +931,50 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                     onChange={(e) => onToggleAll(e.target.checked)}
                   />
                 </TableHead>
-                {/* PR #20 round 1: list-view enrichment. Four new
-                    columns flank the existing Name + actions:
-                    thumbnail, primary genre, rating. The Name cell
-                    stacks the SS-canonical name on top with the year
-                    underneath. Round 7 dropped the System column —
-                    inside a single-core view every row's system is
-                    the same (the core's canonical name), so the
-                    column was redundant noise. The `system` field
-                    stays in RomMetadata for the expanded-row state
-                    (round 8). The Size column from v0 was retired in
-                    round 1 — the density bar encodes size visually. */}
+                {/* PR-A item 8 layout: [Box art] [Name] [Year]
+                    [Genre] [Rating]. Year promoted out of the
+                    name-stack into its own sortable column. Each
+                    sortable header is clickable; the active column
+                    shows a chevron. Folder rows pin to the top
+                    regardless of sort. */}
                 <TableHead className="w-16" aria-label="Box art" />
-                <TableHead>Name</TableHead>
-                <TableHead className="w-28">Genre</TableHead>
-                <TableHead className="w-14 text-right">Rating</TableHead>
+                <SortableHeader
+                  label="Name"
+                  sortKey="name"
+                  sortState={sortState}
+                  onSort={(k) =>
+                    setSortState((prev) => nextSortState(prev, k))
+                  }
+                />
+                <SortableHeader
+                  label="Year"
+                  sortKey="year"
+                  align="right"
+                  className="w-16"
+                  sortState={sortState}
+                  onSort={(k) =>
+                    setSortState((prev) => nextSortState(prev, k))
+                  }
+                />
+                <SortableHeader
+                  label="Genre"
+                  sortKey="genre"
+                  className="w-28"
+                  sortState={sortState}
+                  onSort={(k) =>
+                    setSortState((prev) => nextSortState(prev, k))
+                  }
+                />
+                <SortableHeader
+                  label="Rating"
+                  sortKey="rating"
+                  align="right"
+                  className="w-14"
+                  sortState={sortState}
+                  onSort={(k) =>
+                    setSortState((prev) => nextSortState(prev, k))
+                  }
+                />
                 {/* MoreHorizontal column. Sits left of the density+eye
                     right-edge stack so the row's primary visibility
                     toggle owns the far-right slot. */}
@@ -933,6 +995,15 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             </TableHeader>
             <TableBody>
               {backRow ? (
+                // PR #23 round 3 part 2: back row uses the standard
+                // column layout (checkbox / thumbnail / name / year /
+                // genre / rating / actions / density) so the thumbnail
+                // column has consistent rhythm with the rest of the
+                // list. The thumbnail slot carries a 40px tile with a
+                // CornerUpLeft glyph (the round-3 spec's "tile of
+                // SOMETHING for every row" rule). Empty cells fill the
+                // metadata slots — the back row has no Rom, no metadata,
+                // and isn't sortable, so the slots stay visually quiet.
                 <TableRow
                   className="cursor-pointer bg-overlay/40 hover:bg-overlay"
                   onClick={() => setSubPath(backRow.targetSubPath)}
@@ -947,20 +1018,30 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                   aria-label={`Back to ${backRow.parentLabel}`}
                   title={`Back to ${backRow.parentLabel}`}
                 >
-                  <TableCell colSpan={7} className="pl-4">
-                    <span className="inline-flex items-center gap-2 font-mono text-body-sm text-fg-muted">
-                      <ArrowLeft className="size-3.5 shrink-0" strokeWidth={1.5} aria-hidden />
-                      <span className="truncate">
-                        ../ {backRow.parentLabel}
-                      </span>
+                  <TableCell className="pl-4" />
+                  <BackThumbnailCell />
+                  <TableCell className="truncate">
+                    <span className="font-mono text-body-sm text-fg-muted">
+                      ../ {backRow.parentLabel}
                     </span>
                   </TableCell>
+                  <TableCell className="w-16" />
+                  <TableCell className="w-28" />
+                  <TableCell className="w-14" />
+                  <TableCell className="w-10" />
+                  <TableCell className="w-[3.25rem] p-0" />
                 </TableRow>
               ) : null}
               {presentableRoms.map((rom) => {
                 const isSelected = selected.has(rom.filename);
                 const isSystem = systemFlags.get(rom.filename) === true;
                 const isDimmed = rom.hidden || isSystem;
+                // PR #23 round 3 part 2: visual row type drives the
+                // thumbnail tile variant. Maps from `rom.kind` (file /
+                // folder-atomic / folder-container) to one of 'game' /
+                // 'single-game-folder' / 'explorable-folder'. The back
+                // row is rendered separately above.
+                const rowType = classifyRow({ kind: 'rom', rom });
                 // PR #20 round 2: metadata streamed from the parent's
                 // prefetch effect. undefined = loading; entry present
                 // = settled (metadata may be null = unmatched, or
@@ -1004,6 +1085,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                       dimmed={isDimmed}
                       metadata={metadata}
                       error={fetchError}
+                      rowType={rowType}
                     />
                     <TableCell
                       className={cn(
@@ -1028,12 +1110,21 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                       {/* PR #20 round 1: name+year stack replaces the
                           plain displayName. The metadata-derived name
                           wins when present (SS canonical), falling
-                          back to the on-disk filename. The leading-
-                          icon slot keeps the existing system / folder
-                          decoration; the click handler stays on the
-                          parent TableCell so folder-container drill
-                          behavior is unchanged. */}
-                      <RomNameYearStack
+                          back to the on-disk filename. The click
+                          handler stays on the parent TableCell so
+                          folder-container drill behavior is
+                          unchanged.
+                          PR #23 round 4: the leading-icon slot now
+                          carries the system gear ONLY. The folder
+                          glyphs (Folder / FolderOpen) that used to
+                          sit next to folder names are redundant —
+                          round 3 part 2 put a 40px tile (FolderOpen
+                          for explorable folders, box-art + folder
+                          badge overlay for single-game folders) in
+                          the thumbnail column, so the inline glyph
+                          was repeating the same signal next to the
+                          name and breaking the column rhythm. */}
+                      <RomNameInner
                         rom={rom}
                         dimmed={isDimmed}
                         metadata={metadata}
@@ -1045,26 +1136,18 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                               strokeWidth={1.5}
                               aria-label="system file"
                             />
-                          ) : rom.kind === 'folder-container' ? (
-                            <FolderOpen
-                              className="size-3.5 shrink-0 text-fg-muted"
-                              strokeWidth={1.5}
-                              aria-label="container folder"
-                            />
-                          ) : rom.kind === 'folder-atomic' ? (
-                            <Folder
-                              className="size-3.5 shrink-0 text-fg-muted"
-                              strokeWidth={1.5}
-                              aria-label="folder ROM"
-                            />
                           ) : null
                         }
                       />
                     </TableCell>
-                    {/* PR #20 round 1: system / genre / rating cells.
-                        The v0 numeric Size column is retired — the
-                        density bar already encodes size visually,
-                        which buys back horizontal room for these. */}
+                    {/* PR-A item 8: year promoted out of the name
+                        stack into its own column for sort. */}
+                    <RomYearCell
+                      rom={rom}
+                      dimmed={isDimmed}
+                      metadata={metadata}
+                      error={fetchError}
+                    />
                     <RomMetadataInfoCells
                       rom={rom}
                       dimmed={isDimmed}
@@ -1098,71 +1181,24 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         <MoreHorizontal strokeWidth={1.5} />
                       </Button>
                     </TableCell>
-                    {/* Combined density + eye column. The wrapper's
-                        `h-full` lets the density rectangle and eye
-                        button stretch to the row's actual height —
-                        same flex bridge the cores pane uses. The
-                        `<td>` here has `p-0`, the inner flex has
-                        `items-stretch`, and DensityBar's hardcoded
-                        h-10 sits flush against the eye button with
-                        no gap utility class between them. System rows
-                        skip the rectangle; the gear icon + dimming
-                        already says "read-only", so the eye-icon
-                        slot reads as "read-only" copy. */}
-                    <TableCell className="p-0">
-                      <div className="flex h-full shrink-0 items-stretch">
-                        {!isSystem ? (
-                          <DensityBar
-                            floor="bg-elevated"
-                            value={rom.sizeBytes}
-                            max={maxSizeBytes}
-                            ariaLabel={`${formatBytes(rom.sizeBytes)} of peer max ${formatBytes(maxSizeBytes)}`}
-                          />
-                        ) : null}
-                        {isSystem ? (
-                          <span
-                            className="flex items-center px-2 font-mono text-body-sm text-fg-disabled"
-                            aria-label="read-only"
-                          >
-                            read-only
-                          </span>
-                        ) : (
-                          // Eye / EyeOff toggle — always visible at
-                          // rest (Round 3 Issue 1). Hover lifts
-                          // opacity on row-hover (matches cores pane,
-                          // which uses the same `group-hover/row`
-                          // pattern via the `group/row` class on
-                          // TableRow from the Table primitive).
-                          // `canMutate` gates against a lost-
-                          // connection session.
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => void onSingleToggle(rom)}
-                            disabled={!canMutate}
-                            title={
-                              canMutate
-                                ? rom.hidden
-                                  ? `Show ${rom.displayName}`
-                                  : `Hide ${rom.displayName}`
-                                : DISCONNECTED_TOOLTIP
-                            }
-                            aria-label={
-                              rom.hidden
-                                ? `Show ${rom.displayName}`
-                                : `Hide ${rom.displayName}`
-                            }
-                            className="self-center opacity-70 transition-opacity group-hover/row:opacity-100 focus-visible:opacity-100"
-                          >
-                            {rom.hidden ? (
-                              <EyeOff strokeWidth={1.5} />
-                            ) : (
-                              <Eye strokeWidth={1.5} />
-                            )}
-                          </Button>
-                        )}
-                      </div>
-                    </TableCell>
+                    {/* Combined density + eye column. PR #23 round 4
+                        extracted the cell into RomDensityEyeCell to
+                        give the absolute-positioning workaround a
+                        stable contract a regression test can pin —
+                        see RomMetadataCells.tsx for the long
+                        explanation of why `position: absolute` is the
+                        only reliable way to fill the row's actual
+                        height when the `<tr>` height is
+                        content-driven (the 48px thumbnail makes the
+                        actual row ~56px, not the declared 40px). */}
+                    <RomDensityEyeCell
+                      rom={rom}
+                      isSystem={isSystem}
+                      maxSizeBytes={maxSizeBytes}
+                      canMutate={canMutate}
+                      disconnectedTooltip={DISCONNECTED_TOOLTIP}
+                      onSingleToggle={onSingleToggle}
+                    />
                   </TableRow>
                 );
               })}
@@ -1179,5 +1215,58 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
         />
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Clickable column header (PR-A item 8). Active column shows a
+ * chevron indicating direction; inactive columns show no chevron
+ * (kept clean per spec — "your call, just be consistent"). The
+ * underlying `<th>` becomes a button so keyboard activation works.
+ */
+function SortableHeader(props: {
+  readonly label: string;
+  readonly sortKey: SortKey;
+  readonly sortState: SortState;
+  readonly onSort: (key: SortKey) => void;
+  readonly align?: 'left' | 'right';
+  readonly className?: string;
+}): JSX.Element {
+  const { label, sortKey, sortState, onSort, align = 'left', className } = props;
+  const active = sortState.key === sortKey;
+  const dir = active ? sortState.dir : null;
+  return (
+    <TableHead className={cn(align === 'right' && 'text-right', className)}>
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className={cn(
+          'inline-flex items-center gap-1 text-inherit transition-colors hover:text-fg',
+          align === 'right' && 'flex-row-reverse',
+          active && 'text-fg',
+        )}
+        aria-label={`Sort by ${label}${active ? ` (currently ${dir})` : ''}`}
+        aria-sort={
+          active ? (dir === 'asc' ? 'ascending' : 'descending') : 'none'
+        }
+      >
+        <span>{label}</span>
+        {active ? (
+          dir === 'asc' ? (
+            <ChevronUp
+              className="size-3 shrink-0"
+              strokeWidth={1.5}
+              aria-hidden
+            />
+          ) : (
+            <ChevronDown
+              className="size-3 shrink-0"
+              strokeWidth={1.5}
+              aria-hidden
+            />
+          )
+        ) : null}
+      </button>
+    </TableHead>
   );
 }
