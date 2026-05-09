@@ -132,6 +132,9 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
       // PR-C (PR #26): metadata-ipc tests don't exercise the
       // auto-scrape engine path; pass a stub that never gets called.
       { setFocus: () => undefined } as never,
+      // PR-D2 (PR #29): search-by-name path not exercised here;
+      // pass null for the SS service.
+      null,
     );
   });
 
@@ -298,6 +301,9 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
       // PR-C (PR #26): metadata-ipc tests don't exercise the
       // auto-scrape engine path; pass a stub that never gets called.
       { setFocus: () => undefined } as never,
+      // PR-D2 (PR #29): search-by-name path not exercised here;
+      // pass null for the SS service.
+      null,
     );
     const h = handlers.get(IPC_CHANNELS.ensureMetadataDatabase);
     await h!.handler({});

@@ -12,11 +12,13 @@ import type {
   OpenVGDBProgressEvent,
   OpenVGDBService,
 } from '@app/main/metadata/openvgdb-service';
+import type { ScreenScraperGame } from '@app/main/metadata/screenscraper-service';
 import { diagLog } from '@shared/diag-log';
 import type {
   MetadataHint,
   PrefetchProgress,
   RomMetadata,
+  UserMetadataOverride,
 } from '@shared/metadata-types';
 
 /**
@@ -259,6 +261,50 @@ export class MetadataOrchestrator {
    * Either way the renderer should show a loading state for that
    * row until the validation pass populates it.
    */
+  /**
+   * PR-D2 (PR #29) — write a user-defined field-override block onto
+   * the cache record for `path`. Resolves path → hash via the disk
+   * hash cache (no SSH), routes to `MetadataService.writeUserOverride`.
+   * Returns the updated record so the renderer can update its
+   * `metadataByPath` immediately. Returns `null` when no hash / no
+   * cache record exists.
+   */
+  async setUserMetadataOverride(
+    path: string,
+    override: UserMetadataOverride | undefined,
+  ): Promise<RomMetadata | null> {
+    const session = this.getActiveSession();
+    if (session === null) return null;
+    const hashEntries = await this.hashService.readCachedEntries(
+      session.host,
+      [path],
+    );
+    const entry = hashEntries.get(path);
+    if (entry === undefined || entry === null) return null;
+    return this.metadataService.writeUserOverride(entry.md5, override);
+  }
+
+  /**
+   * PR-D2 (PR #29) — write a manual-bind cache record from a SS
+   * `jeu` the user picked in the search modal. Same path-resolution
+   * shape as `setUserMetadataOverride`; routes to
+   * `MetadataService.bindManualOverride`.
+   */
+  async bindManualMetadataOverride(
+    path: string,
+    game: ScreenScraperGame,
+  ): Promise<RomMetadata | null> {
+    const session = this.getActiveSession();
+    if (session === null) return null;
+    const hashEntries = await this.hashService.readCachedEntries(
+      session.host,
+      [path],
+    );
+    const entry = hashEntries.get(path);
+    if (entry === undefined || entry === null) return null;
+    return this.metadataService.bindManualOverride(entry.md5, game);
+  }
+
   async readCachedRomsMetadata(
     coreId: string,
     romPaths: readonly string[],
