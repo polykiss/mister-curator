@@ -762,4 +762,113 @@ describe('MetadataOrchestrator', () => {
       ]);
     });
   });
+
+  describe('getRomsMetadata — unmappable-coreId short-circuit (round 11)', () => {
+    /**
+     * For coreIds with no SS systemeid mapping (mame, hbmame,
+     * AO486, etc.), round 11 short-circuits the hash phase entirely:
+     * no checkCachedMtimes batch, no per-row computeHash, no hash-
+     * based metadataService.getMetadata. Synthetic-keyed sentinels
+     * via the existing cache machinery handle "we saw this path
+     * once" semantics.
+     */
+    it('mame: no checkCachedMtimes, no computeHash, hashSkipped equals path count', async () => {
+      const paths = Array.from({ length: 10 }, (_, i) => `/p/mame/${String(i)}.zip`);
+      const { orchestrator, hashService, metadataService } =
+        makeOrchestrator({
+          systemId: null, // mame is unmapped
+          meta: null,
+        });
+      const events: { path: string; metadata: unknown; error: boolean }[] = [];
+      await orchestrator.getRomsMetadata('mame', paths, (e) =>
+        events.push(e),
+      );
+      // The big assertion: no hash work AT ALL.
+      expect(hashService.checkCachedMtimes).not.toHaveBeenCalled();
+      expect(hashService.computeHash).not.toHaveBeenCalled();
+      // Per-path metadataService.getMetadata IS called (with the
+      // synthetic key) so the cache machinery records the no-coverage
+      // result.
+      expect(metadataService.getMetadata).toHaveBeenCalledTimes(10);
+      // Every getMetadata call uses a synthetic `noss-` key, NOT a
+      // real md5 hash. This is the marker that distinguishes the
+      // round-11 short-circuit from the regular flow on disk.
+      const calls = (metadataService.getMetadata as ReturnType<typeof vi.fn>)
+        .mock.calls;
+      for (const c of calls) {
+        expect(c?.[0]).toMatch(/^noss-[0-9a-f]{40}$/);
+        expect(c?.[2]).toBeUndefined(); // no ssHint — synthetic flow
+      }
+      expect(events).toHaveLength(10);
+      expect(events.every((e) => !e.error && e.metadata === null)).toBe(true);
+    });
+
+    it('synthetic key is deterministic per (coreId, path)', async () => {
+      // Same path → same synthetic key. Two prefetches of the same
+      // mame core ask getMetadata with the same key, so the cache
+      // hit on the second prefetch is a literal cache hit (not a
+      // miss + re-write).
+      const { orchestrator, metadataService } = makeOrchestrator({
+        systemId: null,
+      });
+      await orchestrator.getRomsMetadata('mame', ['/p/mame/foo.zip']);
+      await orchestrator.getRomsMetadata('mame', ['/p/mame/foo.zip']);
+      const calls = (metadataService.getMetadata as ReturnType<typeof vi.fn>)
+        .mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[0]?.[0]).toBe(calls[1]?.[0]);
+    });
+
+    it('different (coreId, path) tuples produce different synthetic keys', async () => {
+      const { orchestrator, metadataService } = makeOrchestrator({
+        systemId: null,
+      });
+      await orchestrator.getRomsMetadata('mame', [
+        '/p/mame/a.zip',
+        '/p/mame/b.zip',
+      ]);
+      await orchestrator.getRomsMetadata('hbmame', ['/p/hbmame/a.zip']);
+      const keys = (metadataService.getMetadata as ReturnType<typeof vi.fn>)
+        .mock.calls.map((c) => c[0] as string);
+      expect(new Set(keys).size).toBe(3); // all distinct
+    });
+
+    it('mappable core (SNES) still flows through the hash phase (round 11 doesn\'t regress round 9/10)', async () => {
+      const paths = ['/p/snes/sonic.sfc'];
+      const hashEntries = new Map<string, HashEntry>();
+      hashEntries.set(paths[0]!, buildHashEntry(HASH));
+      const { orchestrator, hashService, metadataService } =
+        makeOrchestrator({
+          systemId: 4, // SNES is mapped
+          hashEntries,
+          meta: buildMeta(HASH, 'Sonic'),
+        });
+      await orchestrator.getRomsMetadata('SNES', paths);
+      expect(hashService.checkCachedMtimes).toHaveBeenCalledTimes(1);
+      // getMetadata receives a real md5 hash (32 hex chars), not the
+      // synthetic `noss-` key.
+      const call = (
+        metadataService.getMetadata as ReturnType<typeof vi.fn>
+      ).mock.calls[0];
+      expect(call?.[0]).toMatch(/^[0-9a-f]{32}$/);
+      // ssHint is supplied (round-2 shape).
+      expect(call?.[2]).toBeDefined();
+    });
+
+    it('unmappable core with 200 paths completes without any hash SSH calls', async () => {
+      // Reproduces the user's mame-650 scenario at unit scale. The
+      // perf claim: zero hash SSH cost, only N getMetadata calls
+      // (which read/write the local cache file synchronously).
+      const paths = Array.from(
+        { length: 200 },
+        (_, i) => `/p/mame/rom-${String(i)}.zip`,
+      );
+      const { orchestrator, hashService } = makeOrchestrator({
+        systemId: null,
+      });
+      await orchestrator.getRomsMetadata('mame', paths);
+      expect(hashService.checkCachedMtimes).not.toHaveBeenCalled();
+      expect(hashService.computeHash).not.toHaveBeenCalled();
+    });
+  });
 });

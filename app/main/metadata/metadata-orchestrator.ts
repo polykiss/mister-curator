@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
 import type {
@@ -229,6 +230,7 @@ export class MetadataOrchestrator {
     const startWall = Date.now();
     let resolved = 0;
     let errors = 0;
+    let hashSkipped = 0;
     const session = this.getActiveSession();
     if (session === null) {
       diagLog('warn', 'prefetch', '·', 'no-session', { coreId });
@@ -237,6 +239,19 @@ export class MetadataOrchestrator {
       }
       return;
     }
+
+    // Round 11 (PR #20): probe whether THIS coreId resolves to any
+    // metadata source. If not (mame, hbmame, AO486, etc.) the hash
+    // buys us nothing — SS won't be queried (no systemeid) and
+    // OpenVGDB is hash-keyed but only covers cartridge consoles
+    // we already map to SS. Skip BOTH the mtime batch AND the
+    // per-path hash compute; emit synthetic-keyed sentinels via
+    // the existing MetadataService cache machinery so we don't
+    // re-decide on every prefetch. For mame's 650 paths this
+    // collapses ~5 minutes of cold hash compute to a single SSH
+    // skip + 650 cache reads/writes (~600 ms total).
+    const wholeCoreUnmappable =
+      this.resolveSystemId({ romPath: romPaths[0]!, coreId }) === null;
 
     // Round 9 (PR #20): batched mtime check + per-path compute.
     // Round 5 collapsed the hash phase to per-ROM `getHash([single])`
@@ -255,30 +270,39 @@ export class MetadataOrchestrator {
     // Cached cores collapse to ~200 ms wall; cold cores keep the
     // round-5 per-ROM isolation (so the multi-GB Collection still
     // only fails its own row).
-    const mtimeCheckStart = Date.now();
     let mtimeMap: Map<string, HashEntry | null>;
-    try {
-      mtimeMap = await this.hashService.checkCachedMtimes(
-        session.client,
-        session.host,
-        romPaths,
-      );
-      diagLog('info', 'prefetch', '·', 'mtime-batch done', {
+    if (wholeCoreUnmappable) {
+      diagLog('info', 'prefetch', '·', 'skip-hash-batch', {
         coreId,
-        ms: Date.now() - mtimeCheckStart,
-        validated: [...mtimeMap.values()].filter((v) => v !== null).length,
-        needsHash: [...mtimeMap.values()].filter((v) => v === null).length,
-      });
-    } catch (err) {
-      // Batched stat failed — fall back to per-ROM compute (same
-      // shape as round 5). Mark all paths as "needs hash" so the
-      // loop below treats each individually.
-      diagLog('error', 'prefetch', '✗', 'mtime-batch failed', {
-        coreId,
-        ms: Date.now() - mtimeCheckStart,
-        err: err instanceof Error ? err.message : String(err),
+        reason: 'no-coverage',
+        paths: romPaths.length,
       });
       mtimeMap = new Map(romPaths.map((p) => [p, null]));
+    } else {
+      const mtimeCheckStart = Date.now();
+      try {
+        mtimeMap = await this.hashService.checkCachedMtimes(
+          session.client,
+          session.host,
+          romPaths,
+        );
+        diagLog('info', 'prefetch', '·', 'mtime-batch done', {
+          coreId,
+          ms: Date.now() - mtimeCheckStart,
+          validated: [...mtimeMap.values()].filter((v) => v !== null).length,
+          needsHash: [...mtimeMap.values()].filter((v) => v === null).length,
+        });
+      } catch (err) {
+        // Batched stat failed — fall back to per-ROM compute (same
+        // shape as round 5). Mark all paths as "needs hash" so the
+        // loop below treats each individually.
+        diagLog('error', 'prefetch', '✗', 'mtime-batch failed', {
+          coreId,
+          ms: Date.now() - mtimeCheckStart,
+          err: err instanceof Error ? err.message : String(err),
+        });
+        mtimeMap = new Map(romPaths.map((p) => [p, null]));
+      }
     }
 
     for (const path of romPaths) {
@@ -287,6 +311,62 @@ export class MetadataOrchestrator {
         coreId,
         path: basename(path),
       });
+
+      // Round 11 short-circuit: no metadata source can use a hash
+      // for this core, so skip the compute and let the
+      // synthetic-key sentinel write/read via the existing cache.
+      // The synthetic key is `noss-<sha1(coreId:path)>` — clearly
+      // distinguishable from a real md5 (which is 32 hex chars
+      // with no prefix), so cache files can be greppe'd to find
+      // synthetic-only entries.
+      const systemId = this.resolveSystemId({ romPath: path, coreId });
+      if (systemId === null) {
+        diagLog('info', 'meta', '·', 'system-map-miss', {
+          coreId,
+          path: basename(path),
+        });
+        diagLog('info', 'prefetch', '·', 'skip-hash', {
+          coreId,
+          path: basename(path),
+          reason: 'no-coverage',
+        });
+        const syntheticKey = makeSyntheticCacheKey(coreId, path);
+        let metadata: RomMetadata | null;
+        try {
+          metadata = await this.metadataService.getMetadata(
+            syntheticKey,
+            {},
+            undefined,
+          );
+        } catch (err) {
+          diagLog('error', 'prefetch', '✗', 'synthetic-lookup failed', {
+            coreId,
+            path: basename(path),
+            ms: Date.now() - perRomStart,
+            err: err instanceof Error ? err.message : String(err),
+          });
+          diagLog('info', 'meta', '·', 'path-end', {
+            coreId,
+            path: basename(path),
+            source: 'error',
+            ms: Date.now() - perRomStart,
+          });
+          onResolved?.({ path, metadata: null, error: true });
+          errors += 1;
+          continue;
+        }
+        diagLog('info', 'meta', '·', 'path-end', {
+          coreId,
+          path: basename(path),
+          source: 'synthetic-sentinel',
+          ms: Date.now() - perRomStart,
+        });
+        onResolved?.({ path, metadata, error: false });
+        resolved += 1;
+        hashSkipped += 1;
+        continue;
+      }
+
       let entry: HashEntry | undefined;
       const cachedEntry = mtimeMap.get(path);
       if (cachedEntry !== null && cachedEntry !== undefined) {
@@ -333,30 +413,14 @@ export class MetadataOrchestrator {
         resolved += 1;
         continue;
       }
-      const systemId = this.resolveSystemId({ romPath: path, coreId });
-      if (systemId === null) {
-        // Round 10 (PR #20) — surface unmapped coreIds in the diag
-        // log. Without this, the only signal is the downstream
-        // `[meta] · ss-skip reason=no-hint` line, which doesn't make
-        // it obvious that the coreId is the missing piece (vs SS
-        // being unavailable). Adds a coreId to the
-        // `screenscraper-system-map` should make this stop firing.
-        diagLog('info', 'meta', '·', 'system-map-miss', {
-          coreId,
-          path: basename(path),
-        });
-      }
-      const ssHint =
-        systemId === null
-          ? undefined
-          : {
-              systemId,
-              md5: entry.md5,
-              sha1: entry.sha1,
-              crc32: undefined,
-              romName: basename(path),
-              romSize: entry.size,
-            };
+      const ssHint = {
+        systemId,
+        md5: entry.md5,
+        sha1: entry.sha1,
+        crc32: undefined,
+        romName: basename(path),
+        romSize: entry.size,
+      };
       const lookupStart = Date.now();
       try {
         const metadata = await this.metadataService.getMetadata(
@@ -402,6 +466,7 @@ export class MetadataOrchestrator {
       ms: Date.now() - startWall,
       resolved,
       errors,
+      hashSkipped,
       total: romPaths.length,
     });
   }
@@ -485,6 +550,27 @@ export class MetadataOrchestrator {
       this.imageCache.clearAll(),
     ]);
   }
+}
+
+/**
+ * Round 11 — deterministic synthetic cache key for paths whose
+ * coreId has no metadata source. The `noss-` prefix marks the key
+ * as synthetic (a real md5 is 32 hex chars with no prefix), so cache
+ * files can be `grep`'d for synthetic-only entries. The hash input
+ * is `<coreId>:<path>` so two distinct paths under the same core
+ * produce distinct keys, and re-clicking the same core is
+ * idempotent.
+ *
+ * Mtime is intentionally NOT included: if the user replaces the
+ * file's bytes the metadata answer doesn't change (still no
+ * coverage), and including mtime would orphan the previous
+ * synthetic record on every file modification with no benefit.
+ */
+function makeSyntheticCacheKey(coreId: string, path: string): string {
+  return (
+    'noss-' +
+    createHash('sha1').update(`${coreId}:${path}`).digest('hex')
+  );
 }
 
 function basename(path: string): string {
