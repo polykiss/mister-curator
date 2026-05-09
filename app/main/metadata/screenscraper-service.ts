@@ -69,6 +69,22 @@
  */
 
 const ENDPOINT = 'https://api.screenscraper.fr/api2/jeuInfos.php';
+/**
+ * PR-D1 (PR #27): name-search endpoint. Used as a fallback when
+ * `jeuInfos.php` returns no match for a known hash AND OpenVGDB
+ * also misses — lets us recover NEOGEO romset-style names
+ * (`mslug2`, `kof97`) and arcade titles via the filename / parent-
+ * folder hint extracted in `filename-hint.ts`.
+ *
+ * Same auth, same rate-limit gap (1.1s shared with `jeuInfos`), same
+ * redaction rules. Spec referenced `neoclone.screenscraper.fr` which
+ * isn't a documented SS subdomain — using the standard
+ * `api.screenscraper.fr` host to match the existing `jeuInfos`
+ * client. If SS adds a separate name-search subdomain later, change
+ * here.
+ */
+const SEARCH_ENDPOINT =
+  'https://api.screenscraper.fr/api2/jeuRecherche.php';
 const SOFTNAME = 'mistercurator';
 const DEFAULT_MIN_INTERVAL_MS = 1100;
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -370,6 +386,29 @@ export class ScreenScraperService {
     return this.enqueue(() => this.doLookup(query));
   }
 
+  /**
+   * PR-D1 (PR #27) — name-search fallback. Calls
+   * `jeuRecherche.php?systemeid=<id>&recherche=<term>` and returns
+   * SS's ranked candidate games (top result first). Caller scores
+   * each candidate against the search term via `name-match.ts` and
+   * decides whether to bind.
+   *
+   * Uses the SAME enqueue gate / 1.1s rate-limit / retry rules as
+   * `lookup` — name-search calls share the rate budget with hash
+   * lookups so we never exceed the SS API floor across mixed
+   * traffic.
+   */
+  async searchByName(args: {
+    readonly systemId: number;
+    readonly searchTerm: string;
+  }): Promise<readonly ScreenScraperGame[]> {
+    if (!this.hasCredentials) return [];
+    if (this.getStatus() !== 'available') return [];
+    const term = args.searchTerm.trim();
+    if (term === '') return [];
+    return this.enqueue(() => this.doSearchByName(args.systemId, term));
+  }
+
   // ─── internals ─────────────────────────────────────────────────────
 
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
@@ -394,6 +433,36 @@ export class ScreenScraperService {
     query: ScreenScraperLookupQuery,
   ): Promise<ScreenScraperGame | null> {
     const url = this.buildUrl(query);
+    const body = await this.fetchWithRetries(url);
+    if (body === null) return null;
+    return parseScreenScraperResponse(body);
+  }
+
+  /**
+   * PR-D1 (PR #27): name-search executor. Mirrors `doLookup`'s
+   * shape (build URL → shared fetch+retry → parse) but calls
+   * `parseScreenScraperSearchResponse` against the array-of-jeux
+   * shape that `jeuRecherche.php` returns.
+   */
+  private async doSearchByName(
+    systemId: number,
+    searchTerm: string,
+  ): Promise<readonly ScreenScraperGame[]> {
+    const url = this.buildSearchUrl(systemId, searchTerm);
+    const body = await this.fetchWithRetries(url);
+    if (body === null) return [];
+    return parseScreenScraperSearchResponse(body);
+  }
+
+  /**
+   * Shared fetch + retry + status-handling routine. Returns the
+   * parsed JSON body on success, or null on any error / latched
+   * unavailability. Both `doLookup` (jeuInfos) and `doSearchByName`
+   * (jeuRecherche) call this with the appropriate URL — the only
+   * difference between them is the per-endpoint response shape
+   * which the caller handles with its own parser.
+   */
+  private async fetchWithRetries(url: string): Promise<unknown | null> {
     let attempts401 = 0;
     let attempts429 = 0;
     let attempts5xx = 0;
@@ -517,7 +586,7 @@ export class ScreenScraperService {
       } catch {
         return null;
       }
-      return parseScreenScraperResponse(body);
+      return body;
     }
   }
 
@@ -533,16 +602,7 @@ export class ScreenScraperService {
     // names that may contain special characters (passwords with `+`
     // or `&`, ROM filenames with parens, etc).
     const u = new URL(ENDPOINT);
-    u.searchParams.set('softname', SOFTNAME);
-    u.searchParams.set('output', 'json');
-    if (this.devId !== null) u.searchParams.set('devid', this.devId);
-    if (this.devPassword !== null) {
-      u.searchParams.set('devpassword', this.devPassword);
-    }
-    if (this.ssid !== null) u.searchParams.set('ssid', this.ssid);
-    if (this.sspassword !== null) {
-      u.searchParams.set('sspassword', this.sspassword);
-    }
+    this.applyAuthAndOutputParams(u);
     u.searchParams.set('systemeid', String(query.systemId));
     if (query.md5 !== undefined && query.md5.length > 0) {
       u.searchParams.set('md5', query.md5);
@@ -560,6 +620,39 @@ export class ScreenScraperService {
       u.searchParams.set('romtaille', String(query.romSize));
     }
     return u.toString();
+  }
+
+  /**
+   * PR-D1 (PR #27): build the `jeuRecherche.php` URL. Same auth + output
+   * params as `buildUrl`; only the `recherche` and `systemeid`
+   * differ. URL.searchParams URL-encodes the search term so spaces
+   * and punctuation in game names ("Metal Slug 2 (USA)") survive.
+   */
+  private buildSearchUrl(systemId: number, searchTerm: string): string {
+    const u = new URL(SEARCH_ENDPOINT);
+    this.applyAuthAndOutputParams(u);
+    u.searchParams.set('systemeid', String(systemId));
+    u.searchParams.set('recherche', searchTerm);
+    return u.toString();
+  }
+
+  /**
+   * Apply the SS auth + output-format params shared by every endpoint.
+   * Extracted so the jeuInfos and jeuRecherche URL builders share a
+   * single source for credential injection — adding a new SS endpoint
+   * means one new builder, not duplicating the auth wiring.
+   */
+  private applyAuthAndOutputParams(u: URL): void {
+    u.searchParams.set('softname', SOFTNAME);
+    u.searchParams.set('output', 'json');
+    if (this.devId !== null) u.searchParams.set('devid', this.devId);
+    if (this.devPassword !== null) {
+      u.searchParams.set('devpassword', this.devPassword);
+    }
+    if (this.ssid !== null) u.searchParams.set('ssid', this.ssid);
+    if (this.sspassword !== null) {
+      u.searchParams.set('sspassword', this.sspassword);
+    }
   }
 
   private async fetchWithTimeout(url: string): Promise<Response> {
@@ -599,6 +692,43 @@ export function parseScreenScraperResponse(
 ): ScreenScraperGame | null {
   if (body === null || typeof body !== 'object') return null;
   const jeu = readPath<unknown>(body, ['response', 'jeu']);
+  return parseSingleJeu(jeu);
+}
+
+/**
+ * PR-D1 (PR #27): parse a `jeuRecherche.php` response. Returns the
+ * candidate games in SS's response order (most relevant first).
+ *
+ * Response shape: `{ response: { jeux: [<jeu>, <jeu>, ...] } }`. Each
+ * `jeu` has the same shape as the single-`jeu` payload from
+ * `jeuInfos`, so the per-game parser is shared. Empty array returned
+ * when:
+ *   • body is missing / non-object
+ *   • `response.jeux` is missing or not an array
+ *   • every individual jeu fails to parse (no name, missing id)
+ */
+export function parseScreenScraperSearchResponse(
+  body: unknown,
+): readonly ScreenScraperGame[] {
+  if (body === null || typeof body !== 'object') return [];
+  const jeux = readPath<unknown>(body, ['response', 'jeux']);
+  if (!Array.isArray(jeux)) return [];
+  const out: ScreenScraperGame[] = [];
+  for (const j of jeux) {
+    const parsed = parseSingleJeu(j);
+    if (parsed !== null) out.push(parsed);
+  }
+  return out;
+}
+
+/**
+ * PR-D1 (PR #27): single-jeu parser shared between `jeuInfos`
+ * (one game) and `jeuRecherche` (array of games). Extracted from the
+ * original `parseScreenScraperResponse` body so both endpoints route
+ * through the same field-extraction logic — adding new metadata
+ * fields means changing one place.
+ */
+function parseSingleJeu(jeu: unknown): ScreenScraperGame | null {
   if (jeu === null || typeof jeu !== 'object') return null;
   const j = jeu as Record<string, unknown>;
 

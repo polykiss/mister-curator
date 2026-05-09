@@ -1203,6 +1203,66 @@ describe('RealMisterClient', () => {
       expect(gdi?.kind).toBe('folder-atomic');
     });
 
+    it('PR-D1 (PR #27): atomic folders carry containedRomPath = alphabetical-first launchable file', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            // X68000-shape: one .zip + a manual companion.
+            'd\tCastlevania\t0',
+            'f\tCastlevania/Castlevania.zip\t40960',
+            'f\tCastlevania/manual.txt\t2048',
+            // Two-launchable folder: alphabetical-first wins
+            // (`a-game.zip` over `z-game.zip`).
+            'd\tDualGame\t0',
+            'f\tDualGame/z-game.zip\t40960',
+            'f\tDualGame/a-game.zip\t40960',
+            // Atomic folder with no launchable extension —
+            // containedRomPath stays undefined (renderer falls back
+            // to ImageOff + folder badge).
+            'd\tNoLaunchable\t0',
+            'f\tNoLaunchable/manual.pdf\t2048',
+            // Container folder — containedRomPath should NOT populate
+            // (it's drilled into, not metadata-bound).
+            'd\tManyGames\t0',
+            'f\tManyGames/g1.zip\t1024',
+            'f\tManyGames/g2.zip\t1024',
+            'f\tManyGames/g3.zip\t1024',
+            'f\tManyGames/g4.zip\t1024',
+            'f\tManyGames/g5.zip\t1024',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('X68000');
+
+      const single = roms.find((r) => r.filename === 'Castlevania');
+      expect(single?.kind).toBe('folder-atomic');
+      expect(single?.containedRomPath).toBe(
+        '/media/fat/games/X68000/Castlevania/Castlevania.zip',
+      );
+
+      const dual = roms.find((r) => r.filename === 'DualGame');
+      expect(dual?.kind).toBe('folder-atomic');
+      // a-game wins by alphabetical order.
+      expect(dual?.containedRomPath).toBe(
+        '/media/fat/games/X68000/DualGame/a-game.zip',
+      );
+
+      const noRom = roms.find((r) => r.filename === 'NoLaunchable');
+      expect(noRom?.kind).toBe('folder-atomic');
+      expect(noRom?.containedRomPath).toBeUndefined();
+
+      const container = roms.find((r) => r.filename === 'ManyGames');
+      expect(container?.kind).toBe('folder-container');
+      // Container folders don't carry a contained-rom-path; they're
+      // drilled into to enumerate their contents.
+      expect(container?.containedRomPath).toBeUndefined();
+    });
+
     it('preserves both top-level files and folders in a mixed games dir', async () => {
       // Some cores' games dirs hold both bare-file ROMs and folder
       // ROMs side by side (e.g. a NES core where most ROMs are flat

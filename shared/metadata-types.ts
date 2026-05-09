@@ -20,7 +20,19 @@
  *     when creds are configured.
  */
 
-export type MetadataSource = 'screenscraper' | 'openvgdb' | 'none';
+/**
+ * `'screenscraper-name-search'` (PR-D1, PR #27) marks records resolved
+ * via the name-search fallback (jeuRecherche.php with a filename /
+ * folder hint), distinct from `'screenscraper'` which means the
+ * authoritative hash lookup hit. The two are kept separate so the
+ * cache audit + future "this row was inferred, not hash-confirmed"
+ * UI distinction stays available.
+ */
+export type MetadataSource =
+  | 'screenscraper'
+  | 'screenscraper-name-search'
+  | 'openvgdb'
+  | 'none';
 
 /**
  * Every per-ROM metadata record carries the source that produced it.
@@ -87,13 +99,28 @@ export interface RomMetadata {
 }
 
 /**
- * Optional hint passed to the metadata pipeline. v0 ignores both
- * fields — OpenVGDB is hash-keyed so the hash uniquely identifies
- * the ROM. Reserved for future name-search fallback if we add one.
+ * Optional hint passed to the metadata pipeline.
+ *
+ * `name` and `system` were the v0 placeholder fields (still ignored).
+ *
+ * PR-D1 (PR #27): `filename` and `parentFolder` feed the name-search
+ * fallback. When SS hash + OpenVGDB both miss, `filename-hint.ts`
+ * extracts up to three search terms from these inputs, calls
+ * `searchByName` for each, and binds the top result if it scores
+ * ≥ 0.9 against the search term. Pass these whenever you have them
+ * (always for prefetch, optionally for ad-hoc lookups).
  */
 export interface MetadataHint {
   readonly name?: string;
   readonly system?: string;
+  /** Basename of the ROM file (e.g. `mslug2.neo`). */
+  readonly filename?: string;
+  /**
+   * Basename of the immediate parent dir (atomic-folder shape:
+   * `Metal Slug 2 (USA)`). Undefined when the ROM is at the core's
+   * top level.
+   */
+  readonly parentFolder?: string;
 }
 
 /**

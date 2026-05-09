@@ -805,6 +805,20 @@ export class RealMisterClient implements IMisterClient {
         visibleRelPath,
       );
       const classification = resolveClassification(heuristic, override);
+      const kind =
+        classification === 'container' ? 'folder-container' : 'folder-atomic';
+      // PR-D1 (PR #27): for atomic folders, identify the
+      // alphabetical-first launchable ROM file inside so the
+      // renderer can bind metadata (box art etc.) to the folder
+      // row by looking up the contained file's hash. Container
+      // folders don't get this — they're drilled into.
+      const containedRomPath =
+        kind === 'folder-atomic'
+          ? pickPrimaryRomFile(
+              acc.directFiles,
+              `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`,
+            )
+          : undefined;
       roms.push({
         coreId,
         filename: acc.name,
@@ -812,9 +826,9 @@ export class RealMisterClient implements IMisterClient {
         sizeBytes: acc.sizeBytes,
         hidden,
         path: `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`,
-        kind:
-          classification === 'container' ? 'folder-container' : 'folder-atomic',
+        kind,
         relativePath,
+        containedRomPath,
       });
     }
 
@@ -2052,6 +2066,30 @@ function parseDiscoveryShellOutput(
       });
     }
   }
+}
+
+/**
+ * PR-D1 (PR #27): pick the alphabetical-first launchable ROM file
+ * inside an atomic folder. Used to populate `Rom.containedRomPath`
+ * so the renderer can bind metadata to the folder row by looking
+ * up the file's hash.
+ *
+ * Returns undefined when no immediate-child file has a launchable
+ * extension — the renderer falls back to the ImageOff + folder
+ * badge presentation in that case. Doesn't recurse: the spec
+ * requires "first file alphabetically whose extension is in
+ * CART_EXTENSIONS ∪ DISC_EXTENSIONS" at the immediate level only;
+ * deeply-nested ROMs inside an atomic folder are unusual and would
+ * confuse the metadata binding (which file is "the game"?).
+ */
+function pickPrimaryRomFile(
+  immediateFiles: readonly string[],
+  folderPath: string,
+): string | undefined {
+  const launchable = [...immediateFiles].filter(isLaunchableRomExtension);
+  if (launchable.length === 0) return undefined;
+  launchable.sort((a, b) => a.localeCompare(b));
+  return `${folderPath}/${launchable[0]!}`;
 }
 
 function assertSafeSegment(label: string, value: string): void {

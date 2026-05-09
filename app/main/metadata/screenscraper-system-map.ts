@@ -16,9 +16,21 @@
  *     Aliases for hypothetical-but-unseen-in-the-wild coreIds (e.g.
  *     `MasterSystem` alongside the MiSTer's `SMS`) are fine but not
  *     load-bearing.
- *   - Skip coreIds without a clean SS mapping (Arcade, MAME, hbmame,
+ *   - Skip coreIds without a clean SS mapping (Arcade, hbmame,
  *     AO486 PC games). Better to fall through to the "no-hint"
  *     diag log than to commit a wrong mapping.
+ *
+ * PR-D1 (PR #27): `mame` mapped to 75 (ScreenScraper's `arcade` /
+ * MAME systemeid). Combined with the new filename-hint
+ * name-search fallback, MAME's 650 ROMs that previously got
+ * synthetic-key sentinels (because SS hash lookups for arcade
+ * romsets always miss — the romset hash isn't what SS indexes)
+ * now flow through hash-miss → name-search → high-confidence bind
+ * via the paren-shortname hint (`(mslug2)` → searches `mslug2` →
+ * SS returns Metal Slug 2). The wholeCoreUnmappable gate in
+ * MetadataOrchestrator stops firing for mame; the synthetic-key
+ * path stays as future-proofing for cores that genuinely have no
+ * SS mapping.
  */
 export const SCREENSCRAPER_SYSTEM_ID_BY_CORE_ID: ReadonlyMap<string, number> =
   new Map([
@@ -83,6 +95,13 @@ export const SCREENSCRAPER_SYSTEM_ID_BY_CORE_ID: ReadonlyMap<string, number> =
     ['WonderSwan', 45],
     ['WonderSwanColor', 46],
     ['Odyssey2', 104],
+    // ─── Arcade ──────────────────────────────────────────────────────
+    // PR-D1 (PR #27): mame core → ScreenScraper systemeid 75
+    // (arcade). Hash lookups for arcade romsets typically miss (SS
+    // doesn't index per-romset hashes), but the new filename-hint
+    // pipeline catches them via the `(mslug2)` paren-shortname →
+    // jeuRecherche search → name-match scoring path.
+    ['mame', 75],
   ]);
 
 /**

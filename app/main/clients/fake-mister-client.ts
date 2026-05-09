@@ -372,6 +372,30 @@ export class FakeMisterClient implements IMisterClient {
           visibleRelPath,
           folderClassifications,
         );
+        const kind =
+          classification === 'container' ? 'folder-container' : 'folder-atomic';
+        // PR-D1 (PR #27): mirror real-mister-client — for atomic
+        // folders, identify the alphabetical-first launchable file
+        // for renderer-side metadata binding. Walks immediate
+        // children only (matches the real client's behavior).
+        let containedRomPath: string | undefined;
+        if (kind === 'folder-atomic') {
+          try {
+            const innerEntries = await fs.readdir(fullPath, {
+              withFileTypes: true,
+            });
+            const launchable = innerEntries
+              .filter((e) => e.isFile() && isLaunchableRomExtension(e.name))
+              .map((e) => e.name)
+              .sort((a, b) => a.localeCompare(b));
+            if (launchable.length > 0) {
+              containedRomPath = `${onDevicePath}/${launchable[0]!}`;
+            }
+          } catch {
+            // Unreadable folder — skip; renderer falls back to
+            // ImageOff + folder badge.
+          }
+        }
         roms.push({
           coreId,
           filename,
@@ -379,9 +403,9 @@ export class FakeMisterClient implements IMisterClient {
           sizeBytes,
           hidden,
           path: onDevicePath,
-          kind:
-            classification === 'container' ? 'folder-container' : 'folder-atomic',
+          kind,
           relativePath,
+          containedRomPath,
         });
       }
     }

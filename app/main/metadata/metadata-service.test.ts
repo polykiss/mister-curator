@@ -1169,4 +1169,230 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       expect(ss.lookupCalls).toBe(2);
     });
   });
+
+  describe('PR-D1 (PR #27) — name-search fallback', () => {
+    /**
+     * Stub a ScreenScraper service that supports BOTH `lookup` (hash)
+     * and `searchByName`. Returns lookup result first; if lookup is
+     * null, searchByName fires per-hint and the test fixture controls
+     * the candidate list per search term.
+     */
+    function makeSearchSS(opts: {
+      readonly lookupResult?: ScreenScraperGame | null;
+      readonly searchResults?: Record<string, readonly ScreenScraperGame[]>;
+    } = {}): {
+      readonly svc: ScreenScraperService;
+      readonly searchCalls: { systemId: number; searchTerm: string }[];
+    } {
+      const searchCalls: { systemId: number; searchTerm: string }[] = [];
+      const stub = {
+        getStatus: vi.fn(() => 'available'),
+        lookup: vi.fn(async () => opts.lookupResult ?? null),
+        searchByName: vi.fn(
+          async (args: { systemId: number; searchTerm: string }) => {
+            searchCalls.push(args);
+            return opts.searchResults?.[args.searchTerm] ?? [];
+          },
+        ),
+      } as unknown as ScreenScraperService;
+      return { svc: stub, searchCalls };
+    }
+
+    function buildSsHit(
+      overrides: Partial<ScreenScraperGame> = {},
+    ): ScreenScraperGame {
+      return {
+        id: 1234,
+        name: 'Metal Slug 2',
+        system: 'Arcade',
+        description: 'Run-and-gun.',
+        developer: 'SNK',
+        publisher: 'SNK',
+        genres: ['Action', 'Run and Gun'],
+        releaseDate: '1998-04-02',
+        rating: 9,
+        players: '1-2',
+        boxArtUrl: 'https://ss-cdn/box.png',
+        extra: {
+          box3DUrl: null,
+          marqueeUrl: null,
+          titleScreenUrl: null,
+          snapUrl: null,
+          clearLogoUrl: null,
+          screenshots: [],
+        },
+        ...overrides,
+      };
+    }
+
+    const SS_HINT = {
+      systemId: 75,
+      md5: HASH,
+      sha1: 'b'.repeat(40),
+      crc32: 'deadbeef',
+      romName: 'mslug2.neo',
+      romSize: 1024,
+    };
+
+    it('hash miss + name-search high-confidence hit → binds with source=screenscraper-name-search', async () => {
+      // Hash misses both SS + OpenVGDB. The paren-shortname hint
+      // `mslug2` returns a candidate scoring exact (1.0) → bind.
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({
+        lookupResult: null,
+        searchResults: { mslug2: [buildSsHit({ name: 'mslug2' })] },
+      });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      const result = await svc.getMetadata(
+        HASH,
+        { filename: 'Metal Slug 2 (mslug2).neo' },
+        SS_HINT,
+      );
+      expect(result?.source).toBe('screenscraper-name-search');
+      expect(result?.name).toBe('mslug2');
+    });
+
+    it('cache the name-search result so re-fetches use it without re-querying', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({
+        lookupResult: null,
+        searchResults: {
+          'Metal Slug 2': [buildSsHit({ name: 'Metal Slug 2' })],
+        },
+      });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      const first = await svc.getMetadata(
+        HASH,
+        { filename: 'mslug2.neo', parentFolder: 'Metal Slug 2' },
+        SS_HINT,
+      );
+      expect(first?.source).toBe('screenscraper-name-search');
+      const before = ss.searchCalls.length;
+      const second = await svc.getMetadata(
+        HASH,
+        { filename: 'mslug2.neo', parentFolder: 'Metal Slug 2' },
+        SS_HINT,
+      );
+      expect(second?.source).toBe('screenscraper-name-search');
+      // Cache hit on the second call — no additional searchByName.
+      expect(ss.searchCalls.length).toBe(before);
+    });
+
+    it('low-confidence top result → sentinel write, NO bind', async () => {
+      // Search returns a candidate, but the score is below the
+      // auto-bind threshold (0.9). Better to leave the row blank.
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({
+        lookupResult: null,
+        // Search term "mslug2"; top candidate "Completely Unrelated Game".
+        // Score: distance > 2, no token overlap → 0.
+        searchResults: {
+          mslug2: [buildSsHit({ name: 'Completely Unrelated Game' })],
+        },
+      });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      const result = await svc.getMetadata(
+        HASH,
+        { filename: 'Metal Slug 2 (mslug2).neo' },
+        SS_HINT,
+      );
+      expect(result).toBeNull();
+    });
+
+    it('parent-folder hint wins over paren-shortname when both score equally', async () => {
+      // Engine fires hints in priority order. Parent-folder is
+      // first; if it gets a high-confidence match, paren-shortname
+      // is never queried (saves an API call).
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({
+        lookupResult: null,
+        searchResults: {
+          // Parent folder "Metal Slug 2" hits exact.
+          'Metal Slug 2': [buildSsHit({ name: 'Metal Slug 2' })],
+          // Would also hit but never asked because folder won first.
+          mslug2: [buildSsHit({ name: 'mslug2' })],
+        },
+      });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      await svc.getMetadata(
+        HASH,
+        {
+          filename: 'Metal Slug 2 (mslug2).neo',
+          parentFolder: 'Metal Slug 2',
+        },
+        SS_HINT,
+      );
+      // Only the parent-folder search fired.
+      expect(ss.searchCalls.map((c) => c.searchTerm)).toEqual([
+        'Metal Slug 2',
+      ]);
+    });
+
+    it('falls through to next hint when first returns no candidates', () => {
+      // Atomic-folder shape: parent folder doesn't search-hit, but
+      // paren-shortname does.
+      return (async () => {
+        const m = makeMocks({ dbReturns: null });
+        const ss = makeSearchSS({
+          lookupResult: null,
+          searchResults: {
+            // Parent-folder search returns nothing.
+            'Cleaned Folder Name': [],
+            // paren-shortname `mslug2` hits.
+            mslug2: [buildSsHit({ name: 'mslug2' })],
+          },
+        });
+        const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+        const result = await svc.getMetadata(
+          HASH,
+          {
+            filename: 'Metal Slug 2 (mslug2).neo',
+            parentFolder: 'Cleaned Folder Name',
+          },
+          SS_HINT,
+        );
+        expect(result?.source).toBe('screenscraper-name-search');
+        expect(ss.searchCalls.map((c) => c.searchTerm)).toEqual([
+          'Cleaned Folder Name',
+          'mslug2',
+        ]);
+      })();
+    });
+
+    it('skips name-search when filename hint is missing', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({ lookupResult: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      // No filename in hint — name-search should not fire.
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result).toBeNull();
+      expect(ss.searchCalls).toEqual([]);
+    });
+
+    it('skips name-search when ssHint is missing (no system id to scope search)', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({ lookupResult: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      // No ssHint passed — name-search needs the systemId; skipped.
+      const result = await svc.getMetadata(HASH, {
+        filename: 'Game.nes',
+      });
+      expect(result).toBeNull();
+      expect(ss.searchCalls).toEqual([]);
+    });
+
+    it('OpenVGDB hit short-circuits before name-search runs', async () => {
+      const m = makeMocks({ dbReturns: buildDbHit({ name: 'From DB' }) });
+      const ss = makeSearchSS({ lookupResult: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      const result = await svc.getMetadata(
+        HASH,
+        { filename: 'mslug2.neo' },
+        SS_HINT,
+      );
+      // OpenVGDB-sourced — name-search never fired.
+      expect(result?.source).toBe('openvgdb');
+      expect(ss.searchCalls).toEqual([]);
+    });
+  });
 });

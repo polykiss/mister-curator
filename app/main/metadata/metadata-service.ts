@@ -1,7 +1,9 @@
 import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
 
+import { extractNameHints } from '@app/main/metadata/filename-hint';
 import type { LibretroThumbnailsFetcher } from '@app/main/metadata/libretro-thumbnails';
+import { AUTO_BIND_THRESHOLD, scoreMatch } from '@app/main/metadata/name-match';
 import type {
   OpenVGDBMetadata,
   OpenVGDBService,
@@ -151,11 +153,10 @@ export class MetadataService {
     hint: MetadataHint = {},
     screenScraperHint?: ScreenScraperHint,
   ): Promise<RomMetadata | null> {
-    void hint;
     const inflight = this.inflight.get(hash);
     if (inflight !== undefined) return inflight;
 
-    const promise = this.doGet(hash, screenScraperHint).finally(() => {
+    const promise = this.doGet(hash, screenScraperHint, hint).finally(() => {
       this.inflight.delete(hash);
     });
     this.inflight.set(hash, promise);
@@ -194,6 +195,7 @@ export class MetadataService {
   private async doGet(
     hash: string,
     ssHint: ScreenScraperHint | undefined,
+    hint: MetadataHint,
   ): Promise<RomMetadata | null> {
     const ssAvailable = this.canQueryScreenScraper(ssHint);
     const cached = await this.readCache(hash);
@@ -280,19 +282,127 @@ export class MetadataService {
       return composed;
     }
 
-    // Both sources missed — sentinel. Round 9 records the
-    // ssAvailable bit at write-time so the next read can distinguish
-    // "definitive SS no-match" (authoritative TTL) from "we couldn't
-    // even ask SS" (refetch on next opportunity).
+    // PR-D1 (PR #27) — Source priority 3: ScreenScraper name-search
+    // fallback. Both hash sources missed; if we have name hints
+    // (filename / parentFolder) AND a system id, try jeuRecherche
+    // for each hint in priority order. Bind the first high-
+    // confidence (≥ AUTO_BIND_THRESHOLD) match. Saves an SS call
+    // per remaining hint when one hits.
+    if (
+      this.screenScraper !== null &&
+      ssHint !== undefined &&
+      this.screenScraper.getStatus() === 'available' &&
+      hint.filename !== undefined
+    ) {
+      const nameSearchHit = await this.tryNameSearch(
+        hash,
+        ssHint.systemId,
+        hint,
+      );
+      if (nameSearchHit !== null) {
+        await this.writeCache(hash, nameSearchHit);
+        return nameSearchHit;
+      }
+    }
+
+    // All sources missed — sentinel. Round 9 records the ssAvailable
+    // bit at write-time so the next read can distinguish "definitive
+    // SS no-match" (authoritative TTL) from "we couldn't even ask SS"
+    // (refetch on next opportunity).
     diagLog('info', 'meta', '·', 'metadata-decision', {
       hash: hash.slice(0, 12),
       action: 'write-sentinel',
-      reason: 'both-sources-miss',
+      reason: 'all-sources-miss',
       ssAvailableAtWrite: ssAvailable ? 1 : 0,
     });
     const sentinel = this.buildSentinel(hash, ssAvailable);
     await this.writeCache(hash, sentinel);
     return null;
+  }
+
+  /**
+   * PR-D1 (PR #27) — name-search fallback executor. Extract hints
+   * from filename + parentFolder, try each in priority order, score
+   * the top candidate, bind if confidence ≥ AUTO_BIND_THRESHOLD.
+   *
+   * Short-circuits on the first high-confidence match so we don't
+   * burn rate-limit budget on a stem hint when the parent-folder
+   * already won. Below-threshold candidates are logged for diag
+   * coverage but ignored — better to leave the row blank than to
+   * bind to the wrong game (PR-D2 will surface manual-override).
+   */
+  private async tryNameSearch(
+    hash: string,
+    systemId: number,
+    hint: MetadataHint,
+  ): Promise<RomMetadata | null> {
+    if (this.screenScraper === null) return null;
+    if (hint.filename === undefined) return null;
+    const hints = extractNameHints({
+      filename: hint.filename,
+      parentFolder: hint.parentFolder,
+    });
+    if (hints.length === 0) return null;
+    for (const h of hints) {
+      let candidates: readonly ScreenScraperGame[];
+      try {
+        candidates = await this.screenScraper.searchByName({
+          systemId,
+          searchTerm: h.value,
+        });
+      } catch (err) {
+        if (err instanceof ScreenScraperAuthError) {
+          // Auth latched mid-search; SS won't recover this session.
+          // Stop trying further hints and let the sentinel write.
+          this.logger(
+            `[MetadataService] ScreenScraper auth failed during name-search; aborting fallback.`,
+          );
+          return null;
+        }
+        throw err;
+      }
+      if (candidates.length === 0) {
+        diagLog('info', 'meta', '·', 'ss-name-search', {
+          hash: hash.slice(0, 12),
+          source: h.source,
+          term: h.value,
+          outcome: 'no-candidates',
+        });
+        continue;
+      }
+      const top = candidates[0]!;
+      const score = scoreMatch(h.value, top.name);
+      diagLog('info', 'meta', '·', 'ss-name-search', {
+        hash: hash.slice(0, 12),
+        source: h.source,
+        term: h.value,
+        topName: top.name,
+        score,
+        outcome: score >= AUTO_BIND_THRESHOLD ? 'bind' : 'low-confidence',
+      });
+      if (score >= AUTO_BIND_THRESHOLD) {
+        return this.composeFromScreenScraperNameSearch(hash, top);
+      }
+      // Below threshold — try the next hint. The candidate IS in
+      // SS's database, but the rank-1 result didn't match the search
+      // term well enough to auto-bind; continue rather than commit.
+    }
+    return null;
+  }
+
+  /**
+   * PR-D1 (PR #27) — compose a RomMetadata record from a name-search
+   * hit. Same field shape as `composeFromScreenScraper`, but the
+   * `source` field flips to `'screenscraper-name-search'` so the
+   * cache audit + future UI can distinguish hash-confirmed records
+   * from inferred ones.
+   */
+  private composeFromScreenScraperNameSearch(
+    hash: string,
+    game: ScreenScraperGame,
+  ): RomMetadata {
+    const base = this.composeFromScreenScraper(hash, game);
+    return { ...base, source: 'screenscraper-name-search' };
   }
 
   /**
@@ -504,6 +614,13 @@ export class MetadataService {
     if (cached.source === 'screenscraper') {
       return { refetch: false, reason: 'cached-screenscraper' };
     }
+    if (cached.source === 'screenscraper-name-search') {
+      // PR-D1 (PR #27): name-search hits are cached the same as
+      // hash hits. Re-asking SS for the same hash is wasteful when
+      // we already have a high-confidence binding. PR-D2's manual
+      // override path is the documented way to revisit a binding.
+      return { refetch: false, reason: 'cached-screenscraper-name-search' };
+    }
     if (cached.source === 'openvgdb') {
       return ssAvailable
         ? { refetch: true, reason: 'cache-upgrade-ss-available' }
@@ -591,6 +708,8 @@ function isRomMetadata(v: unknown): v is RomMetadata {
     typeof o.system === 'string' &&
     typeof o.fetchedAt === 'string' &&
     (o.source === 'screenscraper' ||
+      // PR-D1 (PR #27): name-search hits are valid cache entries.
+      o.source === 'screenscraper-name-search' ||
       o.source === 'openvgdb' ||
       o.source === 'none')
   );

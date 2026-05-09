@@ -446,10 +446,18 @@ export class MetadataOrchestrator {
         romSize: entry.size,
       };
       const lookupStart = Date.now();
+      // PR-D1 (PR #27): pass filename + parentFolder so MetadataService
+      // can run the name-search fallback (jeuRecherche) when the hash
+      // misses both SS and OpenVGDB. Parent folder is the basename of
+      // the directory above the file — for atomic-folder ROMs
+      // (`Metal Slug 2 (USA)/mslug2.neo`) this is the strongest
+      // recovery signal.
+      const filename = basename(path);
+      const parentFolder = parentBasename(path);
       try {
         const metadata = await this.metadataService.getMetadata(
           entry.md5,
-          {},
+          { filename, parentFolder },
           ssHint,
         );
         diagLog('info', 'prefetch', '·', 'lookup', {
@@ -600,4 +608,25 @@ function makeSyntheticCacheKey(coreId: string, path: string): string {
 function basename(path: string): string {
   const slash = path.lastIndexOf('/');
   return slash < 0 ? path : path.slice(slash + 1);
+}
+
+/**
+ * PR-D1 (PR #27): basename of the IMMEDIATE parent dir, or undefined
+ * when there's no parent (root-level files). Used to feed the
+ * name-search fallback's parentFolder hint — atomic-folder ROMs
+ * (`/games/NEOGEO/Metal Slug 2 (USA)/mslug2.neo`) yield "Metal Slug
+ * 2 (USA)", which `filename-hint.ts` cleans to "Metal Slug 2" before
+ * running it as the search term.
+ *
+ * Returns undefined for paths with 0 or 1 segments (no meaningful
+ * parent) so the hint is omitted rather than passed as the empty
+ * string.
+ */
+function parentBasename(path: string): string | undefined {
+  const lastSlash = path.lastIndexOf('/');
+  if (lastSlash <= 0) return undefined;
+  const parentPath = path.slice(0, lastSlash);
+  const prevSlash = parentPath.lastIndexOf('/');
+  const parent = prevSlash < 0 ? parentPath : parentPath.slice(prevSlash + 1);
+  return parent === '' ? undefined : parent;
 }
