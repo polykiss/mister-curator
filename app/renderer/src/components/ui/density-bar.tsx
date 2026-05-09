@@ -51,12 +51,16 @@ export function DensityBar({
       role="img"
       aria-label={ariaLabel ?? `intensity ${String(Math.round(ratio * 100))}%`}
       className={cn(
-        // 40px tall (matches the row-height design token §4) × 20px
-        // wide (half the row height per §10). `<td>` containers don't
-        // propagate `h-full` to children without an explicit flex
-        // bridge, so the height is hardcoded — change here if the row
-        // density target ever shifts.
-        'block h-10 w-5 shrink-0',
+        // PR-A item 9: full row-height edge-to-edge, right-bleed
+        // flush. `h-full` works because the parent `<td>` uses
+        // `flex h-full items-stretch` (the bridge ROMs / Cores
+        // panes already provide). 20px wide preserves the §10
+        // ratio against whatever the actual row height is —
+        // PR #20 round 1 grew the row past 40px to fit a 48px
+        // thumbnail, and the previous hardcoded `h-10` left a
+        // visible gap above and below the bar. `block` keeps the
+        // self-stretch behaviour consistent across browsers.
+        'block h-full w-5 shrink-0',
         className,
       )}
       style={style}

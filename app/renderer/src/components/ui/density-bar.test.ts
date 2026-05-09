@@ -1,7 +1,10 @@
+import type { ReactElement } from 'react';
+
 import { describe, expect, it } from 'vitest';
 
 import {
   DENSITY_CURVE_EXPONENT,
+  DensityBar,
   densityFillColor,
   densityRatio,
 } from '@app/renderer/src/components/ui/density-bar';
@@ -136,5 +139,43 @@ describe('densityFillColor', () => {
     // a muddy midpoint). The point of this indicator is perceptual
     // uniformity — see SYSTEM.md §10.
     expect(densityFillColor(0.5, 'bg-surface')).toMatch(/in oklch/);
+  });
+});
+
+describe('DensityBar — render shape (PR-A item 9)', () => {
+  // The component is small enough to render directly without a DOM.
+  // Calling it as a function returns the JSX element it produces;
+  // we read `props.className` to assert the layout intent. Saves
+  // pulling in @testing-library/react just for two assertions.
+  function classNameFor(): string {
+    const result = DensityBar({
+      value: 50,
+      max: 100,
+      floor: 'bg-surface',
+    }) as ReactElement<{ readonly className: string }>;
+    return result.props.className;
+  }
+
+  it('uses h-full so the indicator fills the row height edge-to-edge', () => {
+    const cn = classNameFor();
+    expect(cn).toContain('h-full');
+    // Pre-PR-A item 9 the height was hardcoded to h-10 (40px) which
+    // left a visible gap when the row grew (PR #20 round 1 bumped
+    // the row past 40px to fit the thumbnail). Pin that we no
+    // longer hardcode that.
+    expect(cn).not.toMatch(/\bh-10\b/);
+  });
+
+  it('has no vertical padding or margin on the indicator container', () => {
+    const cn = classNameFor();
+    // Tailwind escapes for vertical spacing utilities. Any of these
+    // would re-introduce the gap above/below the bar.
+    expect(cn).not.toMatch(/\b[mp][ytb]-\d/);
+  });
+
+  it('keeps the §10 ratio: 20px wide, shrink-0', () => {
+    const cn = classNameFor();
+    expect(cn).toContain('w-5');
+    expect(cn).toContain('shrink-0');
   });
 });
