@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+
 import type { HashClient, HashService } from '@app/main/metadata/hash-service';
 import type { ImageCache } from '@app/main/metadata/image-cache';
 import type { MetadataService } from '@app/main/metadata/metadata-service';
@@ -203,6 +205,23 @@ export class MetadataOrchestrator {
   async getBoxArtLocal(url: string): Promise<string | null> {
     if (url.length === 0) return null;
     return this.imageCache.fetch(url);
+  }
+
+  /**
+   * Same as `getBoxArtLocal` but returns the file bytes so a sandboxed
+   * renderer (where `file://` is blocked) can wrap them in a Blob /
+   * objectURL for `<img src>`. Lazy-downloads on first call via the
+   * shared image cache. Returns null on fetch failure or when the URL
+   * is empty.
+   */
+  async getBoxArtBytes(url: string): Promise<Uint8Array | null> {
+    const path = await this.getBoxArtLocal(url);
+    if (path === null) return null;
+    try {
+      return await readFile(path);
+    } catch {
+      return null;
+    }
   }
 
   /** Wipe the metadata cache + image cache. Hash cache is independent. */

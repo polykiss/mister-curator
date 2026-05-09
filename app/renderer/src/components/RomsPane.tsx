@@ -28,6 +28,11 @@ import {
   RomRowMenu,
   type RomRowMenuItem,
 } from '@app/renderer/src/components/RomRowMenu';
+import {
+  RomMetadataInfoCells,
+  RomNameYearStack,
+  RomThumbnailCell,
+} from '@app/renderer/src/components/RomMetadataCells';
 import { Button } from '@app/renderer/src/components/ui/button';
 import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
@@ -737,8 +742,19 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                     onChange={(e) => onToggleAll(e.target.checked)}
                   />
                 </TableHead>
+                {/* PR #20 round 1: list-view enrichment. Four new
+                    columns flank the existing Name + actions:
+                    thumbnail, system, primary genre, rating. The Name
+                    cell now stacks the SS-canonical name on top with
+                    the year underneath. The Size column from v0 is
+                    retired — the density bar already encodes size
+                    visually, and dropping the numeric column buys back
+                    horizontal room for the metadata payload. */}
+                <TableHead className="w-16" aria-label="Box art" />
                 <TableHead>Name</TableHead>
-                <TableHead className="w-32 text-right">Size</TableHead>
+                <TableHead className="w-28">System</TableHead>
+                <TableHead className="w-28">Genre</TableHead>
+                <TableHead className="w-14 text-right">Rating</TableHead>
                 {/* MoreHorizontal column. Sits left of the density+eye
                     right-edge stack so the row's primary visibility
                     toggle owns the far-right slot. */}
@@ -773,7 +789,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                   aria-label={`Back to ${backRow.parentLabel}`}
                   title={`Back to ${backRow.parentLabel}`}
                 >
-                  <TableCell colSpan={5} className="pl-4">
+                  <TableCell colSpan={8} className="pl-4">
                     <span className="inline-flex items-center gap-2 font-mono text-body-sm text-fg-muted">
                       <ArrowLeft className="size-3.5 shrink-0" strokeWidth={1.5} aria-hidden />
                       <span className="truncate">
@@ -814,6 +830,11 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         onChange={(e) => onToggleSelect(rom.filename, e.target.checked)}
                       />
                     </TableCell>
+                    {/* PR #20 round 1: thumbnail cell. Lazy-loads SS or
+                        libretro art via the per-row useBoxArt hook;
+                        skeleton while loading, ImageOff placeholder
+                        when no art is available. */}
+                    <RomThumbnailCell rom={rom} dimmed={isDimmed} />
                     <TableCell
                       className={cn(
                         'truncate',
@@ -834,46 +855,45 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                           : undefined
                       }
                     >
-                      <span className="inline-flex items-center gap-2">
-                        {/* System rows carry a 14px gear icon on the
-                            left of the name. It inherits the row's
-                            current text color, so it dims along with
-                            the rest of the row. The SYSTEM/HIDDEN
-                            pill badges from PR #7 are gone. */}
-                        {isSystem ? (
-                          <Settings
-                            className="size-3.5 shrink-0"
-                            strokeWidth={1.5}
-                            aria-label="system file"
-                          />
-                        ) : rom.kind === 'folder-container' ? (
-                          <FolderOpen
-                            className="size-3.5 shrink-0 text-fg-muted"
-                            strokeWidth={1.5}
-                            aria-label="container folder"
-                          />
-                        ) : rom.kind === 'folder-atomic' ? (
-                          <Folder
-                            className="size-3.5 shrink-0 text-fg-muted"
-                            strokeWidth={1.5}
-                            aria-label="folder ROM"
-                          />
-                        ) : null}
-                        <span
-                          className={cn(
-                            'truncate',
-                            !isDimmed && 'text-fg',
-                          )}
-                        >
-                          {rom.displayName}
-                        </span>
-                      </span>
+                      {/* PR #20 round 1: name+year stack replaces the
+                          plain displayName. The metadata-derived name
+                          wins when present (SS canonical), falling
+                          back to the on-disk filename. The leading-
+                          icon slot keeps the existing system / folder
+                          decoration; the click handler stays on the
+                          parent TableCell so folder-container drill
+                          behavior is unchanged. */}
+                      <RomNameYearStack
+                        rom={rom}
+                        dimmed={isDimmed}
+                        leadingIcon={
+                          isSystem ? (
+                            <Settings
+                              className="size-3.5 shrink-0"
+                              strokeWidth={1.5}
+                              aria-label="system file"
+                            />
+                          ) : rom.kind === 'folder-container' ? (
+                            <FolderOpen
+                              className="size-3.5 shrink-0 text-fg-muted"
+                              strokeWidth={1.5}
+                              aria-label="container folder"
+                            />
+                          ) : rom.kind === 'folder-atomic' ? (
+                            <Folder
+                              className="size-3.5 shrink-0 text-fg-muted"
+                              strokeWidth={1.5}
+                              aria-label="folder ROM"
+                            />
+                          ) : null
+                        }
+                      />
                     </TableCell>
-                    <TableCell className="text-right">
-                      <span className="font-mono text-body-sm text-fg-muted tabular">
-                        {formatBytes(rom.sizeBytes)}
-                      </span>
-                    </TableCell>
+                    {/* PR #20 round 1: system / genre / rating cells.
+                        The v0 numeric Size column is retired — the
+                        density bar already encodes size visually,
+                        which buys back horizontal room for these. */}
+                    <RomMetadataInfoCells rom={rom} dimmed={isDimmed} />
                     {/* MoreHorizontal lives left of the density+eye
                         right-edge stack (Round 3 / SYSTEM.md §5). The
                         eye toggle owns the far-right slot so the

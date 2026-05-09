@@ -64,6 +64,7 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
     prefetchMetadata: ReturnType<typeof vi.fn>;
     clearMetadataCache: ReturnType<typeof vi.fn>;
     getBoxArtLocal: ReturnType<typeof vi.fn>;
+    getBoxArtBytes: ReturnType<typeof vi.fn>;
     ensureMetadataDatabase: ReturnType<typeof vi.fn>;
   };
   let emitProgress: ReturnType<typeof vi.fn>;
@@ -91,6 +92,7 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
       }),
       clearMetadataCache: vi.fn(async () => undefined),
       getBoxArtLocal: vi.fn(async (url: string) => `/cache/${url}`),
+      getBoxArtBytes: vi.fn(async () => new Uint8Array([1, 2, 3])),
       ensureMetadataDatabase: vi.fn(
         async (cb?: (e: { kind: string }) => void) => {
           cb?.({ kind: 'started' });
@@ -117,6 +119,7 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
     expect(handlers.has(IPC_CHANNELS.prefetchMetadata)).toBe(true);
     expect(handlers.has(IPC_CHANNELS.clearMetadataCache)).toBe(true);
     expect(handlers.has(IPC_CHANNELS.getBoxArtLocal)).toBe(true);
+    expect(handlers.has(IPC_CHANNELS.getBoxArtBytes)).toBe(true);
     expect(handlers.has(IPC_CHANNELS.ensureMetadataDatabase)).toBe(true);
   });
 
@@ -194,6 +197,16 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
     const result = await h!.handler({}, 'https://cdn/box.png');
     expect(result).toBe('/cache/https://cdn/box.png');
     expect(stubOrchestrator.getBoxArtLocal).toHaveBeenCalledWith(
+      'https://cdn/box.png',
+    );
+  });
+
+  it('mister:getBoxArtBytes returns Uint8Array bytes for the renderer Blob path (PR #20)', async () => {
+    const h = handlers.get(IPC_CHANNELS.getBoxArtBytes);
+    const result = (await h!.handler({}, 'https://cdn/box.png')) as Uint8Array;
+    expect(result).toBeInstanceOf(Uint8Array);
+    expect(Array.from(result)).toEqual([1, 2, 3]);
+    expect(stubOrchestrator.getBoxArtBytes).toHaveBeenCalledWith(
       'https://cdn/box.png',
     );
   });

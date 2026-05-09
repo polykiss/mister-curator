@@ -316,6 +316,66 @@ describe('MetadataOrchestrator', () => {
     expect(imageCache.fetch).not.toHaveBeenCalled();
   });
 
+  describe('getBoxArtBytes (PR #20 round 1)', () => {
+    it('reads bytes from the cached file path returned by ImageCache', async () => {
+      // Write a known-bytes file, point ImageCache.fetch at it, and
+      // assert getBoxArtBytes returns its bytes verbatim.
+      const { promises: fs } = await import('node:fs');
+      const os = await import('node:os');
+      const path = await import('node:path');
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-boxart-'));
+      const filePath = path.join(dir, 'art.bin');
+      const expected = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]); // PNG-ish
+      await fs.writeFile(filePath, expected);
+      try {
+        const { orchestrator } = makeOrchestrator();
+        // Override the imageCache.fetch mock to return our temp path.
+        const stub = (orchestrator as unknown as {
+          imageCache: { fetch: ReturnType<typeof vi.fn> };
+        }).imageCache;
+        stub.fetch.mockReset();
+        stub.fetch.mockResolvedValue(filePath);
+        const bytes = await orchestrator.getBoxArtBytes('https://cdn/box.png');
+        expect(bytes).not.toBeNull();
+        expect(Array.from(bytes!)).toEqual(Array.from(expected));
+      } finally {
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('returns null when ImageCache reports no cached file', async () => {
+      const { orchestrator } = makeOrchestrator();
+      const stub = (orchestrator as unknown as {
+        imageCache: { fetch: ReturnType<typeof vi.fn> };
+      }).imageCache;
+      stub.fetch.mockReset();
+      stub.fetch.mockResolvedValue(null);
+      const bytes = await orchestrator.getBoxArtBytes('https://cdn/box.png');
+      expect(bytes).toBeNull();
+    });
+
+    it('returns null when the cached file vanished between fetch and read', async () => {
+      // ImageCache.fetch resolves with a path, but the file was wiped
+      // (e.g., user cleared the cache) before readFile got to it.
+      const { orchestrator } = makeOrchestrator();
+      const stub = (orchestrator as unknown as {
+        imageCache: { fetch: ReturnType<typeof vi.fn> };
+      }).imageCache;
+      stub.fetch.mockReset();
+      stub.fetch.mockResolvedValue('/nonexistent/path/art.bin');
+      const bytes = await orchestrator.getBoxArtBytes('https://cdn/box.png');
+      expect(bytes).toBeNull();
+    });
+
+    it('skips ImageCache entirely for an empty URL', async () => {
+      const { orchestrator, imageCache } = makeOrchestrator();
+      (imageCache.fetch as ReturnType<typeof vi.fn>).mockReset();
+      const bytes = await orchestrator.getBoxArtBytes('');
+      expect(bytes).toBeNull();
+      expect(imageCache.fetch).not.toHaveBeenCalled();
+    });
+  });
+
   it('clearMetadataCache: wipes both metadata and image caches', async () => {
     const { orchestrator, metadataService, imageCache } = makeOrchestrator();
     await orchestrator.clearMetadataCache();

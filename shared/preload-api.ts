@@ -53,6 +53,14 @@ export const IPC_CHANNELS = {
   prefetchMetadata: 'mister:prefetchMetadata',
   clearMetadataCache: 'mister:clearMetadataCache',
   getBoxArtLocal: 'mister:getBoxArtLocal',
+  // PR #20 (round 1) — render-side image bytes channel. Sandbox +
+  // contextIsolation block file:// from the renderer's http://localhost
+  // origin, so the renderer can't display the local-path output of
+  // getBoxArtLocal directly. This channel returns the cached file's
+  // bytes; the renderer wraps in a Blob + objectURL. If render-time
+  // bandwidth becomes an issue (hundreds of visible rows at once), a
+  // custom protocol handler is the structural follow-up.
+  getBoxArtBytes: 'mister:getBoxArtBytes',
   metadataPrefetchProgress: 'mister:metadataPrefetchProgress',
   // Round 3 (OpenVGDB). The renderer prompts the user to download
   // the ~50MB SQLite snapshot; main pulls it down + opens it.
@@ -334,6 +342,17 @@ export interface MisterApi {
    * the URL is empty.
    */
   getBoxArtLocal(url: string): Promise<string | null>;
+  /**
+   * Same lazy-download semantics as `getBoxArtLocal`, but returns the
+   * cached file's bytes so the renderer can build an object URL for
+   * `<img src>`. The local-path channel exists for tooling/scripts
+   * (Node-side) where file:// just works; the renderer needs bytes
+   * because Electron's sandbox + contextIsolation block file:// from
+   * the renderer's origin. Returns null on download failure or empty
+   * URL. Bytes are not cached in the renderer — caller owns the Blob
+   * and the objectURL lifecycle.
+   */
+  getBoxArtBytes(url: string): Promise<Uint8Array | null>;
   /**
    * Subscribe to `metadataPrefetchProgress` events from
    * `prefetchHashes` / `prefetchMetadata`. Returns an unsubscribe

@@ -230,6 +230,10 @@ export function registerIpcHandlers(
     metadata.getBoxArtLocal(url),
   );
 
+  handle<[string], Uint8Array | null>(IPC_CHANNELS.getBoxArtBytes, (url) =>
+    metadata.getBoxArtBytes(url),
+  );
+
   handle<[], { readonly ready: boolean; readonly downloadInProgress: boolean }>(
     IPC_CHANNELS.ensureMetadataDatabase,
     () =>

@@ -188,6 +188,8 @@ const api: MisterApi = {
   clearMetadataCache: () => invoke<void>(IPC_CHANNELS.clearMetadataCache),
   getBoxArtLocal: (url: string) =>
     invoke<string | null>(IPC_CHANNELS.getBoxArtLocal, url),
+  getBoxArtBytes: (url: string) =>
+    invoke<Uint8Array | null>(IPC_CHANNELS.getBoxArtBytes, url),
   onMetadataPrefetchProgress: (
     handler: (event: MetadataPrefetchEvent) => void,
   ) => {
