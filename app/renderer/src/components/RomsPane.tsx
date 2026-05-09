@@ -223,15 +223,34 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   useEffect(() => {
     const wasConnected = wasConnectedRef.current;
     wasConnectedRef.current = status === 'connected';
+    // Round 5 — log every fire of the resume effect, before the
+    // early-return guards. Tells us whether the effect runs at all
+    // on reconnect and which guard (if any) blocks the resume.
+    diagLog('info', 'roms-pane', '·', 'resume-effect-fired', {
+      status,
+      wasConnected: wasConnected ? 1 : 0,
+      coreId: core.id,
+      romsCount: roms?.length ?? 0,
+    });
     if (status !== 'connected') return;
     if (wasConnected) return; // already on a live session, no resume
-    if (!roms || roms.length === 0) return;
+    if (!roms || roms.length === 0) {
+      diagLog('info', 'roms-pane', '·', 'resume-skip-no-roms', {
+        coreId: core.id,
+      });
+      return;
+    }
     const filePaths = roms.filter((r) => r.kind === 'file').map((r) => r.path);
     const pending = filePaths.filter((p) => {
       const entry = metadataByPath[p];
       return entry === undefined || entry.error;
     });
-    if (pending.length === 0) return;
+    if (pending.length === 0) {
+      diagLog('info', 'roms-pane', '·', 'resume-skip-no-pending', {
+        coreId: core.id,
+      });
+      return;
+    }
     // Clear error flags on the residue so rows flip back to skeleton
     // while the re-fetch is in flight.
     setMetadataByPath((prev) => {

@@ -994,8 +994,22 @@ export class ConnectionManager {
     const profileId = this.currentProfileId;
     if (profileId === null) return;
     diagLog('warn', 'conn', '✗', 'unexpected-disconnect', { profileId });
-    this.setStatus('disconnected');
+    // Round 5 — emit the event BEFORE flipping status. The renderer
+    // delivers IPC events as separate tasks, so a `setStatus(...)`-
+    // before-event order produces a brief render where the renderer
+    // sees `status='disconnected' && lostConnection=false`. The
+    // CoresContext wipe-effect's transient-drop guard checks
+    // `lostConnection`, so that inter-event window passed the wipe
+    // guard and nullified `romsByCore` even on transient drops —
+    // which in turn tore down the initial-prefetch effect (logged
+    // `roms-pane unsubscribed` in round 4) and prevented the resume
+    // effect from re-firing on reconnect (no `roms` to enumerate).
+    //
+    // Emitting the event first means the renderer sees
+    // `lostConnection=true` BEFORE `status='disconnected'`, so the
+    // wipe guard holds across the cycle.
     this.emitConnectionEvent({ type: 'disconnected-unexpected', profileId });
+    this.setStatus('disconnected');
     void this.runAutoRetry(profileId);
   }
 

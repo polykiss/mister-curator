@@ -238,44 +238,38 @@ export class MetadataOrchestrator {
       return;
     }
 
-    diagLog('info', 'prefetch', '·', 'hash-batch start', {
-      coreId,
-      paths: romPaths.length,
-    });
-    const hashStart = Date.now();
-    let hashes: Map<string, HashEntry>;
-    try {
-      hashes = await this.hashService.getHash(
-        session.client,
-        session.host,
-        romPaths,
-      );
-      diagLog('info', 'prefetch', '·', 'hash-batch done', {
-        coreId,
-        ms: Date.now() - hashStart,
-        hashed: hashes.size,
-      });
-    } catch (err) {
-      diagLog('error', 'prefetch', '✗', 'hash-batch failed', {
-        coreId,
-        ms: Date.now() - hashStart,
-        err: err instanceof Error ? err.message : String(err),
-      });
-      for (const path of romPaths) {
+    // Round 5: per-ROM hash + lookup, end-to-end per path. Round 4
+    // batched the hash into one big SSH exec for all N paths; a
+    // single multi-GB ROM (e.g. a Super Famicom translation
+    // collection) would push that batch past the 120s hash timeout
+    // and take down ALL N paths' metadata. Now: one ROM at a time
+    // through the per-host serialized HashService, with ssh2's
+    // `disposeOnTimeout: false` (set in `hashPaths`) so a single
+    // bad ROM only fails its own row instead of the SSH session.
+    // Trade-off: ~100-200ms of SSH channel-setup overhead per ROM.
+    // Cheap price for the resilience win and the progressive UI
+    // updates (rows populate one by one as they resolve).
+    for (const path of romPaths) {
+      const perRomStart = Date.now();
+      let entry: HashEntry | undefined;
+      try {
+        const hashes = await this.hashService.getHash(
+          session.client,
+          session.host,
+          [path],
+        );
+        entry = hashes.get(path);
+      } catch (err) {
+        diagLog('error', 'prefetch', '✗', 'hash failed', {
+          coreId,
+          path: basename(path),
+          ms: Date.now() - perRomStart,
+          err: err instanceof Error ? err.message : String(err),
+        });
         onResolved?.({ path, metadata: null, error: true });
         errors += 1;
+        continue;
       }
-      diagLog('error', 'prefetch', '✗', 'complete', {
-        coreId,
-        ms: Date.now() - startWall,
-        resolved: 0,
-        errors,
-      });
-      return;
-    }
-
-    for (const path of romPaths) {
-      const entry = hashes.get(path);
       if (entry === undefined) {
         diagLog('info', 'prefetch', '·', 'unmatched', {
           coreId,
@@ -310,6 +304,7 @@ export class MetadataOrchestrator {
           path: basename(path),
           source: metadata?.source ?? 'none',
           ms: Date.now() - lookupStart,
+          totalMs: Date.now() - perRomStart,
         });
         onResolved?.({ path, metadata, error: false });
         resolved += 1;

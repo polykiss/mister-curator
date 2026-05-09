@@ -2011,7 +2011,7 @@ describe('RealMisterClient', () => {
       }
     });
 
-    it('hashPaths uses the higher 120s timeout (round 3)', async () => {
+    it('hashPaths uses the higher 120s timeout AND preserves the SSH session on timeout (round 3 + round 5)', async () => {
       vi.useFakeTimers();
       const client = new RealMisterClient();
       try {
@@ -2040,9 +2040,50 @@ describe('RealMisterClient', () => {
 
         expect(result).toBeInstanceOf(MisterConnectionError);
         if (result instanceof MisterConnectionError) {
-          expect(result.message).toMatch(/no reply within 120s/);
+          // Round 5 — hash-timeout uses the "session preserved"
+          // message because `runSshOp(..., disposeOnTimeout: false)`
+          // doesn't tear down the transport. A single multi-GB ROM
+          // exceeding 120s only fails its own row; the orchestrator
+          // catches and emits per-path error.
+          expect(result.message).toMatch(
+            /Command timed out after 120s; SSH session preserved\./,
+          );
+        }
+        // Round 5 — unexpected-disconnect listener does NOT fire on
+        // a hash timeout, because the SSH transport stays alive.
+        expect(listener).not.toHaveBeenCalled();
+        expect(mocks.dispose).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('disposeOnTimeout: true (default) still tears down on a non-hash timeout', async () => {
+      // Confirms round-5 behavior didn't accidentally weaken the
+      // default. listRoms uses the default-timeout path.
+      vi.useFakeTimers();
+      const client = new RealMisterClient();
+      try {
+        await client.connect(profile, secret);
+        const listener = vi.fn();
+        client.onUnexpectedDisconnect(listener);
+        mocks.execCommand.mockImplementationOnce(
+          () =>
+            new Promise(() => {
+              /* never resolves */
+            }),
+        );
+
+        const promise = client.listRoms('NES').catch((err: unknown) => err);
+        await vi.advanceTimersByTimeAsync(60_001);
+        const result = await promise;
+
+        expect(result).toBeInstanceOf(MisterConnectionError);
+        if (result instanceof MisterConnectionError) {
+          expect(result.message).toMatch(/no reply within 60s/);
         }
         expect(listener).toHaveBeenCalledTimes(1);
+        expect(mocks.dispose).toHaveBeenCalled();
       } finally {
         vi.useRealTimers();
       }

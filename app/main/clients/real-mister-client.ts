@@ -1270,10 +1270,16 @@ export class RealMisterClient implements IMisterClient {
     // which legitimately runs minutes for a large batch on a slow
     // SD card. Use the higher hash-specific timeout so we don't
     // false-fire on real progress.
+    // Round 5 — `disposeOnTimeout: false`. A single multi-GB ROM
+    // legitimately exceeding 120s should not tear down the SSH
+    // session; the orchestrator catches the timeout and emits a
+    // per-path error, leaving the rest of the per-ROM hash loop
+    // free to proceed.
     const result = await this.runSshOp(
       script,
       () => this.ssh.execCommand(script),
       SSH_HASH_OP_TIMEOUT_MS,
+      false,
     );
     if (result.code !== 0) {
       throw new Error(
@@ -1352,11 +1358,22 @@ export class RealMisterClient implements IMisterClient {
    * only. Truncated to 200 chars so a long `find` doesn't drown the
    * structured fields. Required so we have visibility into which
    * shell call hangs when the cascade fires.
+   *
+   * Round 5 — `disposeOnTimeout` (default true). Hash commands pass
+   * `false`: a single multi-GB ROM legitimately exceeding the 120s
+   * cap should NOT tear down the SSH transport, because the next
+   * per-ROM hash command can still proceed. With false we throw the
+   * timed-out promise but leave ssh2 connected — the orphaned remote
+   * `unzip|md5sum` process keeps running but doesn't poison the
+   * session. ssh2's own keepalive (round 3 widened to 60s) still
+   * detects a TRULY dead transport and triggers the unexpected-
+   * disconnect path independently.
    */
   private async runSshOp<T>(
     cmd: string,
     fn: () => Promise<T>,
     timeoutMs: number = SSH_OP_TIMEOUT_MS,
+    disposeOnTimeout = true,
   ): Promise<T> {
     const opId = nextSshOpId();
     const start = Date.now();
@@ -1388,13 +1405,23 @@ export class RealMisterClient implements IMisterClient {
           ms,
           timeoutMs: err.timeoutMs,
           cmd: truncateForLog(cmd),
+          disposed: disposeOnTimeout ? 1 : 0,
         });
-        this.handleUnexpectedDisconnect();
-        this.safelyDispose();
         const seconds = Math.round(err.timeoutMs / 1000);
+        if (disposeOnTimeout) {
+          this.handleUnexpectedDisconnect();
+          this.safelyDispose();
+          throw new MisterConnectionError(
+            'unknown',
+            `The MiSTer stopped responding (no reply within ${String(seconds)}s). Reconnecting…`,
+          );
+        }
+        // Transport stays alive; let the caller treat this as a
+        // per-call failure and move on. The orphaned remote process
+        // keeps running until it exits on its own.
         throw new MisterConnectionError(
           'unknown',
-          `The MiSTer stopped responding (no reply within ${String(seconds)}s). Reconnecting…`,
+          `Command timed out after ${String(seconds)}s; SSH session preserved.`,
         );
       }
       diagLog('error', 'ssh', '✗', 'error', {

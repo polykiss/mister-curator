@@ -291,9 +291,16 @@ describe('MetadataOrchestrator', () => {
   });
 
   describe('getRomsMetadata (PR #20 round 2 — list-view streaming prefetch)', () => {
-    it('hashes all paths in ONE batched HashService call (collapses N IPC into 1 SSH)', async () => {
-      // Reproduces the round-1 hotfix scenario: 32 paths shouldn't
-      // cost 32 sequential SSH `statWitnesses` round-trips.
+    it('hashes per-ROM through HashService.runGated, emits one event per path in order (round 5)', async () => {
+      // Round 5 reverted round 2's "ONE batched hashService call"
+      // shape because a single multi-GB ROM in the batch (e.g. a
+      // SNES translation collection) blew past the 120s hash timeout
+      // and took down ALL N paths. Per-ROM hashing keeps the failure
+      // surface to one row at a time, and the existing per-host
+      // serialization (`HashService.runGated`) ensures we still issue
+      // at most one concurrent SSH command per host. The renderer-
+      // side IPC fan-in (one prefetchRomsMetadata call per pane mount)
+      // from round 2 stays intact.
       const paths: string[] = [];
       const hashEntries = new Map<string, HashEntry>();
       for (let i = 0; i < 32; i += 1) {
@@ -313,18 +320,59 @@ describe('MetadataOrchestrator', () => {
         error: boolean;
       }[] = [];
       await orchestrator.getRomsMetadata('SNES', paths, (e) => events.push(e));
-      // ONE batched call to hashService — not 32. This is the
-      // structural fix for the round-1 SSH-overload bug.
-      expect(hashService.getHash).toHaveBeenCalledTimes(1);
-      expect(hashService.getHash).toHaveBeenCalledWith(
-        expect.anything(),
-        'host-1',
-        paths,
-      );
+      // One hashService.getHash call per path — each with a single-
+      // path argument. NOT one batched call for the whole list.
+      expect(hashService.getHash).toHaveBeenCalledTimes(32);
+      for (let i = 0; i < paths.length; i += 1) {
+        const call = (hashService.getHash as ReturnType<typeof vi.fn>).mock
+          .calls[i];
+        expect(call?.[1]).toBe('host-1');
+        expect(call?.[2]).toEqual([paths[i]]);
+      }
       // One event per path, in order.
       expect(events).toHaveLength(32);
       expect(events.map((e) => e.path)).toEqual(paths);
       expect(events.every((e) => !e.error)).toBe(true);
+    });
+
+    it('one ROM\'s hash failure is isolated — subsequent ROMs still resolve (round 5)', async () => {
+      // The big-collection-ROM scenario: one path's hash throws (e.g.
+      // 120s timeout from `runSshOp`), the rest must keep flowing.
+      // Pre-round-5, the single batched hash call would emit error for
+      // ALL paths on any throw.
+      const paths = ['/p/small.sfc', '/p/HUGE-collection.zip', '/p/ok.sfc'];
+      const hashEntries = new Map<string, HashEntry>();
+      for (const p of paths) hashEntries.set(p, buildHashEntry(HASH));
+      const { orchestrator, hashService, metadataService } = makeOrchestrator({
+        hashEntries,
+        meta: buildMeta(HASH, 'X'),
+      });
+      // Reset and replace getHash so we can throw selectively.
+      (hashService.getHash as ReturnType<typeof vi.fn>).mockReset();
+      (hashService.getHash as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_client: unknown, _host: string, hashed: readonly string[]) => {
+          if (hashed[0] === '/p/HUGE-collection.zip') {
+            throw new Error(
+              'Command timed out after 120s; SSH session preserved.',
+            );
+          }
+          const out = new Map<string, HashEntry>();
+          for (const p of hashed) out.set(p, buildHashEntry(HASH));
+          return out;
+        },
+      );
+      const events: { path: string; error: boolean }[] = [];
+      await orchestrator.getRomsMetadata('SNES', paths, (e) =>
+        events.push({ path: e.path, error: e.error }),
+      );
+      expect(events).toEqual([
+        { path: '/p/small.sfc', error: false },
+        { path: '/p/HUGE-collection.zip', error: true },
+        { path: '/p/ok.sfc', error: false },
+      ]);
+      // Two metadata lookups happened (the two non-erroring paths) —
+      // the third was skipped because hash failed.
+      expect(metadataService.getMetadata).toHaveBeenCalledTimes(2);
     });
 
     it('emits unmatched (no error) for every path when no session is active', async () => {
