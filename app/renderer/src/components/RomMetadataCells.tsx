@@ -25,8 +25,10 @@ import {
   displayGenre as displayGenreOf,
   displayName as displayNameOf,
   displayRating as displayRatingOf,
+  displayTags as displayTagsOf,
   displayYear as displayYearOf,
 } from '@app/renderer/src/lib/metadata-display';
+import { RomTagPills } from '@app/renderer/src/components/RomTagPills';
 import {
   formatRating,
   pickPrimaryGenre,
@@ -243,6 +245,11 @@ export function RomNameInner(
     metadata !== null && metadata !== undefined
       ? displayNameOf(metadata)
       : rom.displayName;
+  // PR-D2 (PR #29): user-set tags render as colored pills next to
+  // the title. `RomTagPills` returns null when no tags so the
+  // markup degrades cleanly for the common case.
+  const tags =
+    metadata !== null && metadata !== undefined ? displayTagsOf(metadata) : [];
 
   return (
     <span className="flex min-w-0 items-center gap-2">
@@ -253,6 +260,7 @@ export function RomNameInner(
       >
         {displayName}
       </span>
+      <RomTagPills tags={tags} />
     </span>
   );
 }

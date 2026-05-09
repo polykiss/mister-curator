@@ -152,7 +152,10 @@ describe('RomNameInner — PR #25 truncation + title-attribute tooltip', () => {
   }
 
   // RomNameInner returns a wrapping <span> with [leadingIcon, innerSpan].
-  // We need the LAST child (innerSpan) to assert on its props.
+  // PR-D2 (PR #29): RomNameInner now renders a third child after
+  // the inner-span — the RomTagPills component (returns null when no
+  // tags). Find the inner-span by its `truncate` className rather
+  // than positionally so future additions don't break the test.
   function callInner(displayName?: string): {
     readonly className: string;
     readonly title: string;
@@ -165,17 +168,32 @@ describe('RomNameInner — PR #25 truncation + title-attribute tooltip', () => {
       metadata: undefined,
       error: false,
     }) as ReactElement<{
-      readonly children: readonly ReactElement<{
-        readonly className: string;
-        readonly title: string;
-        readonly children: string;
-      }>[];
+      readonly children: readonly (
+        | ReactElement<{
+            readonly className?: string;
+            readonly title?: string;
+            readonly children?: string;
+          }>
+        | null
+      )[];
     }>;
-    // children is [leadingIcon (undefined here), innerSpan]
     const children = Array.isArray(result.props.children)
       ? result.props.children
       : [result.props.children];
-    const innerSpan = children[children.length - 1]!;
+    const innerSpan = children.find(
+      (c): c is ReactElement<{
+        readonly className: string;
+        readonly title: string;
+        readonly children: string;
+      }> =>
+        c !== null &&
+        typeof c === 'object' &&
+        typeof c.props.className === 'string' &&
+        c.props.className.includes('truncate'),
+    );
+    if (innerSpan === undefined) {
+      throw new Error('truncate inner span not found in RomNameInner output');
+    }
     return {
       className: innerSpan.props.className,
       title: innerSpan.props.title,
@@ -227,16 +245,32 @@ describe('RomNameInner — PR #25 truncation + title-attribute tooltip', () => {
       },
       error: false,
     }) as ReactElement<{
-      readonly children: readonly ReactElement<{
-        readonly title: string;
-        readonly children: string;
-      }>[];
+      readonly children: readonly (
+        | ReactElement<{
+            readonly className?: string;
+            readonly title?: string;
+            readonly children?: string;
+          }>
+        | null
+      )[];
     }>;
     const children = Array.isArray(result.props.children)
       ? result.props.children
       : [result.props.children];
-    const innerSpan = children[children.length - 1]!;
-    expect(innerSpan.props.title).toBe('Canonical Game Title');
-    expect(innerSpan.props.children).toBe('Canonical Game Title');
+    // PR-D2: find the inner-span by its `truncate` className (RomTagPills
+    // is now a sibling — positional lookup would catch the wrong element).
+    const innerSpan = children.find(
+      (c): c is ReactElement<{
+        readonly className: string;
+        readonly title: string;
+        readonly children: string;
+      }> =>
+        c !== null &&
+        typeof c === 'object' &&
+        typeof c.props.className === 'string' &&
+        c.props.className.includes('truncate'),
+    );
+    expect(innerSpan?.props.title).toBe('Canonical Game Title');
+    expect(innerSpan?.props.children).toBe('Canonical Game Title');
   });
 });
