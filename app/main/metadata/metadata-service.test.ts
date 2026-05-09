@@ -133,14 +133,17 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     expect(result?.boxArtUrl).toContain('Some%20Game.png');
   });
 
-  it('writes a cache file in v4 shape', async () => {
+  it('writes a cache file in the current schema version', async () => {
+    // PR-D2 (PR #29) bumped the schema from 4 → 5 (added the
+    // userOverride block). New writes always use the current
+    // ROM_METADATA_SCHEMA_VERSION; v4 records on disk still parse.
     const m = makeMocks({ dbReturns: buildDbHit() });
     const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     await svc.getMetadata(HASH);
 
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
     const onDisk = JSON.parse(await fs.readFile(path, 'utf-8')) as RomMetadata;
-    expect(onDisk.version).toBe(4);
+    expect(onDisk.version).toBe(5);
     expect(onDisk.source).toBe('openvgdb');
     expect(onDisk.system).toBe('Super Nintendo Entertainment System');
   });
@@ -154,7 +157,8 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
     const onDisk = JSON.parse(await fs.readFile(path, 'utf-8')) as RomMetadata;
     expect(onDisk.source).toBe('none');
-    expect(onDisk.version).toBe(4);
+    // PR-D2 (PR #29): writes use current schema (v5).
+    expect(onDisk.version).toBe(5);
   });
 
   it('hit on a system not in the libretro map → null thumbnail URLs but full metadata', async () => {
@@ -1546,6 +1550,248 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       // OpenVGDB-sourced — name-search never fired.
       expect(result?.source).toBe('openvgdb');
       expect(ss.searchCalls).toEqual([]);
+    });
+  });
+
+  describe('PR-D2 (PR #29) — manual override write paths', () => {
+    function buildSsHit(
+      overrides: Partial<ScreenScraperGame> = {},
+    ): ScreenScraperGame {
+      return {
+        id: 9999,
+        name: 'Manual Pick Game',
+        system: 'NEOGEO',
+        description: null,
+        developer: null,
+        publisher: null,
+        genres: [],
+        releaseDate: '2000-01-01',
+        rating: null,
+        players: null,
+        boxArtUrl: 'https://ss-cdn/manual-pick.png',
+        extra: {
+          box3DUrl: null,
+          marqueeUrl: null,
+          titleScreenUrl: null,
+          snapUrl: null,
+          clearLogoUrl: null,
+          screenshots: [],
+        },
+        ...overrides,
+      };
+    }
+
+    it('writeUserOverride: writes the override block onto an existing record', async () => {
+      // Seed an SS-resolved record.
+      const m = makeMocks({ dbReturns: null });
+      const ss = {
+        getStatus: vi.fn(() => 'available' as const),
+        lookup: vi.fn(async () => ({
+          id: 1,
+          name: 'Source Name',
+          system: 'NEOGEO',
+          description: null,
+          developer: null,
+          publisher: null,
+          genres: [],
+          releaseDate: '1990-01-01',
+          rating: null,
+          players: null,
+          boxArtUrl: null,
+          extra: {
+            box3DUrl: null,
+            marqueeUrl: null,
+            titleScreenUrl: null,
+            snapUrl: null,
+            clearLogoUrl: null,
+            screenshots: [],
+          },
+        })),
+      } as unknown as ScreenScraperService;
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss);
+      await svc.getMetadata(HASH, {}, {
+        systemId: 142,
+        md5: HASH,
+        sha1: 'b'.repeat(40),
+        crc32: 'deadbeef',
+        romName: 'mslug2.neo',
+        romSize: 1024,
+      });
+      // Now apply an override.
+      const updated = await svc.writeUserOverride(HASH, {
+        name: 'My Renamed Game',
+        year: 2020,
+        tags: ['hack', 'fan-translation'],
+      });
+      expect(updated?.userOverride?.name).toBe('My Renamed Game');
+      expect(updated?.userOverride?.year).toBe(2020);
+      expect(updated?.userOverride?.tags).toEqual([
+        'hack',
+        'fan-translation',
+      ]);
+      // Source-resolved fields untouched (year derived from
+      // releaseDate '1990-01-01').
+      expect(updated?.name).toBe('Source Name');
+      expect(updated?.year).toBe(1990);
+    });
+
+    it('writeUserOverride: returns null when no cache record exists', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      const result = await svc.writeUserOverride(HASH, { name: 'Test' });
+      expect(result).toBeNull();
+    });
+
+    it('writeUserOverride: undefined override clears the block (Reset)', async () => {
+      // Pre-seed with an override.
+      const seed: RomMetadata = {
+        version: 5,
+        hash: HASH,
+        name: 'Source Name',
+        system: 'NEOGEO',
+        year: 1990,
+        publisher: null,
+        developer: null,
+        genre: null,
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: null,
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        source: 'screenscraper',
+        fetchedAt: new Date().toISOString(),
+        userOverride: { name: 'Old Override' },
+      };
+      await fs.mkdir(join(dir, 'by-hash', HASH.slice(0, 2)), { recursive: true });
+      await fs.writeFile(
+        join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`),
+        JSON.stringify(seed),
+      );
+
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      const updated = await svc.writeUserOverride(HASH, undefined);
+      expect(updated?.userOverride).toBeUndefined();
+    });
+
+    it('writeUserOverride: empty override block normalizes to undefined (lean records)', async () => {
+      const seed: RomMetadata = {
+        version: 5,
+        hash: HASH,
+        name: 'Source',
+        system: 'NEOGEO',
+        year: null,
+        publisher: null,
+        developer: null,
+        genre: null,
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: null,
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        source: 'screenscraper',
+        fetchedAt: new Date().toISOString(),
+      };
+      await fs.mkdir(join(dir, 'by-hash', HASH.slice(0, 2)), { recursive: true });
+      await fs.writeFile(
+        join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`),
+        JSON.stringify(seed),
+      );
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      const updated = await svc.writeUserOverride(HASH, {});
+      expect(updated?.userOverride).toBeUndefined();
+    });
+
+    it('writeUserOverride: tags get deduplicated + empty-string-stripped', async () => {
+      const seed: RomMetadata = {
+        version: 5,
+        hash: HASH,
+        name: 'Source',
+        system: 'NEOGEO',
+        year: null,
+        publisher: null,
+        developer: null,
+        genre: null,
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: null,
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        source: 'screenscraper',
+        fetchedAt: new Date().toISOString(),
+      };
+      await fs.mkdir(join(dir, 'by-hash', HASH.slice(0, 2)), { recursive: true });
+      await fs.writeFile(
+        join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`),
+        JSON.stringify(seed),
+      );
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      const updated = await svc.writeUserOverride(HASH, {
+        tags: ['hack', '  hack  ', 'demo', '', 'demo', ' '],
+      });
+      // hack (deduped, trimmed), demo (deduped). Empties dropped.
+      expect(updated?.userOverride?.tags).toEqual(['hack', 'demo']);
+    });
+
+    it('bindManualOverride: writes a manual-override record from a SS jeu', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      const updated = await svc.bindManualOverride(HASH, buildSsHit());
+      expect(updated.source).toBe('manual-override');
+      expect(updated.name).toBe('Manual Pick Game');
+      expect(updated.userOverride?.jeuid).toBe('9999');
+      expect(updated.boxArtUrl).toBe('https://ss-cdn/manual-pick.png');
+    });
+
+    it('bindManualOverride: preserves existing userOverride field edits', async () => {
+      // Seed with an existing userOverride.
+      const seed: RomMetadata = {
+        version: 5,
+        hash: HASH,
+        name: 'Old Name',
+        system: 'OldSys',
+        year: null,
+        publisher: null,
+        developer: null,
+        genre: null,
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: null,
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        source: 'screenscraper',
+        fetchedAt: new Date().toISOString(),
+        userOverride: { name: 'My Custom Name', tags: ['hack'] },
+      };
+      await fs.mkdir(join(dir, 'by-hash', HASH.slice(0, 2)), { recursive: true });
+      await fs.writeFile(
+        join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`),
+        JSON.stringify(seed),
+      );
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      const updated = await svc.bindManualOverride(HASH, buildSsHit());
+      // jeuid added, but the field overrides survive.
+      expect(updated.userOverride?.jeuid).toBe('9999');
+      expect(updated.userOverride?.name).toBe('My Custom Name');
+      expect(updated.userOverride?.tags).toEqual(['hack']);
+    });
+
+    it('bindManualOverride: marks triedNameSearch=true so the cache decision skips name-search retry', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      const updated = await svc.bindManualOverride(HASH, buildSsHit());
+      expect(updated.triedNameSearch).toBe(true);
     });
   });
 });

@@ -27,12 +27,51 @@
  * authoritative hash lookup hit. The two are kept separate so the
  * cache audit + future "this row was inferred, not hash-confirmed"
  * UI distinction stays available.
+ *
+ * `'manual-override'` (PR-D2) marks records bound via the user-driven
+ * search modal — the user picked a specific SS jeuid for this hash.
+ * Distinct from `'screenscraper'` (hash hit) and `'screenscraper-name-search'`
+ * (auto-bound via jeuRecherche) so future audit / UI can show the
+ * provenance. NOTE: `userOverride` (free-form per-field edits) is
+ * INDEPENDENT of `source` — editing the year doesn't change the source.
+ * Source flips to `'manual-override'` only when the user picks a
+ * specific match in the search modal.
  */
 export type MetadataSource =
   | 'screenscraper'
   | 'screenscraper-name-search'
   | 'openvgdb'
+  | 'manual-override'
   | 'none';
+
+/**
+ * PR-D2 (PR #29) — user-defined per-ROM overrides. Layered on top of
+ * the source-resolved fields by the renderer's display-merge helpers
+ * (see `app/renderer/src/lib/metadata-display.ts`). Every field is
+ * optional and "undefined OR equal to the source value" means
+ * "no override" — the display falls back to the source-resolved
+ * value. This keeps cache records lean (no redundant override
+ * storage) and makes Reset trivially "delete the userOverride
+ * block".
+ *
+ * `tags` is the only collection field — ordered, deduplicated by the
+ * caller before write. The first ~3 render as colored pills; the rest
+ * collapse into a "+N" overflow pill (PR-D2 round 1 — design pinned
+ * by the spec).
+ *
+ * `jeuid` is set ONLY by the search modal's "Use this match" path
+ * — pinning a specific ScreenScraper game id. Independent of the
+ * other fields, which the edit modal can write.
+ */
+export interface UserMetadataOverride {
+  readonly name?: string;
+  readonly year?: number;
+  readonly genre?: string;
+  readonly rating?: number;
+  readonly tags?: readonly string[];
+  readonly note?: string;
+  readonly jeuid?: string;
+}
 
 /**
  * Every per-ROM metadata record carries the source that produced it.
@@ -56,7 +95,15 @@ export type MetadataSource =
  *   - `none`: sentinel — most fields null, `name: '(no match)'`.
  */
 export interface RomMetadata {
-  readonly version: 4;
+  /**
+   * Schema version. PR-D2 (PR #29) bumped from 4 → 5 to add the
+   * `userOverride` block. The validator (`isRomMetadata` in
+   * `metadata-service.ts`) accepts BOTH versions on read so existing
+   * v4 records on disk keep parsing — no forced migration pass; new
+   * writes always use v5 and v4 records get upgraded naturally on
+   * the next write that touches them.
+   */
+  readonly version: 4 | 5;
   readonly hash: string;
   readonly name: string;
   readonly system: string;
@@ -110,6 +157,20 @@ export interface RomMetadata {
    * new records always set it true (or false on the first write).
    */
   readonly triedNameSearch?: boolean;
+  /**
+   * PR-D2 (PR #29) — user-defined per-field overrides + tags + note +
+   * pinned SS jeuid. Written by the edit modal (free-form fields)
+   * and the search modal (jeuid + sometimes other fields). Layered
+   * on top of the source-resolved fields by the renderer's
+   * display-merge helpers.
+   *
+   * Optional + sparse: only fields the user explicitly set persist.
+   * Unset fields fall back to source-resolved values. Empty
+   * `userOverride` block (no keys set) is semantically equivalent
+   * to `userOverride: undefined`; writers should prefer the latter
+   * to keep records lean.
+   */
+  readonly userOverride?: UserMetadataOverride;
 }
 
 /**
@@ -164,7 +225,15 @@ export const NO_MATCH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
  */
 export const SENTINEL_AUTHORITATIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-export const ROM_METADATA_SCHEMA_VERSION = 4 as const;
+/**
+ * PR-D2 (PR #29) — schema bumped from 4 → 5 to add the `userOverride`
+ * block. New writes use 5; reads accept BOTH 4 and 5 so existing
+ * cache files keep working without a forced migration pass. v4
+ * records get upgraded naturally on the next write.
+ */
+export const ROM_METADATA_SCHEMA_VERSION = 5 as const;
+/** Versions the cache validator will accept on read. */
+export const ROM_METADATA_SUPPORTED_SCHEMA_VERSIONS = [4, 5] as const;
 
 /** One progress tick from a long-running prefetch. `done` is 1-based. */
 export interface PrefetchProgress {

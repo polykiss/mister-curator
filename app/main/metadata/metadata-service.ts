@@ -18,9 +18,11 @@ import { diagLog } from '@shared/diag-log';
 import {
   NO_MATCH_TTL_MS,
   ROM_METADATA_SCHEMA_VERSION,
+  ROM_METADATA_SUPPORTED_SCHEMA_VERSIONS,
   SENTINEL_AUTHORITATIVE_TTL_MS,
   type MetadataHint,
   type RomMetadata,
+  type UserMetadataOverride,
 } from '@shared/metadata-types';
 
 /**
@@ -714,6 +716,78 @@ export class MetadataService {
   }
 
   /**
+   * PR-D2 (PR #29) — write a user-provided field-override block onto
+   * an existing cache record. Returns the updated record so the
+   * caller (renderer) can update its `metadataByPath` immediately
+   * without a follow-up read.
+   *
+   * Returns `null` when no cache record exists for the hash (the
+   * user shouldn't have been able to open the edit modal — there
+   * was nothing to display, so nothing to override). The caller
+   * surfaces a benign error in that case.
+   *
+   * Pass `undefined` to clear the override entirely (Reset button).
+   * Pass an empty object → also normalized to no-override (lean
+   * cache records).
+   */
+  async writeUserOverride(
+    hash: string,
+    override: UserMetadataOverride | undefined,
+  ): Promise<RomMetadata | null> {
+    const cached = await this.readCache(hash);
+    if (cached === null) return null;
+    const normalized = normalizeOverride(override);
+    const updated: RomMetadata = {
+      ...cached,
+      // Always upgrade to current schema on write — v4 → v5
+      // happens here naturally for any record that gets edited.
+      version: ROM_METADATA_SCHEMA_VERSION,
+      userOverride: normalized,
+    };
+    await this.writeCache(hash, updated);
+    return updated;
+  }
+
+  /**
+   * PR-D2 (PR #29) — write a manual-bind cache record from a SS
+   * jeu the user picked in the search modal. Composes the same
+   * shape `composeFromScreenScraper` produces, but with
+   * `source: 'manual-override'` and `userOverride.jeuid` pinned to
+   * the chosen game id so future audits can tell this was a
+   * user-driven bind. Preserves any existing `userOverride` field
+   * edits — re-binding a different jeuid doesn't clear name/year/
+   * tags overrides.
+   *
+   * Returns the updated RomMetadata so the renderer can update its
+   * `metadataByPath` immediately.
+   */
+  async bindManualOverride(
+    hash: string,
+    game: ScreenScraperGame,
+  ): Promise<RomMetadata> {
+    const cached = await this.readCache(hash);
+    const composed = this.composeFromScreenScraper(hash, game);
+    const existingOverride =
+      cached !== null ? normalizeOverride(cached.userOverride) : undefined;
+    // Pin the jeuid in userOverride so the audit/UI can show it,
+    // even if the user later edits other fields.
+    const mergedOverride = normalizeOverride({
+      ...existingOverride,
+      jeuid: String(game.id),
+    });
+    const updated: RomMetadata = {
+      ...composed,
+      source: 'manual-override',
+      userOverride: mergedOverride,
+      // Mark so the cache-priority gate (PR-D1 round 2) doesn't
+      // try the auto name-search again.
+      triedNameSearch: true,
+    };
+    await this.writeCache(hash, updated);
+    return updated;
+  }
+
+  /**
    * PR-D1 round 2 (PR #27 round 2): public read-only cache lookup
    * for the optimistic-render path. Reads from disk; never queries
    * SS / OpenVGDB; never writes. Returns null when the hash isn't
@@ -781,8 +855,20 @@ function isNodeError(err: unknown): err is NodeJS.ErrnoException {
 function isRomMetadata(v: unknown): v is RomMetadata {
   if (v === null || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
+  // PR-D2 (PR #29) — accept both v4 and v5 records on read so the
+  // userOverride-block schema bump doesn't invalidate existing
+  // cache files. Writes always use the current
+  // `ROM_METADATA_SCHEMA_VERSION` (v5); v4 records get upgraded
+  // naturally on the next write that touches them.
+  if (
+    typeof o.version !== 'number' ||
+    !ROM_METADATA_SUPPORTED_SCHEMA_VERSIONS.includes(
+      o.version as 4 | 5,
+    )
+  ) {
+    return false;
+  }
   return (
-    o.version === ROM_METADATA_SCHEMA_VERSION &&
     typeof o.hash === 'string' &&
     typeof o.name === 'string' &&
     typeof o.system === 'string' &&
@@ -790,7 +876,50 @@ function isRomMetadata(v: unknown): v is RomMetadata {
     (o.source === 'screenscraper' ||
       // PR-D1 (PR #27): name-search hits are valid cache entries.
       o.source === 'screenscraper-name-search' ||
+      // PR-D2 (PR #29): user-picked SS jeuid bind.
+      o.source === 'manual-override' ||
       o.source === 'openvgdb' ||
       o.source === 'none')
   );
 }
+
+/**
+ * PR-D2 (PR #29) — normalize a userOverride block before write.
+ *
+ * Returns `undefined` for an empty / no-op block so cache records
+ * stay lean (an empty `userOverride: {}` writes the same data to
+ * disk as omitting the field; the latter is preferred).
+ *
+ * Tag arrays get deduplicated + filtered (drops empty strings).
+ * Other fields pass through verbatim — the caller (edit modal)
+ * is responsible for "is this field actually overriding?" decisions
+ * (e.g., dropping fields that match the source value). The service
+ * just stores what it's told.
+ */
+function normalizeOverride(
+  override: UserMetadataOverride | undefined,
+): UserMetadataOverride | undefined {
+  if (override === undefined) return undefined;
+  const out: Mutable<UserMetadataOverride> = {};
+  if (override.name !== undefined) out.name = override.name;
+  if (override.year !== undefined) out.year = override.year;
+  if (override.genre !== undefined) out.genre = override.genre;
+  if (override.rating !== undefined) out.rating = override.rating;
+  if (override.note !== undefined) out.note = override.note;
+  if (override.jeuid !== undefined) out.jeuid = override.jeuid;
+  if (override.tags !== undefined) {
+    const seen = new Set<string>();
+    const tags: string[] = [];
+    for (const raw of override.tags) {
+      const t = raw.trim();
+      if (t === '' || seen.has(t)) continue;
+      seen.add(t);
+      tags.push(t);
+    }
+    if (tags.length > 0) out.tags = tags;
+  }
+  // Empty block → no override.
+  return Object.keys(out).length === 0 ? undefined : out;
+}
+
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { JSX } from 'react';
 
 /**
@@ -25,8 +25,79 @@ export interface RomRowMenuProps {
   readonly onClose: () => void;
 }
 
+/** Distance kept from the viewport edges when flipping/clamping. */
+export const VIEWPORT_PADDING = 8;
+
+/**
+ * Pure positioning math for the floating menu — extracted from the
+ * component so the flip logic is testable without jsdom. Given the
+ * anchor coords, the menu's measured size, and the viewport size,
+ * returns the final `left` / `top` after right-edge clamp and
+ * bottom-edge flip.
+ *
+ * Bottom-edge flip: when the menu's bottom would clip below the
+ * viewport, open upward from the anchor instead — top = y - height.
+ * Right-edge clamp: when the menu's right would overflow, shift left
+ * just enough to keep the right edge inside the viewport. Both rules
+ * fall back to `VIEWPORT_PADDING` when even the flip won't fit (menu
+ * taller/wider than viewport).
+ */
+export function computeMenuPosition(args: {
+  readonly anchorX: number;
+  readonly anchorY: number;
+  readonly menuWidth: number;
+  readonly menuHeight: number;
+  readonly viewportWidth: number;
+  readonly viewportHeight: number;
+}): { readonly left: number; readonly top: number } {
+  const { anchorX, anchorY, menuWidth, menuHeight, viewportWidth, viewportHeight } =
+    args;
+  let left = anchorX;
+  let top = anchorY;
+  if (left + menuWidth > viewportWidth - VIEWPORT_PADDING) {
+    left = Math.max(VIEWPORT_PADDING, viewportWidth - menuWidth - VIEWPORT_PADDING);
+  }
+  if (top + menuHeight > viewportHeight - VIEWPORT_PADDING) {
+    top = Math.max(VIEWPORT_PADDING, anchorY - menuHeight);
+  }
+  return { left, top };
+}
+
 export function RomRowMenu(props: RomRowMenuProps): JSX.Element {
   const ref = useRef<HTMLDivElement | null>(null);
+
+  // PR-D2 r2 c4: measure-then-flip collision detection. Round 1 used a
+  // naive clamp with a hardcoded 80px height, which was correct when
+  // the menu had two items but undersized after PR-D2 added two more
+  // (Edit metadata + Find on ScreenScraper) — the fifth item rendered
+  // off the bottom of the viewport on rows near the bottom of the
+  // table. Now we measure the actual rendered box and either shift up
+  // (right-edge clamp) or flip upward (bottom-edge clamp) when needed.
+  //
+  // First render uses the raw anchor coords with `visibility: hidden`
+  // so the unmeasured position never paints. useLayoutEffect runs
+  // synchronously before paint, measures the box, computes the final
+  // position, and flips `measured`. The user sees only the corrected
+  // position.
+  const [position, setPosition] = useState<{
+    readonly left: number;
+    readonly top: number;
+    readonly measured: boolean;
+  }>({ left: props.x, top: props.y, measured: false });
+
+  useLayoutEffect(() => {
+    if (!ref.current) return;
+    const rect = ref.current.getBoundingClientRect();
+    const { left, top } = computeMenuPosition({
+      anchorX: props.x,
+      anchorY: props.y,
+      menuWidth: rect.width,
+      menuHeight: rect.height,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+    });
+    setPosition({ left, top, measured: true });
+  }, [props.x, props.y, props.items.length]);
 
   useEffect(() => {
     function onClickOutside(e: MouseEvent): void {
@@ -45,18 +116,19 @@ export function RomRowMenu(props: RomRowMenuProps): JSX.Element {
     };
   }, [props]);
 
-  // Clamp to the viewport so the menu doesn't get clipped off the right
-  // / bottom edge. Naive math — assumes the menu is roughly 240×100,
-  // which is fine for two items.
-  const left = Math.min(props.x, window.innerWidth - 256);
-  const top = Math.min(props.y, window.innerHeight - 80);
-
   return (
     <div
       ref={ref}
       role="menu"
       className="fixed z-50 min-w-[16rem] overflow-hidden rounded border border-default bg-overlay py-1 text-body text-fg shadow-popover"
-      style={{ left, top }}
+      style={{
+        left: position.left,
+        top: position.top,
+        // Hide the unmeasured first frame to avoid a flash at the
+        // pre-flip position. useLayoutEffect runs before paint, so
+        // the user only ever sees the corrected position.
+        visibility: position.measured ? 'visible' : 'hidden',
+      }}
     >
       {props.items.map((item, i) => (
         <button

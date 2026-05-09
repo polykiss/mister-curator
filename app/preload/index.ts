@@ -23,7 +23,9 @@ import type {
 import type {
   MetadataHint,
   RomMetadata,
+  UserMetadataOverride,
 } from '@shared/metadata-types';
+import type { ScreenScraperGame } from '@shared/screenscraper-types';
 import type {
   BulkCoreResult,
   BulkRomResult,
@@ -247,6 +249,27 @@ const api: MisterApi = {
       IPC_CHANNELS.getCachedRomsMetadata,
       coreId,
       paths,
+    ),
+  setRomMetadataOverride: (
+    path: string,
+    override: UserMetadataOverride | undefined,
+  ) =>
+    invoke<RomMetadata | null>(
+      IPC_CHANNELS.setRomMetadataOverride,
+      path,
+      override,
+    ),
+  bindRomMetadataFromSearch: (path: string, game: ScreenScraperGame) =>
+    invoke<RomMetadata | null>(
+      IPC_CHANNELS.bindRomMetadataFromSearch,
+      path,
+      game,
+    ),
+  searchScreenScraperByName: (coreId: string, searchTerm: string) =>
+    invoke<readonly ScreenScraperGame[]>(
+      IPC_CHANNELS.searchScreenScraperByName,
+      coreId,
+      searchTerm,
     ),
   onRomMetadataResolved: (
     handler: (event: RomMetadataResolvedEvent) => void,

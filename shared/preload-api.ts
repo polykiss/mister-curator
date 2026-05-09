@@ -3,7 +3,9 @@ import type {
   MetadataHint,
   PrefetchProgress,
   RomMetadata,
+  UserMetadataOverride,
 } from '@shared/metadata-types';
+import type { ScreenScraperGame } from '@shared/screenscraper-types';
 import type {
   BulkCoreProgress,
   BulkCoreResult,
@@ -73,6 +75,14 @@ export const IPC_CHANNELS = {
   // RomsPane on click for immediate row paint. No SSH, no SS,
   // never blocks the UI on the auto-scrape engine's gate.
   getCachedRomsMetadata: 'mister:getCachedRomsMetadata',
+  // PR-D2 (PR #29) — manual-override write paths for the edit
+  // modal (free-form fields) and search modal (jeuid bind).
+  setRomMetadataOverride: 'mister:setRomMetadataOverride',
+  bindRomMetadataFromSearch: 'mister:bindRomMetadataFromSearch',
+  // PR-D2 (PR #29) — name-search invoked from the renderer's
+  // search modal. Same SS endpoint the auto-scrape pipeline uses,
+  // exposed directly so the UI can drive it interactively.
+  searchScreenScraperByName: 'mister:searchScreenScraperByName',
   // Round 3 (OpenVGDB). The renderer prompts the user to download
   // the ~50MB SQLite snapshot; main pulls it down + opens it.
   ensureMetadataDatabase: 'mister:ensureMetadataDatabase',
@@ -459,6 +469,40 @@ export interface MisterApi {
     coreId: string,
     paths: readonly string[],
   ): Promise<Record<string, RomMetadata | null>>;
+  /**
+   * PR-D2 (PR #29) — write a user-defined field-override block onto
+   * the cache record for `path`. Pass `undefined` for the override
+   * to clear all overrides (Reset). Returns the updated record so
+   * the caller can refresh state immediately. Returns `null` when
+   * no cache record exists for the path (the user shouldn't have
+   * been able to open the edit modal in that case).
+   */
+  setRomMetadataOverride(
+    path: string,
+    override: UserMetadataOverride | undefined,
+  ): Promise<RomMetadata | null>;
+  /**
+   * PR-D2 (PR #29) — bind a manual SS jeu (the user's pick from the
+   * search modal) to the cache record for `path`. Source flips to
+   * `'manual-override'`; existing field overrides on the record
+   * are preserved.
+   */
+  bindRomMetadataFromSearch(
+    path: string,
+    game: ScreenScraperGame,
+  ): Promise<RomMetadata | null>;
+  /**
+   * PR-D2 (PR #29) — name-search for the search modal. Returns SS
+   * candidate games for a free-form term scoped to the core's
+   * SS systemeid. The handler resolves coreId → systemeid via
+   * `lookupScreenScraperSystemId` (the renderer doesn't import
+   * the map directly). Returns an empty array when the core
+   * isn't mapped to a SS system or SS isn't configured.
+   */
+  searchScreenScraperByName(
+    coreId: string,
+    searchTerm: string,
+  ): Promise<readonly ScreenScraperGame[]>;
   /**
    * Round 3: kick off (or check on) the OpenVGDB SQLite download.
    * Returns immediately with the current state — the renderer

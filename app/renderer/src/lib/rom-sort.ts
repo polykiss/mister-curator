@@ -2,6 +2,13 @@ import type { RomMetadata } from '@shared/metadata-types';
 import type { Rom } from '@shared/types';
 
 import {
+  displayGenre as displayGenreOf,
+  displayName as displayNameOf,
+  displayRating as displayRatingOf,
+  displayYear as displayYearOf,
+} from '@app/renderer/src/lib/metadata-display';
+
+import {
   formatRating,
   pickPrimaryGenre,
 } from '@app/renderer/src/lib/rom-metadata-format';
@@ -66,9 +73,17 @@ function stripLeadingArticle(name: string): string {
  * Display name fallback chain — metadata's authoritative name when
  * present, else the on-disk display name (filename stripped of
  * leading dot for hidden files).
+ *
+ * PR-D2 (PR #29): when a metadata record exists, route through the
+ * display-merge helper so userOverride.name wins over the source
+ * name. Sort order tracks the visible name — if the user renames a
+ * row to "Aaa", it sorts at the top.
  */
 function resolveName(rom: Rom, metadata: RomMetadata | null | undefined): string {
-  return metadata?.name ?? rom.displayName;
+  if (metadata !== null && metadata !== undefined) {
+    return displayNameOf(metadata);
+  }
+  return rom.displayName;
 }
 
 /**
@@ -95,17 +110,18 @@ function extractFor(
         s: stripLeadingArticle(resolveName(rom, metadata)).toLocaleLowerCase(),
       };
     case 'year': {
-      const year = metadata?.year ?? null;
+      // PR-D2 (PR #29): user-override wins via displayYearOf.
+      const year = metadata ? displayYearOf(metadata) : null;
       if (year === null) return { kind: 'missing' };
       return { kind: 'value', s: String(year), n: year };
     }
     case 'genre': {
-      const g = pickPrimaryGenre(metadata?.genre ?? null);
+      const g = pickPrimaryGenre(metadata ? displayGenreOf(metadata) : null);
       if (g === null) return { kind: 'missing' };
       return { kind: 'value', s: g.toLocaleLowerCase() };
     }
     case 'rating': {
-      const r = metadata?.rating ?? null;
+      const r = metadata ? displayRatingOf(metadata) : null;
       if (r === null) return { kind: 'missing' };
       return { kind: 'value', s: formatRating(r) ?? String(r), n: r };
     }

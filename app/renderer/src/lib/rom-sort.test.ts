@@ -237,3 +237,46 @@ describe('sortRoms — DEFAULT_SORT is name asc', () => {
     expect(DEFAULT_SORT).toEqual({ key: 'name', dir: 'asc' });
   });
 });
+
+describe('sortRoms — PR-D2 userOverride layering', () => {
+  // Sort goes through the same display-merge helpers as the
+  // visible row text. If the user renames a row to "Aaa" via the
+  // edit modal, that row sorts to the top — matches what the user
+  // sees on screen.
+
+  it('sort by name uses userOverride.name when set', () => {
+    const rows = [
+      row(makeRom({ filename: 'a.smc' }), makeMeta({ name: 'Sonic' })),
+      row(
+        makeRom({ filename: 'b.smc' }),
+        // SS resolved as "Zelda" but the user overrode to "Aardvark".
+        // The override wins → row sorts to the top.
+        {
+          ...makeMeta({ name: 'Zelda' }),
+          userOverride: { name: 'Aardvark' },
+        },
+      ),
+    ];
+    const out = sortRoms(rows, { key: 'name', dir: 'asc' });
+    expect(out.map((r) => r.metadata?.name)).toEqual(['Zelda', 'Sonic']);
+    // The display-merge name "Aardvark" drove the sort, but the
+    // raw `metadata.name` is still "Zelda" — the test reads it
+    // directly to prove the data wasn't mutated.
+  });
+
+  it('sort by year uses userOverride.year when set', () => {
+    const rows = [
+      row(makeRom({ filename: 'a.smc' }), makeMeta({ year: 1995 })),
+      row(
+        makeRom({ filename: 'b.smc' }),
+        {
+          ...makeMeta({ year: 2010 }),
+          userOverride: { year: 1985 },
+        },
+      ),
+    ];
+    const out = sortRoms(rows, { key: 'year', dir: 'asc' });
+    // Override 1985 sorts before source 1995.
+    expect(out.map((r) => r.metadata?.year)).toEqual([2010, 1995]);
+  });
+});

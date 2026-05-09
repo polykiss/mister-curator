@@ -22,6 +22,14 @@ import { cn } from '@app/renderer/src/lib/cn';
 import { formatBytes } from '@app/renderer/src/lib/format';
 import { abbreviateGenre } from '@app/renderer/src/lib/genre-format';
 import {
+  displayGenre as displayGenreOf,
+  displayName as displayNameOf,
+  displayRating as displayRatingOf,
+  displayTags as displayTagsOf,
+  displayYear as displayYearOf,
+} from '@app/renderer/src/lib/metadata-display';
+import { RomTagPills } from '@app/renderer/src/components/RomTagPills';
+import {
   formatRating,
   pickPrimaryGenre,
 } from '@app/renderer/src/lib/rom-metadata-format';
@@ -229,7 +237,19 @@ export function RomNameInner(
   props: RomMetadataCellProps & { readonly leadingIcon?: ReactNode },
 ): JSX.Element {
   const { rom, dimmed, leadingIcon, metadata } = props;
-  const displayName = metadata?.name ?? rom.displayName;
+  // PR-D2 (PR #29): route through `displayNameOf` so the user-set
+  // `userOverride.name` wins over the source-resolved name. Falls
+  // back to the on-disk filename when no metadata record exists
+  // yet (loading / unmatched).
+  const displayName =
+    metadata !== null && metadata !== undefined
+      ? displayNameOf(metadata)
+      : rom.displayName;
+  // PR-D2 (PR #29): user-set tags render as colored pills next to
+  // the title. `RomTagPills` returns null when no tags so the
+  // markup degrades cleanly for the common case.
+  const tags =
+    metadata !== null && metadata !== undefined ? displayTagsOf(metadata) : [];
 
   return (
     <span className="flex min-w-0 items-center gap-2">
@@ -240,6 +260,7 @@ export function RomNameInner(
       >
         {displayName}
       </span>
+      <RomTagPills tags={tags} />
     </span>
   );
 }
@@ -252,7 +273,8 @@ export function RomNameInner(
 export function RomYearCell(props: RomMetadataCellProps): JSX.Element {
   const { dimmed, metadata, error } = props;
   const loading = metadata === undefined && !error;
-  const year = metadata?.year ?? null;
+  // PR-D2 (PR #29): user-override wins via `displayYearOf`.
+  const year = metadata ? displayYearOf(metadata) : null;
 
   return (
     <TableCell className="w-16 text-right">
@@ -285,16 +307,16 @@ export function RomMetadataInfoCells(
 ): JSX.Element {
   const { dimmed, metadata, error } = props;
   const loading = metadata === undefined && !error;
-  const primaryGenre = pickPrimaryGenre(metadata?.genre ?? null);
-  // PR-C round 2: abbreviate the well-known long genre names
-  // ("Role Playing Game" → "RPG" etc.) so they fit the w-28 (112px)
-  // column without truncation. The full pre-abbreviated form goes
-  // into `title=` for the hover tooltip — same pattern PR #25 uses
-  // for the truncated ROM name cell. Unmapped long genres pass
-  // through verbatim and the existing table-fixed truncation
-  // ellipses overflow.
+  // PR-D2 (PR #29): user-override wins via `displayGenreOf` /
+  // `displayRatingOf`. The genre then goes through the same
+  // PR-C round 2 abbreviation pipeline.
+  const primaryGenre = pickPrimaryGenre(
+    metadata ? displayGenreOf(metadata) : null,
+  );
   const displayGenre = abbreviateGenre(primaryGenre);
-  const rating = formatRating(metadata?.rating ?? null);
+  const rating = formatRating(
+    metadata ? displayRatingOf(metadata) : null,
+  );
 
   return (
     <>

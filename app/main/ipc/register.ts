@@ -15,7 +15,9 @@ import type {
 import type {
   MetadataHint,
   RomMetadata,
+  UserMetadataOverride,
 } from '@shared/metadata-types';
+import type { ScreenScraperGame } from '@shared/screenscraper-types';
 import type {
   BulkCoreResult,
   BulkRomResult,
@@ -29,6 +31,8 @@ import type {
 
 import type { ConnectionManager } from '@app/main/ipc/connection-manager';
 import type { MetadataOrchestrator } from '@app/main/metadata/metadata-orchestrator';
+import { lookupScreenScraperSystemId } from '@app/main/metadata/screenscraper-system-map';
+import type { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
 import type { AutoScrapeEngine } from '@app/main/services/auto-scrape-engine';
 import type { ProfileStore } from '@app/main/storage/profile-store';
 
@@ -130,6 +134,10 @@ export function registerIpcHandlers(
   emitMetadataDatabaseProgress: MetadataDatabaseEmitter,
   emitRomMetadataResolved: RomMetadataResolvedEmitter,
   autoScrapeEngine: AutoScrapeEngine,
+  // PR-D2 (PR #29): the search modal calls jeuRecherche directly via
+  // a renderer-driven IPC; the SS service is passed in so the
+  // handler can reach it.
+  screenScraper: ScreenScraperService | null,
 ): void {
   handle<[], MisterProfile[]>(IPC_CHANNELS.listProfiles, () => store.list());
 
@@ -328,6 +336,40 @@ export function registerIpcHandlers(
   handle<[string, readonly string[]], Record<string, RomMetadata | null>>(
     IPC_CHANNELS.getCachedRomsMetadata,
     (coreId, paths) => metadata.readCachedRomsMetadata(coreId, paths),
+  );
+
+  // PR-D2 (PR #29) — manual-override write paths. Edit modal calls
+  // `setRomMetadataOverride` for free-form field overrides; search
+  // modal calls `bindRomMetadataFromSearch` to pin a SS jeuid.
+  // Both return the updated record so the renderer can refresh
+  // its `metadataByPath` immediately without a follow-up read.
+  handle<
+    [string, UserMetadataOverride | undefined],
+    RomMetadata | null
+  >(IPC_CHANNELS.setRomMetadataOverride, (path, override) =>
+    metadata.setUserMetadataOverride(path, override),
+  );
+  handle<[string, ScreenScraperGame], RomMetadata | null>(
+    IPC_CHANNELS.bindRomMetadataFromSearch,
+    (path, game) => metadata.bindManualMetadataOverride(path, game),
+  );
+
+  // PR-D2 (PR #29) — name-search for the search modal. Resolves
+  // coreId → SS systemeid via the same map the auto-scrape
+  // pipeline uses. Returns empty array when:
+  //   • SS isn't configured (matches auto-scrape's silent-skip);
+  //   • the core isn't mapped to a SS systemeid (Arcade hbmame /
+  //     AO486 / etc. — search modal will show "no matches" and
+  //     the user can still try the edit modal for free-form
+  //     overrides).
+  handle<[string, string], readonly ScreenScraperGame[]>(
+    IPC_CHANNELS.searchScreenScraperByName,
+    async (coreId, searchTerm) => {
+      if (screenScraper === null) return [];
+      const systemId = lookupScreenScraperSystemId(coreId);
+      if (systemId === null) return [];
+      return screenScraper.searchByName({ systemId, searchTerm });
+    },
   );
 
   handle<[], { readonly ready: boolean; readonly downloadInProgress: boolean }>(

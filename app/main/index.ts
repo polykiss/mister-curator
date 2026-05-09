@@ -256,6 +256,9 @@ void app.whenReady().then(() => {
     emitMetadataDatabaseProgress,
     emitRomMetadataResolved,
     autoScrapeEngine,
+    // PR-D2 (PR #29): the search modal calls jeuRecherche directly
+    // via a renderer-driven IPC; pass the SS service through.
+    screenScraper,
   );
 
   const window = createWindow();
