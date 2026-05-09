@@ -141,6 +141,70 @@ export function metadataLookupPathFor(rom: Rom): string | null {
 }
 
 /**
+ * Combine a recursive launchable-path list (from
+ * `listRecursiveRomFiles` — every launchable file under the games
+ * dir, classification-blind) with a set of TOP-LEVEL atomic folders
+ * (from `listRoms`) to produce the auto-scrape's deduped target list.
+ *
+ * For each top-level atomic folder:
+ *   1. Drop every recursive path that lives inside the folder's
+ *      subtree (matches the prefix `${folder.path}/`).
+ *   2. Add the folder's `containedRomPath` as the single
+ *      representative path.
+ *
+ * The result: contained files are scraped exactly ONCE per atomic
+ * folder, and the folder representative carries the parent-folder
+ * name-search hint (via the orchestrator's `atomicFolderPaths` set).
+ * For X68000 with ~647 atomic floppy folders × 2.25 disks = ~1455
+ * paths reduces to ~647 — every disk no longer hashes individually
+ * + the same folder-name search no longer runs 2-4 times per game.
+ *
+ * Nested classification (atomic folders INSIDE a top-level container)
+ * is out of scope: top-level container contents pass through verbatim
+ * exactly as they did pre-fix. Doing nested classification properly
+ * would need recursive `listRoms` calls per container, which is
+ * follow-up work.
+ *
+ * Pure: no IPC, no SSH, no async. Extracted from
+ * `ConnectionManager.listAllRomPathsForCore` so the merge logic is
+ * testable without spinning up a real client.
+ */
+export function mergeRecursivePathsWithAtomicFolders(args: {
+  readonly recursivePaths: readonly string[];
+  readonly topLevelRoms: readonly Rom[];
+}): {
+  readonly paths: readonly string[];
+  readonly atomicFolderPaths: ReadonlySet<string>;
+} {
+  // Subtree-poison set: EVERY top-level atomic folder, regardless of
+  // whether it has a `containedRomPath`. The empty-atomic-folder case
+  // (no launchable inside) STILL poisons its subtree — junk files
+  // shouldn't sneak past as scrape targets just because the folder
+  // has no representative. The "with representative" subset is
+  // computed separately below.
+  const allAtomic = args.topLevelRoms.filter(
+    (r) => r.kind === 'folder-atomic',
+  );
+  const atomicFolderRoots = allAtomic.map((r) => `${r.path}/`);
+  const filtered = args.recursivePaths.filter((p) => {
+    for (const root of atomicFolderRoots) {
+      if (p.startsWith(root)) return false;
+    }
+    return true;
+  });
+  // Representatives: only atomic folders WITH a `containedRomPath`
+  // contribute a representative path (per `enumerateRomEntries`'s
+  // skip-empty-atomic-folder rule). Empty atomic folders poison
+  // their subtree but add nothing back.
+  const atomicEntries = enumerateRomEntries(allAtomic);
+  const atomicPaths = atomicEntries.map((e) => e.path);
+  return {
+    paths: [...filtered, ...atomicPaths],
+    atomicFolderPaths: atomicFolderPathsFromRoms(allAtomic),
+  };
+}
+
+/**
  * Subset of atomic-folder paths from a `Rom[]`. The orchestrator's
  * `getRomsMetadata` accepts an `atomicFolderPaths` set so it can
  * route those paths' name-search through the parent folder name (the

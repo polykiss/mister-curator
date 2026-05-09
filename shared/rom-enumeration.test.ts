@@ -4,6 +4,8 @@ import {
   atomicFolderPathsFromRoms,
   enumerateRomEntries,
   enumerateScrapePaths,
+  mergeRecursivePathsWithAtomicFolders,
+  metadataLookupPathFor,
 } from '@shared/rom-enumeration';
 import type { Rom } from '@shared/types';
 
@@ -213,6 +215,199 @@ describe('atomicFolderPathsFromRoms — orchestrator name-search routing', () =>
 
   it('empty input returns an empty set', () => {
     expect(atomicFolderPathsFromRoms([]).size).toBe(0);
+  });
+});
+
+describe('metadataLookupPathFor — per-row cache key derivation', () => {
+  it('file row → file path', () => {
+    const r = file('Sonic.zip');
+    expect(metadataLookupPathFor(r)).toBe(
+      '/media/fat/games/X68000/Sonic.zip',
+    );
+  });
+
+  it('atomic-folder row → containedRomPath', () => {
+    const r = atomic('Game', 'main.dim');
+    expect(metadataLookupPathFor(r)).toBe(
+      '/media/fat/games/X68000/Game/main.dim',
+    );
+  });
+
+  it('atomic-folder row WITHOUT containedRomPath → null', () => {
+    expect(metadataLookupPathFor(atomic('Empty', undefined))).toBeNull();
+  });
+
+  it('container-folder row → null (callers never look up metadata on containers)', () => {
+    expect(metadataLookupPathFor(container('Subfolder'))).toBeNull();
+  });
+});
+
+describe('mergeRecursivePathsWithAtomicFolders — auto-scrape dedup', () => {
+  // The X68000 dominant case: ~647 atomic floppy folders × 2.25 disks
+  // each = ~1455 paths from listRecursiveRomFiles. After this merge:
+  // ~647 representative paths (the alphabetical-first launchable file
+  // inside each folder), plus the atomicFolderPaths set the
+  // orchestrator routes name-search hints by.
+
+  it('drops contained-file paths inside top-level atomic folders, adds the representative', () => {
+    const recursivePaths = [
+      '/media/fat/games/X68000/Carrot Party/disk1.dim',
+      '/media/fat/games/X68000/Carrot Party/disk2.dim',
+      '/media/fat/games/X68000/Carrot Party/disk3.dim',
+      '/media/fat/games/X68000/loose-rom.zip',
+    ];
+    const topLevelRoms = [
+      atomic('Carrot Party', 'disk1.dim'),
+      file('loose-rom.zip'),
+    ];
+    const result = mergeRecursivePathsWithAtomicFolders({
+      recursivePaths,
+      topLevelRoms,
+    });
+    // Expected: loose-rom.zip (passthrough) + disk1.dim (representative
+    // for Carrot Party). disk2.dim + disk3.dim are dropped — they're
+    // collapsed into the folder's representative.
+    expect(result.paths).toEqual([
+      '/media/fat/games/X68000/loose-rom.zip',
+      '/media/fat/games/X68000/Carrot Party/disk1.dim',
+    ]);
+    expect(result.atomicFolderPaths.has(
+      '/media/fat/games/X68000/Carrot Party/disk1.dim',
+    )).toBe(true);
+    expect(result.atomicFolderPaths.size).toBe(1);
+  });
+
+  it('multi-folder X68000: 1455 paths → 647 representatives', () => {
+    // Synthetic version of the X68000 user report. 647 atomic folders
+    // with 2.25 disks each = 1455 individual paths.
+    const FOLDERS = 647;
+    const DISKS_PER_FOLDER = 2;
+    const EXTRAS = 161; // brings total to 1455 (647*2 + 161 = 1455)
+    const recursivePaths: string[] = [];
+    const topLevelRoms = [];
+    for (let i = 0; i < FOLDERS; i += 1) {
+      const folderName = `Game ${String(i).padStart(4, '0')}`;
+      for (let d = 1; d <= DISKS_PER_FOLDER; d += 1) {
+        recursivePaths.push(
+          `/media/fat/games/X68000/${folderName}/disk${String(d)}.dim`,
+        );
+      }
+      topLevelRoms.push(atomic(folderName, 'disk1.dim'));
+    }
+    // Add 161 extra "third disks" to a subset of folders.
+    for (let i = 0; i < EXTRAS; i += 1) {
+      const folderName = `Game ${String(i).padStart(4, '0')}`;
+      recursivePaths.push(
+        `/media/fat/games/X68000/${folderName}/disk3.dim`,
+      );
+    }
+    expect(recursivePaths.length).toBe(1455);
+
+    const result = mergeRecursivePathsWithAtomicFolders({
+      recursivePaths,
+      topLevelRoms,
+    });
+    expect(result.paths.length).toBe(FOLDERS); // 647
+    expect(result.atomicFolderPaths.size).toBe(FOLDERS);
+  });
+
+  it('top-level container contents pass through verbatim (no nested classification)', () => {
+    // Nested atomic folders inside a container are out of scope;
+    // top-level containers' recursive contents flow through unchanged.
+    const recursivePaths = [
+      '/media/fat/games/NES/Hacks/Mario.nes',
+      '/media/fat/games/NES/Hacks/Zelda.nes',
+      '/media/fat/games/NES/Castlevania.zip',
+    ];
+    const topLevelRoms = [
+      container('Hacks'),
+      file('Castlevania.zip'),
+    ];
+    const result = mergeRecursivePathsWithAtomicFolders({
+      recursivePaths,
+      topLevelRoms,
+    });
+    // All three paths kept as-is (container contents not collapsed).
+    expect(result.paths).toEqual(recursivePaths);
+    expect(result.atomicFolderPaths.size).toBe(0);
+  });
+
+  it('mixed top level: file + atomic + container', () => {
+    const recursivePaths = [
+      '/media/fat/games/X68000/loose.zip',
+      '/media/fat/games/X68000/Atomic Game/disk1.dim',
+      '/media/fat/games/X68000/Atomic Game/disk2.dim',
+      '/media/fat/games/X68000/Container/Inner1.zip',
+      '/media/fat/games/X68000/Container/Inner2.zip',
+    ];
+    const topLevelRoms = [
+      file('loose.zip'),
+      atomic('Atomic Game', 'disk1.dim'),
+      container('Container'),
+    ];
+    const result = mergeRecursivePathsWithAtomicFolders({
+      recursivePaths,
+      topLevelRoms,
+    });
+    expect([...result.paths].sort()).toEqual([
+      '/media/fat/games/X68000/Atomic Game/disk1.dim',
+      '/media/fat/games/X68000/Container/Inner1.zip',
+      '/media/fat/games/X68000/Container/Inner2.zip',
+      '/media/fat/games/X68000/loose.zip',
+    ]);
+    expect(result.atomicFolderPaths.size).toBe(1);
+  });
+
+  it('atomic folder with no containedRomPath: contained files are still dropped, no representative added', () => {
+    // Defensive case — an atomic folder with no launchable inside.
+    // The folder's subtree is still poison (no contained-file scrape),
+    // but we don't add a representative since there's nothing to
+    // hash + nothing meaningful to bind.
+    const recursivePaths = [
+      '/media/fat/games/X68000/Empty/junk.txt',
+      '/media/fat/games/X68000/loose.zip',
+    ];
+    const topLevelRoms = [
+      atomic('Empty', undefined),
+      file('loose.zip'),
+    ];
+    const result = mergeRecursivePathsWithAtomicFolders({
+      recursivePaths,
+      topLevelRoms,
+    });
+    // Only loose.zip survives — Empty/junk.txt is dropped (atomic
+    // subtree poison) and Empty has no representative to add.
+    expect(result.paths).toEqual([
+      '/media/fat/games/X68000/loose.zip',
+    ]);
+    expect(result.atomicFolderPaths.size).toBe(0);
+  });
+
+  it('empty inputs', () => {
+    const result = mergeRecursivePathsWithAtomicFolders({
+      recursivePaths: [],
+      topLevelRoms: [],
+    });
+    expect(result.paths).toEqual([]);
+    expect(result.atomicFolderPaths.size).toBe(0);
+  });
+
+  it('subtree-membership uses path + "/" prefix (not raw substring)', () => {
+    // Regression case: "Game" matches "Game 2" via substring but
+    // NOT via path-prefix. Pin that the merge uses
+    // `path + '/'` so a folder named "Game" doesn't accidentally
+    // poison files in a sibling "Game 2/" folder.
+    const recursivePaths = [
+      '/media/fat/games/X68000/Game/disk1.dim',
+      '/media/fat/games/X68000/Game 2/main.zip',
+    ];
+    const topLevelRoms = [atomic('Game', 'disk1.dim'), file('Game 2/main.zip')];
+    const result = mergeRecursivePathsWithAtomicFolders({
+      recursivePaths,
+      topLevelRoms,
+    });
+    // The "Game 2/main.zip" must NOT be dropped by the "Game/" atomic.
+    expect(result.paths).toContain('/media/fat/games/X68000/Game 2/main.zip');
   });
 });
 
