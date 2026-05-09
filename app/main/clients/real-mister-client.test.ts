@@ -771,6 +771,108 @@ describe('RealMisterClient', () => {
     });
   });
 
+  describe('listRecursiveRomFiles (PR-C round 2)', () => {
+    it('returns full on-device paths for files matching the sidebar predicate', async () => {
+      // Pin the contract: SSH find + main-side filter via
+      // shouldCountAsRom + isLaunchableRomExtension, returning the
+      // exact set of paths the sidebar count promised. Pre-round-2
+      // the engine queued only top-level files via listRoms — the
+      // footer total never matched the sidebar count.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            // Top-level launchable
+            'mario.nes',
+            'zelda.nes',
+            // Top-level non-launchable (should be filtered)
+            'manual.pdf',
+            'notes.nfo',
+            // Subfolder launchable (Hacks/ is not a system folder)
+            'Hacks/SuperMario.nes',
+            'Hacks/Zelda2.nes',
+            // Subfolder non-launchable (filtered)
+            'Hacks/patch.ips',
+            'ScreenShots/screen.png',
+            // System-folder content (filtered by ancestor)
+            'Palettes/red.pal',
+            // Deep nested launchable
+            'Hacks/Sub/deep.nes',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const paths = await client.listRecursiveRomFiles({
+        coreId: 'NES',
+        gamesDirBasename: 'NES',
+      });
+
+      expect(paths).toEqual([
+        '/media/fat/games/NES/mario.nes',
+        '/media/fat/games/NES/zelda.nes',
+        '/media/fat/games/NES/Hacks/SuperMario.nes',
+        '/media/fat/games/NES/Hacks/Zelda2.nes',
+        '/media/fat/games/NES/Hacks/Sub/deep.nes',
+      ]);
+    });
+
+    it('runs the SSH find against the games-dir basename, not the coreId', async () => {
+      // Same invariant as listRoms: the matcher passes the
+      // gamesDirBasename (which may differ from coreId for hidden
+      // cores or canonicalized names like Atari2600 vs `Atari 2600`).
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.listRecursiveRomFiles({
+        coreId: 'Atari2600',
+        gamesDirBasename: 'Atari2600',
+      });
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain(`[ -d '/media/fat/games/Atari2600' ]`);
+      expect(script).toContain(`find '/media/fat/games/Atari2600' -type f`);
+    });
+
+    it('returns empty array when the SSH command fails', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execFail(1));
+
+      const paths = await client.listRecursiveRomFiles({
+        coreId: 'NES',
+        gamesDirBasename: 'NES',
+      });
+      expect(paths).toEqual([]);
+    });
+
+    it('honours user-marked system files via the marks parameter', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(['mario.nes', 'unwanted.nes', ''].join('\n')),
+      );
+
+      const paths = await client.listRecursiveRomFiles({
+        coreId: 'NES',
+        gamesDirBasename: 'NES',
+        marks: {
+          schemaVersion: 1,
+          marked: [
+            { coreId: 'NES', filename: 'unwanted.nes', markedAt: '2026-05-09' },
+          ],
+        },
+      });
+      expect(paths).toEqual(['/media/fat/games/NES/mario.nes']);
+    });
+  });
+
   describe('listRoms', () => {
     it('targets the games-dir basename via the coreId argument (PR #11 round 3 / Bug 1)', async () => {
       // The matcher's invariant guarantees CoreEntry.id === on-disk

@@ -27,8 +27,10 @@ import { displayRomName } from '@shared/display';
 import { isOsMetadataDir, isOsMetadataFile } from '@shared/library-filter';
 import {
   classifyFolder,
+  isLaunchableRomExtension,
   resolveClassification,
 } from '@shared/folder-rom';
+import { shouldCountAsRom } from '@shared/system-files';
 import {
   EMPTY_FOLDER_CLASSIFICATIONS,
   getFolderOverride,
@@ -246,6 +248,60 @@ export class FakeMisterClient implements IMisterClient {
       arcadeDirExists,
       systemFilesMarks,
     });
+  }
+
+  async listRecursiveRomFiles(args: {
+    readonly coreId: string;
+    readonly gamesDirBasename: string;
+    readonly marks?: SystemFilesMarks;
+  }): Promise<readonly string[]> {
+    this.assertConnected();
+    this.assertSafeCoreId(args.coreId);
+    this.assertSafeCoreId(args.gamesDirBasename);
+    await this.delay();
+
+    // PR-C round 2: walk the games dir recursively, filter by the
+    // same predicate the sidebar count uses. See
+    // RealMisterClient.listRecursiveRomFiles for the full rationale —
+    // this fake mirrors the SSH-based walk with a local-fs walk so
+    // tests against the fake client see the same paths the real
+    // client would on the same data.
+    const localRoot = this.toLocal(
+      `${MISTER_GAMES_DIR}/${args.gamesDirBasename}`,
+    );
+    const onDeviceRoot = `${MISTER_GAMES_DIR}/${args.gamesDirBasename}`;
+    const out: string[] = [];
+
+    async function walk(localDir: string, relPrefix: string): Promise<void> {
+      let entries: Dirent[];
+      try {
+        entries = await fs.readdir(localDir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        const rel = relPrefix === '' ? entry.name : `${relPrefix}/${entry.name}`;
+        if (entry.isFile()) {
+          if (
+            !shouldCountAsRom({
+              relPath: rel,
+              isDirectory: false,
+              coreId: args.coreId,
+              marks: args.marks,
+            })
+          ) {
+            continue;
+          }
+          if (!isLaunchableRomExtension(rel)) continue;
+          out.push(`${onDeviceRoot}/${rel}`);
+        } else if (entry.isDirectory()) {
+          await walk(path.join(localDir, entry.name), rel);
+        }
+      }
+    }
+
+    await walk(localRoot, '');
+    return out;
   }
 
   async listRoms(

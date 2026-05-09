@@ -228,13 +228,16 @@ void app.whenReady().then(() => {
   //     the engine's shouldAbort callback so setFocus pivots land
   //     within one path's wall time.
   const autoScrapeEngine = new AutoScrapeEngine({
-    listRomPaths: async (coreId) => {
-      // Default `{}` uses the existing cache (no forceRefresh), which
-      // is what we want — the engine should ride along the same
-      // listing the rest of the app uses.
-      const roms = await manager.listRoms(coreId, '', {});
-      return roms.filter((r) => r.kind === 'file').map((r) => r.path);
-    },
+    // PR-C round 2: recursive ROM-file path list, filtered by the
+    // sidebar-count predicate (shouldCountAsRom +
+    // isLaunchableRomExtension). Round 1 used `manager.listRoms`
+    // which returned only top-level entries — a GBA core with 145
+    // ROMs (most in nested folders) showed as "GBA · 39/62" in the
+    // footer. The new wrapper does an SSH find for the whole core
+    // tree and returns absolute paths, so the engine queues
+    // exactly the files the sidebar count promised.
+    listRomPaths: async (coreId) =>
+      manager.listAllRomPathsForCore(coreId),
     scrape: async (coreId, paths, onPathResolved, shouldAbort) => {
       await metadataOrchestrator.getRomsMetadata(
         coreId,

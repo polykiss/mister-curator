@@ -603,6 +603,53 @@ export class RealMisterClient implements IMisterClient {
     };
   }
 
+  async listRecursiveRomFiles(args: {
+    readonly coreId: string;
+    readonly gamesDirBasename: string;
+    readonly marks?: SystemFilesMarks;
+  }): Promise<readonly string[]> {
+    this.assertConnected();
+    assertSafeSegment('coreId', args.coreId);
+    assertSafeSegment('gamesDirBasename', args.gamesDirBasename);
+
+    // PR-C round 2: SSH find for ALL files in the core's games dir,
+    // then filter on the main side by the same predicate the
+    // sidebar count uses (shouldCountAsRom + isLaunchableRomExtension
+    // — see shared/folder-rom.ts and shared/system-files.ts). Engine
+    // pre-round-2 only saw `listRoms`'s top-level entries, so a
+    // GBA core with 145 ROMs (most in nested folders) appeared as
+    // "GBA · 39/62" — 39 file rows out of 62 top-level entries.
+    // The new method returns the full launchable-ROM list so the
+    // engine's footer total matches the sidebar's count.
+    const targetDir = `${MISTER_GAMES_DIR}/${args.gamesDirBasename}`;
+    const script = [
+      `[ -d ${shellQuote(targetDir)} ] || exit 0`,
+      `find ${shellQuote(targetDir)} -type f -printf '%P\\n' 2>/dev/null`,
+    ].join('\n');
+    const result = await this.runSshOp(script, () =>
+      this.ssh.execCommand(script),
+    );
+    if (result.code !== 0) return [];
+
+    const out: string[] = [];
+    for (const line of result.stdout.split('\n')) {
+      if (line === '') continue;
+      if (
+        !shouldCountAsRom({
+          relPath: line,
+          isDirectory: false,
+          coreId: args.coreId,
+          marks: args.marks,
+        })
+      ) {
+        continue;
+      }
+      if (!isLaunchableRomExtension(line)) continue;
+      out.push(`${targetDir}/${line}`);
+    }
+    return out;
+  }
+
   async listRoms(
     coreId: string,
     subPath = '',

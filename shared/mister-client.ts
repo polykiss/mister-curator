@@ -143,6 +143,36 @@ export interface IMisterClient {
   ): Promise<Rom[]>;
 
   /**
+   * PR-C round 2 (PR #26): list every ROM file in a core's games dir
+   * recursively, filtered by the SAME predicate the sidebar count
+   * uses (`shouldCountAsRom` + `isLaunchableRomExtension` from
+   * `shared/folder-rom.ts`). Used by the auto-scrape engine to
+   * queue every path that contributes to the sidebar's integer
+   * count — pre-round-2 the engine queued only top-level files
+   * from `listRoms`, so subfolder ROMs were never scraped and the
+   * footer total never matched the sidebar.
+   *
+   * Returns full on-device paths (`/media/fat/games/<dir>/<rel>`)
+   * so the engine can pass them straight to
+   * `MetadataOrchestrator.getRomsMetadata`. Folder rows themselves
+   * (folder-atomic / folder-container) don't appear here — the
+   * engine sees only individual ROM files. Atomic-folder routing
+   * (treat the folder's contained ROM as the folder's metadata
+   * source) is deferred to PR-D1.
+   */
+  listRecursiveRomFiles(args: {
+    readonly coreId: string;
+    /**
+     * On-disk basename of the games dir (with leading dot for
+     * hidden cores). Resolved by ConnectionManager from the cores
+     * cache so the client doesn't need its own coreId → games-dir
+     * lookup.
+     */
+    readonly gamesDirBasename: string;
+    readonly marks?: SystemFilesMarks;
+  }): Promise<readonly string[]>;
+
+  /**
    * Toggle the visibility of one ROM at `<coreDir>/<subPath>/<filename>`.
    * `subPath` defaults to the empty string (top-level); pass it when
    * the user is operating inside a drilled-in container.
