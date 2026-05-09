@@ -119,6 +119,28 @@ export function enumerateScrapePaths(
 }
 
 /**
+ * Per-row metadata-cache lookup path. The renderer calls this in
+ * several places (row-menu, prefetch builder, sort key) where it
+ * needs the SAME path the orchestrator uses to key the cache —
+ * which for atomic folders is the contained file's path, NOT the
+ * folder path. Returns `null` for container rows (callers should
+ * never look up metadata directly on a container) and for atomic
+ * folders without a `containedRomPath` (defensive empty-folder case).
+ *
+ * Pre-helper this was an inline ternary at every call site;
+ * extracting it kills the drift risk if the policy changes (e.g.
+ * future "use folder path as key for atomic folders" schema change
+ * — one place to update).
+ */
+export function metadataLookupPathFor(rom: Rom): string | null {
+  if (rom.kind === 'file') return rom.path;
+  if (rom.kind === 'folder-atomic') {
+    return rom.containedRomPath ?? null;
+  }
+  return null;
+}
+
+/**
  * Subset of atomic-folder paths from a `Rom[]`. The orchestrator's
  * `getRomsMetadata` accepts an `atomicFolderPaths` set so it can
  * route those paths' name-search through the parent folder name (the
