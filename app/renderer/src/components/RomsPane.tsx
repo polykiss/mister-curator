@@ -1,8 +1,6 @@
 import {
   ChevronDown,
   ChevronUp,
-  Folder,
-  FolderOpen,
   MoreHorizontal,
   Settings,
 } from 'lucide-react';
@@ -1101,11 +1099,20 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                       {/* PR #20 round 1: name+year stack replaces the
                           plain displayName. The metadata-derived name
                           wins when present (SS canonical), falling
-                          back to the on-disk filename. The leading-
-                          icon slot keeps the existing system / folder
-                          decoration; the click handler stays on the
-                          parent TableCell so folder-container drill
-                          behavior is unchanged. */}
+                          back to the on-disk filename. The click
+                          handler stays on the parent TableCell so
+                          folder-container drill behavior is
+                          unchanged.
+                          PR #23 round 4: the leading-icon slot now
+                          carries the system gear ONLY. The folder
+                          glyphs (Folder / FolderOpen) that used to
+                          sit next to folder names are redundant —
+                          round 3 part 2 put a 40px tile (FolderOpen
+                          for explorable folders, box-art + folder
+                          badge overlay for single-game folders) in
+                          the thumbnail column, so the inline glyph
+                          was repeating the same signal next to the
+                          name and breaking the column rhythm. */}
                       <RomNameInner
                         rom={rom}
                         dimmed={isDimmed}
@@ -1117,18 +1124,6 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                               className="size-3.5 shrink-0"
                               strokeWidth={1.5}
                               aria-label="system file"
-                            />
-                          ) : rom.kind === 'folder-container' ? (
-                            <FolderOpen
-                              className="size-3.5 shrink-0 text-fg-muted"
-                              strokeWidth={1.5}
-                              aria-label="container folder"
-                            />
-                          ) : rom.kind === 'folder-atomic' ? (
-                            <Folder
-                              className="size-3.5 shrink-0 text-fg-muted"
-                              strokeWidth={1.5}
-                              aria-label="folder ROM"
                             />
                           ) : null
                         }
