@@ -78,6 +78,33 @@ export class MetadataOrchestrator {
   /** Tracks whether `ensureMetadataDatabase` is currently downloading. */
   private downloadInProgress = false;
 
+  /**
+   * PR-D1 round 2 (PR #27 round 2): per-coreId in-flight gate for
+   * `getRomsMetadata`. The auto-scrape engine and RomsPane's
+   * per-pane prefetch both hit the same orchestrator method when
+   * the user clicks the focused core. Without this gate, both
+   * outer loops ran independently — same paths processed twice,
+   * same `prefetch.lookup` log lines emitted twice, ~2× the work.
+   *
+   * When a second call arrives for a coreId already in flight, the
+   * second caller's `onResolved` is added to the in-flight call's
+   * subscriber set; the second caller awaits the in-flight promise
+   * and returns when it resolves. Only one underlying scrape loop
+   * runs per coreId at a time. Path-set differences (engine =
+   * recursive, RomsPane = visible subset) are accepted: the
+   * second caller gets events for ALL paths in the in-flight set,
+   * including any it didn't explicitly request — RomsPane filters
+   * those out by visible-set on the renderer side, so the only
+   * cost is wasted event dispatch (microseconds).
+   */
+  private inflightByCoreId = new Map<
+    string,
+    {
+      readonly promise: Promise<void>;
+      readonly callbacks: Set<(event: RomMetadataResolvedEvent) => void>;
+    }
+  >();
+
   constructor(
     private readonly hashService: HashService,
     private readonly metadataService: MetadataService,
@@ -217,21 +244,108 @@ export class MetadataOrchestrator {
    *   - Per-path metadata throws → emit `{ ..., error: true }` for
    *     just that path; subsequent paths still get a chance.
    */
+  /**
+   * PR-D1 round 2 (PR #27 round 2): pure-disk cache snapshot for the
+   * optimistic-render path. Reads the hash service's path → hash
+   * cache (no SSH stat) and the metadata cache (no SS / OpenVGDB
+   * fetch). Returns whatever's already on disk so the renderer can
+   * paint rows immediately on click — the normal `getRomsMetadata`
+   * follow-up validates mtimes and refetches anything stale.
+   *
+   * Returns a record keyed by path. A `null` value means either:
+   *   • the hash for this path isn't cached locally (cold), OR
+   *   • the metadata for the cached hash is a sentinel
+   *     (`source: 'none'` — no useful render data).
+   * Either way the renderer should show a loading state for that
+   * row until the validation pass populates it.
+   */
+  async readCachedRomsMetadata(
+    coreId: string,
+    romPaths: readonly string[],
+  ): Promise<Record<string, RomMetadata | null>> {
+    void coreId; // present for diag-log symmetry; not used yet
+    const out: Record<string, RomMetadata | null> = {};
+    if (romPaths.length === 0) return out;
+    const session = this.getActiveSession();
+    if (session === null) {
+      for (const p of romPaths) out[p] = null;
+      return out;
+    }
+    const hashEntries = await this.hashService.readCachedEntries(
+      session.host,
+      romPaths,
+    );
+    for (const p of romPaths) {
+      const entry = hashEntries.get(p);
+      if (entry === null || entry === undefined) {
+        out[p] = null;
+        continue;
+      }
+      out[p] = await this.metadataService.readCachedMetadata(entry.md5);
+    }
+    return out;
+  }
+
   async getRomsMetadata(
     coreId: string,
     romPaths: readonly string[],
     onResolved?: (event: RomMetadataResolvedEvent) => void,
-    /**
-     * PR-C (PR #26): cooperative cancellation for the auto-scrape
-     * engine. Checked at the top of each per-path iteration —
-     * returns early if true, leaving partial work in the metadata
-     * cache (which is the source of truth for "this path is
-     * scanned"). The engine flips this flag from setFocus / pause
-     * so the user's pivot lands within ~one path's wall time. SSH
-     * round-trips themselves aren't aborted (separate refactor
-     * scope per the PR-C spec); the abort surfaces between paths.
-     */
     shouldAbort?: () => boolean,
+    atomicFolderPaths?: ReadonlySet<string>,
+  ): Promise<void> {
+    // PR-D1 round 2 (PR #27 round 2): per-coreId in-flight gate.
+    // If a scrape is already running for this coreId, subscribe
+    // this call's onResolved to the in-flight call's fan-out and
+    // await its promise — only ONE underlying scrape loop runs per
+    // coreId. Eliminates duplicate `prefetch.lookup` log lines
+    // when the auto-scrape engine and RomsPane's per-pane prefetch
+    // both target the focused core.
+    const inflight = this.inflightByCoreId.get(coreId);
+    if (inflight !== undefined) {
+      diagLog('info', 'prefetch', '·', 'gate-coalesce', {
+        coreId,
+        paths: romPaths.length,
+      });
+      if (onResolved !== undefined) inflight.callbacks.add(onResolved);
+      try {
+        await inflight.promise;
+      } finally {
+        if (onResolved !== undefined) inflight.callbacks.delete(onResolved);
+      }
+      return;
+    }
+
+    const callbacks = new Set<(event: RomMetadataResolvedEvent) => void>();
+    if (onResolved !== undefined) callbacks.add(onResolved);
+    const fanOut = (event: RomMetadataResolvedEvent): void => {
+      for (const cb of callbacks) cb(event);
+    };
+    const promise = this.runScrapeLoop(
+      coreId,
+      romPaths,
+      fanOut,
+      shouldAbort,
+      atomicFolderPaths,
+    ).finally(() => {
+      this.inflightByCoreId.delete(coreId);
+    });
+    this.inflightByCoreId.set(coreId, { promise, callbacks });
+    return promise;
+  }
+
+  /**
+   * PR-D1 round 2 (PR #27 round 2): the actual scrape loop. Was
+   * `getRomsMetadata`'s body before round 2 added the
+   * coreId-keyed in-flight gate. Now invoked by the public
+   * `getRomsMetadata` which handles dedup; this private method
+   * runs the work itself.
+   */
+  private async runScrapeLoop(
+    coreId: string,
+    romPaths: readonly string[],
+    onResolved: (event: RomMetadataResolvedEvent) => void,
+    shouldAbort?: () => boolean,
+    atomicFolderPaths?: ReadonlySet<string>,
   ): Promise<void> {
     if (romPaths.length === 0) return;
     diagLog('info', 'prefetch', '→', 'start', {
@@ -246,7 +360,7 @@ export class MetadataOrchestrator {
     if (session === null) {
       diagLog('warn', 'prefetch', '·', 'no-session', { coreId });
       for (const path of romPaths) {
-        onResolved?.({ path, metadata: null, error: false });
+        onResolved({ path, metadata: null, error: false });
       }
       return;
     }
@@ -375,7 +489,7 @@ export class MetadataOrchestrator {
             source: 'error',
             ms: Date.now() - perRomStart,
           });
-          onResolved?.({ path, metadata: null, error: true });
+          onResolved({ path, metadata: null, error: true });
           errors += 1;
           continue;
         }
@@ -385,7 +499,7 @@ export class MetadataOrchestrator {
           source: 'synthetic-sentinel',
           ms: Date.now() - perRomStart,
         });
-        onResolved?.({ path, metadata, error: false });
+        onResolved({ path, metadata, error: false });
         resolved += 1;
         hashSkipped += 1;
         continue;
@@ -416,7 +530,7 @@ export class MetadataOrchestrator {
             source: 'error',
             ms: Date.now() - perRomStart,
           });
-          onResolved?.({ path, metadata: null, error: true });
+          onResolved({ path, metadata: null, error: true });
           errors += 1;
           continue;
         }
@@ -433,7 +547,7 @@ export class MetadataOrchestrator {
           source: 'unmatched',
           ms: Date.now() - perRomStart,
         });
-        onResolved?.({ path, metadata: null, error: false });
+        onResolved({ path, metadata: null, error: false });
         resolved += 1;
         continue;
       }
@@ -446,10 +560,22 @@ export class MetadataOrchestrator {
         romSize: entry.size,
       };
       const lookupStart = Date.now();
+      // PR-D1 (PR #27): pass filename + parentFolder so MetadataService
+      // can run the name-search fallback (jeuRecherche) when the hash
+      // misses both SS and OpenVGDB. Parent folder is the basename of
+      // the directory above the file — for atomic-folder ROMs
+      // (`Metal Slug 2 (USA)/mslug2.neo`) this is the strongest
+      // recovery signal.
+      const filename = basename(path);
+      const parentFolder = parentBasename(path);
+      // PR-D1 round 2 (PR #27 round 2): only forward `parentFolderIsAtomic=true`
+      // for paths the caller marked atomic. Default false so
+      // organizational folders don't waste API budget.
+      const parentFolderIsAtomic = atomicFolderPaths?.has(path) === true;
       try {
         const metadata = await this.metadataService.getMetadata(
           entry.md5,
-          {},
+          { filename, parentFolder, parentFolderIsAtomic },
           ssHint,
         );
         diagLog('info', 'prefetch', '·', 'lookup', {
@@ -465,7 +591,7 @@ export class MetadataOrchestrator {
           source: metadata?.source ?? 'none',
           ms: Date.now() - perRomStart,
         });
-        onResolved?.({ path, metadata, error: false });
+        onResolved({ path, metadata, error: false });
         resolved += 1;
       } catch (err) {
         diagLog('error', 'prefetch', '✗', 'lookup failed', {
@@ -480,7 +606,7 @@ export class MetadataOrchestrator {
           source: 'error',
           ms: Date.now() - perRomStart,
         });
-        onResolved?.({ path, metadata: null, error: true });
+        onResolved({ path, metadata: null, error: true });
         errors += 1;
       }
     }
@@ -600,4 +726,25 @@ function makeSyntheticCacheKey(coreId: string, path: string): string {
 function basename(path: string): string {
   const slash = path.lastIndexOf('/');
   return slash < 0 ? path : path.slice(slash + 1);
+}
+
+/**
+ * PR-D1 (PR #27): basename of the IMMEDIATE parent dir, or undefined
+ * when there's no parent (root-level files). Used to feed the
+ * name-search fallback's parentFolder hint — atomic-folder ROMs
+ * (`/games/NEOGEO/Metal Slug 2 (USA)/mslug2.neo`) yield "Metal Slug
+ * 2 (USA)", which `filename-hint.ts` cleans to "Metal Slug 2" before
+ * running it as the search term.
+ *
+ * Returns undefined for paths with 0 or 1 segments (no meaningful
+ * parent) so the hint is omitted rather than passed as the empty
+ * string.
+ */
+function parentBasename(path: string): string | undefined {
+  const lastSlash = path.lastIndexOf('/');
+  if (lastSlash <= 0) return undefined;
+  const parentPath = path.slice(0, lastSlash);
+  const prevSlash = parentPath.lastIndexOf('/');
+  const parent = prevSlash < 0 ? parentPath : parentPath.slice(prevSlash + 1);
+  return parent === '' ? undefined : parent;
 }

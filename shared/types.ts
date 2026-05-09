@@ -92,6 +92,24 @@ export interface Rom {
    * this for breadcrumb display and to thread back into IPC calls.
    */
   readonly relativePath?: string;
+  /**
+   * PR-D1 (PR #27): for `kind === 'folder-atomic'` rows ONLY — the
+   * full on-device path of the alphabetical-first launchable ROM
+   * file inside the folder. Lets the renderer look up metadata
+   * keyed by the contained file's hash so the folder row displays
+   * the contained game's box art (with a folder badge overlay).
+   *
+   * Undefined for `'file'` rows (the rom IS the file) and for
+   * `'folder-container'` rows (multi-game folders need drill-in,
+   * not direct binding). Undefined for atomic folders that don't
+   * contain a launchable file (defensive — renderer falls back to
+   * the ImageOff + badge presentation in that case).
+   *
+   * "Alphabetical-first" is the picker for atomic folders with
+   * multiple launchable files (rare). Documented; PR-D2's manual
+   * override surfaces the wrong-pick correction path.
+   */
+  readonly containedRomPath?: string;
 }
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';

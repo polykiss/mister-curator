@@ -69,6 +69,10 @@ export const IPC_CHANNELS = {
   // `romMetadataResolved` events keyed on operationId.
   prefetchRomsMetadata: 'mister:prefetchRomsMetadata',
   romMetadataResolved: 'mister:romMetadataResolved',
+  // PR-D1 round 2 (PR #27 round 2): pure-disk cache read used by
+  // RomsPane on click for immediate row paint. No SSH, no SS,
+  // never blocks the UI on the auto-scrape engine's gate.
+  getCachedRomsMetadata: 'mister:getCachedRomsMetadata',
   // Round 3 (OpenVGDB). The renderer prompts the user to download
   // the ~50MB SQLite snapshot; main pulls it down + opens it.
   ensureMetadataDatabase: 'mister:ensureMetadataDatabase',
@@ -423,7 +427,17 @@ export interface MisterApi {
   prefetchRomsMetadata(
     coreId: string,
     paths: readonly string[],
-    options?: { readonly operationId?: string },
+    options?: {
+      readonly operationId?: string;
+      /**
+       * PR-D1 round 2 (PR #27 round 2): subset of `paths` whose
+       * immediate parent dir is a `folder-atomic` single-game
+       * folder. Tells the orchestrator which paths should get the
+       * parent-folder name-search hint. Organizational containers
+       * (NEOGEO `1 World A-Z`) MUST NOT appear here.
+       */
+      readonly atomicFolderPaths?: readonly string[];
+    },
   ): Promise<void>;
   /**
    * Subscribe to per-path resolution events from
@@ -434,6 +448,17 @@ export interface MisterApi {
   onRomMetadataResolved(
     handler: (event: RomMetadataResolvedEvent) => void,
   ): () => void;
+  /**
+   * PR-D1 round 2 (PR #27 round 2): synchronous-feeling cache read
+   * for the optimistic-render path. Returns whatever's already on
+   * disk (no SSH, no SS). The renderer paints rows from this
+   * snapshot, then `prefetchRomsMetadata` validates + refetches
+   * stale rows in the background.
+   */
+  getCachedRomsMetadata(
+    coreId: string,
+    paths: readonly string[],
+  ): Promise<Record<string, RomMetadata | null>>;
   /**
    * Round 3: kick off (or check on) the OpenVGDB SQLite download.
    * Returns immediately with the current state — the renderer

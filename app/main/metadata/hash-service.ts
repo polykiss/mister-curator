@@ -411,6 +411,26 @@ export class HashService {
     return next;
   }
 
+  /**
+   * PR-D1 round 2 (PR #27 round 2): pure-disk cache lookup for the
+   * optimistic-render path. Returns the cached `HashEntry` for each
+   * requested path WITHOUT a fresh SSH stat — entries may be stale
+   * if the file's mtime drifted, but the renderer wants something
+   * to display immediately. Stale entries are corrected in the
+   * background via `checkCachedMtimes` from the normal flow.
+   *
+   * Returns `null` for paths the disk cache doesn't know about.
+   */
+  async readCachedEntries(
+    host: string,
+    paths: readonly string[],
+  ): Promise<Map<string, HashEntry | null>> {
+    const entries = await this.loadEntries(host);
+    const out = new Map<string, HashEntry | null>();
+    for (const p of paths) out.set(p, entries[p] ?? null);
+    return out;
+  }
+
   private async loadEntries(host: string): Promise<Record<string, HashEntry>> {
     const cached = this.memCache.get(host);
     if (cached !== undefined) return cached;

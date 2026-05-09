@@ -177,13 +177,60 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   useEffect(() => {
     setMetadataByPath({});
     if (!roms || roms.length === 0) return;
-    // Folder-kind ROMs aren't hashed by the metadata pipeline; the
-    // prefetch can skip them and the renderer falls through to
-    // filename rendering for them.
-    const filePaths = roms
-      .filter((r) => r.kind === 'file')
-      .map((r) => r.path);
+    // PR-D1 (PR #27): include atomic folders' contained primary
+    // ROM file in the prefetch list so the folder row can show the
+    // contained game's box art (with the folder badge overlay).
+    // The metadata is keyed by the contained file's hash; the
+    // renderer's row render does the lookup via `containedRomPath`.
+    // Container folders stay out — they're drilled into for their
+    // contents.
+    const filePaths: string[] = [];
+    // PR-D1 round 2 (PR #27 round 2): track the subset that lives
+    // inside atomic folders so the orchestrator emits a parent-folder
+    // name-search hint only for those — organizational folders
+    // (NEOGEO `1 World A-Z`, NES `Hacks`) would waste API calls.
+    const atomicFolderPaths: string[] = [];
+    for (const r of roms) {
+      if (r.kind === 'file') {
+        filePaths.push(r.path);
+      } else if (
+        r.kind === 'folder-atomic' &&
+        r.containedRomPath !== undefined
+      ) {
+        filePaths.push(r.containedRomPath);
+        atomicFolderPaths.push(r.containedRomPath);
+      }
+    }
     if (filePaths.length === 0) return;
+    // PR-D1 round 2 (PR #27 round 2): optimistic-render path. Read
+    // the disk cache snapshot first (no SSH, no SS — instant) and
+    // hydrate `metadataByPath` so rows paint immediately. Then the
+    // normal validation prefetch fires below; mtime-batch + per-path
+    // refetch update only the rows that changed on-device. Most
+    // rows don't change between sessions, so the optimistic paint
+    // is correct for the common case.
+    let cancelled = false;
+    void window.mister
+      .getCachedRomsMetadata(core.id, filePaths)
+      .then((cached) => {
+        if (cancelled) return;
+        const seed: Record<
+          string,
+          { metadata: RomMetadata | null; error: boolean }
+        > = {};
+        for (const [path, metadata] of Object.entries(cached)) {
+          if (metadata !== null) {
+            seed[path] = { metadata, error: false };
+          }
+        }
+        // Merge — don't overwrite events that arrived faster than the
+        // cache read (rare race; preserve fresher data).
+        setMetadataByPath((prev) => ({ ...seed, ...prev }));
+      })
+      .catch(() => {
+        // Cache snapshot failed — not fatal; the validation prefetch
+        // below still runs and fills rows the slow way.
+      });
     // Operation id scopes the streamed events to THIS pane mount —
     // a quick navigation away starts a fresh prefetch with a new
     // operationId; events from the in-flight prior prefetch are
@@ -211,8 +258,13 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     });
     void window.mister.prefetchRomsMetadata(core.id, filePaths, {
       operationId,
+      atomicFolderPaths,
     });
     return () => {
+      // Round 2 (PR #27 round 2): cancel the optimistic-cache hydrate
+      // if the user navigates away before it lands. Prevents stale
+      // cache snapshot from clobbering a fresh pane's metadata.
+      cancelled = true;
       diagLog('info', 'roms-pane', '·', 'unsubscribed', {
         opId: operationId,
       });
@@ -252,11 +304,32 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
       });
       return;
     }
-    const filePaths = roms.filter((r) => r.kind === 'file').map((r) => r.path);
+    // PR-D1 (PR #27): same containedRomPath inclusion as the
+    // initial-prefetch path. Atomic-folder rows resume their
+    // metadata fetch via the contained file's hash on reconnect.
+    // Round 2: track atomic subset for the parent-folder hint
+    // gating, same as the initial-prefetch path.
+    const filePaths: string[] = [];
+    const atomicFolderPathsAll: string[] = [];
+    for (const r of roms) {
+      if (r.kind === 'file') {
+        filePaths.push(r.path);
+      } else if (
+        r.kind === 'folder-atomic' &&
+        r.containedRomPath !== undefined
+      ) {
+        filePaths.push(r.containedRomPath);
+        atomicFolderPathsAll.push(r.containedRomPath);
+      }
+    }
     const pending = filePaths.filter((p) => {
       const entry = metadataByPath[p];
       return entry === undefined || entry.error;
     });
+    const pendingSet = new Set(pending);
+    const atomicFolderPaths = atomicFolderPathsAll.filter((p) =>
+      pendingSet.has(p),
+    );
     if (pending.length === 0) {
       diagLog('info', 'roms-pane', '·', 'resume-skip-no-pending', {
         coreId: core.id,
@@ -295,6 +368,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     });
     void window.mister.prefetchRomsMetadata(core.id, pending, {
       operationId,
+      atomicFolderPaths,
     });
     return () => {
       diagLog('info', 'roms-pane', '·', 'resume-unsubscribed', {
@@ -345,7 +419,15 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     // the pane consumes.
     const withMeta = filtered.map((rom) => ({
       rom,
-      metadata: metadataByPath[rom.path]?.metadata,
+      // PR-D1 (PR #27): atomic-folder rows sort by their contained
+      // primary file's metadata so the folder's display name in the
+      // sort matches what the row visually shows. Files + container
+      // folders look up by their own path.
+      metadata: metadataByPath[
+        rom.kind === 'folder-atomic' && rom.containedRomPath !== undefined
+          ? rom.containedRomPath
+          : rom.path
+      ]?.metadata,
     }));
     return sortRoms(withMeta, sortState).map((r) => r.rom);
   }, [roms, showHidden, showSystem, systemFlags, metadataByPath, sortState]);
@@ -1053,7 +1135,17 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                 // prefetch effect. undefined = loading; entry present
                 // = settled (metadata may be null = unmatched, or
                 // error = true = fetch failed).
-                const metadataState = metadataByPath[rom.path];
+                // PR-D1 (PR #27): atomic-folder rows look up by the
+                // contained primary file's path so the folder row
+                // can show the contained game's box art (with the
+                // folder badge overlay from round 3 part 2). Files
+                // and container folders look up by their own path.
+                const metadataLookupPath =
+                  rom.kind === 'folder-atomic' &&
+                  rom.containedRomPath !== undefined
+                    ? rom.containedRomPath
+                    : rom.path;
+                const metadataState = metadataByPath[metadataLookupPath];
                 const metadata = metadataState?.metadata;
                 const fetchError = metadataState?.error ?? false;
                 return (

@@ -20,7 +20,19 @@
  *     when creds are configured.
  */
 
-export type MetadataSource = 'screenscraper' | 'openvgdb' | 'none';
+/**
+ * `'screenscraper-name-search'` (PR-D1, PR #27) marks records resolved
+ * via the name-search fallback (jeuRecherche.php with a filename /
+ * folder hint), distinct from `'screenscraper'` which means the
+ * authoritative hash lookup hit. The two are kept separate so the
+ * cache audit + future "this row was inferred, not hash-confirmed"
+ * UI distinction stays available.
+ */
+export type MetadataSource =
+  | 'screenscraper'
+  | 'screenscraper-name-search'
+  | 'openvgdb'
+  | 'none';
 
 /**
  * Every per-ROM metadata record carries the source that produced it.
@@ -84,16 +96,52 @@ export interface RomMetadata {
    *     read. Optional so old v4 records still parse.
    */
   readonly ssAvailableAtWrite?: boolean;
+  /**
+   * PR-D1 round 2 (PR #27 round 2): true once the name-search
+   * fallback has run for this hash (regardless of whether it hit or
+   * not). Pre-D1 records have this undefined → cache-priority
+   * treats them as "needs retry once" so legacy sentinels get a
+   * chance at the new pipeline without requiring a manual cache
+   * wipe. After the retry runs, the field is set on the next cache
+   * write so subsequent reads honor the sentinel normally.
+   *
+   * Does NOT bump the schema version — this is a minor opt-in flag,
+   * not a structural change. Old records without it still parse;
+   * new records always set it true (or false on the first write).
+   */
+  readonly triedNameSearch?: boolean;
 }
 
 /**
- * Optional hint passed to the metadata pipeline. v0 ignores both
- * fields — OpenVGDB is hash-keyed so the hash uniquely identifies
- * the ROM. Reserved for future name-search fallback if we add one.
+ * Optional hint passed to the metadata pipeline.
+ *
+ * `name` and `system` were the v0 placeholder fields (still ignored).
+ *
+ * PR-D1 (PR #27): `filename` and `parentFolder` feed the name-search
+ * fallback. When SS hash + OpenVGDB both miss, `filename-hint.ts`
+ * extracts up to three search terms from these inputs, calls
+ * `searchByName` for each, and binds the top result if it scores
+ * ≥ 0.9 against the search term. Pass these whenever you have them
+ * (always for prefetch, optionally for ad-hoc lookups).
  */
 export interface MetadataHint {
   readonly name?: string;
   readonly system?: string;
+  /** Basename of the ROM file (e.g. `mslug2.neo`). */
+  readonly filename?: string;
+  /**
+   * Basename of the immediate parent dir (atomic-folder shape:
+   * `Metal Slug 2 (USA)`). Undefined when the ROM is at the core's
+   * top level.
+   */
+  readonly parentFolder?: string;
+  /**
+   * Round 2 (PR #27 round 2): true iff `parentFolder` names an
+   * atomic single-game folder. Only then is the folder name used as
+   * a search hint — organizational folders like NEOGEO's
+   * `1 World A-Z` would waste API calls returning no candidates.
+   */
+  readonly parentFolderIsAtomic?: boolean;
 }
 
 /**

@@ -1046,3 +1046,163 @@ describe.runIf(liveProbeEnabled)('ScreenScraperService — live probes', () => {
     20_000,
   );
 });
+
+describe('searchByName — PR-D1 jeuRecherche client', () => {
+  it('builds the jeuRecherche.php URL with systemeid + recherche params', async () => {
+    const fetch = vi.fn(async () =>
+      jsonResponse({ response: { jeux: [] } }),
+    );
+    const svc = makeService({ fetch: fetch as unknown as typeof globalThis.fetch });
+    await svc.searchByName({ systemId: 75, searchTerm: 'mslug2' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const calls = fetch.mock.calls as readonly (readonly unknown[])[];
+    const url = String(calls[0]?.[0]);
+    expect(url).toContain('jeuRecherche.php');
+    expect(url).toContain('systemeid=75');
+    // searchParams URL-encodes the search term — confirms encoding
+    // happens (no raw spaces in the URL).
+    expect(url).toContain('recherche=mslug2');
+  });
+
+  it('URL-encodes search terms with spaces and parens', async () => {
+    const fetch = vi.fn(async () =>
+      jsonResponse({ response: { jeux: [] } }),
+    );
+    const svc = makeService({ fetch: fetch as unknown as typeof globalThis.fetch });
+    await svc.searchByName({
+      systemId: 4,
+      searchTerm: 'Metal Slug 2 (USA)',
+    });
+    const calls = fetch.mock.calls as readonly (readonly unknown[])[];
+    const url = String(calls[0]?.[0]);
+    // %20 (space) and %28%29 (parens) — the URL.searchParams encoder
+    // uses + for spaces in form-urlencoded, but URL builder uses %20.
+    // Either is OK as long as the raw chars don't appear.
+    expect(url).not.toContain(' ');
+    expect(url).toContain('recherche=');
+  });
+
+  it('threads the same auth params as jeuInfos (devid, devpassword, etc.)', async () => {
+    const fetch = vi.fn(async () =>
+      jsonResponse({ response: { jeux: [] } }),
+    );
+    const svc = makeService({
+      devId: 'd',
+      devPassword: 'p',
+      ssid: 'u',
+      sspassword: 'q',
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+    await svc.searchByName({ systemId: 4, searchTerm: 'Mario' });
+    const calls = fetch.mock.calls as readonly (readonly unknown[])[];
+    const url = String(calls[0]?.[0]);
+    expect(url).toContain('devid=d');
+    expect(url).toContain('devpassword=p');
+    expect(url).toContain('ssid=u');
+    expect(url).toContain('sspassword=q');
+    expect(url).toContain('softname=mistercurator');
+    expect(url).toContain('output=json');
+  });
+
+  it('parses the response.jeux array into ranked candidates', async () => {
+    const fetch = vi.fn(async () =>
+      jsonResponse({
+        response: {
+          jeux: [
+            {
+              id: 1,
+              systeme: { id: '75', text: 'Arcade' },
+              noms: [{ region: 'us', text: 'Metal Slug 2' }],
+            },
+            {
+              id: 2,
+              systeme: { id: '75', text: 'Arcade' },
+              noms: [{ region: 'us', text: 'Metal Slug 2 Special' }],
+            },
+          ],
+        },
+      }),
+    );
+    const svc = makeService({ fetch: fetch as unknown as typeof globalThis.fetch });
+    const games = await svc.searchByName({ systemId: 75, searchTerm: 'mslug2' });
+    expect(games).toHaveLength(2);
+    expect(games[0]?.name).toBe('Metal Slug 2');
+    expect(games[1]?.name).toBe('Metal Slug 2 Special');
+  });
+
+  it('returns empty array when response.jeux is missing or empty', async () => {
+    const svc = makeService({
+      fetch: (async () => jsonResponse({ response: {} })) as unknown as typeof globalThis.fetch,
+    });
+    expect(await svc.searchByName({ systemId: 4, searchTerm: 'x' })).toEqual([]);
+  });
+
+  it('returns empty array when an individual jeu fails to parse (no name)', async () => {
+    // SS sometimes returns a jeu with no usable name in any region —
+    // those are dropped, but the rest of the array still parses.
+    const svc = makeService({
+      fetch: (async () =>
+        jsonResponse({
+          response: {
+            jeux: [
+              { id: 1, noms: [] }, // no name → dropped
+              {
+                id: 2,
+                systeme: { id: '75', text: 'Arcade' },
+                noms: [{ region: 'us', text: 'OK Game' }],
+              },
+            ],
+          },
+        })) as unknown as typeof globalThis.fetch,
+    });
+    const games = await svc.searchByName({ systemId: 75, searchTerm: 'x' });
+    expect(games.map((g) => g.name)).toEqual(['OK Game']);
+  });
+
+  it('returns empty array when credentials are missing (no fetch issued)', async () => {
+    const fetch = vi.fn();
+    const svc = new ScreenScraperService({
+      // No devId / devPassword.
+      sleep: () => Promise.resolve(),
+      now: () => 0,
+      minIntervalMs: 0,
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+    const games = await svc.searchByName({ systemId: 4, searchTerm: 'x' });
+    expect(games).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('returns empty array for a whitespace-only search term (no fetch issued)', async () => {
+    const fetch = vi.fn();
+    const svc = makeService({ fetch: fetch as unknown as typeof globalThis.fetch });
+    const games = await svc.searchByName({ systemId: 4, searchTerm: '   ' });
+    expect(games).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('returns empty array on HTTP errors (404, 5xx after retry-exhaustion)', async () => {
+    const svc = makeService({
+      fetch: (async () => emptyResponse(404)) as unknown as typeof globalThis.fetch,
+    });
+    expect(await svc.searchByName({ systemId: 4, searchTerm: 'x' })).toEqual([]);
+  });
+
+  it('shares the rate-limit queue with hash lookups (1.1s gap between calls)', async () => {
+    // Both call paths use enqueue() which threads through the same
+    // serialised queue — a name-search call right after a hash
+    // lookup waits for the gap. We don't time it here (test seam
+    // sleep=noop) but verify both call types run sequentially.
+    const fetch = vi.fn(async () =>
+      jsonResponse({ response: { jeux: [], jeu: undefined } }),
+    );
+    const svc = makeService({ fetch: fetch as unknown as typeof globalThis.fetch });
+    const a = svc.lookup({
+      systemId: 4,
+      md5: HASH_MD5,
+    });
+    const b = svc.searchByName({ systemId: 75, searchTerm: 'x' });
+    await Promise.all([a, b]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});

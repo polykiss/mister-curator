@@ -967,6 +967,11 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     function buildSentinel(
       ssAvailableAtWrite: boolean | undefined,
       fetchedAt = new Date().toISOString(),
+      // Round 2 (PR #27 round 2): default true so existing round-9
+      // tests model "post-D1 sentinel" semantics. The pre-D1 retry
+      // path is exercised by separate tests that explicitly pass
+      // false / undefined.
+      triedNameSearch: boolean | undefined = true,
     ): RomMetadata {
       const base: RomMetadata = {
         version: 4,
@@ -987,8 +992,13 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
         source: 'none',
         fetchedAt,
       };
-      if (ssAvailableAtWrite === undefined) return base;
-      return { ...base, ssAvailableAtWrite };
+      const withSs =
+        ssAvailableAtWrite === undefined
+          ? base
+          : { ...base, ssAvailableAtWrite };
+      return triedNameSearch === undefined
+        ? withSs
+        : { ...withSs, triedNameSearch };
     }
 
     it('authoritative sentinel (ssAvailableAtWrite=true) within TTL → use cache, no SS call', async () => {
@@ -1167,6 +1177,375 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       await svc.getMetadata(HASH, {}, SS_HINT_R9);
       await svc.getMetadata(otherHash, {}, { ...SS_HINT_R9, md5: otherHash });
       expect(ss.lookupCalls).toBe(2);
+    });
+  });
+
+  describe('PR-D1 (PR #27) — name-search fallback', () => {
+    /**
+     * Stub a ScreenScraper service that supports BOTH `lookup` (hash)
+     * and `searchByName`. Returns lookup result first; if lookup is
+     * null, searchByName fires per-hint and the test fixture controls
+     * the candidate list per search term.
+     */
+    function makeSearchSS(opts: {
+      readonly lookupResult?: ScreenScraperGame | null;
+      readonly searchResults?: Record<string, readonly ScreenScraperGame[]>;
+    } = {}): {
+      readonly svc: ScreenScraperService;
+      readonly searchCalls: { systemId: number; searchTerm: string }[];
+    } {
+      const searchCalls: { systemId: number; searchTerm: string }[] = [];
+      const stub = {
+        getStatus: vi.fn(() => 'available'),
+        lookup: vi.fn(async () => opts.lookupResult ?? null),
+        searchByName: vi.fn(
+          async (args: { systemId: number; searchTerm: string }) => {
+            searchCalls.push(args);
+            return opts.searchResults?.[args.searchTerm] ?? [];
+          },
+        ),
+      } as unknown as ScreenScraperService;
+      return { svc: stub, searchCalls };
+    }
+
+    function buildSsHit(
+      overrides: Partial<ScreenScraperGame> = {},
+    ): ScreenScraperGame {
+      return {
+        id: 1234,
+        name: 'Metal Slug 2',
+        system: 'Arcade',
+        description: 'Run-and-gun.',
+        developer: 'SNK',
+        publisher: 'SNK',
+        genres: ['Action', 'Run and Gun'],
+        releaseDate: '1998-04-02',
+        rating: 9,
+        players: '1-2',
+        boxArtUrl: 'https://ss-cdn/box.png',
+        extra: {
+          box3DUrl: null,
+          marqueeUrl: null,
+          titleScreenUrl: null,
+          snapUrl: null,
+          clearLogoUrl: null,
+          screenshots: [],
+        },
+        ...overrides,
+      };
+    }
+
+    const SS_HINT = {
+      systemId: 75,
+      md5: HASH,
+      sha1: 'b'.repeat(40),
+      crc32: 'deadbeef',
+      romName: 'mslug2.neo',
+      romSize: 1024,
+    };
+
+    it('hash miss + name-search high-confidence hit → binds with source=screenscraper-name-search', async () => {
+      // Hash misses both SS + OpenVGDB. The paren-shortname hint
+      // `mslug2` returns a candidate scoring exact (1.0) → bind.
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({
+        lookupResult: null,
+        searchResults: { mslug2: [buildSsHit({ name: 'mslug2' })] },
+      });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      const result = await svc.getMetadata(
+        HASH,
+        { filename: 'Metal Slug 2 (mslug2).neo' },
+        SS_HINT,
+      );
+      expect(result?.source).toBe('screenscraper-name-search');
+      expect(result?.name).toBe('mslug2');
+    });
+
+    it('cache the name-search result so re-fetches use it without re-querying', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({
+        lookupResult: null,
+        searchResults: {
+          'Metal Slug 2': [buildSsHit({ name: 'Metal Slug 2' })],
+        },
+      });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      // Round 2 (PR #27 round 2): mark parent atomic so the folder
+      // hint actually emits — round 1's tests assumed unconditional
+      // emission; round 2 gates it on parentFolderIsAtomic.
+      const hint = {
+        filename: 'mslug2.neo',
+        parentFolder: 'Metal Slug 2',
+        parentFolderIsAtomic: true,
+      };
+      const first = await svc.getMetadata(HASH, hint, SS_HINT);
+      expect(first?.source).toBe('screenscraper-name-search');
+      const before = ss.searchCalls.length;
+      const second = await svc.getMetadata(HASH, hint, SS_HINT);
+      expect(second?.source).toBe('screenscraper-name-search');
+      // Cache hit on the second call — no additional searchByName.
+      expect(ss.searchCalls.length).toBe(before);
+    });
+
+    it('low-confidence top result → sentinel write, NO bind', async () => {
+      // Search returns a candidate, but the score is below the
+      // auto-bind threshold (0.9). Better to leave the row blank.
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({
+        lookupResult: null,
+        // Search term "mslug2"; top candidate "Completely Unrelated Game".
+        // Score: distance > 2, no token overlap → 0.
+        searchResults: {
+          mslug2: [buildSsHit({ name: 'Completely Unrelated Game' })],
+        },
+      });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      const result = await svc.getMetadata(
+        HASH,
+        { filename: 'Metal Slug 2 (mslug2).neo' },
+        SS_HINT,
+      );
+      expect(result).toBeNull();
+    });
+
+    it('parent-folder hint wins over paren-shortname when both score equally (atomic)', async () => {
+      // Engine fires hints in priority order. Parent-folder is
+      // first; if it gets a high-confidence match, paren-shortname
+      // is never queried (saves an API call).
+      // Round 2: must mark parentFolderIsAtomic so the folder hint
+      // actually fires.
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({
+        lookupResult: null,
+        searchResults: {
+          // Parent folder "Metal Slug 2" hits exact.
+          'Metal Slug 2': [buildSsHit({ name: 'Metal Slug 2' })],
+          // Would also hit but never asked because folder won first.
+          mslug2: [buildSsHit({ name: 'mslug2' })],
+        },
+      });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      await svc.getMetadata(
+        HASH,
+        {
+          filename: 'Metal Slug 2 (mslug2).neo',
+          parentFolder: 'Metal Slug 2',
+          parentFolderIsAtomic: true,
+        },
+        SS_HINT,
+      );
+      // Only the parent-folder search fired.
+      expect(ss.searchCalls.map((c) => c.searchTerm)).toEqual([
+        'Metal Slug 2',
+      ]);
+    });
+
+    it('falls through to next hint when first returns no candidates (atomic)', () => {
+      // Atomic-folder shape: parent folder doesn't search-hit, but
+      // paren-shortname does.
+      // Round 2: must mark parentFolderIsAtomic for folder hint to
+      // fire at all.
+      return (async () => {
+        const m = makeMocks({ dbReturns: null });
+        const ss = makeSearchSS({
+          lookupResult: null,
+          searchResults: {
+            // Parent-folder search returns nothing.
+            'Cleaned Folder Name': [],
+            // paren-shortname `mslug2` hits.
+            mslug2: [buildSsHit({ name: 'mslug2' })],
+          },
+        });
+        const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+        const result = await svc.getMetadata(
+          HASH,
+          {
+            filename: 'Metal Slug 2 (mslug2).neo',
+            parentFolder: 'Cleaned Folder Name',
+            parentFolderIsAtomic: true,
+          },
+          SS_HINT,
+        );
+        expect(result?.source).toBe('screenscraper-name-search');
+        expect(ss.searchCalls.map((c) => c.searchTerm)).toEqual([
+          'Cleaned Folder Name',
+          'mslug2',
+        ]);
+      })();
+    });
+
+    it('round 2: parent folder NOT atomic → folder hint suppressed (avoids 1 World A-Z waste)', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({
+        lookupResult: null,
+        searchResults: {
+          // Even if the org-folder name happened to match a real game,
+          // we don't query for it.
+          '1 World A-Z': [buildSsHit({ name: '1 World A-Z' })],
+          mslug2: [buildSsHit({ name: 'mslug2' })],
+        },
+      });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      await svc.getMetadata(
+        HASH,
+        {
+          filename: 'Metal Slug 2 (mslug2).neo',
+          parentFolder: '1 World A-Z',
+          parentFolderIsAtomic: false,
+        },
+        SS_HINT,
+      );
+      // Only paren-shortname searched — folder hint suppressed.
+      expect(ss.searchCalls.map((c) => c.searchTerm)).toEqual(['mslug2']);
+    });
+
+    it('skips name-search when filename hint is missing', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({ lookupResult: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      // No filename in hint — name-search should not fire.
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+      expect(result).toBeNull();
+      expect(ss.searchCalls).toEqual([]);
+    });
+
+    it('skips name-search when ssHint is missing (no system id to scope search)', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({ lookupResult: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      // No ssHint passed — name-search needs the systemId; skipped.
+      const result = await svc.getMetadata(HASH, {
+        filename: 'Game.nes',
+      });
+      expect(result).toBeNull();
+      expect(ss.searchCalls).toEqual([]);
+    });
+
+    it('round 2: pre-D1 sentinel (triedNameSearch=undefined) retries when SS is available', async () => {
+      // The "user upgraded to PR-D1 with existing cache" recovery
+      // path. Pre-D1 sentinels lack the triedNameSearch flag → the
+      // cache decision treats them as "needs retry once" so legacy
+      // misses get a chance at the new pipeline.
+      const m = makeMocks({ dbReturns: null });
+      // Seed with a pre-D1 sentinel: source=none, ssAvailableAtWrite=true,
+      // NO triedNameSearch field.
+      const oldSentinel: RomMetadata = {
+        version: 4,
+        hash: HASH,
+        name: '(no match)',
+        system: '',
+        year: null,
+        publisher: null,
+        developer: null,
+        genre: null,
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: null,
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        source: 'none',
+        fetchedAt: new Date().toISOString(),
+        ssAvailableAtWrite: true,
+        // triedNameSearch intentionally absent — pre-D1 record
+      };
+      const cachePath = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
+      await fs.mkdir(join(dir, 'by-hash', HASH.slice(0, 2)), { recursive: true });
+      await fs.writeFile(cachePath, JSON.stringify(oldSentinel));
+      // SS available; name-search returns a candidate that scores high.
+      const ss = makeSearchSS({
+        lookupResult: null,
+        searchResults: { mslug2: [buildSsHit({ name: 'mslug2' })] },
+      });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      const result = await svc.getMetadata(
+        HASH,
+        { filename: 'Metal Slug 2 (mslug2).neo' },
+        SS_HINT,
+      );
+      // Pre-D1 sentinel was retried, name-search bound the result.
+      expect(result?.source).toBe('screenscraper-name-search');
+      expect(ss.searchCalls.length).toBeGreaterThan(0);
+    });
+
+    it('round 2: post-D1 sentinel (triedNameSearch=true) is honored within TTL — no retry', async () => {
+      // After PR-D1 wrote the sentinel with triedNameSearch=true,
+      // subsequent reads honor the authoritative TTL — no infinite
+      // retry loop, no API budget waste.
+      const m = makeMocks({ dbReturns: null });
+      const post: RomMetadata = {
+        version: 4,
+        hash: HASH,
+        name: '(no match)',
+        system: '',
+        year: null,
+        publisher: null,
+        developer: null,
+        genre: null,
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: null,
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        source: 'none',
+        fetchedAt: new Date().toISOString(),
+        ssAvailableAtWrite: true,
+        triedNameSearch: true,
+      };
+      const cachePath = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
+      await fs.mkdir(join(dir, 'by-hash', HASH.slice(0, 2)), { recursive: true });
+      await fs.writeFile(cachePath, JSON.stringify(post));
+      const ss = makeSearchSS({ lookupResult: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      const result = await svc.getMetadata(
+        HASH,
+        { filename: 'mslug2.neo' },
+        SS_HINT,
+      );
+      expect(result).toBeNull();
+      // No SS calls — sentinel honored as authoritative.
+      expect(ss.searchCalls).toEqual([]);
+    });
+
+    it('round 2: name-search miss writes a sentinel with triedNameSearch=true (don\'t loop)', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSearchSS({
+        lookupResult: null,
+        // No candidates for the search term → name-search ran but
+        // produced no bind. Sentinel write should still mark
+        // triedNameSearch=true so we don't retry forever.
+        searchResults: { mslug2: [] },
+      });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      await svc.getMetadata(
+        HASH,
+        { filename: 'Metal Slug 2 (mslug2).neo' },
+        SS_HINT,
+      );
+      // Read the sentinel back from disk and confirm the flag.
+      const cachePath = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
+      const raw = await fs.readFile(cachePath, 'utf-8');
+      const written = JSON.parse(raw) as RomMetadata;
+      expect(written.source).toBe('none');
+      expect(written.triedNameSearch).toBe(true);
+    });
+
+    it('OpenVGDB hit short-circuits before name-search runs', async () => {
+      const m = makeMocks({ dbReturns: buildDbHit({ name: 'From DB' }) });
+      const ss = makeSearchSS({ lookupResult: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      const result = await svc.getMetadata(
+        HASH,
+        { filename: 'mslug2.neo' },
+        SS_HINT,
+      );
+      // OpenVGDB-sourced — name-search never fired.
+      expect(result?.source).toBe('openvgdb');
+      expect(ss.searchCalls).toEqual([]);
     });
   });
 });

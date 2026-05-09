@@ -105,10 +105,21 @@ describe('lookupScreenScraperSystemId — unmapped / edge cases', () => {
     // SS lookup; deliberately unmapped — caller falls through to
     // `[meta] · ss-skip reason=no-hint` and the OpenVGDB+libretro
     // path runs.
+    // PR-D1 (PR #27): mame is now mapped to 75 — see the test in
+    // the next describe block. hbmame stays unmapped (per-romset
+    // hash collisions with mame would cause SS confusion).
     expect(lookupScreenScraperSystemId('AO486')).toBeNull();
     expect(lookupScreenScraperSystemId('Arcade')).toBeNull();
-    expect(lookupScreenScraperSystemId('mame')).toBeNull();
     expect(lookupScreenScraperSystemId('hbmame')).toBeNull();
+  });
+
+  it('PR-D1 (PR #27): mame resolves to 75 (arcade systemeid)', () => {
+    // The wholeCoreUnmappable gate in MetadataOrchestrator stops
+    // firing for mame after this mapping is added. Combined with
+    // the new filename-hint name-search pipeline, MAME's 650 ROMs
+    // can now recover metadata via the `(mslug2)` paren-shortname
+    // hint → SS jeuRecherche → high-confidence match.
+    expect(lookupScreenScraperSystemId('mame')).toBe(75);
   });
 
   it('is case-sensitive — wrong casing returns null', () => {
