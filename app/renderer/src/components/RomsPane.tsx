@@ -1,5 +1,4 @@
 import {
-  ArrowLeft,
   ChevronDown,
   ChevronUp,
   Eye,
@@ -38,6 +37,7 @@ import {
   type RomRowMenuItem,
 } from '@app/renderer/src/components/RomRowMenu';
 import {
+  BackThumbnailCell,
   RomMetadataInfoCells,
   RomNameInner,
   RomThumbnailCell,
@@ -50,6 +50,7 @@ import {
   type SortKey,
   type SortState,
 } from '@app/renderer/src/lib/rom-sort';
+import { classifyRow } from '@app/renderer/src/lib/row-type';
 import type { RomMetadata } from '@shared/metadata-types';
 import { Button } from '@app/renderer/src/components/ui/button';
 import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
@@ -987,6 +988,15 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
             </TableHeader>
             <TableBody>
               {backRow ? (
+                // PR #23 round 3 part 2: back row uses the standard
+                // column layout (checkbox / thumbnail / name / year /
+                // genre / rating / actions / density) so the thumbnail
+                // column has consistent rhythm with the rest of the
+                // list. The thumbnail slot carries a 40px tile with a
+                // CornerUpLeft glyph (the round-3 spec's "tile of
+                // SOMETHING for every row" rule). Empty cells fill the
+                // metadata slots — the back row has no Rom, no metadata,
+                // and isn't sortable, so the slots stay visually quiet.
                 <TableRow
                   className="cursor-pointer bg-overlay/40 hover:bg-overlay"
                   onClick={() => setSubPath(backRow.targetSubPath)}
@@ -1001,20 +1011,30 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                   aria-label={`Back to ${backRow.parentLabel}`}
                   title={`Back to ${backRow.parentLabel}`}
                 >
-                  <TableCell colSpan={8} className="pl-4">
-                    <span className="inline-flex items-center gap-2 font-mono text-body-sm text-fg-muted">
-                      <ArrowLeft className="size-3.5 shrink-0" strokeWidth={1.5} aria-hidden />
-                      <span className="truncate">
-                        ../ {backRow.parentLabel}
-                      </span>
+                  <TableCell className="pl-4" />
+                  <BackThumbnailCell />
+                  <TableCell className="truncate">
+                    <span className="font-mono text-body-sm text-fg-muted">
+                      ../ {backRow.parentLabel}
                     </span>
                   </TableCell>
+                  <TableCell className="w-16" />
+                  <TableCell className="w-28" />
+                  <TableCell className="w-14" />
+                  <TableCell className="w-10" />
+                  <TableCell className="w-[3.25rem] p-0" />
                 </TableRow>
               ) : null}
               {presentableRoms.map((rom) => {
                 const isSelected = selected.has(rom.filename);
                 const isSystem = systemFlags.get(rom.filename) === true;
                 const isDimmed = rom.hidden || isSystem;
+                // PR #23 round 3 part 2: visual row type drives the
+                // thumbnail tile variant. Maps from `rom.kind` (file /
+                // folder-atomic / folder-container) to one of 'game' /
+                // 'single-game-folder' / 'explorable-folder'. The back
+                // row is rendered separately above.
+                const rowType = classifyRow({ kind: 'rom', rom });
                 // PR #20 round 2: metadata streamed from the parent's
                 // prefetch effect. undefined = loading; entry present
                 // = settled (metadata may be null = unmatched, or
@@ -1058,6 +1078,7 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                       dimmed={isDimmed}
                       metadata={metadata}
                       error={fetchError}
+                      rowType={rowType}
                     />
                     <TableCell
                       className={cn(

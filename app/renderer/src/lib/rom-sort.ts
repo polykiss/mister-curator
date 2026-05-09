@@ -40,10 +40,17 @@ export function nextSortState(current: SortState, key: SortKey): SortState {
 
 /**
  * True iff the row should pin to the top regardless of user sort.
- * Folder-atomic and folder-container rows pin; plain files don't.
+ *
+ * Round 3 part 2 narrowed this from `kind !== 'file'` to
+ * `kind === 'folder-container'`. Folder-atomic rows ARE single-game
+ * folders (the X68000 `<game>/<game>.zip` shape) — the user thinks of
+ * them as "the game", not "a folder", so they sort INTO the games
+ * list by display name rather than pinning to the top. Only multi-game
+ * / nested folders (`folder-container`, the explorable kind) still
+ * pin, so drill-in targets stay grouped at the top.
  */
 export function isPinnedRow(rom: Rom): boolean {
-  return rom.kind !== 'file';
+  return rom.kind === 'folder-container';
 }
 
 /**

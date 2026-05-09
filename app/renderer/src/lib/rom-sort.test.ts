@@ -84,13 +84,19 @@ describe('nextSortState', () => {
 });
 
 describe('isPinnedRow', () => {
-  it('folder rows pin', () => {
-    expect(isPinnedRow(makeRom({ filename: 'F', kind: 'folder-atomic' }))).toBe(
-      true,
-    );
+  it('explorable folders (folder-container) pin to the top', () => {
     expect(
       isPinnedRow(makeRom({ filename: 'F', kind: 'folder-container' })),
     ).toBe(true);
+  });
+
+  it('single-game folders (folder-atomic) do NOT pin — they sort with games', () => {
+    // PR #23 round 3 part 2: folder-atomic IS the X68000 single-game-
+    // folder shape; the user thinks of it as "the game", not "a
+    // folder". Pinning it to the top fights the mental model.
+    expect(isPinnedRow(makeRom({ filename: 'F', kind: 'folder-atomic' }))).toBe(
+      false,
+    );
   });
 
   it('file rows do not pin', () => {
@@ -99,25 +105,30 @@ describe('isPinnedRow', () => {
 });
 
 describe('sortRoms — folder pinning', () => {
-  it('folders pin to the top regardless of sort, files follow user sort', () => {
+  it('explorable folders pin to the top, files + single-game folders follow user sort', () => {
+    // PR #23 round 3 part 2: only `folder-container` (explorable
+    // folder) pins. `folder-atomic` (single-game folder, the X68000
+    // shape) sorts with games — the user thinks of it as a game, not
+    // a folder, so the visual "drill-in targets pinned at top" rule
+    // shouldn't catch it.
     const rows = [
       row(makeRom({ filename: 'sonic.smc', displayName: 'Sonic' }), makeMeta({ name: 'Sonic' })),
       row(makeRom({ filename: 'fld-z', displayName: 'Z Folder', kind: 'folder-container' })),
       row(makeRom({ filename: 'aria.gba', displayName: 'Aria' }), makeMeta({ name: 'Aria' })),
-      row(makeRom({ filename: 'fld-a', displayName: 'A Folder', kind: 'folder-atomic' })),
+      row(makeRom({ filename: 'castlevania', displayName: 'Castlevania', kind: 'folder-atomic' })),
     ];
-    const state: SortState = { key: 'name', dir: 'desc' };
+    const state: SortState = { key: 'name', dir: 'asc' };
     const out = sortRoms(rows, state);
-    // Folders first, alphabetical asc among themselves regardless of
-    // the user-asked desc.
-    expect(out.slice(0, 2).map((r) => r.rom.displayName)).toEqual([
-      'A Folder',
-      'Z Folder',
-    ]);
-    // Files after, user's desc applied.
-    expect(out.slice(2).map((r) => r.rom.displayName)).toEqual([
-      'Sonic',
+    // Pinned: just the container (Z Folder), alphabetical-asc immune
+    // to user direction.
+    expect(out[0]?.rom.displayName).toBe('Z Folder');
+    // Mixed below (asc): Aria, Castlevania (folder-atomic, single-game),
+    // Sonic. Articles stripped so the comparison is lowercase first
+    // letter.
+    expect(out.slice(1).map((r) => r.rom.displayName)).toEqual([
       'Aria',
+      'Castlevania',
+      'Sonic',
     ]);
   });
 });
