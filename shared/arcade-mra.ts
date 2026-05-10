@@ -30,6 +30,18 @@
 
 import { isOsMetadataDir, isOsMetadataFile } from '@shared/library-filter';
 
+/**
+ * feat/arcade-phase-1.5 — id of the synthetic CoreEntry the
+ * renderer prepends to the sidebar to surface the `_Arcade/`
+ * listing as a navigable row. Distinct from the `mame` core
+ * (which manages .zip ROMs in `/media/fat/games/mame/`); this
+ * row navigates to the .mra file management view.
+ *
+ * The double-underscore prefix is reserved namespace — passes
+ * `assertSafeSegment` (no `/`, no `..`) but no real core uses it.
+ */
+export const ARCADE_VIRTUAL_CORE_ID = '__arcade__';
+
 export type ArcadeMraEntryKind =
   | 'mra'
   /** `cores/` is the firmware's per-game .rbf stash inside _Arcade. */

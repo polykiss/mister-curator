@@ -95,6 +95,14 @@ export const IPC_CHANNELS = {
   // active core resumes after).
   autoScrapeProgress: 'mister:autoScrapeProgress',
   setAutoScrapeFocus: 'mister:setAutoScrapeFocus',
+  // feat/arcade-phase-1.5 — .mra listing + hide/unhide for the
+  // MiSTer arcade menu. Distinct from `mame` core ops (which target
+  // .zip ROMs in /media/fat/games/mame/); these target .mra files
+  // in /media/fat/_Arcade/ and use the same dot-prefix hide
+  // convention.
+  listArcadeMraEntries: 'mister:listArcadeMraEntries',
+  setArcadeMraVisibility: 'mister:setArcadeMraVisibility',
+  setBulkArcadeMraVisibility: 'mister:setBulkArcadeMraVisibility',
 } as const;
 
 /** PR #15 prefetch progress kind. Discriminator for the wire event. */
@@ -535,6 +543,47 @@ export interface MisterApi {
    * position 1. No-op if the focused core is already active.
    */
   setAutoScrapeFocus(coreId: string): Promise<void>;
+  // feat/arcade-phase-1.5 — .mra listing + hide/unhide. Distinct
+  // from `mame` core ops; targets `/media/fat/_Arcade/` instead of
+  // `/media/fat/games/mame/`. Same dot-prefix hide convention.
+  /**
+   * Walk `_Arcade/` and return the parsed `.mra` entries (and
+   * subfolders). Cached in ConnectionManager same way the cores
+   * list is — refresh on the existing Refresh button.
+   */
+  listArcadeMraEntries(options?: {
+    readonly forceRefresh?: boolean;
+  }): Promise<readonly ArcadeMraEntryWire[]>;
+  /**
+   * Hide / show a single `.mra` entry by toggling the dot-prefix on
+   * its filename. `relativePath` is the path under `_Arcade/`
+   * (slash-joined for nested entries).
+   */
+  setArcadeMraVisibility(
+    relativePath: string,
+    hidden: boolean,
+  ): Promise<void>;
+  /**
+   * Bulk hide / show. Same chunking behavior as
+   * `setBulkRomVisibility` (PR #30) — chunks of 100 to stay under
+   * dropbear's exec channel buffer.
+   */
+  setBulkArcadeMraVisibility(
+    changes: readonly ArcadeMraVisibilityChangeWire[],
+  ): Promise<BulkRomResult>;
+}
+
+/** feat/arcade-phase-1.5 — wire shape for `.mra` entries. */
+export interface ArcadeMraEntryWire {
+  readonly relativePath: string;
+  readonly displayName: string;
+  readonly kind: 'mra' | 'cores-subfolder' | 'subfolder';
+  readonly hidden: boolean;
+}
+
+export interface ArcadeMraVisibilityChangeWire {
+  readonly relativePath: string;
+  readonly hidden: boolean;
 }
 
 const VALID_CONNECTION_ERROR_CODES: ReadonlySet<ConnectionErrorCode> = new Set([

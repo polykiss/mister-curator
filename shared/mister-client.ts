@@ -213,6 +213,33 @@ export interface IMisterClient {
   ): Promise<BulkRomResult>;
 
   /**
+   * feat/arcade-phase-1.5 — toggle a single `.mra` file's
+   * visibility under `MISTER_ARCADE_DIR`. `relativePath` is the
+   * path relative to `_Arcade/` (e.g. `_Konami/TMNT.mra` for
+   * subfolder entries, `Metal Slug.mra` for top-level). Same
+   * dot-prefix hide convention as ROM files.
+   *
+   * Distinct from `setRomVisibility` because the base directory is
+   * different — `setRomVisibility` always targets
+   * `MISTER_GAMES_DIR/<coreId>` and a synthetic 'arcade' coreId
+   * would route to `/media/fat/games/arcade/` (wrong).
+   */
+  setArcadeMraVisibility(
+    relativePath: string,
+    hidden: boolean,
+  ): Promise<void>;
+
+  /**
+   * feat/arcade-phase-1.5 — bulk variant. Same chunking as
+   * `setBulkRomVisibility` (PR #30): the batch is split into
+   * groups of 100 paths per SSH `execCommand` to stay under
+   * dropbear's exec channel buffer.
+   */
+  setBulkArcadeMraVisibility(
+    changes: readonly { readonly relativePath: string; readonly hidden: boolean }[],
+  ): Promise<BulkRomResult>;
+
+  /**
    * Hide a single core: rename its games dir AND every matching rbf
    * (file or folder) to dot-prefixed form, atomically in one SSH call.
    * No-op (zero SSH calls) when the core is already fully hidden.

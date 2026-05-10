@@ -986,6 +986,109 @@ export class RealMisterClient implements IMisterClient {
     return { succeeded, failed };
   }
 
+  async setArcadeMraVisibility(
+    relativePath: string,
+    hidden: boolean,
+  ): Promise<void> {
+    this.assertConnected();
+    // `_Arcade/` paths are slash-joined for nested entries
+    // (`_Konami/TMNT.mra`); validate each segment + reject path
+    // traversal segments via assertSafeSubPath.
+    const segments = relativePath.split('/');
+    if (segments.length === 0 || segments[segments.length - 1] === '') {
+      throw new Error(`Invalid arcade .mra path: ${relativePath}`);
+    }
+    const filename = segments[segments.length - 1]!;
+    const subSegments = segments.slice(0, -1);
+    assertSafeSegment('filename', filename);
+    if (subSegments.length > 0) {
+      assertSafeSubPath(subSegments.join('/'));
+    }
+    const visibleName = filename.startsWith('.') ? filename.slice(1) : filename;
+    const targetName = hidden ? `.${visibleName}` : visibleName;
+    if (targetName === filename) return;
+    const dirPart =
+      subSegments.length === 0
+        ? MISTER_ARCADE_DIR
+        : `${MISTER_ARCADE_DIR}/${subSegments.join('/')}`;
+    const src = `${dirPart}/${filename}`;
+    const dst = `${dirPart}/${targetName}`;
+    const command = `mv ${shellQuote(src)} ${shellQuote(dst)}`;
+    const result = await this.runSshOp(command, () =>
+      this.ssh.execCommand(command),
+    );
+    if (result.code !== 0) {
+      throw new Error(
+        `Failed to rename ${relativePath}: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+      );
+    }
+  }
+
+  async setBulkArcadeMraVisibility(
+    changes: readonly { readonly relativePath: string; readonly hidden: boolean }[],
+  ): Promise<BulkRomResult> {
+    this.assertConnected();
+    interface PendingRename {
+      readonly relativePath: string;
+      readonly src: string;
+      readonly dst: string;
+    }
+    // Validate + plan each rename. Same structure as
+    // `setBulkRomVisibility` — the only difference is the base
+    // directory (`MISTER_ARCADE_DIR`) and that we operate on the
+    // full relative path (which may include subfolders) instead of
+    // a top-level filename.
+    const pending: PendingRename[] = [];
+    for (const change of changes) {
+      const segments = change.relativePath.split('/');
+      if (segments.length === 0 || segments[segments.length - 1] === '') {
+        throw new Error(`Invalid arcade .mra path: ${change.relativePath}`);
+      }
+      const filename = segments[segments.length - 1]!;
+      const subSegments = segments.slice(0, -1);
+      assertSafeSegment('filename', filename);
+      if (subSegments.length > 0) {
+        assertSafeSubPath(subSegments.join('/'));
+      }
+      const visible = filename.startsWith('.') ? filename.slice(1) : filename;
+      const target = change.hidden ? `.${visible}` : visible;
+      if (target === filename) continue;
+      const subPrefix = subSegments.length === 0 ? '' : `${subSegments.join('/')}/`;
+      pending.push({
+        relativePath: change.relativePath,
+        src: `${subPrefix}${filename}`,
+        dst: `${subPrefix}${target}`,
+      });
+    }
+    if (pending.length === 0) return { succeeded: [], failed: [] };
+    // Reuse the chunking shape from `setBulkRomVisibility` (PR #30).
+    // 100 paths/chunk keeps each script under dropbear's exec buffer.
+    const succeeded: string[] = [];
+    const failed: { readonly filename: string; readonly reason: string }[] = [];
+    for (let i = 0; i < pending.length; i += BULK_ROM_RENAME_CHUNK_SIZE) {
+      const chunk = pending.slice(i, i + BULK_ROM_RENAME_CHUNK_SIZE);
+      const lines: string[] = [`cd ${shellQuote(MISTER_ARCADE_DIR)}`];
+      for (const p of chunk) {
+        const id = shellQuote(p.relativePath);
+        lines.push(
+          `if err=$(mv ${shellQuote(p.src)} ${shellQuote(p.dst)} 2>&1); then`,
+          `  printf 'OK\\t%s\\n' ${id}`,
+          `else`,
+          `  printf 'FAIL\\t%s\\t%s\\n' ${id} "$(printf '%s' "$err" | tr '\\n\\t' '  ' | head -c 200)"`,
+          `fi`,
+        );
+      }
+      const script = lines.join('\n');
+      const result = await this.runSshOp(script, () =>
+        this.ssh.execCommand(script),
+      );
+      const parsed = parseBulkResult<BulkRomResult>(result.stdout, 'filename');
+      succeeded.push(...parsed.succeeded);
+      failed.push(...parsed.failed);
+    }
+    return { succeeded, failed };
+  }
+
   async hideCore(core: CoreEntry): Promise<void> {
     this.assertConnected();
     if (!isRealCore(core)) {

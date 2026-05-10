@@ -1732,6 +1732,142 @@ describe('RealMisterClient', () => {
     });
   });
 
+  // feat/arcade-phase-1.5: single + bulk visibility for `.mra`
+  // entries under `_Arcade/`. Mirrors `setRomVisibility` /
+  // `setBulkRomVisibility` shape, with `MISTER_ARCADE_DIR` as the
+  // base instead of `MISTER_GAMES_DIR/<coreId>`.
+  describe('setArcadeMraVisibility (Phase 1.5)', () => {
+    it('renames a top-level .mra to its dot-prefixed form', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.setArcadeMraVisibility('Metal Slug.mra', true);
+
+      const command = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(command).toBe(
+        `mv '/media/fat/_Arcade/Metal Slug.mra' '/media/fat/_Arcade/.Metal Slug.mra'`,
+      );
+    });
+
+    it('renames a nested .mra (subfolder) correctly', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.setArcadeMraVisibility('_Konami/TMNT.mra', true);
+
+      const command = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(command).toBe(
+        `mv '/media/fat/_Arcade/_Konami/TMNT.mra' '/media/fat/_Arcade/_Konami/.TMNT.mra'`,
+      );
+    });
+
+    it('unhide reverses the dot-prefix', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      await client.setArcadeMraVisibility('.Metal Slug.mra', false);
+
+      const command = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(command).toBe(
+        `mv '/media/fat/_Arcade/.Metal Slug.mra' '/media/fat/_Arcade/Metal Slug.mra'`,
+      );
+    });
+
+    it('no-op when target == source (already in target visibility)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      // Already visible, asking to show: no rename needed.
+      await client.setArcadeMraVisibility('Metal Slug.mra', false);
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+
+    it('rejects path-traversal segments in subfolders', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      await expect(
+        client.setArcadeMraVisibility('../escape.mra', true),
+      ).rejects.toThrow();
+    });
+  });
+
+  describe('setBulkArcadeMraVisibility (Phase 1.5)', () => {
+    it('issues a chunked SSH script + parses OK lines', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'OK\tMetal Slug.mra',
+            'OK\tStreet Fighter II.mra',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const result = await client.setBulkArcadeMraVisibility([
+        { relativePath: 'Metal Slug.mra', hidden: true },
+        { relativePath: 'Street Fighter II.mra', hidden: true },
+      ]);
+
+      expect(result.succeeded).toEqual([
+        'Metal Slug.mra',
+        'Street Fighter II.mra',
+      ]);
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain(`cd '/media/fat/_Arcade'`);
+      expect(script).toContain(
+        `mv 'Metal Slug.mra' '.Metal Slug.mra'`,
+      );
+    });
+
+    it('chunks 250 changes into 3 SSH calls (matches PR #30 chunk size)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      // Mock 3 chunks of empty stdout (parser tolerates).
+      for (let i = 0; i < 3; i += 1) {
+        mocks.execCommand.mockResolvedValueOnce(execOk(''));
+      }
+      const changes: { relativePath: string; hidden: boolean }[] = [];
+      for (let i = 0; i < 250; i += 1) {
+        changes.push({
+          relativePath: `Game ${String(i).padStart(3, '0')}.mra`,
+          hidden: true,
+        });
+      }
+      await client.setBulkArcadeMraVisibility(changes);
+      expect(mocks.execCommand).toHaveBeenCalledTimes(3);
+    });
+
+    it('handles nested subfolder paths in the script', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk('OK\t_Konami/TMNT.mra\n'),
+      );
+      const result = await client.setBulkArcadeMraVisibility([
+        { relativePath: '_Konami/TMNT.mra', hidden: true },
+      ]);
+      expect(result.succeeded).toEqual(['_Konami/TMNT.mra']);
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      // Renames operate on the full subfolder-relative source/target;
+      // dot-prefix flips on the BASENAME only.
+      expect(script).toContain(
+        `mv '_Konami/TMNT.mra' '_Konami/.TMNT.mra'`,
+      );
+    });
+  });
+
   describe('hideCore / showCore', () => {
     function makeCore(overrides: Partial<CoreEntry> = {}): CoreEntry {
       return {

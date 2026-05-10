@@ -14,6 +14,11 @@ import type {
   BulkRomResult,
   SystemFileMarkChange,
 } from '@shared/mister-client';
+import {
+  ARCADE_VIRTUAL_CORE_ID,
+  countArcadeMraEntries,
+  type ArcadeMraEntry,
+} from '@shared/arcade-mra';
 import { EMPTY_SYSTEM_FILES_MARKS, isMarked } from '@shared/system-files-marks';
 import type {
   CoreEntry,
@@ -44,6 +49,45 @@ type LoadingByCore = Readonly<Record<string, boolean>>;
  */
 export function romsKey(coreId: string, subPath = ''): string {
   return subPath === '' ? coreId : `${coreId}::${subPath}`;
+}
+
+/**
+ * feat/arcade-phase-1.5 — synthesize a CoreEntry for the
+ * `__arcade__` row from the arcade .mra listing. The matcher
+ * actively drops Arcade-category entries (see `core-matching.ts`
+ * line ~494: "PR-A item 1 dropped the synthetic Arcade
+ * placeholder"), so this is the only path that puts an Arcade
+ * row in the sidebar — and now it's actionable, not the dead
+ * "read-only" placeholder from earlier rounds.
+ *
+ * Counts come from `countArcadeMraEntries`: total `.mra` entries
+ * = romCount, hidden `.mra` entries = hiddenCount. Subfolder /
+ * cores-subfolder rows aren't counted (they're navigational
+ * structure, not "ROMs").
+ *
+ * `gamesDirExists: true` is what makes the row navigable in
+ * `BrowserScreen` — without it the right pane stays empty when
+ * the user clicks. Returns `null` for an empty `_Arcade/` so the
+ * sidebar doesn't show an Arcade row when the device has no
+ * .mra content at all.
+ */
+function synthesizeArcadeCoreEntry(
+  entries: readonly ArcadeMraEntry[],
+): CoreEntry | null {
+  const counts = countArcadeMraEntries(entries);
+  if (counts.totalMras === 0 && counts.subfolders === 0) return null;
+  return {
+    id: ARCADE_VIRTUAL_CORE_ID,
+    name: 'Arcade',
+    romCount: counts.totalMras,
+    hiddenCount: counts.hiddenMras,
+    recursiveRomCount: counts.totalMras,
+    recursiveHiddenCount: counts.hiddenMras,
+    category: 'Arcade',
+    rbfPaths: [],
+    gamesDirExists: true,
+    gamesDirHidden: false,
+  };
 }
 
 interface CoresContextValue {
@@ -259,7 +303,21 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
         const next = await runWithStatus('Scanning cores…', () =>
           window.mister.listAllCoresWithFiles({ forceRefresh }),
         );
-        setCores(next);
+        // feat/arcade-phase-1.5 — fetch the .mra listing alongside
+        // the cores walk so the synthetic Arcade row carries fresh
+        // counts. Best-effort: if the call fails, the cores list
+        // still renders without the Arcade row (Phase 1.5 is
+        // additive — its absence doesn't break other functionality).
+        let arcadeEntry: CoreEntry | null = null;
+        try {
+          const arcade = await window.mister.listArcadeMraEntries({
+            forceRefresh,
+          });
+          arcadeEntry = synthesizeArcadeCoreEntry(arcade);
+        } catch {
+          arcadeEntry = null;
+        }
+        setCores(arcadeEntry ? [arcadeEntry, ...next] : next);
         setRomsByCore({});
         setRomsLoading({});
       } catch (err) {

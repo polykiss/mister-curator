@@ -495,6 +495,36 @@ export class FakeMisterClient implements IMisterClient {
     return { succeeded, failed };
   }
 
+  async setArcadeMraVisibility(
+    relativePath: string,
+    hidden: boolean,
+  ): Promise<void> {
+    this.assertConnected();
+    await this.delay();
+    await this.applyArcadeMraRename(relativePath, hidden);
+  }
+
+  async setBulkArcadeMraVisibility(
+    changes: readonly { readonly relativePath: string; readonly hidden: boolean }[],
+  ): Promise<BulkRomResult> {
+    this.assertConnected();
+    await this.delay();
+    const succeeded: string[] = [];
+    const failed: { filename: string; reason: string }[] = [];
+    for (const change of changes) {
+      try {
+        await this.applyArcadeMraRename(change.relativePath, change.hidden);
+        succeeded.push(change.relativePath);
+      } catch (err) {
+        failed.push({
+          filename: change.relativePath,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return { succeeded, failed };
+  }
+
   async hideCore(core: CoreEntry): Promise<void> {
     this.assertConnected();
     if (!isRealCore(core)) {
@@ -949,6 +979,41 @@ export class FakeMisterClient implements IMisterClient {
     } catch (err) {
       if (isNodeError(err) && err.code === 'ENOENT') {
         throw new Error(`ROM not found: ${relLabel}/${filename}`);
+      }
+      throw err;
+    }
+  }
+
+  private async applyArcadeMraRename(
+    relativePath: string,
+    hidden: boolean,
+  ): Promise<void> {
+    const segments = relativePath.split('/');
+    if (segments.length === 0 || segments[segments.length - 1] === '') {
+      throw new Error(`Invalid arcade .mra path: ${relativePath}`);
+    }
+    const filename = segments[segments.length - 1]!;
+    const subSegments = segments.slice(0, -1);
+    const dir = this.toLocal(
+      subSegments.length === 0
+        ? MISTER_ARCADE_DIR
+        : `${MISTER_ARCADE_DIR}/${subSegments.join('/')}`,
+    );
+    const visible = filename.startsWith('.') ? filename.slice(1) : filename;
+    const target = hidden ? `.${visible}` : visible;
+    if (filename === target) {
+      try {
+        await fs.access(path.join(dir, filename));
+        return;
+      } catch {
+        throw new Error(`Arcade .mra not found: ${relativePath}`);
+      }
+    }
+    try {
+      await fs.rename(path.join(dir, filename), path.join(dir, target));
+    } catch (err) {
+      if (isNodeError(err) && err.code === 'ENOENT') {
+        throw new Error(`Arcade .mra not found: ${relativePath}`);
       }
       throw err;
     }

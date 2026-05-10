@@ -7,6 +7,8 @@ import {
   setMisterConnectionErrorFactory,
 } from '@shared/preload-api';
 import type {
+  ArcadeMraEntryWire,
+  ArcadeMraVisibilityChangeWire,
   AutoScrapeProgressEvent,
   BulkCoreProgressEvent,
   ConnectResult,
@@ -301,6 +303,27 @@ const api: MisterApi = {
   },
   setAutoScrapeFocus: (coreId: string) =>
     invoke<void>(IPC_CHANNELS.setAutoScrapeFocus, coreId),
+  // feat/arcade-phase-1.5 — .mra listing + hide/unhide.
+  listArcadeMraEntries: (
+    options?: { readonly forceRefresh?: boolean },
+  ) =>
+    invoke<readonly ArcadeMraEntryWire[]>(
+      IPC_CHANNELS.listArcadeMraEntries,
+      options,
+    ),
+  setArcadeMraVisibility: (relativePath: string, hidden: boolean) =>
+    invoke<void>(
+      IPC_CHANNELS.setArcadeMraVisibility,
+      relativePath,
+      hidden,
+    ),
+  setBulkArcadeMraVisibility: (
+    changes: readonly ArcadeMraVisibilityChangeWire[],
+  ) =>
+    invoke<BulkRomResult>(
+      IPC_CHANNELS.setBulkArcadeMraVisibility,
+      changes,
+    ),
 };
 
 contextBridge.exposeInMainWorld('mister', api);

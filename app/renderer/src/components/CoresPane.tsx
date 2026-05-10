@@ -16,7 +16,6 @@ import { cn } from '@app/renderer/src/lib/cn';
 import { summarizeBulkResult } from '@app/renderer/src/lib/format';
 import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
 
-const ARCADE_TOOLTIP = "Arcade cores aren't supported yet — coming in a later release.";
 const DISCONNECTED_TOOLTIP = 'Reconnect to make changes.';
 
 export function CoresPane(): JSX.Element {
@@ -369,13 +368,14 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                 ariaLabel={`${String(densityValueFor(core))} ROMs of peer max ${String(maxRomCount)}`}
               />
               {isArcade ? (
-                <span
-                  className="flex shrink-0 items-center px-2 font-mono text-body-sm text-fg-disabled"
-                  title={ARCADE_TOOLTIP}
-                  aria-label={ARCADE_TOOLTIP}
-                >
-                  read-only
-                </span>
+                // feat/arcade-phase-1.5 — the synthetic Arcade row
+                // is now navigable (clicking surfaces the .mra
+                // listing for hide/unhide). Hide is per-`.mra`,
+                // not per-row, so no eye icon at this level.
+                // Pre-Phase-1.5 this branch rendered "read-only"
+                // because the row WAS dead; that label was the
+                // load-bearing UX misfeature this PR retires.
+                null
               ) : isPending ? (
                 // Inline indicator while the SSH rename is on the
                 // wire (Round 5 Issue 4). Replaces the eye icon at

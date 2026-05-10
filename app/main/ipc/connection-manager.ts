@@ -30,6 +30,10 @@ import type {
   RomVisibilityChange,
   SystemFileMarkChange,
 } from '@shared/mister-client';
+import {
+  type ArcadeMraEntry,
+  parseArcadeMraEntries,
+} from '@shared/arcade-mra';
 import { diagLog } from '@shared/diag-log';
 import { EMPTY_FOLDER_CLASSIFICATIONS } from '@shared/folder-classifications';
 import { mergeRecursivePathsWithAtomicFolders } from '@shared/rom-enumeration';
@@ -135,6 +139,14 @@ export class ConnectionManager {
   private folderClassificationsCache: FolderClassifications =
     EMPTY_FOLDER_CLASSIFICATIONS;
   /**
+   * feat/arcade-phase-1.5 — in-memory copy of the parsed `.mra`
+   * entries under `_Arcade/`. Populated on first
+   * `listArcadeMraEntries` call (lazy — many users won't navigate
+   * to the Arcade row), invalidated on disconnect + on the
+   * `forceRefresh` path used by the Refresh button.
+   */
+  private arcadeMraCache: readonly ArcadeMraEntry[] | null = null;
+  /**
    * Host of the active connection — used to key the on-disk cache
    * (PR #12). Captured on connect alongside `currentProfileId` so a
    * write-through after a hide/show targets the right host's cache
@@ -206,6 +218,7 @@ export class ConnectionManager {
     this.ledgerCache = EMPTY_LEDGER;
     this.systemFilesMarksCache = EMPTY_SYSTEM_FILES_MARKS;
     this.folderClassificationsCache = EMPTY_FOLDER_CLASSIFICATIONS;
+    this.arcadeMraCache = null;
     this.currentHost = null;
 
     // Connecting-elapsed ticker. Fires every second while the connect
@@ -353,6 +366,7 @@ export class ConnectionManager {
       this.ledgerCache = EMPTY_LEDGER;
       this.systemFilesMarksCache = EMPTY_SYSTEM_FILES_MARKS;
       this.folderClassificationsCache = EMPTY_FOLDER_CLASSIFICATIONS;
+      this.arcadeMraCache = null;
       this.setStatus('disconnected');
     }
   }
@@ -384,6 +398,57 @@ export class ConnectionManager {
       return this.coresCache;
     }
     return this.fetchAndCacheCores();
+  }
+
+  /**
+   * feat/arcade-phase-1.5 — list `.mra` entries under `_Arcade/`.
+   * Cached in memory same shape as `listAllCoresWithFiles`. The
+   * Refresh button drops the cache via `forceRefresh: true`; lazy
+   * initialization on the cache-miss path means many users never
+   * pay the SSH cost (those who don't navigate to the Arcade row).
+   */
+  async listArcadeMraEntries(
+    options: { readonly forceRefresh?: boolean } = {},
+  ): Promise<readonly ArcadeMraEntry[]> {
+    this.assertConnected();
+    if (options.forceRefresh) {
+      this.arcadeMraCache = null;
+    }
+    if (this.arcadeMraCache !== null) {
+      return this.arcadeMraCache;
+    }
+    const raw = await this.client.listArcadeRawListing();
+    const entries = parseArcadeMraEntries(raw);
+    this.arcadeMraCache = entries;
+    return entries;
+  }
+
+  /**
+   * feat/arcade-phase-1.5 — toggle a single `.mra` entry's
+   * visibility. Invalidates the arcade cache so the next listing
+   * reflects the rename.
+   */
+  async setArcadeMraVisibility(
+    relativePath: string,
+    hidden: boolean,
+  ): Promise<void> {
+    this.assertConnected();
+    await this.client.setArcadeMraVisibility(relativePath, hidden);
+    this.arcadeMraCache = null;
+  }
+
+  /**
+   * feat/arcade-phase-1.5 — bulk variant. Same chunking + result
+   * shape as `setBulkRomVisibility` (PR #30). Invalidates the
+   * arcade cache so the next listing reflects the renames.
+   */
+  async setBulkArcadeMraVisibility(
+    changes: readonly { readonly relativePath: string; readonly hidden: boolean }[],
+  ): Promise<BulkRomResult> {
+    this.assertConnected();
+    const result = await this.client.setBulkArcadeMraVisibility(changes);
+    this.arcadeMraCache = null;
+    return result;
   }
 
   /**

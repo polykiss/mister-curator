@@ -322,8 +322,17 @@ void app.whenReady().then(() => {
     }
     try {
       const cores = await manager.listAllCoresWithFiles({});
+      // feat/arcade-phase-1.5 — drop the synthetic Arcade row.
+      // It carries `gamesDirExists: true` so it appears in the
+      // sidebar as actionable, but it has no scrape work
+      // (Phase 2 will handle .mra metadata via XML parse, not
+      // hash-based scraping). Without this guard the engine
+      // would queue `__arcade__`, call `listRoms` which throws
+      // for the non-existent `/media/fat/games/__arcade__/`
+      // dir, and noise up the per-core try/catch.
       const coreIds = cores
         .filter((c) => c.gamesDirExists)
+        .filter((c) => c.category !== 'Arcade')
         .map((c) => c.id);
       autoScrapeEngine.start(coreIds);
     } catch {
