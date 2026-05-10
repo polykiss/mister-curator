@@ -16,6 +16,7 @@ import { diagLog } from '@shared/diag-log';
 
 import { Button } from '@app/renderer/src/components/ui/button';
 import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
+import { StatusIndicator } from '@app/renderer/src/components/ui/status-indicator';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
 import { TableCell } from '@app/renderer/src/components/ui/table';
 import { cn } from '@app/renderer/src/lib/cn';
@@ -266,10 +267,25 @@ export function RomNameInner(
   const tags =
     metadata !== null && metadata !== undefined ? displayTagsOf(metadata) : [];
   const showFilename = shouldShowFilenameSubline(rom, displayName);
+  // fix/count-and-status-indicator commit 2 — binary per-row
+  // scrape state. Cold blue while metadata is loading or when SS /
+  // OpenVGDB returned no match; full signal-green halo once we
+  // have data we can show. The dot sits before the title, so its
+  // column position stays consistent across rows of varying lengths.
+  const rowProgress = metadata !== null && metadata !== undefined ? 1 : 0;
 
   return (
     <span className="flex min-w-0 items-center gap-2">
       {leadingIcon}
+      <StatusIndicator
+        progress={rowProgress}
+        sizePx={8}
+        ariaLabel={
+          rowProgress === 1
+            ? `${displayName} metadata ready`
+            : `${displayName} metadata pending`
+        }
+      />
       <span className="flex min-w-0 flex-1 flex-col">
         <span
           className={cn('truncate text-body-sm', !dimmed && 'text-fg')}

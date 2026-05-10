@@ -1,16 +1,18 @@
-import { Check, Eye, EyeOff, Loader2, Sparkles, Undo2 } from 'lucide-react';
+import { Eye, EyeOff, Loader2, Sparkles, Undo2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
+import type { AutoScrapeProgressEvent } from '@shared/preload-api';
 import { coreDisplayName, isCoreHidden } from '@shared/core-matching';
 import type { CoreEntry } from '@shared/types';
 
 import { Button } from '@app/renderer/src/components/ui/button';
 import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
+import { StatusIndicator } from '@app/renderer/src/components/ui/status-indicator';
 import { HideEmptyCoresDialog } from '@app/renderer/src/components/HideEmptyCoresDialog';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
-import { useScrapedCoreIds } from '@app/renderer/src/contexts/AutoScrapeContext';
+import { useAutoScrapeProgress } from '@app/renderer/src/contexts/AutoScrapeContext';
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
@@ -34,7 +36,10 @@ export function CoresPane(): JSX.Element {
   } = useCores();
   const { status } = useConnection();
   const canMutate = status === 'connected';
-  const scrapedCoreIds = useScrapedCoreIds();
+  // fix/count-and-status-indicator commit 2 — passes the full
+  // auto-scrape event so per-core progress can be computed inline
+  // (replaces the old "scrapedCoreIds Set + green ✓" binary view).
+  const autoScrapeProgress = useAutoScrapeProgress();
 
   // Hidden cores stay off the default cores list — they're permanent
   // decisions and the user opts in to seeing them.
@@ -223,7 +228,7 @@ export function CoresPane(): JSX.Element {
         visibleCores,
         selectedCoreId,
         pendingCoreIds,
-        scrapedCoreIds,
+        autoScrapeProgress,
         canMutate,
         onSelect: selectCore,
         onHide,
@@ -247,15 +252,38 @@ interface RenderArgs {
   readonly selectedCoreId: string | null;
   readonly pendingCoreIds: ReadonlySet<string>;
   /**
-   * feat/auto-scrape-persistence — in-session set of cores the
-   * engine has finished scraping. Sidebar rows render a small
-   * green check to the left of the count for cores in this set.
+   * fix/count-and-status-indicator commit 2 — full auto-scrape
+   * event. Per-row code derives the StatusIndicator's progress
+   * inline: 1.0 for cores in `completedCoreIds`, `done/total` for
+   * the active core, 0 otherwise. Replaces the prior
+   * `scrapedCoreIds Set` which carried only the binary state.
    */
-  readonly scrapedCoreIds: ReadonlySet<string>;
+  readonly autoScrapeProgress: AutoScrapeProgressEvent;
   readonly canMutate: boolean;
   readonly onSelect: (id: string | null) => void;
   readonly onHide: (core: CoreEntry) => Promise<void>;
   readonly onShow: (core: CoreEntry) => Promise<void>;
+}
+
+/**
+ * Pure derivation of per-core scrape progress from the latest
+ * AutoScrapeProgressEvent. Exported so tests can pin the shape
+ * (each branch of the indicator's gradient state machine maps
+ * directly to one of these return values).
+ */
+export function progressForCore(
+  coreId: string,
+  event: AutoScrapeProgressEvent,
+): number {
+  if (event.completedCoreIds.includes(coreId)) return 1;
+  if (event.state === 'active' && event.coreId === coreId) {
+    if (event.total <= 0) return 0;
+    const ratio = event.done / event.total;
+    if (ratio < 0) return 0;
+    if (ratio > 1) return 1;
+    return ratio;
+  }
+  return 0;
 }
 
 function renderCoreList(args: RenderArgs): JSX.Element {
@@ -347,6 +375,17 @@ function renderCoreList(args: RenderArgs): JSX.Element {
               className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left focus-visible:outline-none"
             >
               <span className="flex min-w-0 items-center gap-2">
+                {/* fix/count-and-status-indicator commit 2 — always
+                    renders. Cold blue when the engine hasn't started,
+                    mid-gradient while scraping, full signal-green
+                    with halo once done. Placed before the name so
+                    the indicator stays in a fixed column regardless
+                    of name length. */}
+                <StatusIndicator
+                  progress={progressForCore(core.id, args.autoScrapeProgress)}
+                  sizePx={12}
+                  ariaLabel={`Scrape progress for ${displayName}`}
+                />
                 <span
                   className={cn(
                     'truncate',
@@ -358,18 +397,6 @@ function renderCoreList(args: RenderArgs): JSX.Element {
               </span>
 
               <span className="flex shrink-0 items-center gap-2 font-mono text-body-sm text-fg-muted tabular">
-                {args.scrapedCoreIds.has(core.id) ? (
-                  // feat/auto-scrape-persistence — engine has
-                  // finished scraping this core in the current
-                  // session (or persisted within the freshness
-                  // window). Visual cue so the user can tell at
-                  // a glance which cores still have pending work.
-                  <Check
-                    className="size-3.5 text-success"
-                    strokeWidth={2}
-                    aria-label="Scraped"
-                  />
-                ) : null}
                 <CoreCountSummary core={core} />
               </span>
             </button>

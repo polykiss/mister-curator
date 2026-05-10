@@ -4,12 +4,16 @@ import type { JSX } from 'react';
 import type { AutoScrapeProgressEvent } from '@shared/preload-api';
 import type { ConnectionStatus } from '@shared/types';
 
-import { useAutoScrapeProgress } from '@app/renderer/src/contexts/AutoScrapeContext';
+import {
+  useActiveScrapeProgress,
+  useAutoScrapeProgress,
+} from '@app/renderer/src/contexts/AutoScrapeContext';
 import {
   useConnection,
   type AutoRetryProgress,
 } from '@app/renderer/src/contexts/ConnectionContext';
 import { useOperationStatus } from '@app/renderer/src/contexts/OperationStatusContext';
+import { StatusIndicator } from '@app/renderer/src/components/ui/status-indicator';
 import { cn } from '@app/renderer/src/lib/cn';
 
 /**
@@ -31,6 +35,7 @@ export function StatusBar(): JSX.Element {
   const { status, lostConnection, autoRetry, autoRetryFailed } =
     useConnection();
   const autoScrape = useAutoScrapeProgress();
+  const autoScrapeProgress = useActiveScrapeProgress();
 
   // PR-C (PR #26): when no manual operation is in flight AND the
   // connection is steady-state connected, fall back to the
@@ -79,6 +84,19 @@ export function StatusBar(): JSX.Element {
             className="size-3 shrink-0 animate-spin text-fg-body"
             strokeWidth={1.5}
             aria-hidden
+          />
+        ) : null}
+        {/* fix/count-and-status-indicator commit 2 — live progress
+            indicator next to the "Scraping <core> (n/total)" message.
+            Brightens from cold-blue to signal-green-with-halo as the
+            current core's done/total approaches 1. Rendered only
+            when the engine is actively scraping (autoScrapeProgress
+            non-null); idle status messages skip the indicator. */}
+        {autoScrapeProgress !== null ? (
+          <StatusIndicator
+            progress={autoScrapeProgress}
+            sizePx={10}
+            ariaLabel="Auto-scrape progress"
           />
         ) : null}
         <span className="truncate normal-case tracking-normal text-body-sm text-fg-body">
