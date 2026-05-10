@@ -1,6 +1,10 @@
 import { MISTER_GAMES_DIR } from '@shared/constants';
 import { emit, type DiagnosticsCollector } from '@shared/diag';
-import { classifyFolder, isLaunchableRomExtension } from '@shared/folder-rom';
+import {
+  classifyFolder,
+  countRomGroups,
+  isLaunchableRomExtension,
+} from '@shared/folder-rom';
 import {
   isAutoDetectedSystemFile,
   isAutoDetectedSystemFolder,
@@ -800,9 +804,15 @@ function computeRecursiveRomCount(
       // the inflation. `dirs.length` is kept unfiltered — every dir
       // is still treated as a contributing entry (1 ROM each via the
       // atomic-vs-container heuristic when its turn comes around).
+      //
+      // fix/scrape-and-count-correctness commit 2: collapse the
+      // immediate-files term through `countRomGroups` so a fallback
+      // that fires on a `.cue + .bin` shape still reports one
+      // entry, matching the real per-parent-bucket aggregation.
       const recursive =
         sub.recursiveFileCount ??
-        sub.files.filter(isLaunchableRomExtension).length + sub.dirs.length;
+        countRomGroups(sub.files.filter(isLaunchableRomExtension)) +
+          sub.dirs.length;
       const recursiveHidden = sub.recursiveHiddenFileCount ?? 0;
       total += recursive;
       let hiddenContribution: number;

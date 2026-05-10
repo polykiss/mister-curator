@@ -28,6 +28,7 @@ import { displayRomName } from '@shared/display';
 import { isOsMetadataDir, isOsMetadataFile } from '@shared/library-filter';
 import {
   classifyFolder,
+  countRomGroups,
   isLaunchableRomExtension,
   resolveClassification,
 } from '@shared/folder-rom';
@@ -1202,18 +1203,50 @@ async function readSubFolderForMatcher(
 async function countRecursiveFiles(
   dir: string,
 ): Promise<{ recursiveFileCount: number; recursiveHiddenFileCount: number }> {
+  // fix/scrape-and-count-correctness commit 2: bucket leaf names by
+  // their immediate parent directory so `countRomGroups` can collapse
+  // `.cue + .bin` sets per parent. Mirrors the real client's
+  // bucket-then-group conversion path so the fake reports identical
+  // counts for the same fixture.
+  const filesByParent = new Map<string, string[]>();
+  const hiddenFilesByParent = new Map<string, string[]>();
+  await walkBucket(dir, '', filesByParent, hiddenFilesByParent);
   let total = 0;
   let hidden = 0;
+  for (const list of filesByParent.values()) {
+    total += countRomGroups(list);
+  }
+  for (const list of hiddenFilesByParent.values()) {
+    hidden += countRomGroups(list);
+  }
+  return { recursiveFileCount: total, recursiveHiddenFileCount: hidden };
+}
+
+async function walkBucket(
+  dir: string,
+  parentRel: string,
+  filesByParent: Map<string, string[]>,
+  hiddenFilesByParent: Map<string, string[]>,
+): Promise<void> {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.isFile()) {
-      total += 1;
-      if (entry.name.startsWith('.')) hidden += 1;
+      const list = filesByParent.get(parentRel);
+      if (list) list.push(entry.name);
+      else filesByParent.set(parentRel, [entry.name]);
+      if (entry.name.startsWith('.')) {
+        const hList = hiddenFilesByParent.get(parentRel);
+        if (hList) hList.push(entry.name);
+        else hiddenFilesByParent.set(parentRel, [entry.name]);
+      }
     } else if (entry.isDirectory()) {
-      const nested = await countRecursiveFiles(path.join(dir, entry.name));
-      total += nested.recursiveFileCount;
-      hidden += nested.recursiveHiddenFileCount;
+      const childRel = parentRel === '' ? entry.name : `${parentRel}/${entry.name}`;
+      await walkBucket(
+        path.join(dir, entry.name),
+        childRel,
+        filesByParent,
+        hiddenFilesByParent,
+      );
     }
   }
-  return { recursiveFileCount: total, recursiveHiddenFileCount: hidden };
 }

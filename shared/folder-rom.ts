@@ -364,3 +364,120 @@ export function isLaunchableRomExtension(filename: string): boolean {
     FLOPPY_EXTENSIONS.has(ext)
   );
 }
+
+/**
+ * fix/scrape-and-count-correctness commit 2 — disc-set grouping.
+ *
+ * One game is one row. A multi-track Saturn / MegaCD / PCE-CD dump
+ * lives as a `<stem>.cue` plus several `<stem>...bin` siblings —
+ * the user sees one game, not a `.cue` row plus six `.bin` rows.
+ * Container counts (sidebar recursive total, drill-in row count)
+ * collapse those siblings into the one row the user thinks about.
+ *
+ * Rule (precedence top to bottom):
+ *   1. Each `.cue` file claims sibling `.bin` files whose basename
+ *      starts with the cue's stem at a name boundary (the next
+ *      character is not alphanumeric — `Game.cue` claims
+ *      `Game (Track 01).bin` but not `Gameboy.bin`).
+ *   2. The longest matching cue stem wins when several could claim
+ *      the same `.bin` (`Game Disc 2.cue` beats `Game.cue` for
+ *      `Game Disc 2 (Track 01).bin`).
+ *   3. `.bin` files no cue claims are their own group (one per
+ *      file — typically a standalone track dump).
+ *   4. Every other file is its own group, regardless of extension —
+ *      `.iso`, `.chd`, `.gdi`, `.zip`, `.dim`, `.nes` etc. all
+ *      contribute one group per file. Multi-disk floppy games
+ *      (`Game Disk 1.dim` + `Game Disk 2.dim`) DO NOT collapse at
+ *      this layer; the atomic-folder classifier handles those by
+ *      treating the whole folder as one game (1 by definition).
+ */
+export interface RomGroup {
+  /**
+   * The "first" file in the group as encountered in input order.
+   * For a `.cue+.bin` set this is the `.cue` (cues are emitted
+   * before their members during the assignment pass).
+   */
+  readonly representative: string;
+  readonly files: readonly string[];
+}
+
+export function groupRomFiles(files: readonly string[]): readonly RomGroup[] {
+  // Pass 1: collect cue stems, longest first so `Game Disc 2.cue`
+  // beats `Game.cue` when both could claim the same `.bin`.
+  const cueStems: { stem: string; key: string }[] = [];
+  for (const f of files) {
+    if (extensionOf(f) === '.cue') {
+      const stem = stemOf(f).toLowerCase();
+      cueStems.push({ stem, key: `cue:${f.toLowerCase()}` });
+    }
+  }
+  cueStems.sort((a, b) => b.stem.length - a.stem.length);
+
+  // Pass 2: assign each file to a group. Map preserves insertion
+  // order so the result is stable for tests and the user's visual
+  // expectation (cues before their members; standalone files in the
+  // order they appeared).
+  const groups = new Map<string, string[]>();
+  const addTo = (key: string, file: string): void => {
+    const list = groups.get(key);
+    if (list) list.push(file);
+    else groups.set(key, [file]);
+  };
+
+  for (const f of files) {
+    const ext = extensionOf(f);
+    if (ext === '.cue') {
+      addTo(`cue:${f.toLowerCase()}`, f);
+      continue;
+    }
+    if (ext === '.bin') {
+      const lower = f.toLowerCase();
+      const claim = cueStems.find((c) =>
+        boundaryStartsWith(lower, c.stem),
+      );
+      if (claim) {
+        addTo(claim.key, f);
+        continue;
+      }
+    }
+    addTo(`file:${f.toLowerCase()}`, f);
+  }
+
+  const out: RomGroup[] = [];
+  for (const list of groups.values()) {
+    out.push({ representative: list[0]!, files: list });
+  }
+  return out;
+}
+
+/**
+ * Group-count without materializing the groups themselves. Equivalent
+ * to `groupRomFiles(files).length` but skips the array-of-arrays
+ * allocation — the matcher's recursive walk calls this hot for every
+ * parent bucket across thousands of files.
+ */
+export function countRomGroups(files: readonly string[]): number {
+  return groupRomFiles(files).length;
+}
+
+function stemOf(filename: string): string {
+  const dot = filename.lastIndexOf('.');
+  return dot < 0 ? filename : filename.slice(0, dot);
+}
+
+/**
+ * True iff `name` starts with `prefix` AND the next character (if
+ * any) is a name boundary — i.e. not `[a-z0-9]`. Both arguments are
+ * already lowercase per the call site. Prevents `Game.cue`'s stem
+ * `game` from claiming `Gameboy.bin` (which starts with `game` but
+ * extends into another alphanumeric token, so it's not a sibling
+ * track).
+ */
+function boundaryStartsWith(name: string, prefix: string): boolean {
+  if (!name.startsWith(prefix)) return false;
+  if (name.length === prefix.length) return true;
+  const c = name.charCodeAt(prefix.length);
+  const isAlphaNumeric =
+    (c >= 48 && c <= 57) || (c >= 97 && c <= 122);
+  return !isAlphaNumeric;
+}

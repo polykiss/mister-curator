@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   classifyFolder,
+  countRomGroups,
+  groupRomFiles,
   isLaunchableRomExtension,
   resolveClassification,
   type FolderContents,
@@ -425,6 +427,125 @@ describe('classifyFolder — fix/floppy-folder-classification (FLOPPY_EXTENSIONS
         }),
       ).toBe('atomic');
     });
+  });
+});
+
+describe('groupRomFiles — fix/scrape-and-count-correctness commit 2', () => {
+  // Disc-set grouping: a `.cue` claims sibling `.bin` files whose
+  // basename starts at a name boundary with the cue's stem. Other
+  // files (`.iso`, `.chd`, `.gdi`, standalone `.bin`, plain carts)
+  // each count as one game.
+
+  it('Saturn shape: one .cue + N .bin tracks → 1 group', () => {
+    const groups = groupRomFiles([
+      'Castlevania.cue',
+      'Castlevania (Track 01).bin',
+      'Castlevania (Track 02).bin',
+      'Castlevania (Track 03).bin',
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.representative).toBe('Castlevania.cue');
+    expect(groups[0]?.files.length).toBe(4);
+    expect(countRomGroups([
+      'Castlevania.cue',
+      'Castlevania (Track 01).bin',
+      'Castlevania (Track 02).bin',
+      'Castlevania (Track 03).bin',
+    ])).toBe(1);
+  });
+
+  it('multi-disc set: two .cue + their respective .bin siblings → 2 groups', () => {
+    expect(
+      countRomGroups([
+        'Game.cue',
+        'Game (Track 01).bin',
+        'Game (Track 02).bin',
+        'Game Disc 2.cue',
+        'Game Disc 2 (Track 01).bin',
+        'Game Disc 2 (Track 02).bin',
+      ]),
+    ).toBe(2);
+  });
+
+  it('longest cue stem wins when more than one could claim a .bin', () => {
+    // `Game.cue` and `Game Disc 2.cue` both prefix `Game Disc 2 (Track
+    // 01).bin`. Longest-match (`Game Disc 2`) keeps that .bin in the
+    // disc-2 group instead of falsely sucking it into the disc-1 group.
+    const groups = groupRomFiles([
+      'Game.cue',
+      'Game Disc 2.cue',
+      'Game Disc 2 (Track 01).bin',
+    ]);
+    expect(groups).toHaveLength(2);
+    const disc2 = groups.find((g) => g.representative === 'Game Disc 2.cue');
+    expect(disc2?.files).toEqual([
+      'Game Disc 2.cue',
+      'Game Disc 2 (Track 01).bin',
+    ]);
+  });
+
+  it('boundary check prevents Game.cue from claiming Gameboy.bin', () => {
+    // `Gameboy.bin` startsWith `game` but the next character (`b`) is
+    // alphanumeric, so it's NOT at a name boundary — different game.
+    expect(
+      countRomGroups(['Game.cue', 'Game (Track 01).bin', 'Gameboy.bin']),
+    ).toBe(2);
+  });
+
+  it('standalone .bin (no .cue claims it) is its own group', () => {
+    expect(countRomGroups(['Loose Track.bin'])).toBe(1);
+  });
+
+  it('.iso / .chd / .gdi each count as one group per file', () => {
+    expect(
+      countRomGroups([
+        'Game A.iso',
+        'Game B.iso',
+        'Game C.chd',
+        'Game D.gdi',
+      ]),
+    ).toBe(4);
+  });
+
+  it('.dim multi-disk floppy games do NOT collapse at this layer', () => {
+    // Floppy multi-disk grouping is the atomic-folder classifier's job
+    // (the whole folder = one game). At the file-list layer each .dim
+    // is its own group; flat container folders that should be 1 game
+    // rely on the atomic classification upstream.
+    expect(countRomGroups(['Game Disk 1.dim', 'Game Disk 2.dim'])).toBe(2);
+  });
+
+  it('NEOGEO 30 .zip files → 30 groups (one per game)', () => {
+    const files: string[] = [];
+    for (let i = 0; i < 30; i += 1) files.push(`mslug${String(i)}.zip`);
+    expect(countRomGroups(files)).toBe(30);
+  });
+
+  it('case-insensitive cue stem match', () => {
+    expect(
+      countRomGroups([
+        'Game.CUE',
+        'Game (Track 01).BIN',
+        'GAME (Track 02).bin',
+      ]),
+    ).toBe(1);
+  });
+
+  it('the .cue is the group representative even when listed last', () => {
+    const groups = groupRomFiles([
+      'Game (Track 01).bin',
+      'Game (Track 02).bin',
+      'Game.cue',
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.representative).toBe('Game (Track 01).bin');
+    // First file inserted becomes the representative — pin that the
+    // group itself contains all three (cue + both bins).
+    expect(groups[0]?.files.length).toBe(3);
+  });
+
+  it('empty input → 0 groups', () => {
+    expect(countRomGroups([])).toBe(0);
   });
 });
 
