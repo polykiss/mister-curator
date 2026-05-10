@@ -1002,4 +1002,60 @@ describe('FakeMisterClient', () => {
       });
     });
   });
+
+  // feat/arcade-mra-management Phase 1: raw listing of _Arcade/ for
+  // the Phase 1.5 IPC + renderer integration. Just the find →
+  // {type, relPath} pipeline; the shared `parseArcadeMraEntries`
+  // filter (own test file) handles the classification.
+  describe('listArcadeRawListing (Phase 1)', () => {
+    let arcadeDir: string;
+    beforeEach(async () => {
+      arcadeDir = path.join(workDir, '_Arcade');
+      // Reset to a clean shape per test — fixtures only have .rbf
+      // here; we add .mra + subfolders to exercise the listing.
+      await fs.rm(arcadeDir, { recursive: true, force: true });
+      await fs.mkdir(arcadeDir, { recursive: true });
+      await fs.writeFile(path.join(arcadeDir, 'Metal Slug.mra'), 'mra');
+      await fs.writeFile(path.join(arcadeDir, 'Street Fighter II.mra'), 'mra');
+      // Hidden via dot-prefix.
+      await fs.writeFile(path.join(arcadeDir, '.Donkey Kong.mra'), 'mra');
+      // Organisational subfolder.
+      await fs.mkdir(path.join(arcadeDir, '_Konami'));
+      await fs.writeFile(path.join(arcadeDir, '_Konami', 'TMNT.mra'), 'mra');
+      // Firmware-managed cores stash.
+      await fs.mkdir(path.join(arcadeDir, 'cores'));
+      await fs.writeFile(path.join(arcadeDir, 'cores', 'Galaga.rbf'), 'rbf');
+      // AppleDouple sidecar — must drop.
+      await fs.writeFile(path.join(arcadeDir, '._Metal Slug.mra'), 'junk');
+    });
+
+    it('returns the raw listing as {type, relPath} rows', async () => {
+      const raw = await client.listArcadeRawListing();
+      const relPaths = raw.map((r) => r.relPath).sort();
+      // Includes .mra files, dot-prefixed .mra files, organisational
+      // subfolders + their content, the cores stash + .rbf inside,
+      // and AppleDouple. The shared parser filters these — this
+      // method's job is just to surface everything for the parser.
+      expect(relPaths).toContain('Metal Slug.mra');
+      expect(relPaths).toContain('.Donkey Kong.mra');
+      expect(relPaths).toContain('_Konami');
+      expect(relPaths).toContain('_Konami/TMNT.mra');
+      expect(relPaths).toContain('cores');
+      expect(relPaths).toContain('._Metal Slug.mra'); // raw — parser drops
+    });
+
+    it('emits type=d for directories and type=f for files', async () => {
+      const raw = await client.listArcadeRawListing();
+      const konami = raw.find((r) => r.relPath === '_Konami');
+      const metalSlug = raw.find((r) => r.relPath === 'Metal Slug.mra');
+      expect(konami?.type).toBe('d');
+      expect(metalSlug?.type).toBe('f');
+    });
+
+    it('returns an empty list when _Arcade/ does not exist', async () => {
+      await fs.rm(arcadeDir, { recursive: true, force: true });
+      const raw = await client.listArcadeRawListing();
+      expect(raw).toEqual([]);
+    });
+  });
 });

@@ -9,6 +9,7 @@ import {
   HIDEABLE_CATEGORIES,
   MISTER_CATEGORY_DIRS,
   MISTER_FOLDER_CLASSIFICATIONS_PATH,
+  MISTER_ARCADE_DIR,
   MISTER_GAMES_DIR,
   MISTER_LEDGER_DIR,
   MISTER_LEDGER_PATH,
@@ -301,6 +302,43 @@ export class FakeMisterClient implements IMisterClient {
     }
 
     await walk(localRoot, '');
+    return out;
+  }
+
+  async listArcadeRawListing(): Promise<
+    readonly { readonly type: 'f' | 'd'; readonly relPath: string }[]
+  > {
+    this.assertConnected();
+    await this.delay();
+    const localRoot = this.toLocal(MISTER_ARCADE_DIR);
+    const out: { type: 'f' | 'd'; relPath: string }[] = [];
+    // Mirror RealMisterClient's `find -mindepth 1 -maxdepth 3`. The
+    // depth cap matches what a real `_Arcade/` actually contains
+    // (one or two levels of organisational folders + a `cores/`
+    // stash); deeper trees would surface via a Phase 2 enhancement.
+    async function walk(
+      dir: string,
+      relPrefix: string,
+      depth: number,
+    ): Promise<void> {
+      if (depth > 3) return;
+      let entries: Dirent[];
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        const rel = relPrefix === '' ? entry.name : `${relPrefix}/${entry.name}`;
+        if (entry.isFile()) {
+          out.push({ type: 'f', relPath: rel });
+        } else if (entry.isDirectory()) {
+          out.push({ type: 'd', relPath: rel });
+          await walk(path.join(dir, entry.name), rel, depth + 1);
+        }
+      }
+    }
+    await walk(localRoot, '', 1);
     return out;
   }
 
