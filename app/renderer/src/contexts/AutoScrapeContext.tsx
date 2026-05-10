@@ -17,7 +17,10 @@ import type { AutoScrapeProgressEvent } from '@shared/preload-api';
  * for the footer's "<core> · <done>/<total>" rendering.
  */
 
-const DEFAULT_STATE: AutoScrapeProgressEvent = { state: 'idle' };
+const DEFAULT_STATE: AutoScrapeProgressEvent = {
+  state: 'idle',
+  completedCoreIds: [],
+};
 
 const AutoScrapeContext = createContext<AutoScrapeProgressEvent>(DEFAULT_STATE);
 
@@ -47,4 +50,14 @@ export function AutoScrapeProvider({
 
 export function useAutoScrapeProgress(): AutoScrapeProgressEvent {
   return useContext(AutoScrapeContext);
+}
+
+/**
+ * feat/auto-scrape-persistence: convenience hook for the sidebar
+ * checkmark decorator. Returns the in-session completed Set as a
+ * stable Set<string> so sidebar rows can check membership in O(1).
+ */
+export function useScrapedCoreIds(): ReadonlySet<string> {
+  const event = useContext(AutoScrapeContext);
+  return new Set(event.completedCoreIds);
 }
