@@ -1,4 +1,4 @@
-import { Eye, EyeOff, Loader2, Sparkles, Undo2 } from 'lucide-react';
+import { Check, Eye, EyeOff, Loader2, Sparkles, Undo2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
@@ -10,6 +10,7 @@ import { Button } from '@app/renderer/src/components/ui/button';
 import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
 import { HideEmptyCoresDialog } from '@app/renderer/src/components/HideEmptyCoresDialog';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
+import { useScrapedCoreIds } from '@app/renderer/src/contexts/AutoScrapeContext';
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
@@ -33,6 +34,7 @@ export function CoresPane(): JSX.Element {
   } = useCores();
   const { status } = useConnection();
   const canMutate = status === 'connected';
+  const scrapedCoreIds = useScrapedCoreIds();
 
   // Hidden cores stay off the default cores list — they're permanent
   // decisions and the user opts in to seeing them.
@@ -221,6 +223,7 @@ export function CoresPane(): JSX.Element {
         visibleCores,
         selectedCoreId,
         pendingCoreIds,
+        scrapedCoreIds,
         canMutate,
         onSelect: selectCore,
         onHide,
@@ -243,6 +246,12 @@ interface RenderArgs {
   readonly visibleCores: readonly CoreEntry[] | null;
   readonly selectedCoreId: string | null;
   readonly pendingCoreIds: ReadonlySet<string>;
+  /**
+   * feat/auto-scrape-persistence — in-session set of cores the
+   * engine has finished scraping. Sidebar rows render a small
+   * green check to the left of the count for cores in this set.
+   */
+  readonly scrapedCoreIds: ReadonlySet<string>;
   readonly canMutate: boolean;
   readonly onSelect: (id: string | null) => void;
   readonly onHide: (core: CoreEntry) => Promise<void>;
@@ -349,6 +358,18 @@ function renderCoreList(args: RenderArgs): JSX.Element {
               </span>
 
               <span className="flex shrink-0 items-center gap-2 font-mono text-body-sm text-fg-muted tabular">
+                {args.scrapedCoreIds.has(core.id) ? (
+                  // feat/auto-scrape-persistence — engine has
+                  // finished scraping this core in the current
+                  // session (or persisted within the freshness
+                  // window). Visual cue so the user can tell at
+                  // a glance which cores still have pending work.
+                  <Check
+                    className="size-3.5 text-success"
+                    strokeWidth={2}
+                    aria-label="Scraped"
+                  />
+                ) : null}
                 <CoreCountSummary core={core} />
               </span>
             </button>

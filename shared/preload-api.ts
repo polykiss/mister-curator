@@ -173,6 +173,11 @@ export interface BulkCoreProgressEvent extends BulkCoreProgress {
  *     count individual paths within that core; `coreLabel` is the
  *     display name, e.g. `mame` → "Arcade")
  *   • `idle` when the queue is empty / engine paused / not yet started
+ *
+ * feat/auto-scrape-persistence: both states carry session
+ * completion state so the renderer can:
+ *   • render "<N> done · <M> queued" tail in the footer status,
+ *   • decorate completed sidebar rows with a check icon.
  */
 export type AutoScrapeProgressEvent =
   | {
@@ -181,8 +186,13 @@ export type AutoScrapeProgressEvent =
       readonly coreLabel: string;
       readonly done: number;
       readonly total: number;
+      readonly completedCoreIds: readonly string[];
+      readonly remainingCount: number;
     }
-  | { readonly state: 'idle' };
+  | {
+      readonly state: 'idle';
+      readonly completedCoreIds: readonly string[];
+    };
 
 export interface SystemFileMarkChangeWire {
   readonly filename: string;

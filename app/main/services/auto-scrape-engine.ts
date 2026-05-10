@@ -27,33 +27,53 @@ import { coreDisplayName } from '@shared/core-matching';
  * spec accepts this trade-off rather than threading abort signals
  * into the SSH layer (separate refactor scope).
  *
- * Focus pin (fix/auto-scrape-pivot): once `setFocus` has been called,
- * the engine PINS to that core. After the focused core completes,
- * the loop EXITS — it does NOT auto-advance to the next queue
- * entry. Pre-fix, the queue still contained the previously-active
- * core at position 1 (the "resumes immediately after" comment from
- * the original PR-C design); the loop would shift it next and
- * silently re-start a core the user had explicitly navigated AWAY
- * from. Trace from the user report:
+ * Focus pin (fix/auto-scrape-pivot, then refined in
+ * feat/auto-scrape-persistence): user-clicked cores get pivoted
+ * to the head of the queue and the previously-active core is
+ * re-queued at position 1. Pre-this-fix, the engine STOPPED after
+ * the focused core completed (PR #34's "focus pin = idle after"
+ * semantics) so the user's pick wouldn't silently rewind to a
+ * core they navigated away from. That was the right fix for the
+ * trace below — but it also meant the engine never finished its
+ * sidebar walk after a single click. The original trace:
  *   [prefetch] → start coreId=mame                  # initial connect
  *   [ipc] mister:setAutoScrapeFocus                 # user clicked X68000
  *   [prefetch] · aborted coreId=mame                # mame aborts (good)
  *   [prefetch] → start coreId=X68000                # X68000 runs (good)
  *   [prefetch] → start coreId=mame                  # mame restarts ❌
- * The "implicit resume" was the load-bearing ux misfeature — the
- * user wants the engine to STOP after their explicit pick, not
- * silently reverse course. `start()` clears the pin so a fresh
- * connect-time queue walk works as before.
  *
- * Cache as source of truth: there's no separate "scanned" state
- * to persist. The metadata cache (PR #20 round 9) already records
- * every path's metadata + sentinel; on reconnect, the engine re-runs
- * the full queue and warm cores zip through in ~200ms via the
- * cache's mtime-batch fast path. So pause/resume/restart is just
- * "drop the queue, rebuild on next start" — no separate state file.
+ * feat/auto-scrape-persistence inverts the "idle after focused"
+ * behavior: instead of stopping, the engine maintains an
+ * in-session `completedCoreIds` Set. After any core completes
+ * (focused or not) it's added to that set. The runLoop SKIPS
+ * cores already in the set when shifting the queue. So the user's
+ * pivot pulls X68000 to the head, X68000 runs, X68000 gets
+ * marked done, then mame is shifted next and SKIPPED (still in
+ * the completed set from the connect-time partial scrape). The
+ * mame-restart from the original trace is still impossible.
+ *
+ * Persistence: cores scraped within a configurable freshness
+ * window persist across reconnects via `ScrapeStateStore`. The
+ * wiring layer seeds the engine's completed set on connect with
+ * the persisted set, so a fresh connect to a recently-scraped
+ * MiSTer skips ALL cores immediately and the engine emits idle.
+ * Manual Refresh + a re-click on a completed core both clear
+ * the corresponding completed entry so a re-run is possible
+ * without disconnecting.
  */
 
-/** Wire-shape event the renderer consumes. Two states only. */
+/**
+ * Wire-shape event the renderer consumes.
+ *
+ * feat/auto-scrape-persistence: both states now carry session
+ * progress counts so the footer can render
+ * "Scraping mame (123/680) · 3 done · 5 queued" + the sidebar
+ * can mark completed cores with a check icon.
+ *
+ *   - completedCoreIds: in-session done set. The renderer reads
+ *     this to decorate sidebar rows.
+ *   - remainingCount: queue length excluding the active core.
+ */
 export type AutoScrapeEvent =
   | {
       readonly state: 'active';
@@ -63,8 +83,13 @@ export type AutoScrapeEvent =
       readonly coreLabel: string;
       readonly done: number;
       readonly total: number;
+      readonly completedCoreIds: readonly string[];
+      readonly remainingCount: number;
     }
-  | { readonly state: 'idle' };
+  | {
+      readonly state: 'idle';
+      readonly completedCoreIds: readonly string[];
+    };
 
 export type AutoScrapeListener = (event: AutoScrapeEvent) => void;
 
@@ -112,6 +137,16 @@ export interface AutoScrapeDeps {
   ) => Promise<void>;
 }
 
+/**
+ * feat/auto-scrape-persistence: emitted when a core finishes its
+ * scrape pass without abort. The wiring layer subscribes to
+ * persist the timestamp via `ScrapeStateStore`; the engine
+ * itself doesn't import disk I/O.
+ */
+export type AutoScrapeCompletionListener = (event: {
+  readonly coreId: string;
+}) => void;
+
 export class AutoScrapeEngine {
   private queue: string[] = [];
   private currentCoreId: string | null = null;
@@ -119,13 +154,19 @@ export class AutoScrapeEngine {
   private isPaused = true;
   private isLoopRunning = false;
   /**
-   * fix/auto-scrape-pivot: when set, the loop exits after this core
-   * completes instead of advancing to the next queue entry. Set by
-   * `setFocus`, cleared by `start()` (a fresh connect-time queue
-   * walk should not honor the previous session's pin).
+   * feat/auto-scrape-persistence: in-session set of cores whose
+   * scrape pass finished (without abort). The runLoop SKIPS cores
+   * already in this set when shifting the queue. Seeded on
+   * `start(coreIds, alreadyCompleted)` from the persisted scrape
+   * state so a reconnect to a recently-scraped MiSTer doesn't
+   * re-walk every core. Cleared per-coreId by setFocus (re-running
+   * the user's pick) and by `clearCompleted` (manual Refresh +
+   * the renderer's "rescan all").
    */
-  private focusedCoreId: string | null = null;
+  private completedCoreIds = new Set<string>();
   private readonly listeners = new Set<AutoScrapeListener>();
+  private readonly completionListeners =
+    new Set<AutoScrapeCompletionListener>();
 
   constructor(private readonly deps: AutoScrapeDeps) {}
 
@@ -137,15 +178,37 @@ export class AutoScrapeEngine {
     };
   }
 
+  /**
+   * feat/auto-scrape-persistence: subscribe to per-core completion
+   * events. Wiring layer uses this to persist the lastScrapedAt
+   * timestamp via ScrapeStateStore. Engine doesn't fire completion
+   * events for aborted scrapes (a partial walk isn't "done").
+   */
+  onCompletion(listener: AutoScrapeCompletionListener): () => void {
+    this.completionListeners.add(listener);
+    return () => {
+      this.completionListeners.delete(listener);
+    };
+  }
+
   /** Returns the current state. Useful for tests + late-subscribers. */
   getCurrentState(): AutoScrapeEvent {
-    if (this.currentCoreId === null) return { state: 'idle' };
+    if (this.currentCoreId === null) {
+      return {
+        state: 'idle',
+        completedCoreIds: [...this.completedCoreIds],
+      };
+    }
     return {
       state: 'active',
       coreId: this.currentCoreId,
       coreLabel: coreDisplayName(this.currentCoreId),
       done: 0,
       total: 0,
+      completedCoreIds: [...this.completedCoreIds],
+      remainingCount: this.queue.filter(
+        (c) => !this.completedCoreIds.has(c),
+      ).length,
     };
   }
 
@@ -153,18 +216,39 @@ export class AutoScrapeEngine {
    * Reset and (re)start the engine with a fresh queue. Called on
    * connect (passing the sidebar core list in display order). Idempotent
    * — calling start while already running just rebuilds the queue.
+   *
+   * feat/auto-scrape-persistence: optional `alreadyCompleted` seeds
+   * the in-session done set. The wiring layer passes the persisted
+   * "scraped within last hour" set so warm cores skip immediately.
    */
-  start(coreIds: readonly string[]): void {
+  start(
+    coreIds: readonly string[],
+    alreadyCompleted: ReadonlySet<string> = new Set(),
+  ): void {
     this.queue = [...coreIds];
     this.isPaused = false;
     // Abort any in-flight scrape so the loop re-evaluates the new queue.
     this.abortFlag = true;
-    // fix/auto-scrape-pivot: connect-time start walks the FULL queue
-    // from scratch — drop any focus pin from a previous session.
-    this.focusedCoreId = null;
+    // Seed the completed set from persistence. Filter to coreIds
+    // actually in the queue — stale entries for removed cores
+    // would just sit unused but pollute the AutoScrapeEvent.
+    const queueSet = new Set(coreIds);
+    this.completedCoreIds = new Set(
+      [...alreadyCompleted].filter((c) => queueSet.has(c)),
+    );
     if (!this.isLoopRunning) {
       void this.runLoop();
     }
+  }
+
+  /**
+   * feat/auto-scrape-persistence: drop a coreId from the in-session
+   * completed set so the next queue iteration re-runs it. Used by
+   * the manual-Refresh path; setFocus does this implicitly so the
+   * user's re-click on a completed core re-scrapes it.
+   */
+  clearCompleted(coreId: string): void {
+    this.completedCoreIds.delete(coreId);
   }
 
   /**
@@ -180,21 +264,26 @@ export class AutoScrapeEngine {
 
   /**
    * User clicked a core in the sidebar. Move it to the head of the
-   * queue and re-add the previously-active core at position 1 so it
-   * stays adjacent in case the user later navigates back. No-op
-   * pivot if the focused core is already the active one (the pin
-   * still updates so a focus on the active core takes effect — see
-   * the focus-pin section in the file header). Aborts the current
-   * scrape (loop will re-evaluate).
+   * queue (re-queueing the previously-active core at position 1 so
+   * it resumes adjacent if the user navigates back). No-op queue
+   * change if the focused core is already the active one. Aborts
+   * the current scrape (loop will re-evaluate).
    *
-   * fix/auto-scrape-pivot: also sets `focusedCoreId` so the loop
-   * exits after this core completes instead of silently auto-
-   * advancing to the previously-active core. Restarts the loop
-   * if it had drained to idle, since a setFocus from idle is the
-   * user explicitly asking the engine to do work.
+   * feat/auto-scrape-persistence: also drops the focused core from
+   * the in-session completed set — clicking a completed core in
+   * the same session is the user's signal to re-run it. Without
+   * the drop, the runLoop would shift the core then immediately
+   * skip it as already-done.
+   *
+   * The previous "focus pin = idle after this core" semantics from
+   * PR #34 are gone: the engine now ALWAYS auto-advances to the
+   * next un-completed core. The pivot's protection against
+   * silently-restarting a navigated-away-from core is preserved
+   * by the completed set instead — once a core finishes, it stays
+   * skipped for the rest of the session.
    */
   setFocus(coreId: string): void {
-    this.focusedCoreId = coreId;
+    this.completedCoreIds.delete(coreId);
     if (this.currentCoreId === coreId) return;
     const active = this.currentCoreId;
     const rest = this.queue.filter((c) => c !== coreId && c !== active);
@@ -224,8 +313,17 @@ export class AutoScrapeEngine {
     try {
       while (!this.isPaused && this.queue.length > 0) {
         const coreId = this.queue.shift()!;
+        // feat/auto-scrape-persistence: skip cores already in the
+        // in-session completed set. Seeded by `start()` from the
+        // persisted "scraped within last hour" set + grown by every
+        // successful scrape this session. Continues to the next
+        // queue entry without firing any active/scrape events.
+        if (this.completedCoreIds.has(coreId)) {
+          continue;
+        }
         this.currentCoreId = coreId;
         this.abortFlag = false;
+        let scrapeCompleted = false;
         try {
           const targets = await this.deps.listRomPaths(coreId);
           // The path-list resolution itself can race with a setFocus —
@@ -242,6 +340,10 @@ export class AutoScrapeEngine {
             coreLabel: coreDisplayName(coreId),
             done: 0,
             total,
+            completedCoreIds: [...this.completedCoreIds],
+            remainingCount: this.queue.filter(
+              (c) => !this.completedCoreIds.has(c),
+            ).length,
           });
           if (total > 0) {
             await this.deps.scrape(
@@ -255,10 +357,21 @@ export class AutoScrapeEngine {
                   coreLabel: coreDisplayName(coreId),
                   done,
                   total,
+                  completedCoreIds: [...this.completedCoreIds],
+                  remainingCount: this.queue.filter(
+                    (c) => !this.completedCoreIds.has(c),
+                  ).length,
                 });
               },
               () => this.abortFlag || this.isPaused,
             );
+          }
+          // feat/auto-scrape-persistence: a scrape that returned
+          // WITHOUT abort is a complete pass. Aborted scrapes
+          // (focus pivot, pause) leave scrapeCompleted=false so
+          // the next session re-runs them.
+          if (!this.abortFlag && !this.isPaused) {
+            scrapeCompleted = true;
           }
         } catch {
           // Per-core errors don't kill the engine — log + continue.
@@ -266,16 +379,21 @@ export class AutoScrapeEngine {
           // via its own diagLog hook before they reach the engine.)
         }
         this.currentCoreId = null;
-        // fix/auto-scrape-pivot: focus pin. If the user has set
-        // focus and the core that just completed IS that focused
-        // core, exit the loop instead of advancing. The user's
-        // explicit pick is the terminal state — no silent
-        // auto-advance to a core they navigated away from.
-        if (this.focusedCoreId !== null && coreId === this.focusedCoreId) {
-          break;
+        if (scrapeCompleted) {
+          this.completedCoreIds.add(coreId);
+          for (const l of this.completionListeners) {
+            try {
+              l({ coreId });
+            } catch {
+              /* don't let a listener throw break the loop */
+            }
+          }
         }
       }
-      this.emit({ state: 'idle' });
+      this.emit({
+        state: 'idle',
+        completedCoreIds: [...this.completedCoreIds],
+      });
     } finally {
       this.isLoopRunning = false;
     }

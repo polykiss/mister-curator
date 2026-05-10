@@ -181,7 +181,18 @@ export function autoScrapeMessageFor(
 ): string | null {
   if (event.state !== 'active') return null;
   if (status !== 'connected') return null;
-  return `Scraping ${event.coreLabel} · ${String(event.done)}/${String(event.total)}`;
+  // feat/auto-scrape-persistence: extend the footer with the
+  // session completion counts so the user sees the FULL picture,
+  // not just the current core. Tail segments drop when their
+  // count is zero so the message stays short on the common case
+  // (just connected, nothing done yet → "Scraping mame (12/680)").
+  const base = `Scraping ${event.coreLabel} (${String(event.done)}/${String(event.total)})`;
+  const doneCount = event.completedCoreIds.length;
+  const queuedCount = event.remainingCount;
+  const tail: string[] = [];
+  if (doneCount > 0) tail.push(`${String(doneCount)} done`);
+  if (queuedCount > 0) tail.push(`${String(queuedCount)} queued`);
+  return tail.length > 0 ? `${base} · ${tail.join(' · ')}` : base;
 }
 
 function statusDotClass(state: ConnectionStatus | 'reconnecting'): string {

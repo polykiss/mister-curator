@@ -22,6 +22,7 @@ import { MetadataService } from '@app/main/metadata/metadata-service';
 import { OpenVGDBService } from '@app/main/metadata/openvgdb-service';
 import { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
 import { AutoScrapeEngine } from '@app/main/services/auto-scrape-engine';
+import { ScrapeStateStore } from '@app/main/services/scrape-state';
 import { ProfileStore } from '@app/main/storage/profile-store';
 
 function resolveClientMode(): 'real' | 'fake' {
@@ -227,6 +228,25 @@ void app.whenReady().then(() => {
   //   • scrape → MetadataOrchestrator.getRomsMetadata, threading
   //     the engine's shouldAbort callback so setFocus pivots land
   //     within one path's wall time.
+  // feat/auto-scrape-persistence — per-host store of "lastScrapedAt"
+  // timestamps. Lives at <userData>/scrape-state/<host>/scrape-state.json.
+  // Read on connect to seed the engine's in-session completed set so
+  // recently-scraped cores skip immediately; written per-core
+  // completion via the engine's onCompletion subscription below.
+  const scrapeStateStore = new ScrapeStateStore(
+    path.join(app.getPath('userData'), 'scrape-state'),
+  );
+  /**
+   * Cores scraped within this window persist as "done" across
+   * reconnects. One hour matches the spec; tuneable here without
+   * touching the store. Outside the window the persisted state is
+   * ignored and the core re-walks (the metadata cache still
+   * provides the warm fast-path; only the SSH walk + per-path
+   * orchestrator iteration get re-run, which is cheap on a warm
+   * cache).
+   */
+  const SCRAPE_FRESHNESS_WINDOW_MS = 60 * 60 * 1000;
+
   const autoScrapeEngine = new AutoScrapeEngine({
     // PR-C round 2: recursive ROM-file path list, filtered by the
     // sidebar-count predicate (shouldCountAsRom +
@@ -310,11 +330,29 @@ void app.whenReady().then(() => {
     }
   });
 
+  // feat/auto-scrape-persistence — persist per-core completion
+  // timestamps. The engine fires only for fully-scraped cores
+  // (aborted scrapes don't fire), so this never races against a
+  // pivot. Best-effort write: a failed disk write logs but doesn't
+  // throw; the in-memory completed set still works for the rest
+  // of this session.
+  autoScrapeEngine.onCompletion(({ coreId }) => {
+    const session = manager.getActiveSession();
+    if (session === null) return;
+    void scrapeStateStore.markScraped(session.host, coreId).catch(() => {
+      /* swallow — disk-write failure shouldn't break the engine */
+    });
+  });
+
   // PR-C (PR #26) — lifecycle: start the engine on connect (with
   // the sidebar core list in display order), pause on every other
-  // status. Cache is the source of truth for "is this core scanned",
-  // so resume after disconnect is just "rebuild the queue and let
-  // warm cores zip through". No persistent engine state.
+  // status.
+  //
+  // feat/auto-scrape-persistence: on connect, also seed the
+  // engine's in-session completed Set with cores scraped within
+  // the freshness window. Those cores skip immediately on the
+  // queue walk — pre-fix every reconnect re-walked everything,
+  // burning user wall-time on cores that DID finish last session.
   manager.onStatusChange(async (status) => {
     if (status !== 'connected') {
       autoScrapeEngine.pause();
@@ -334,7 +372,15 @@ void app.whenReady().then(() => {
         .filter((c) => c.gamesDirExists)
         .filter((c) => c.category !== 'Arcade')
         .map((c) => c.id);
-      autoScrapeEngine.start(coreIds);
+      const session = manager.getActiveSession();
+      const alreadyCompleted =
+        session !== null
+          ? await scrapeStateStore.coresScrapedWithin(
+              session.host,
+              SCRAPE_FRESHNESS_WINDOW_MS,
+            )
+          : new Set<string>();
+      autoScrapeEngine.start(coreIds, alreadyCompleted);
     } catch {
       // listAllCoresWithFiles can fail (SSH dropped right after
       // connect). The engine stays idle; the next status flip
