@@ -18,14 +18,32 @@ import { coreDisplayName } from '@shared/core-matching';
  * or Node-specific modules.
  *
  * Pivot mechanics: `setFocus` reorders the queue (focused first,
- * previously-active second so it resumes after) and sets an
- * `aborted` flag. The flag is threaded through `deps.scrape` as
- * `shouldAbort()` and the orchestrator's per-path loop checks it
- * between iterations — abandons the rest of the current core and
- * returns. Maximum pivot latency = one path's wall time (cold N64
- * ~10s, cold SNES ~3s, warm anything ~200ms). The spec accepts
- * this trade-off rather than threading abort signals into the SSH
- * layer (separate refactor scope).
+ * previously-active second so it RESUMES IF AND WHEN focus clears)
+ * and sets an `aborted` flag. The flag is threaded through
+ * `deps.scrape` as `shouldAbort()` and the orchestrator's per-path
+ * loop checks it between iterations — abandons the rest of the
+ * current core and returns. Maximum pivot latency = one path's wall
+ * time (cold N64 ~10s, cold SNES ~3s, warm anything ~200ms). The
+ * spec accepts this trade-off rather than threading abort signals
+ * into the SSH layer (separate refactor scope).
+ *
+ * Focus pin (fix/auto-scrape-pivot): once `setFocus` has been called,
+ * the engine PINS to that core. After the focused core completes,
+ * the loop EXITS — it does NOT auto-advance to the next queue
+ * entry. Pre-fix, the queue still contained the previously-active
+ * core at position 1 (the "resumes immediately after" comment from
+ * the original PR-C design); the loop would shift it next and
+ * silently re-start a core the user had explicitly navigated AWAY
+ * from. Trace from the user report:
+ *   [prefetch] → start coreId=mame                  # initial connect
+ *   [ipc] mister:setAutoScrapeFocus                 # user clicked X68000
+ *   [prefetch] · aborted coreId=mame                # mame aborts (good)
+ *   [prefetch] → start coreId=X68000                # X68000 runs (good)
+ *   [prefetch] → start coreId=mame                  # mame restarts ❌
+ * The "implicit resume" was the load-bearing ux misfeature — the
+ * user wants the engine to STOP after their explicit pick, not
+ * silently reverse course. `start()` clears the pin so a fresh
+ * connect-time queue walk works as before.
  *
  * Cache as source of truth: there's no separate "scanned" state
  * to persist. The metadata cache (PR #20 round 9) already records
@@ -80,6 +98,13 @@ export class AutoScrapeEngine {
   private abortFlag = false;
   private isPaused = true;
   private isLoopRunning = false;
+  /**
+   * fix/auto-scrape-pivot: when set, the loop exits after this core
+   * completes instead of advancing to the next queue entry. Set by
+   * `setFocus`, cleared by `start()` (a fresh connect-time queue
+   * walk should not honor the previous session's pin).
+   */
+  private focusedCoreId: string | null = null;
   private readonly listeners = new Set<AutoScrapeListener>();
 
   constructor(private readonly deps: AutoScrapeDeps) {}
@@ -114,6 +139,9 @@ export class AutoScrapeEngine {
     this.isPaused = false;
     // Abort any in-flight scrape so the loop re-evaluates the new queue.
     this.abortFlag = true;
+    // fix/auto-scrape-pivot: connect-time start walks the FULL queue
+    // from scratch — drop any focus pin from a previous session.
+    this.focusedCoreId = null;
     if (!this.isLoopRunning) {
       void this.runLoop();
     }
@@ -133,11 +161,20 @@ export class AutoScrapeEngine {
   /**
    * User clicked a core in the sidebar. Move it to the head of the
    * queue and re-add the previously-active core at position 1 so it
-   * resumes immediately after the focused core finishes. No-op if the
-   * focused core is already the active one. Aborts the current scrape
-   * (loop will re-evaluate).
+   * stays adjacent in case the user later navigates back. No-op
+   * pivot if the focused core is already the active one (the pin
+   * still updates so a focus on the active core takes effect — see
+   * the focus-pin section in the file header). Aborts the current
+   * scrape (loop will re-evaluate).
+   *
+   * fix/auto-scrape-pivot: also sets `focusedCoreId` so the loop
+   * exits after this core completes instead of silently auto-
+   * advancing to the previously-active core. Restarts the loop
+   * if it had drained to idle, since a setFocus from idle is the
+   * user explicitly asking the engine to do work.
    */
   setFocus(coreId: string): void {
+    this.focusedCoreId = coreId;
     if (this.currentCoreId === coreId) return;
     const active = this.currentCoreId;
     const rest = this.queue.filter((c) => c !== coreId && c !== active);
@@ -147,6 +184,9 @@ export class AutoScrapeEngine {
       ...rest,
     ];
     this.abortFlag = true;
+    if (!this.isLoopRunning) {
+      void this.runLoop();
+    }
   }
 
   /** Test-only: read the queue. */
@@ -206,6 +246,14 @@ export class AutoScrapeEngine {
           // via its own diagLog hook before they reach the engine.)
         }
         this.currentCoreId = null;
+        // fix/auto-scrape-pivot: focus pin. If the user has set
+        // focus and the core that just completed IS that focused
+        // core, exit the loop instead of advancing. The user's
+        // explicit pick is the terminal state — no silent
+        // auto-advance to a core they navigated away from.
+        if (this.focusedCoreId !== null && coreId === this.focusedCoreId) {
+          break;
+        }
       }
       this.emit({ state: 'idle' });
     } finally {

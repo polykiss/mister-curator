@@ -125,10 +125,14 @@ describe('AutoScrapeEngine', () => {
   });
 
   describe('setFocus pivot', () => {
-    it('moves the focused core to the head of the queue', async () => {
-      // Slow scrape so we can pivot mid-flight without races.
-      // Init to noop so TS narrowing keeps the call signature
-      // through the async-closure assignment below.
+    it('pivots to the focused core, then idles after it completes (focus pin)', async () => {
+      // fix/auto-scrape-pivot: pre-fix, after the focused core
+      // completed the engine auto-advanced to the next queue entry
+      // — which still contained the previously-active core at
+      // position 1. The user's clicked-away-from core silently
+      // restarted. New contract: setFocus PINS the engine to that
+      // core; after it completes, the loop EXITS instead of
+      // advancing.
       let resolveFirstPath: () => void = (): void => undefined;
       const slowScrape: AutoScrapeDeps['scrape'] = async (
         _coreId,
@@ -145,7 +149,7 @@ describe('AutoScrapeEngine', () => {
         }
       };
 
-      const { engine, scrapeCalls } = makeEngine({
+      const { engine, scrapeCalls, events } = makeEngine({
         pathsByCore: { SNES: ['a', 'b'], NES: ['c'], GBA: ['d'] },
         scrapeOverride: slowScrape,
       });
@@ -154,27 +158,26 @@ describe('AutoScrapeEngine', () => {
 
       // SNES is mid-scrape (waiting on resolveFirstPath). User clicks
       // GBA. setFocus reorders the queue: GBA at head, SNES (active)
-      // at position 1, NES (originally next) after.
+      // at position 1, NES (originally next) after — and PINS focus
+      // to GBA.
       engine.setFocus('GBA');
       // Let the in-flight SNES path complete; the scrape's
-      // shouldAbort() check at the top of the next iteration sees the
-      // abort flag and returns early.
+      // shouldAbort() check at the top of the next iteration sees
+      // the abort flag and returns early.
       resolveFirstPath();
       await flush();
-      // Now GBA's scrape is in flight (waiting on resolveFirstPath).
+      // GBA's scrape is now in flight; let its single path complete.
       resolveFirstPath();
       await flush();
-      // SNES resumes (a-and-b again — cache makes it warm in
-      // production, the engine doesn't track per-path completion
-      // across pivots). For this test, we just verify the COREID
-      // sequence: GBA jumped ahead of NES.
+      // GBA finishes. Pre-fix, SNES would have resumed here (queue
+      // position 1). Post-fix, the focus pin breaks the loop.
       const sequence = scrapeCalls.map((c) => c.coreId);
-      // First entry: SNES (originally started). After pivot: GBA
-      // (the focus target). SNES re-runs to finish what was aborted.
-      expect(sequence[0]).toBe('SNES');
-      expect(sequence[1]).toBe('GBA');
-      // SNES queues back at position 1, so next is SNES (resumed).
-      expect(sequence[2]).toBe('SNES');
+      expect(sequence[0]).toBe('SNES'); // initial
+      expect(sequence[1]).toBe('GBA');  // pivot target
+      // No third call — SNES does NOT resume.
+      expect(sequence).toHaveLength(2);
+      // Engine surfaces an idle event after GBA completes.
+      expect(events[events.length - 1]).toEqual({ state: 'idle' });
     });
 
     it('is a no-op when the focused core is already active', async () => {
@@ -251,6 +254,125 @@ describe('AutoScrapeEngine', () => {
       // hang.
       resolveCurrent();
       await flush();
+    });
+  });
+
+  describe('focus pin (fix/auto-scrape-pivot)', () => {
+    // The user-reported regression sequence:
+    //   [prefetch] → start coreId=mame
+    //   [ipc] mister:setAutoScrapeFocus
+    //   [prefetch] · aborted coreId=mame
+    //   [prefetch] → start coreId=X68000
+    //   [prefetch] → start coreId=X68000  (renderer re-fire, separate concern)
+    //   [prefetch] → start coreId=mame    ← THIS is the bug
+    // The mame restart at the end was queue auto-progression: after
+    // the focused X68000 finished, the loop shifted the next queue
+    // entry (mame, re-added at position 1 by setFocus). Post-fix,
+    // setFocus pins the loop to that core; auto-progression skipped.
+
+    it('engine idles after focused core completes (no auto-advance)', async () => {
+      // Reproduces the exact failure trace, with mame instead of
+      // X68000-vs-SNES because the failure is about the auto-
+      // progression rule, not the specific cores.
+      const { engine, scrapeCalls } = makeEngine({
+        pathsByCore: { mame: ['m'], X68000: ['x'] },
+      });
+      engine.start(['mame', 'X68000']);
+      // Pivot immediately to X68000.
+      engine.setFocus('X68000');
+      await flush();
+      // mame ran briefly (or aborted before any path), X68000 ran.
+      // Pre-fix sequence would also include a SECOND mame call after
+      // X68000 — the auto-advance bug. Pin that mame appears EXACTLY
+      // ONCE (the initial start, before pivot).
+      const mameCalls = scrapeCalls.filter((c) => c.coreId === 'mame');
+      expect(mameCalls.length).toBeLessThanOrEqual(1);
+      const x68kCalls = scrapeCalls.filter((c) => c.coreId === 'X68000');
+      expect(x68kCalls.length).toBe(1);
+    });
+
+    it('setFocus from idle starts the focused core (no other cores run)', async () => {
+      // The engine has been idle (queue drained, loop exited). User
+      // clicks a core. Focus pin re-starts the loop with ONLY that
+      // core; the engine completes it and idles again.
+      const { engine, scrapeCalls } = makeEngine({
+        pathsByCore: { GBA: ['g'], NES: ['n'], SNES: ['s'] },
+      });
+      engine.start([]); // empty queue — engine idles immediately
+      await flush();
+      expect(scrapeCalls).toHaveLength(0);
+      // User clicks GBA after idle.
+      engine.setFocus('GBA');
+      await flush();
+      expect(scrapeCalls.map((c) => c.coreId)).toEqual(['GBA']);
+    });
+
+    it('start() clears any existing focus pin (fresh connect-time walk)', async () => {
+      // Connect → engine.start(allCores). The engine should walk
+      // the full queue regardless of any focus pin from the
+      // previous session. Test scenario: first walk, set focus,
+      // start fresh — full walk should resume.
+      const { engine, scrapeCalls } = makeEngine({
+        pathsByCore: { A: ['a'], B: ['b'], C: ['c'] },
+      });
+      engine.start(['A']);
+      engine.setFocus('A'); // pin to A
+      await flush();
+      // Engine completes A, idles (focus pin).
+      expect(scrapeCalls.map((c) => c.coreId)).toEqual(['A']);
+      // Now a "reconnect": start with the full sidebar. Focus pin
+      // must clear so the engine walks B and C in order.
+      engine.start(['A', 'B', 'C']);
+      await flush();
+      const sequence = scrapeCalls.map((c) => c.coreId);
+      expect(sequence).toEqual(['A', 'A', 'B', 'C']);
+    });
+
+    it('walks the full queue when no focus has been set', async () => {
+      // Pre-existing behavior preserved: a vanilla start() with no
+      // setFocus walks the full queue from head to tail.
+      const { engine, scrapeCalls } = makeEngine({
+        pathsByCore: { A: ['a'], B: ['b'], C: ['c'] },
+      });
+      engine.start(['A', 'B', 'C']);
+      await flush();
+      expect(scrapeCalls.map((c) => c.coreId)).toEqual(['A', 'B', 'C']);
+    });
+
+    it('rapid double setFocus on same core is a no-op (no duplicate scrape)', async () => {
+      // Pin the contract that setFocus(X) called twice in quick
+      // succession produces ONE scrape, not two. The engine's
+      // currentCoreId === coreId guard handles the mid-scrape case;
+      // the focus-pin idle handles the post-completion case.
+      const { engine, scrapeCalls } = makeEngine({
+        pathsByCore: { A: ['a'] },
+      });
+      engine.start(['A', 'B']);
+      engine.setFocus('A'); // pin while A is being shifted
+      engine.setFocus('A'); // duplicate — must NOT re-queue
+      await flush();
+      const aCalls = scrapeCalls.filter((c) => c.coreId === 'A');
+      expect(aCalls).toHaveLength(1);
+    });
+
+    it('focus then re-focus on a different core still pins to the latest', async () => {
+      // setFocus(B) → setFocus(C) before B starts. Engine should
+      // run C (the latest pin), not B.
+      const { engine, scrapeCalls } = makeEngine({
+        pathsByCore: { A: ['a'], B: ['b'], C: ['c'] },
+      });
+      engine.start([]);
+      await flush();
+      // Engine is idle.
+      engine.setFocus('B');
+      engine.setFocus('C');
+      await flush();
+      // Latest pin wins — C runs alone.
+      const sequence = scrapeCalls.map((c) => c.coreId);
+      expect(sequence[sequence.length - 1]).toBe('C');
+      // No A call — engine started idle and only the focus pins
+      // queued work.
+      expect(sequence.includes('A')).toBe(false);
     });
   });
 
