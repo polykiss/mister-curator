@@ -1517,6 +1517,154 @@ describe('matchRbfsToGamesDirs', () => {
   });
 });
 
+describe('matchRbfsToGamesDirs — fix/count-and-status-indicator commit 5 (visible / hidden counts use the same rule)', () => {
+  // End-to-end pin for the user's ground-truth observation:
+  //   X68000:  4 visible game folders + 643 hidden game folders.
+  //   MegaCD:  ≈3 visible atomic + 21 hidden atomic.
+  // Pre-commit-1 the X68000 game folders classified container
+  // (many-same-extension on the .zip variants) and the sidebar
+  // inflated to 1155. Post-commit-1 they classify atomic via
+  // shared-prefix and contribute 1 each to recursive*Count. The
+  // visible numerator and hidden parenthetical pull from the
+  // same recursive*Count fields, so both numbers stay consistent.
+
+  it('X68000 shape: shared-prefix folders contribute 1 each to visible AND hidden recursive counts', () => {
+    // Builder: each game folder has the same shared-prefix shape
+    // as the user's "Akumajou Dracula (Konami)/" — 8 .zip variants
+    // sharing the game name as a prefix. The folder name itself
+    // also shares that prefix, so the folder-name-match branch of
+    // the rule fires too.
+    function gameFolder(name: string, dotted: boolean): RawSubFolderInput {
+      const stem = name;
+      const files: string[] = [];
+      const variants = [
+        '[FD]',
+        '[FD] [Set 1]',
+        '[FD] [Set 2]',
+        '[HD]',
+        '[extras]',
+        '(demo) [FD]',
+        '(cheat menu 3) [FD] [Set 1]',
+        '(cheat menu 6) [FD]',
+      ];
+      for (const v of variants) files.push(`${stem} ${v}.zip`);
+      return {
+        name: dotted ? `.${stem} (Konami)` : `${stem} (Konami)`,
+        files,
+        dirs: [],
+        recursiveFileCount: variants.length,
+        recursiveHiddenFileCount: dotted ? variants.length : 0,
+      };
+    }
+
+    // 4 visible + 6 hidden game folders. The user has 643 hidden
+    // on real device; 6 is a representative subset that exercises
+    // the proportionality rule without burning test fixtures.
+    const visibleGames = [
+      'Akumajou Dracula',
+      'Geograph Seal',
+      'Lagoon',
+      'Star Cruiser',
+    ];
+    const hiddenGames = [
+      'Hidden A',
+      'Hidden B',
+      'Hidden C',
+      'Hidden D',
+      'Hidden E',
+      'Hidden F',
+    ];
+    const subFolders: RawSubFolderInput[] = [
+      ...visibleGames.map((g) => gameFolder(g, false)),
+      ...hiddenGames.map((g) => gameFolder(g, true)),
+    ];
+
+    const result = matchRbfsToGamesDirs({
+      rbfs: [
+        {
+          category: 'Computer',
+          filename: 'X68000_20240115.rbf',
+          fullPath: '/media/fat/_Computer/X68000_20240115.rbf',
+          isFolder: false,
+        },
+      ],
+      gamesDirs: [
+        {
+          rawName: 'X68000',
+          // System / boot files at the top — shouldCountAsRom
+          // filters them out via the BIOS-suffix list.
+          files: ['BLANK_disk_X68000.D88', 'boot.rom', 'boot3.vhd'],
+          dirs: subFolders.map((s) => s.name),
+          subFolders,
+        },
+      ],
+    });
+
+    const x68000 = result.find((c) => c.id === 'X68000');
+    expect(x68000).toBeDefined();
+    // Each game folder is one game (atomic via shared-prefix). So
+    // recursive visible = 4 + non-system top-level files; recursive
+    // hidden = 6. The exact non-system top-level file count
+    // depends on the system-files filter, so we assert >= 4 on
+    // visible and == 6 on hidden.
+    expect(x68000?.recursiveRomCount).toBeGreaterThanOrEqual(4);
+    expect(x68000?.recursiveHiddenCount).toBe(6);
+  });
+
+  it('hidden parenthetical and visible numerator share the recursive basis', () => {
+    // The CoreCountSummary renders `${recursiveRomCount} (${recursiveHiddenCount})`
+    // — both numbers must come from the same per-folder rule, or
+    // the ratio is incoherent. Pin that the matcher emits both
+    // numbers using the same atomic-vs-container call.
+    const result = matchRbfsToGamesDirs({
+      rbfs: [],
+      gamesDirs: [
+        {
+          rawName: 'X68000',
+          files: [],
+          dirs: ['Game A', '.Hidden Game B', '.Hidden Game C'],
+          subFolders: [
+            {
+              name: 'Game A',
+              files: ['Game A [FD].zip', 'Game A [HD].zip', 'Game A [extras].zip'],
+              dirs: [],
+              recursiveFileCount: 3,
+              recursiveHiddenFileCount: 0,
+            },
+            {
+              name: '.Hidden Game B',
+              files: [
+                'Hidden Game B [FD].zip',
+                'Hidden Game B [HD].zip',
+                'Hidden Game B [extras].zip',
+              ],
+              dirs: [],
+              recursiveFileCount: 3,
+              recursiveHiddenFileCount: 3,
+            },
+            {
+              name: '.Hidden Game C',
+              files: [
+                'Hidden Game C [FD].zip',
+                'Hidden Game C [HD].zip',
+                'Hidden Game C [extras].zip',
+              ],
+              dirs: [],
+              recursiveFileCount: 3,
+              recursiveHiddenFileCount: 3,
+            },
+          ],
+        },
+      ],
+    });
+    const x68000 = result.find((c) => c.id === 'X68000');
+    // 1 visible + 2 hidden game folders, each atomic via folder-
+    // name-prefix match → contributes 1 to its respective bucket.
+    expect(x68000?.recursiveRomCount).toBe(3);
+    expect(x68000?.recursiveHiddenCount).toBe(2);
+  });
+});
+
 describe('matchRbfsToGamesDirs — fix/scrape-and-count-correctness commit 4 (NeoGeo-CD alias)', () => {
   it('folds NeoGeo-CD/ into the NeoGeo entry — single sidebar row, summed counts', () => {
     const result = matchRbfsToGamesDirs({

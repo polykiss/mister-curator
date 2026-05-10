@@ -118,6 +118,43 @@ describe('CoreCountSummary — sidebar count format', () => {
     expect(collectText(out)).toBe('100(50)');
   });
 
+  it('X68000 ground-truth shape: 4 (643) — both numbers from recursive*Count', () => {
+    // fix/count-and-status-indicator commit 5 — end-to-end pin
+    // for the user's ground truth: X68000 should read "4 (643)"
+    // once the matcher's atomic-via-shared-prefix call from
+    // commit 1 is in place. Pre-commit-1 it read "1155 (1140)"
+    // because the game folders classified container and the
+    // sidebar inflated to file-level counts. Pin both numbers
+    // come from the recursive walk so a future reversion to
+    // top-level `romCount` / `hiddenCount` trips this assertion.
+    const out = CoreCountSummary({
+      core: core({
+        recursiveRomCount: 4,
+        recursiveHiddenCount: 643,
+        // Top-level numbers are intentionally different so a
+        // reversion to top-level basis would flip the result.
+        romCount: 7,
+        hiddenCount: 3,
+      }),
+    });
+    const text = collectText(out);
+    expect(text).toBe('4(643)');
+    expect(text).not.toMatch(/hidden/i);
+  });
+
+  it('MegaCD ground-truth shape: hidden=21 atomic-folder count, NOT file-level', () => {
+    // The user's MegaCD has 21 dot-prefixed game folders. Each
+    // is an atomic disc dump (.cue + .bin). With recursive*Count
+    // as the basis, atomic folders contribute 1 each → 21.
+    const out = CoreCountSummary({
+      core: core({
+        recursiveRomCount: 5,
+        recursiveHiddenCount: 21,
+      }),
+    });
+    expect(collectText(out)).toBe('5(21)');
+  });
+
   it('paren span uses the muted disabled color (visual cue carries the meaning)', () => {
     // The "hidden" word was redundant against the muted paren color.
     // Pin the paren element's class so a stylistic refactor that
