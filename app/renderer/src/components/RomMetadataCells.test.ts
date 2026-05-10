@@ -8,6 +8,7 @@ import {
   DENSITY_EYE_CELL_CLASSNAMES,
   RomDensityEyeCell,
   RomNameInner,
+  shouldShowFilenameSubline,
 } from '@app/renderer/src/components/RomMetadataCells';
 
 /**
@@ -152,10 +153,52 @@ describe('RomNameInner — PR #25 truncation + title-attribute tooltip', () => {
   }
 
   // RomNameInner returns a wrapping <span> with [leadingIcon, innerSpan].
-  // PR-D2 (PR #29): RomNameInner now renders a third child after
-  // the inner-span — the RomTagPills component (returns null when no
-  // tags). Find the inner-span by its `truncate` className rather
-  // than positionally so future additions don't break the test.
+  // PR-D2 (PR #29): RomNameInner renders the inner-span alongside
+  // RomTagPills + (feat/filename-in-listings) an optional filename
+  // subline inside a flex-col wrapper. We walk the tree to find the
+  // FIRST `truncate` span — that's the title-text span the test
+  // pins. The filename subline (if present) also has `truncate` but
+  // is keyed under the filename text instead.
+  function findFirstTruncateSpan(
+    node: ReactElement<{
+      readonly children?: unknown;
+    }> | null,
+  ): {
+    readonly className: string;
+    readonly title: string;
+    readonly children: string;
+  } | null {
+    if (node === null || typeof node !== 'object') return null;
+    const props = node.props as {
+      readonly className?: string;
+      readonly title?: string;
+      readonly children?: unknown;
+    };
+    if (
+      typeof props.className === 'string' &&
+      props.className.includes('truncate')
+    ) {
+      return {
+        className: props.className,
+        title: props.title ?? '',
+        children: typeof props.children === 'string' ? props.children : '',
+      };
+    }
+    const childArr = Array.isArray(props.children)
+      ? (props.children as unknown[])
+      : props.children !== undefined
+        ? [props.children]
+        : [];
+    for (const c of childArr) {
+      if (c === null || typeof c !== 'object') continue;
+      const found = findFirstTruncateSpan(
+        c as ReactElement<{ readonly children?: unknown }>,
+      );
+      if (found !== null) return found;
+    }
+    return null;
+  }
+
   function callInner(displayName?: string): {
     readonly className: string;
     readonly title: string;
@@ -167,38 +210,12 @@ describe('RomNameInner — PR #25 truncation + title-attribute tooltip', () => {
       dimmed: false,
       metadata: undefined,
       error: false,
-    }) as ReactElement<{
-      readonly children: readonly (
-        | ReactElement<{
-            readonly className?: string;
-            readonly title?: string;
-            readonly children?: string;
-          }>
-        | null
-      )[];
-    }>;
-    const children = Array.isArray(result.props.children)
-      ? result.props.children
-      : [result.props.children];
-    const innerSpan = children.find(
-      (c): c is ReactElement<{
-        readonly className: string;
-        readonly title: string;
-        readonly children: string;
-      }> =>
-        c !== null &&
-        typeof c === 'object' &&
-        typeof c.props.className === 'string' &&
-        c.props.className.includes('truncate'),
-    );
-    if (innerSpan === undefined) {
+    }) as ReactElement<{ readonly children?: unknown }>;
+    const found = findFirstTruncateSpan(result);
+    if (found === null) {
       throw new Error('truncate inner span not found in RomNameInner output');
     }
-    return {
-      className: innerSpan.props.className,
-      title: innerSpan.props.title,
-      children: innerSpan.props.children,
-    };
+    return found;
   }
 
   it('inner span has the `truncate` class so long titles ellipsis', () => {
@@ -244,33 +261,190 @@ describe('RomNameInner — PR #25 truncation + title-attribute tooltip', () => {
         fetchedAt: '2026-05-09T00:00:00.000Z',
       },
       error: false,
-    }) as ReactElement<{
-      readonly children: readonly (
-        | ReactElement<{
-            readonly className?: string;
-            readonly title?: string;
-            readonly children?: string;
-          }>
-        | null
-      )[];
-    }>;
-    const children = Array.isArray(result.props.children)
-      ? result.props.children
-      : [result.props.children];
-    // PR-D2: find the inner-span by its `truncate` className (RomTagPills
-    // is now a sibling — positional lookup would catch the wrong element).
-    const innerSpan = children.find(
-      (c): c is ReactElement<{
-        readonly className: string;
-        readonly title: string;
-        readonly children: string;
-      }> =>
-        c !== null &&
-        typeof c === 'object' &&
-        typeof c.props.className === 'string' &&
-        c.props.className.includes('truncate'),
-    );
-    expect(innerSpan?.props.title).toBe('Canonical Game Title');
-    expect(innerSpan?.props.children).toBe('Canonical Game Title');
+    }) as ReactElement<{ readonly children?: unknown }>;
+    // feat/filename-in-listings: walk the new flex-col wrapper to
+    // find the FIRST truncate span — that's the title.
+    const found = findFirstTruncateSpan(result);
+    expect(found?.title).toBe('Canonical Game Title');
+    expect(found?.children).toBe('Canonical Game Title');
+  });
+});
+
+describe('shouldShowFilenameSubline (feat/filename-in-listings)', () => {
+  // The filename subline disambiguates rows that share a metadata-
+  // resolved title but have different region/version tags. It's
+  // NOT shown when redundant (title == filename) or for folder rows
+  // (the folder name IS the displayed name).
+
+  it('shows for a file row when title differs from filename', () => {
+    expect(
+      shouldShowFilenameSubline(
+        { kind: 'file', filename: 'mslug.zip' },
+        'Metal Slug',
+      ),
+    ).toBe(true);
+  });
+
+  it('hidden ROM (dot-prefix filename) shows the filename subline too', () => {
+    // The hide convention dot-prefixes the filename; users may want
+    // to see the on-disk name to confirm what's hidden vs visible.
+    expect(
+      shouldShowFilenameSubline(
+        { kind: 'file', filename: '.mslug.zip' },
+        'Metal Slug',
+      ),
+    ).toBe(true);
+  });
+
+  it('hides when title equals filename (no metadata yet → fallback)', () => {
+    expect(
+      shouldShowFilenameSubline(
+        { kind: 'file', filename: 'Foo.zip' },
+        'Foo.zip',
+      ),
+    ).toBe(false);
+  });
+
+  it('hides for folder-atomic rows (folder name IS the title)', () => {
+    expect(
+      shouldShowFilenameSubline(
+        { kind: 'folder-atomic', filename: 'Carrot Party Disk Magazine' },
+        'Carrot Party Disk Magazine',
+      ),
+    ).toBe(false);
+  });
+
+  it('hides for folder-container rows (drillable, no meaningful filename)', () => {
+    expect(
+      shouldShowFilenameSubline(
+        { kind: 'folder-container', filename: '1 World A-Z' },
+        '1 World A-Z',
+      ),
+    ).toBe(false);
+  });
+
+  it('hides for folder-atomic even if title differs from filename (defensive)', () => {
+    // Folders never show the filename subline regardless of the
+    // displayName/filename relationship.
+    expect(
+      shouldShowFilenameSubline(
+        { kind: 'folder-atomic', filename: 'old-name' },
+        'New Display Name',
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('RomNameInner — filename subline rendering (feat/filename-in-listings)', () => {
+  function makeRom(overrides: Partial<Rom> = {}): Rom {
+    return {
+      coreId: 'NES',
+      filename: 'mslug.zip',
+      displayName: 'mslug',
+      sizeBytes: 1024,
+      hidden: false,
+      path: '/media/fat/games/NES/mslug.zip',
+      kind: 'file',
+      relativePath: 'mslug.zip',
+      ...overrides,
+    };
+  }
+
+  function findAllTruncateSpans(
+    node: ReactElement<{ readonly children?: unknown }> | null,
+  ): { className: string; title: string; children: string }[] {
+    const out: { className: string; title: string; children: string }[] = [];
+    function walk(n: unknown): void {
+      if (n === null || typeof n !== 'object') return;
+      const props = (n as ReactElement<{ readonly children?: unknown }>).props as {
+        readonly className?: string;
+        readonly title?: string;
+        readonly children?: unknown;
+      };
+      if (
+        typeof props.className === 'string' &&
+        props.className.includes('truncate')
+      ) {
+        out.push({
+          className: props.className,
+          title: props.title ?? '',
+          children: typeof props.children === 'string' ? props.children : '',
+        });
+      }
+      const childArr = Array.isArray(props.children)
+        ? (props.children as unknown[])
+        : props.children !== undefined
+          ? [props.children]
+          : [];
+      for (const c of childArr) walk(c);
+    }
+    walk(node);
+    return out;
+  }
+
+  it('renders BOTH title + filename when metadata gives a real name', () => {
+    const result = RomNameInner({
+      rom: makeRom({ filename: 'mslug.zip' }),
+      dimmed: false,
+      metadata: {
+        version: 4,
+        hash: 'a'.repeat(32),
+        name: 'Metal Slug',
+        system: 'NEOGEO',
+        year: null,
+        publisher: null,
+        developer: null,
+        genre: null,
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: null,
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        source: 'screenscraper',
+        fetchedAt: '2026-05-10T00:00:00.000Z',
+      },
+      error: false,
+    }) as ReactElement<{ readonly children?: unknown }>;
+    const truncates = findAllTruncateSpans(result);
+    // Two truncate spans: the title + the filename subline.
+    expect(truncates).toHaveLength(2);
+    expect(truncates[0]?.children).toBe('Metal Slug');
+    expect(truncates[1]?.children).toBe('mslug.zip');
+    // Filename subline is muted — visual distinction from the title.
+    expect(truncates[1]?.className).toContain('text-fg-muted');
+    expect(truncates[1]?.className).toContain('text-caption');
+    // Native title= for hover when truncated.
+    expect(truncates[1]?.title).toBe('mslug.zip');
+  });
+
+  it('omits the filename subline when no metadata (title == filename fallback)', () => {
+    const result = RomNameInner({
+      rom: makeRom({ filename: 'Foo.zip', displayName: 'Foo.zip' }),
+      dimmed: false,
+      metadata: undefined,
+      error: false,
+    }) as ReactElement<{ readonly children?: unknown }>;
+    const truncates = findAllTruncateSpans(result);
+    // Only the title — no filename subline (would be redundant).
+    expect(truncates).toHaveLength(1);
+    expect(truncates[0]?.children).toBe('Foo.zip');
+  });
+
+  it('omits the filename subline for atomic folders', () => {
+    const result = RomNameInner({
+      rom: makeRom({
+        kind: 'folder-atomic',
+        filename: 'Carrot Party Disk Magazine',
+        displayName: 'Carrot Party Disk Magazine',
+      }),
+      dimmed: false,
+      metadata: undefined,
+      error: false,
+    }) as ReactElement<{ readonly children?: unknown }>;
+    const truncates = findAllTruncateSpans(result);
+    expect(truncates).toHaveLength(1);
+    expect(truncates[0]?.children).toBe('Carrot Party Disk Magazine');
   });
 });
