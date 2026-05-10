@@ -222,10 +222,19 @@ export class HashService {
     const entries = await this.loadEntries(host);
     const result = new Map<string, HashEntry>();
 
-    // Validate any cached paths in one stat batch. A cache hit needs
-    // the current mtime to match the recorded one.
+    // feat/rename-aware-hash-cache: stat ALL input paths (cached +
+    // uncached) in one SSH batch instead of just the cached subset.
+    // For uncached paths the extra mtime data fuels the rename
+    // recovery below — a rename (Unix `mv`) preserves mtime, so a
+    // mtime collision against an existing cache entry is a strong
+    // signal the file just moved. Pre-fix every dot-prefixed file
+    // (every hidden ROM) re-hashed on every connect because the
+    // path-keyed cache stranded the entry under the old un-dotted
+    // key. For mame with 600+ hidden ROMs this was ~30-60s of
+    // re-hashing per session.
     const cachedPaths = paths.filter((p) => entries[p] !== undefined);
     const needsHash: string[] = paths.filter((p) => entries[p] === undefined);
+    const uncachedPaths = [...needsHash];
 
     // Round 6 diag — per-path cache-check decision. For the round-6
     // investigation we only ever run with paths.length === 1 from
@@ -240,41 +249,93 @@ export class HashService {
       });
     }
 
-    if (cachedPaths.length > 0) {
-      const mtimes = await client.statWitnesses(cachedPaths);
-      for (const p of cachedPaths) {
-        const entry = entries[p];
-        const current = mtimes[p];
-        if (
-          entry !== undefined &&
-          current !== undefined &&
-          current !== 0 &&
-          current === entry.mtime
-        ) {
-          diagLog('info', 'meta', '·', 'hash-decision', {
-            path: pathBasename(p),
-            action: 'use-cache',
-            reason: 'mtime-match',
-            mtime: current,
-          });
-          result.set(p, entry);
-        } else {
-          // Either missing-on-device, or mtime drifted. Either way,
-          // re-hash. (If the file is genuinely gone the hash call
-          // will silently drop it and we'll just not return the path.)
-          diagLog('info', 'meta', '·', 'hash-decision', {
-            path: pathBasename(p),
-            action: 'stale-revalidate',
-            reason:
-              current === undefined || current === 0
-                ? 'missing-on-device'
-                : 'mtime-drift',
-            cachedMtime: entry?.mtime,
-            currentMtime: current,
-          });
-          needsHash.push(p);
-        }
+    // Stat both cached + uncached in one SSH op so the rename-
+    // recovery pass below has an mtime for each uncached path.
+    // Skip the stat for uncached paths when the cache is empty —
+    // there's nothing to migrate them onto, and the empty-cache
+    // first-run path was the previous behavior (kept fast).
+    const cacheIsEmpty = Object.keys(entries).length === 0;
+    const statTargets = cacheIsEmpty
+      ? cachedPaths
+      : [...cachedPaths, ...uncachedPaths];
+    const mtimes = statTargets.length > 0
+      ? await client.statWitnesses(statTargets)
+      : ({} as Record<string, number>);
+
+    for (const p of cachedPaths) {
+      const entry = entries[p];
+      const current = mtimes[p];
+      if (
+        entry !== undefined &&
+        current !== undefined &&
+        current !== 0 &&
+        current === entry.mtime
+      ) {
+        diagLog('info', 'meta', '·', 'hash-decision', {
+          path: pathBasename(p),
+          action: 'use-cache',
+          reason: 'mtime-match',
+          mtime: current,
+        });
+        result.set(p, entry);
+      } else {
+        // Either missing-on-device, or mtime drifted. Either way,
+        // re-hash. (If the file is genuinely gone the hash call
+        // will silently drop it and we'll just not return the path.)
+        diagLog('info', 'meta', '·', 'hash-decision', {
+          path: pathBasename(p),
+          action: 'stale-revalidate',
+          reason:
+            current === undefined || current === 0
+              ? 'missing-on-device'
+              : 'mtime-drift',
+          cachedMtime: entry?.mtime,
+          currentMtime: current,
+        });
+        needsHash.push(p);
       }
+    }
+
+    // Rename recovery: for each uncached path, see if its current
+    // mtime uniquely identifies an existing cache entry under a
+    // different (old) key. If so, rewrite the key — the file just
+    // moved. Track `claimed` keys so a 2+ collision (multiple
+    // renamed-to paths trying to claim the same old key) refuses
+    // ambiguous migrations rather than aliasing two paths to one
+    // hash entry.
+    const migrated: { from: string; to: string; entry: HashEntry }[] = [];
+    const claimed = new Set<string>();
+    for (const p of uncachedPaths) {
+      const current = mtimes[p];
+      if (current === undefined || current === 0) continue;
+      const oldKey = findCacheKeyByMtime(entries, current, claimed);
+      if (oldKey === null || oldKey === p) continue;
+      const entry = entries[oldKey]!;
+      claimed.add(oldKey);
+      migrated.push({ from: oldKey, to: p, entry });
+      result.set(p, entry);
+      diagLog('info', 'meta', '·', 'hash-decision', {
+        path: pathBasename(p),
+        action: 'use-cache',
+        reason: 'rename-migrated',
+        mtime: current,
+        oldKey: pathBasename(oldKey),
+      });
+    }
+    if (migrated.length > 0) {
+      const next: Record<string, HashEntry> = { ...entries };
+      for (const m of migrated) {
+        delete next[m.from];
+        next[m.to] = m.entry;
+      }
+      this.memCache.set(host, next);
+      await this.writeEntries(host, next);
+      // Drop migrated paths from needsHash (they're now in result).
+      const stillNeeds = needsHash.filter(
+        (p) => !migrated.some((m) => m.to === p),
+      );
+      needsHash.length = 0;
+      needsHash.push(...stillNeeds);
     }
 
     if (needsHash.length === 0) return result;
@@ -336,19 +397,30 @@ export class HashService {
     const entries = await this.loadEntries(host);
     const result = new Map<string, HashEntry | null>();
     const cachedPaths = paths.filter((p) => entries[p] !== undefined);
-    for (const p of paths) {
-      if (entries[p] === undefined) result.set(p, null);
+    const uncachedPaths = paths.filter((p) => entries[p] === undefined);
+    if (paths.length === 0) return result;
+    // feat/rename-aware-hash-cache: stat ALL paths so the rename
+    // recovery (uncached paths whose mtime uniquely identifies an
+    // existing cache entry) can run alongside the normal cached-path
+    // mtime validation. Skip the stat for uncached paths when the
+    // cache is empty — there's nothing to migrate them onto.
+    const cacheIsEmpty = Object.keys(entries).length === 0;
+    const statTargets = cacheIsEmpty ? cachedPaths : paths;
+    if (statTargets.length === 0) {
+      for (const p of paths) {
+        if (!result.has(p)) result.set(p, null);
+      }
+      return result;
     }
-    if (cachedPaths.length === 0) return result;
     let mtimes: Awaited<ReturnType<HashClient['statWitnesses']>>;
     try {
-      mtimes = await client.statWitnesses(cachedPaths);
+      mtimes = await client.statWitnesses(statTargets);
     } catch {
-      // Stat batch failed (transport error, etc.) — return all
-      // cached paths as null so the caller falls through to
-      // computeHash for each. The orchestrator's per-path error
-      // handling is the right shape for this.
-      for (const p of cachedPaths) result.set(p, null);
+      // Stat batch failed (transport error, etc.) — return all paths
+      // as null so the caller falls through to computeHash for each.
+      // The orchestrator's per-path error handling is the right shape
+      // for this.
+      for (const p of paths) result.set(p, null);
       return result;
     }
     for (const p of cachedPaths) {
@@ -366,6 +438,35 @@ export class HashService {
         // re-hash (or skip if vanished).
         result.set(p, null);
       }
+    }
+    // Rename recovery — same shape as `doGetHash`. See the comment
+    // there for the full rationale.
+    const migrated: { from: string; to: string; entry: HashEntry }[] = [];
+    const claimed = new Set<string>();
+    for (const p of uncachedPaths) {
+      const current = mtimes[p];
+      if (current === undefined || current === 0) {
+        result.set(p, null);
+        continue;
+      }
+      const oldKey = findCacheKeyByMtime(entries, current, claimed);
+      if (oldKey === null || oldKey === p) {
+        result.set(p, null);
+        continue;
+      }
+      const entry = entries[oldKey]!;
+      claimed.add(oldKey);
+      migrated.push({ from: oldKey, to: p, entry });
+      result.set(p, entry);
+    }
+    if (migrated.length > 0) {
+      const next: Record<string, HashEntry> = { ...entries };
+      for (const m of migrated) {
+        delete next[m.from];
+        next[m.to] = m.entry;
+      }
+      this.memCache.set(host, next);
+      await this.writeEntries(host, next);
     }
     return result;
   }
@@ -523,4 +624,39 @@ function isHashEntry(v: unknown): v is HashEntry {
 function pathBasename(path: string): string {
   const i = path.lastIndexOf('/');
   return i < 0 ? path : path.slice(i + 1);
+}
+
+/**
+ * feat/rename-aware-hash-cache: scan cache entries for one whose
+ * `mtime` uniquely matches `target`. Returns the key (path) of that
+ * entry, or `null` when zero or two-or-more entries match.
+ *
+ * Mtime-only matching is sufficient for the typical use case: a
+ * Unix `mv` (the hide / unhide rename op) preserves mtime exactly,
+ * so the renamed file's current mtime equals the cached entry's
+ * recorded mtime. Two distinct files coincidentally sharing a
+ * mtime is rare but possible — refusing the migration in that case
+ * costs at most a re-hash, which is exactly the pre-fix behavior.
+ *
+ * `claimed` excludes keys already migrated in the current pass so
+ * a 2+ collision (two renamed-to paths both targeting the same old
+ * key) refuses ambiguous migrations rather than aliasing both to
+ * one hash entry.
+ *
+ * Future: extend to (mtime, size) for stricter matching when SS
+ * itself starts indexing per-disk in some core.
+ */
+export function findCacheKeyByMtime(
+  entries: Readonly<Record<string, HashEntry>>,
+  target: number,
+  claimed: ReadonlySet<string>,
+): string | null {
+  let match: string | null = null;
+  for (const [key, entry] of Object.entries(entries)) {
+    if (claimed.has(key)) continue;
+    if (entry.mtime !== target) continue;
+    if (match !== null) return null; // 2+ matches → ambiguous
+    match = key;
+  }
+  return match;
 }

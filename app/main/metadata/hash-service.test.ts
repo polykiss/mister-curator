@@ -409,4 +409,199 @@ describe('HashService', () => {
       expect(client.hashCalls).toEqual([]);
     });
   });
+
+  // feat/rename-aware-hash-cache: when a file is renamed (e.g. dot-
+  // prefixed for hide), the cache entry under the OLD path is
+  // stranded. Pre-fix the next connect re-hashed every renamed file
+  // (~30-60s for mame's 600+ hidden ROMs). Post-fix the lookup
+  // recognizes the rename via mtime match and migrates the cache key
+  // — no re-hash required.
+  describe('rename recovery (feat/rename-aware-hash-cache)', () => {
+    it('migrates a cache entry when an uncached path matches an existing entry by mtime', async () => {
+      const svc = new HashService(dir);
+      const oldPath = '/media/fat/games/NES/Castlevania.nes';
+      const newPath = '/media/fat/games/NES/.Castlevania.nes';
+      const fixture = fix('a', 1024, 1700000000);
+      // Seed the cache with the OLD path (representing the
+      // pre-rename hash).
+      await svc.getHash(
+        makeClient({ hashes: new Map([[oldPath, fixture]]) }),
+        'host-1',
+        [oldPath],
+      );
+      // Now ask for the NEW path. The device reports the new file's
+      // mtime as the same value (Unix mv preserves mtime).
+      const client = makeClient({
+        hashes: new Map([[newPath, fixture]]), // hashPaths would also work
+        stat: new Map([[newPath, 1700000000]]),
+      });
+      const result = await svc.getHash(client, 'host-1', [newPath]);
+      // The cached entry was returned WITHOUT a fresh hashPaths call
+      // — recovered via mtime match.
+      expect(result.get(newPath)?.md5).toBe('a'.repeat(32));
+      expect(client.hashCalls).toEqual([]);
+      // The cache file now keys the entry under the NEW path; the
+      // OLD key is gone.
+      const file = JSON.parse(
+        await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
+      ) as { entries: Record<string, FixtureHash> };
+      expect(file.entries[newPath]).toBeDefined();
+      expect(file.entries[oldPath]).toBeUndefined();
+    });
+
+    it('refuses to migrate when two cached entries have the same mtime (ambiguous)', async () => {
+      const svc = new HashService(dir);
+      const sharedMtime = 1700000000;
+      const aFix = fix('a', 1024, sharedMtime);
+      const bFix = fix('b', 2048, sharedMtime);
+      const aOld = '/p/A.nes';
+      const bOld = '/p/B.nes';
+      const aNew = '/p/.A.nes';
+      const cFresh = fix('c', 4096, sharedMtime); // collision-prone
+      // Seed cache with two entries sharing a mtime.
+      await svc.getHash(
+        makeClient({
+          hashes: new Map([
+            [aOld, aFix],
+            [bOld, bFix],
+          ]),
+        }),
+        'host-1',
+        [aOld, bOld],
+      );
+      // Ask for a NEW path with the same mtime — the lookup is
+      // ambiguous (could match either A or B). Refuses to migrate;
+      // re-hashes fresh.
+      const client = makeClient({
+        hashes: new Map([[aNew, cFresh]]),
+        stat: new Map([[aNew, sharedMtime]]),
+      });
+      const result = await svc.getHash(client, 'host-1', [aNew]);
+      // Got the fresh hash, not the migrated one.
+      expect(result.get(aNew)?.md5).toBe('c'.repeat(32));
+      expect(client.hashCalls).toHaveLength(1);
+      // Both old keys still in cache (neither was migrated).
+      const file = JSON.parse(
+        await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
+      ) as { entries: Record<string, FixtureHash> };
+      expect(file.entries[aOld]).toBeDefined();
+      expect(file.entries[bOld]).toBeDefined();
+    });
+
+    it('refuses to migrate when mtime does not match any cached entry', async () => {
+      const svc = new HashService(dir);
+      const oldFix = fix('a', 1024, 1700000000);
+      // Seed cache.
+      await svc.getHash(
+        makeClient({ hashes: new Map([['/p/A.nes', oldFix]]) }),
+        'host-1',
+        ['/p/A.nes'],
+      );
+      // Ask for a NEW path with a DIFFERENT mtime (file genuinely
+      // modified). Re-hash fresh.
+      const newFix = fix('c', 1024, 1700099999);
+      const client = makeClient({
+        hashes: new Map([['/p/.A.nes', newFix]]),
+        stat: new Map([['/p/.A.nes', 1700099999]]),
+      });
+      const result = await svc.getHash(client, 'host-1', ['/p/.A.nes']);
+      expect(result.get('/p/.A.nes')?.md5).toBe('c'.repeat(32));
+      expect(client.hashCalls).toHaveLength(1);
+    });
+
+    it('two paths renamed simultaneously each migrate to their unique cache entry', async () => {
+      const svc = new HashService(dir);
+      const aFix = fix('a', 100, 1700000001); // distinct mtimes
+      const bFix = fix('b', 200, 1700000002);
+      // Seed cache with two old keys.
+      await svc.getHash(
+        makeClient({
+          hashes: new Map([
+            ['/p/A.nes', aFix],
+            ['/p/B.nes', bFix],
+          ]),
+        }),
+        'host-1',
+        ['/p/A.nes', '/p/B.nes'],
+      );
+      // Bulk hide → both renamed. Distinct mtimes → both migrate.
+      const client = makeClient({
+        hashes: new Map(),
+        stat: new Map([
+          ['/p/.A.nes', 1700000001],
+          ['/p/.B.nes', 1700000002],
+        ]),
+      });
+      const result = await svc.getHash(client, 'host-1', [
+        '/p/.A.nes',
+        '/p/.B.nes',
+      ]);
+      expect(result.get('/p/.A.nes')?.md5).toBe('a'.repeat(32));
+      expect(result.get('/p/.B.nes')?.md5).toBe('b'.repeat(32));
+      // Zero re-hashes — both recovered via rename migration.
+      expect(client.hashCalls).toEqual([]);
+      const file = JSON.parse(
+        await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
+      ) as { entries: Record<string, FixtureHash> };
+      expect(file.entries['/p/.A.nes']).toBeDefined();
+      expect(file.entries['/p/.B.nes']).toBeDefined();
+      expect(file.entries['/p/A.nes']).toBeUndefined();
+      expect(file.entries['/p/B.nes']).toBeUndefined();
+    });
+
+    it('migration persists across HashService instances (cache file rewritten)', async () => {
+      const oldPath = '/p/A.nes';
+      const newPath = '/p/.A.nes';
+      const fixture = fix('a', 1024, 1700000000);
+      // Phase 1: seed cache + perform migration.
+      const svc1 = new HashService(dir);
+      await svc1.getHash(
+        makeClient({ hashes: new Map([[oldPath, fixture]]) }),
+        'host-1',
+        [oldPath],
+      );
+      const client1 = makeClient({
+        hashes: new Map([[newPath, fixture]]),
+        stat: new Map([[newPath, 1700000000]]),
+      });
+      await svc1.getHash(client1, 'host-1', [newPath]);
+      // Phase 2: fresh service instance reads from disk. The
+      // migrated entry should be there under the NEW key.
+      const svc2 = new HashService(dir);
+      const client2 = makeClient({
+        hashes: new Map(),
+        stat: new Map([[newPath, 1700000000]]),
+      });
+      const result = await svc2.getHash(client2, 'host-1', [newPath]);
+      expect(result.get(newPath)?.md5).toBe('a'.repeat(32));
+      expect(client2.hashCalls).toEqual([]); // no re-hash
+    });
+
+    it('checkCachedMtimes also migrates renamed paths', async () => {
+      // The orchestrator's primary lookup path uses
+      // checkCachedMtimes (PR #20 round 9 batched validation), not
+      // getHash. The migration must work there too.
+      const svc = new HashService(dir);
+      const oldPath = '/p/A.nes';
+      const newPath = '/p/.A.nes';
+      const fixture = fix('a', 1024, 1700000000);
+      await svc.getHash(
+        makeClient({ hashes: new Map([[oldPath, fixture]]) }),
+        'host-1',
+        [oldPath],
+      );
+      const client = makeClient({
+        hashes: new Map(),
+        stat: new Map([[newPath, 1700000000]]),
+      });
+      const result = await svc.checkCachedMtimes(client, 'host-1', [newPath]);
+      expect(result.get(newPath)?.md5).toBe('a'.repeat(32));
+      // Rewritten on disk.
+      const file = JSON.parse(
+        await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
+      ) as { entries: Record<string, FixtureHash> };
+      expect(file.entries[newPath]).toBeDefined();
+      expect(file.entries[oldPath]).toBeUndefined();
+    });
+  });
 });
