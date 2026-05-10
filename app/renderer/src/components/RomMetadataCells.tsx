@@ -279,7 +279,15 @@ export function RomNameInner(
         </span>
         {showFilename ? (
           <span
-            className="truncate text-caption text-fg-muted"
+            // fix/auto-scrape-correctness-suite: bumped from
+            // text-fg-muted → text-fg-disabled. The user wanted
+            // the subline closer to the background — `text-fg-muted`
+            // was reading as "secondary text" and competing with
+            // the title for attention. `text-fg-disabled` is the
+            // most subtle text token in the design system; the
+            // filename is still legible on hover but recedes from
+            // a glance scan of the row table.
+            className="truncate text-caption text-fg-disabled"
             title={rom.filename}
           >
             {rom.filename}

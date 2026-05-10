@@ -412,8 +412,11 @@ describe('RomNameInner — filename subline rendering (feat/filename-in-listings
     expect(truncates).toHaveLength(2);
     expect(truncates[0]?.children).toBe('Metal Slug');
     expect(truncates[1]?.children).toBe('mslug.zip');
-    // Filename subline is muted — visual distinction from the title.
-    expect(truncates[1]?.className).toContain('text-fg-muted');
+    // Filename subline is the most subtle text token in the
+    // design system — fix/auto-scrape-correctness-suite bumped
+    // from text-fg-muted to text-fg-disabled so it recedes from
+    // a glance scan of the row table.
+    expect(truncates[1]?.className).toContain('text-fg-disabled');
     expect(truncates[1]?.className).toContain('text-caption');
     // Native title= for hover when truncated.
     expect(truncates[1]?.title).toBe('mslug.zip');
