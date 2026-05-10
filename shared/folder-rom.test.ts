@@ -205,12 +205,28 @@ describe('classifyFolder — round 9 extension list expansion (round 5 atomic fl
 });
 
 describe('classifyFolder — round 9 many-similar-files rule', () => {
-  it('catches the NEOGEO regression: 148 .neo files → container', () => {
+  it('catches the NEOGEO regression: many distinctly-named .neo files → container', () => {
     // .neo is now in the known-extensions list, but even before that
     // the long-tail rule alone would've caught this. Exercise both
     // signals here.
-    const files: string[] = [];
-    for (let i = 0; i < 148; i += 1) files.push(`game${String(i).padStart(3, '0')}.neo`);
+    //
+    // fix/count-and-status-indicator commit 1: distinct game names
+    // (no shared prefix). The shared-prefix-atomic rule from commit 1
+    // would catch a synthetic `gameNNN.neo` pattern, so this test
+    // uses real NEOGEO romset names — same many-same-extension intent,
+    // realistic data.
+    const files = [
+      'mslug.neo', 'mslug2.neo', 'mslug3.neo', 'mslugx.neo',
+      'kof97.neo', 'kof98.neo', 'kof99.neo', 'kof2000.neo',
+      'samsho.neo', 'samsho2.neo', 'samsho3.neo', 'samsho4.neo',
+      'lastblade2.neo', 'garou.neo', 'fatfursp.neo', 'rotd.neo',
+      'sengoku.neo', 'sengoku3.neo', 'spinmast.neo', 'aof.neo',
+      'aof2.neo', 'aof3.neo', 'pulstar.neo', 'blazstar.neo',
+      'magdrop3.neo', 'puzzledp.neo', 'twinspri.neo', 'wakuwak7.neo',
+      'wjammers.neo', 'breakers.neo', 'ironclad.neo', 'matrim.neo',
+      'svc.neo', 'kof2003.neo', 'mvscup.neo', 'shocktro2.neo',
+      'savagere.neo', 'kabukikl.neo', 'ninjamas.neo', 'overtop.neo',
+    ];
     expect(classifyFolder({ files, dirs: [] })).toBe('container');
   });
 
@@ -430,6 +446,212 @@ describe('classifyFolder — fix/floppy-folder-classification (FLOPPY_EXTENSIONS
   });
 });
 
+describe('classifyFolder — fix/count-and-status-indicator commit 1 (shared-prefix-atomic)', () => {
+  // X68000 game folders are the motivating case: each holds 8+ .zip
+  // variants of the same game (region/format splits — [FD], [HD],
+  // (cheat menu 3), [Set 1], [Set 2], etc). Pre-fix the
+  // many-same-extension rule pinned them to container; the sidebar
+  // inflated 4 visible games to 1155 individual file rows. The
+  // shared-prefix rule fires before many-same-extension and pins
+  // these folders back to atomic.
+
+  it('Akumajou Dracula folder: 8 .zip variants → atomic via shared prefix', () => {
+    const akumajou: FolderContents = {
+      files: [
+        'Akumajou Dracula [FD].zip',
+        'Akumajou Dracula [FD] [Set 1].zip',
+        'Akumajou Dracula [FD] [Set 2].zip',
+        'Akumajou Dracula [HD].zip',
+        'Akumajou Dracula [extras].zip',
+        'Akumajou Dracula (demo) [FD].zip',
+        'Akumajou Dracula (cheat menu 3) [FD] [Set 1].zip',
+        'Akumajou Dracula (cheat menu 6) [FD].zip',
+      ],
+      dirs: [],
+      folderName: 'Akumajou Dracula (Konami)',
+    };
+    expect(classifyFolder(akumajou)).toBe('atomic');
+  });
+
+  it('PSX _translations/ collection: differently-titled .iso files → container (no shared prefix)', () => {
+    // 30 unique game titles, no useful shared prefix → falls through
+    // to disc-collection refinement which trips at >5 groups → container.
+    const titles = [
+      'Final Fantasy VII (J)', 'Chrono Cross (J)', 'Tales of Destiny',
+      'Suikoden II', 'Persona 2 Innocent Sin', 'Castlevania SOTN',
+      'Resident Evil 2', 'Silent Hill', 'Metal Gear Solid',
+      'Tekken 3', 'Crash Bandicoot 3', 'Spyro the Dragon',
+      'Gran Turismo 2', 'Twisted Metal 2', 'Ridge Racer Type 4',
+      'Wild Arms 2', 'Vagrant Story', 'Parasite Eve',
+      'Xenogears', 'Star Ocean Second Story', 'Valkyrie Profile',
+      'Threads of Fate', 'SaGa Frontier', 'Brave Fencer Musashi',
+      'Front Mission 3', 'Bushido Blade', 'Crash Team Racing',
+      'PaRappa the Rapper', 'LSD Dream Emulator', 'Vib-Ribbon',
+    ];
+    const files = titles.map((t) => `${t}.iso`);
+    expect(classifyFolder({ files, dirs: [], folderName: '_translations' })).toBe(
+      'container',
+    );
+  });
+
+  it('Final Fantasy VII multi-disc: folder name prefixes children → atomic', () => {
+    const ff7: FolderContents = {
+      files: [
+        'Final Fantasy VII (Disc 1).chd',
+        'Final Fantasy VII (Disc 2).chd',
+        'Final Fantasy VII (Disc 3).chd',
+      ],
+      dirs: [],
+      folderName: 'Final Fantasy VII',
+    };
+    expect(classifyFolder(ff7)).toBe('atomic');
+  });
+
+  it('disc-set grouping (.cue + .bin) is unchanged: 1 group → atomic', () => {
+    expect(
+      classifyFolder({
+        files: [
+          'Game.cue',
+          'Game.bin',
+          'Game (Track 02).bin',
+          'Game (Track 03).bin',
+        ],
+        dirs: [],
+      }),
+    ).toBe('atomic');
+  });
+
+  it('LCP at exactly the 10-char floor → atomic', () => {
+    // "Sonic2_v01" / "Sonic2_v02" / "Sonic2_v03" share 10 chars.
+    expect(
+      classifyFolder({
+        files: ['Sonic2_v01.zip', 'Sonic2_v02.zip', 'Sonic2_v03.zip'],
+        dirs: [],
+      }),
+    ).toBe('atomic');
+  });
+
+  it('LCP under 10 chars but ≥40% of shortest stem → atomic', () => {
+    // "Lagoon" stem = 6 chars; LCP across [Lagoon (FD), Lagoon (HD),
+    // Lagoon (extras), Lagoon [Set 1], Lagoon [Set 2]] is "Lagoon "
+    // (7 chars including trailing space). Shortest stem is "Lagoon (FD)"
+    // (11 chars). 7 / 11 = 0.64 → ≥40% → atomic.
+    expect(
+      classifyFolder({
+        files: [
+          'Lagoon (FD).zip',
+          'Lagoon (HD).zip',
+          'Lagoon (extras).zip',
+          'Lagoon [Set 1].zip',
+          'Lagoon [Set 2].zip',
+        ],
+        dirs: [],
+        folderName: 'Lagoon (Zoom)',
+      }),
+    ).toBe('atomic');
+  });
+
+  it('shared-prefix wins over many-same-extension', () => {
+    // 8 .zip files would normally trip hasManySameExtension and
+    // classify container. The shared prefix pre-empts that.
+    expect(
+      classifyFolder({
+        files: [
+          'Star Cruiser [FD].zip',
+          'Star Cruiser [HD].zip',
+          'Star Cruiser (FD) (Set 1).zip',
+          'Star Cruiser (FD) (Set 2).zip',
+          'Star Cruiser (FD) (Set 3).zip',
+          'Star Cruiser (cheat).zip',
+          'Star Cruiser (extras).zip',
+          'Star Cruiser (demo).zip',
+        ],
+        dirs: [],
+        folderName: 'Star Cruiser (Arsys Software)',
+      }),
+    ).toBe('atomic');
+  });
+
+  it('NEOGEO 1 World A-Z (no shared prefix) is unchanged: many-same fires → container', () => {
+    // 6 wholly-distinct game .zips with no shared prefix.
+    expect(
+      classifyFolder({
+        files: [
+          'mslug.zip',
+          'kof97.zip',
+          'samsho.zip',
+          'lastblade2.zip',
+          'garou.zip',
+          'mslug3.zip',
+        ],
+        dirs: [],
+        folderName: '1 World A-Z',
+      }),
+    ).toBe('container');
+  });
+
+  it('non-launchable companions (manual.txt, .DS_Store) are filtered before LCP calc', () => {
+    // The launchable filter keeps the .zip variants together; a
+    // stray manual.txt would otherwise drag the LCP to empty.
+    expect(
+      classifyFolder({
+        files: [
+          'Akumajou Dracula [FD].zip',
+          'Akumajou Dracula [HD].zip',
+          'Akumajou Dracula (extras).zip',
+          'manual.txt',
+          '.DS_Store',
+        ],
+        dirs: [],
+        folderName: 'Akumajou Dracula (Konami)',
+      }),
+    ).toBe('atomic');
+  });
+
+  it('single-file folder skips the rule (cart-ext branch handles it)', () => {
+    // Pre-existing behavior: single .zip = atomic via cart-ext rule.
+    // The shared-prefix rule requires ≥2 launchable files.
+    expect(
+      classifyFolder({
+        files: ['Game.zip'],
+        dirs: [],
+        folderName: 'Game',
+      }),
+    ).toBe('atomic');
+  });
+
+  it('does NOT fire on tiny synthetic names like g1.zip / g2.zip / g3.zip', () => {
+    // Regression pin: the LCP here is "g" (1 char). The ratio path
+    // would qualify (1 / 2 = 0.5 ≥ 0.4) without the
+    // SHARED_PREFIX_RATIO_MIN_LENGTH floor, which would break the
+    // ManyGames container test fixture from real-mister-client.
+    // Atomic shouldn't fire when the LCP is tiny in absolute terms,
+    // even if the stems are also tiny.
+    expect(
+      classifyFolder({
+        files: ['g1.zip', 'g2.zip', 'g3.zip', 'g4.zip', 'g5.zip'],
+        dirs: [],
+      }),
+    ).toBe('container');
+  });
+
+  it('hidden folder (.Akumajou Dracula) still classifies atomic (folderName is un-dotted by caller)', () => {
+    // Callers (matcher / listRoms) un-dot the basename before passing
+    // it through. Pin the contract: classifyFolder receives the
+    // un-dotted name and the rule fires.
+    expect(
+      classifyFolder({
+        files: [
+          'Akumajou Dracula [FD].zip',
+          'Akumajou Dracula [HD].zip',
+        ],
+        dirs: [],
+        folderName: 'Akumajou Dracula (Konami)',
+      }),
+    ).toBe('atomic');
+  });
+});
+
 describe('classifyFolder — fix/scrape-and-count-correctness commit 3 (disc collection refinement)', () => {
   // Pre-fix: any folder containing a disc extension pinned to atomic
   // unconditionally — so a PSX `_translations/` directory holding 30
@@ -438,11 +660,46 @@ describe('classifyFolder — fix/scrape-and-count-correctness commit 3 (disc col
   // AND > 5 distinct game-groups live there, classify as container so
   // the user can pick a game.
 
-  it('PSX collection: 30 flat .iso files → container (was atomic)', () => {
-    const files: string[] = [];
-    for (let i = 0; i < 30; i += 1) {
-      files.push(`Translation ${String(i).padStart(2, '0')}.iso`);
-    }
+  it('PSX collection: 30 distinctly-titled .iso files → container (was atomic)', () => {
+    // fix/count-and-status-indicator commit 1: distinct game titles
+    // (no shared prefix). The shared-prefix-atomic rule from commit 1
+    // would catch a synthetic `Translation NN.iso` pattern, so this
+    // test uses real PSX fan-translation game titles — same
+    // disc-collection intent, realistic data the user actually has
+    // on /media/fat/games/PSX/_translations/.
+    const titles = [
+      'Final Fantasy VII (J) [Translation]',
+      'Chrono Cross (J) [Translation]',
+      'Tales of Destiny',
+      'Suikoden II',
+      'Persona 2 Innocent Sin',
+      'Castlevania SOTN',
+      'Resident Evil 2',
+      'Silent Hill',
+      'Metal Gear Solid',
+      'Tekken 3',
+      'Crash Bandicoot 3',
+      'Spyro the Dragon',
+      'Gran Turismo 2',
+      'Twisted Metal 2',
+      'Ridge Racer Type 4',
+      'Wild Arms 2',
+      'Vagrant Story',
+      'Parasite Eve',
+      'Xenogears',
+      'Star Ocean Second Story',
+      'Valkyrie Profile',
+      'Threads of Fate',
+      'SaGa Frontier',
+      'Brave Fencer Musashi',
+      'Front Mission 3',
+      'Bushido Blade',
+      'Crash Team Racing',
+      'PaRappa the Rapper',
+      'LSD Dream Emulator',
+      'Vib-Ribbon',
+    ];
+    const files = titles.map((t) => `${t}.iso`);
     expect(classifyFolder({ files, dirs: [] })).toBe('container');
   });
 

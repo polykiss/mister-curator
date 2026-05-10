@@ -1053,8 +1053,16 @@ export class FakeMisterClient implements IMisterClient {
       if (e.isFile()) files.push(e.name);
       else if (e.isDirectory()) dirs.push(e.name);
     }
+    // fix/count-and-status-indicator commit 1: pass the un-dotted
+    // basename of the local dir so the shared-prefix-atomic rule can
+    // fire. The basename is the last path segment after `path.basename`,
+    // un-dotted to match the matcher's normalization.
+    const folderBasename = path.basename(localDir);
+    const folderName = folderBasename.startsWith('.')
+      ? folderBasename.slice(1)
+      : folderBasename;
     return resolveClassification(
-      classifyFolder({ files, dirs }),
+      classifyFolder({ files, dirs, folderName }),
       getFolderOverride(overrides, coreId, visibleRelPath),
     );
   }

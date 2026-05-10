@@ -860,6 +860,11 @@ export class RealMisterClient implements IMisterClient {
       const heuristic = classifyFolder({
         files: acc.directFiles,
         dirs: acc.directDirs,
+        // fix/count-and-status-indicator commit 1: pass the folder
+        // basename (un-dotted) so the shared-prefix-atomic rule can
+        // fire on X68000 game folders whose .zip variants all share
+        // the game name as a prefix.
+        folderName: visibleBase,
       });
       const override = getFolderOverride(
         folderClassifications,

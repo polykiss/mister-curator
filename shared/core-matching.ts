@@ -808,6 +808,18 @@ export function computeCoreRenames(core: CoreEntry, hidden: boolean): CoreRename
  * `recursiveHiddenCount` directly; for container folders, the
  * client's `recursiveHiddenFileCount` is added.
  */
+/**
+ * Drop a single leading dot, leaving the rest of the basename
+ * intact. Used by `classifyFolder` callers that need the visible
+ * (un-dotted) folder name for the shared-prefix rule — `.Akumajou
+ * Dracula (Konami)/` and `Akumajou Dracula (Konami)/` should both
+ * pass `Akumajou Dracula (Konami)` so the rule fires for hidden
+ * folders too.
+ */
+function stripDot(name: string): string {
+  return name.startsWith('.') ? name.slice(1) : name;
+}
+
 function computeRecursiveRomCount(
   topLevelFiles: readonly string[],
   topLevelDirs: readonly string[],
@@ -884,7 +896,18 @@ function computeRecursiveRomCount(
     // same `classifyFolder` heuristic the renderer uses for the drill-
     // in decision, so the cores-list count and the ROMs-list view stay
     // aligned. `unknown` collapses to `atomic` here too.
-    const classification = classifyFolder({ files: sub.files, dirs: sub.dirs });
+    //
+    // fix/count-and-status-indicator commit 1: pass the subfolder's
+    // basename so the shared-prefix-atomic rule can fire when the
+    // folder name is itself a prefix of every child filename. Without
+    // this, an X68000-shape folder ("Akumajou Dracula (Konami)/" with
+    // 8 .zip variants) trips the many-same-extension rule and
+    // contributes its raw file count instead of one game.
+    const classification = classifyFolder({
+      files: sub.files,
+      dirs: sub.dirs,
+      folderName: stripDot(sub.name),
+    });
     if (classification === 'container') {
       // Container folder: contribute the recursive file count. Falls
       // back to immediate file + dir count when the client didn't

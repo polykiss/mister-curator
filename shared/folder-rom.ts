@@ -17,6 +17,15 @@ export type FolderClassification = 'container' | 'atomic' | 'unknown';
 export interface FolderContents {
   readonly files: readonly string[];
   readonly dirs: readonly string[];
+  /**
+   * fix/count-and-status-indicator commit 1: optional basename of the
+   * folder being classified. Enables the "folder name appears as a
+   * prefix in every child filename → atomic" branch of the
+   * shared-prefix rule. Optional for back-compat — fixtures and
+   * legacy callers that don't supply it skip just that branch; the
+   * length-based shared-prefix branch still fires.
+   */
+  readonly folderName?: string;
 }
 
 /**
@@ -231,6 +240,49 @@ const SAME_EXTENSION_THRESHOLD = 5;
 const DISC_COLLECTION_THRESHOLD = 5;
 
 /**
+ * fix/count-and-status-indicator commit 1 — shared-prefix-atomic rule.
+ *
+ * X68000 single-game folders look like
+ *   `Akumajou Dracula (Konami)/Akumajou Dracula [FD].zip`
+ *   `Akumajou Dracula (Konami)/Akumajou Dracula [HD].zip`
+ *   `Akumajou Dracula (Konami)/Akumajou Dracula (cheat menu 3) [FD].zip`
+ *   …
+ * — 8 .zip variants of the SAME game (region/format/extras splits the
+ * dump community ships separately). Pre-fix the
+ * `hasManySameExtension` rule fired on the 5+ .zip count and pinned
+ * those folders to container, inflating the sidebar from 4 visible
+ * games to 1155 individual file rows.
+ *
+ * The shared-prefix rule pins to atomic when:
+ *   - All filenames (stems, lowercased) share a longest-common-prefix
+ *     of at least `SHARED_PREFIX_MIN_LENGTH` characters, OR
+ *   - The LCP covers at least `SHARED_PREFIX_MIN_RATIO` of the
+ *     shortest stem (catches short-titled games like "Lagoon" where a
+ *     6-char absolute LCP misses the absolute floor but is the entire
+ *     game name), OR
+ *   - The folder's basename (case-insensitive) is itself a prefix of
+ *     every child filename's stem ("Final Fantasy VII/" containing
+ *     "Final Fantasy VII (Disc 1).chd" + "Final Fantasy VII (Disc 2).chd"
+ *     etc).
+ *
+ * The rule needs to fire BEFORE both `hasManySameExtension` (rule 5
+ * pre-fix) AND the disc-collection refinement (rule 2's >5-groups
+ * branch) so a folder of multi-disc releases doesn't accidentally
+ * flip to container.
+ */
+const SHARED_PREFIX_MIN_LENGTH = 10;
+const SHARED_PREFIX_MIN_RATIO = 0.4;
+/**
+ * Even on the ratio path, the LCP must be at least this many
+ * characters. Without this floor a folder of `g1.zip` / `g2.zip` /
+ * `g3.zip` would qualify (1-char LCP, ratio 0.5) — synthetic
+ * test-ish naming the rule isn't meant to catch. Real-world
+ * shared-prefix folders ("Lagoon (FD).zip" etc) clear 3 chars
+ * comfortably.
+ */
+const SHARED_PREFIX_RATIO_MIN_LENGTH = 3;
+
+/**
  * Content-based classifier. Pure: feed it the files / dirs listing for
  * a folder, get back the call. Rule order matters; PR #11 round 5
  * reorders the rules so the X68000 single-game-folder shape
@@ -259,6 +311,16 @@ export function classifyFolder(contents: FolderContents): FolderClassification {
   // disk image pins to atomic, regardless of count. Multi-disk
   // computer games are still one game per folder.
   if (hasFloppyExtension(contents.files)) {
+    return 'atomic';
+  }
+  // fix/count-and-status-indicator commit 1: shared-prefix-atomic
+  // fires AHEAD of the many-same-extension and disc-collection rules
+  // so X68000-shape folders ("Akumajou Dracula (Konami)/" with 8
+  // variant .zip files all sharing the game name) classify atomic
+  // instead of container. Multi-disc releases ("Final Fantasy VII/"
+  // with 3 .chd discs) also catch this rule via the folder-name
+  // branch and stay atomic regardless of the disc-collection count.
+  if (hasSharedPrefixAtomic(contents.files, contents.folderName)) {
     return 'atomic';
   }
   // Disc-marker / track-pattern: atomic in the typical Saturn /
@@ -490,6 +552,77 @@ export function countRomGroups(files: readonly string[]): number {
 function stemOf(filename: string): string {
   const dot = filename.lastIndexOf('.');
   return dot < 0 ? filename : filename.slice(0, dot);
+}
+
+/**
+ * fix/count-and-status-indicator commit 1 — shared-prefix detector.
+ *
+ * Returns true when the folder's filename pattern looks like
+ * "variants of one game" rather than "a collection of games":
+ *   - Folder name (case-insensitive) is a prefix of every child
+ *     filename's stem (`Final Fantasy VII/` containing
+ *     `Final Fantasy VII (Disc 1).chd` etc).
+ *   - LCP across all stems (lowercased, extension-stripped) is at
+ *     least `SHARED_PREFIX_MIN_LENGTH` characters.
+ *   - LCP covers at least `SHARED_PREFIX_MIN_RATIO` of the shortest
+ *     stem (lifts short-titled games like "Lagoon" whose absolute
+ *     LCP is ~6 chars but is the entire game name).
+ *
+ * Single-file folders skip this rule — the existing cart-ext branch
+ * handles "1 cart file = atomic". Two or more files required.
+ */
+function hasSharedPrefixAtomic(
+  files: readonly string[],
+  folderName: string | undefined,
+): boolean {
+  // Filter out OS junk and non-launchable noise so a stray .DS_Store
+  // or a manual.txt can't poison the shared-prefix calc by dragging
+  // the LCP to empty. Same launchable filter the count rule uses.
+  const candidates = files.filter((f) => isLaunchableRomExtension(f));
+  if (candidates.length < 2) return false;
+
+  const stems = candidates.map((f) => stemOf(f).toLowerCase());
+
+  if (folderName !== undefined && folderName.length > 0) {
+    const fNorm = folderName.toLowerCase();
+    if (stems.every((s) => s.startsWith(fNorm))) {
+      return true;
+    }
+  }
+
+  const lcp = longestCommonPrefix(stems);
+  if (lcp.length === 0) return false;
+
+  if (lcp.length >= SHARED_PREFIX_MIN_LENGTH) return true;
+
+  if (lcp.length < SHARED_PREFIX_RATIO_MIN_LENGTH) return false;
+
+  let shortest = stems[0]!.length;
+  for (let i = 1; i < stems.length; i += 1) {
+    if (stems[i]!.length < shortest) shortest = stems[i]!.length;
+  }
+  if (shortest > 0 && lcp.length >= shortest * SHARED_PREFIX_MIN_RATIO) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Longest common prefix across the input strings. Empty when any
+ * string is empty or the strings disagree from the first character.
+ */
+function longestCommonPrefix(strings: readonly string[]): string {
+  if (strings.length === 0) return '';
+  let prefix = strings[0]!;
+  for (let i = 1; i < strings.length; i += 1) {
+    const s = strings[i]!;
+    while (prefix.length > 0 && !s.startsWith(prefix)) {
+      prefix = prefix.slice(0, -1);
+    }
+    if (prefix.length === 0) return '';
+  }
+  return prefix;
 }
 
 /**
