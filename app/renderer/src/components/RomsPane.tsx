@@ -11,6 +11,10 @@ import { toast } from 'sonner';
 import { diagLog } from '@shared/diag-log';
 import { coreDisplayName } from '@shared/core-matching';
 import { isAutoDetectedSystemFile, isSystemFile } from '@shared/system-files';
+import {
+  enumerateRomEntries,
+  metadataLookupPathFor,
+} from '@shared/rom-enumeration';
 import type { CoreEntry, Rom } from '@shared/types';
 
 /**
@@ -198,23 +202,16 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     // renderer's row render does the lookup via `containedRomPath`.
     // Container folders stay out — they're drilled into for their
     // contents.
-    const filePaths: string[] = [];
-    // PR-D1 round 2 (PR #27 round 2): track the subset that lives
-    // inside atomic folders so the orchestrator emits a parent-folder
-    // name-search hint only for those — organizational folders
-    // (NEOGEO `1 World A-Z`, NES `Hacks`) would waste API calls.
-    const atomicFolderPaths: string[] = [];
-    for (const r of roms) {
-      if (r.kind === 'file') {
-        filePaths.push(r.path);
-      } else if (
-        r.kind === 'folder-atomic' &&
-        r.containedRomPath !== undefined
-      ) {
-        filePaths.push(r.containedRomPath);
-        atomicFolderPaths.push(r.containedRomPath);
-      }
-    }
+    // feat/atomic-folder-consistency: enumerateRomEntries collapses
+    // atomic folders to a single entry whose `path` is the contained
+    // primary file's path — exactly what the cache wants. The
+    // atomicFolderPaths set keys orchestrator name-search hint
+    // routing.
+    const entries = enumerateRomEntries(roms);
+    const filePaths = entries.map((e) => e.path);
+    const atomicFolderPaths = entries
+      .filter((e) => e.kind === 'atomic-folder')
+      .map((e) => e.path);
     if (filePaths.length === 0) return;
     // PR-D1 round 2 (PR #27 round 2): optimistic-render path. Read
     // the disk cache snapshot first (no SSH, no SS — instant) and
@@ -318,24 +315,16 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
       });
       return;
     }
-    // PR-D1 (PR #27): same containedRomPath inclusion as the
-    // initial-prefetch path. Atomic-folder rows resume their
-    // metadata fetch via the contained file's hash on reconnect.
-    // Round 2: track atomic subset for the parent-folder hint
-    // gating, same as the initial-prefetch path.
-    const filePaths: string[] = [];
-    const atomicFolderPathsAll: string[] = [];
-    for (const r of roms) {
-      if (r.kind === 'file') {
-        filePaths.push(r.path);
-      } else if (
-        r.kind === 'folder-atomic' &&
-        r.containedRomPath !== undefined
-      ) {
-        filePaths.push(r.containedRomPath);
-        atomicFolderPathsAll.push(r.containedRomPath);
-      }
-    }
+    // feat/atomic-folder-consistency: same enumerateRomEntries shape
+    // as the initial-prefetch path. Atomic-folder rows resume their
+    // metadata fetch via the contained file's hash on reconnect; the
+    // atomicFolderPaths set keys orchestrator name-search hint
+    // routing.
+    const resumeEntries = enumerateRomEntries(roms);
+    const filePaths = resumeEntries.map((e) => e.path);
+    const atomicFolderPathsAll = resumeEntries
+      .filter((e) => e.kind === 'atomic-folder')
+      .map((e) => e.path);
     const pending = filePaths.filter((p) => {
       const entry = metadataByPath[p];
       return entry === undefined || entry.error;
@@ -433,15 +422,12 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
     // the pane consumes.
     const withMeta = filtered.map((rom) => ({
       rom,
-      // PR-D1 (PR #27): atomic-folder rows sort by their contained
-      // primary file's metadata so the folder's display name in the
-      // sort matches what the row visually shows. Files + container
-      // folders look up by their own path.
-      metadata: metadataByPath[
-        rom.kind === 'folder-atomic' && rom.containedRomPath !== undefined
-          ? rom.containedRomPath
-          : rom.path
-      ]?.metadata,
+      // feat/atomic-folder-consistency: `metadataLookupPathFor`
+      // centralizes the atomic-folder-uses-containedRomPath rule.
+      // Container folders return null → metadata undefined → row
+      // sorts by displayName, same as before.
+      metadata:
+        metadataByPath[metadataLookupPathFor(rom) ?? rom.path]?.metadata,
     }));
     return sortRoms(withMeta, sortState).map((r) => r.rom);
   }, [roms, showHidden, showSystem, systemFlags, metadataByPath, sortState]);
@@ -824,11 +810,11 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
 
     // PR-D2 (PR #29) — manual override entries. "Edit metadata..."
     // opens the field-edit modal; gated on metadata existing for
-    // this row. The search-modal entry ships in commit 5.
-    const lookupPath =
-      rom.kind === 'folder-atomic' && rom.containedRomPath !== undefined
-        ? rom.containedRomPath
-        : rom.path;
+    // this row. feat/atomic-folder-consistency: the lookup path for
+    // atomic folders comes from the central `metadataLookupPathFor`
+    // (returns containedRomPath); falls back to rom.path on null
+    // (file rows + the defensive empty-atomic-folder case).
+    const lookupPath = metadataLookupPathFor(rom) ?? rom.path;
     const hasMetadata = metadataByPath[lookupPath]?.metadata !== undefined &&
       metadataByPath[lookupPath]?.metadata !== null;
     items.push({

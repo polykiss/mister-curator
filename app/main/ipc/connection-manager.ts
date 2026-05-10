@@ -32,6 +32,7 @@ import type {
 } from '@shared/mister-client';
 import { diagLog } from '@shared/diag-log';
 import { EMPTY_FOLDER_CLASSIFICATIONS } from '@shared/folder-classifications';
+import { mergeRecursivePathsWithAtomicFolders } from '@shared/rom-enumeration';
 import { EMPTY_SYSTEM_FILES_MARKS } from '@shared/system-files-marks';
 import { witnessesMatch } from '@app/main/cache/cache-types';
 import type {
@@ -652,18 +653,62 @@ export class ConnectionManager {
    * sidebar's integer count — pre-round-2 the engine asked
    * `listRoms(coreId, '', {})` and got only top-level entries.
    *
+   * feat/atomic-folder-consistency: the recursive list is now
+   * post-filtered against the top-level atomic-folder set. For each
+   * top-level atomic folder (e.g. an X68000 multi-disk game folder),
+   * we drop EVERY contained-file path the recursive find produced
+   * and replace them with the folder's single contained primary
+   * path (`Rom.containedRomPath`). For X68000 with ~647 atomic
+   * floppy folders × 2.25 disks each, that's ~1455 paths reduced
+   * to ~647 — every disk no longer gets hashed individually + the
+   * same folder-name search no longer runs 2-4 times per game.
+   *
+   * The returned set carries the atomic-folder paths so the
+   * orchestrator's `getRomsMetadata(atomicFolderPaths)` can route
+   * those paths' name-search through the parent folder name (the
+   * strongest hint when hash misses on a floppy disk image, which
+   * is essentially never indexed by SS at the disk level).
+   *
+   * Nested classification — atomic folders inside a top-level
+   * container — is out of scope for this commit. Top-level
+   * containers' contents pass through verbatim (the recursive
+   * find result), same as today.
+   *
    * Per-core SSH find runs lazily when the engine reaches the core
    * (~1-2s), not upfront. For 60 cores total that's ~60-120s of
    * SSH overhead spread across the multi-minute scraping window —
    * negligible relative to scrape time.
    */
-  async listAllRomPathsForCore(coreId: string): Promise<readonly string[]> {
+  async listAllRomPathsForCore(coreId: string): Promise<{
+    readonly paths: readonly string[];
+    readonly atomicFolderPaths: ReadonlySet<string>;
+  }> {
     this.assertConnected();
     const gamesDirBasename = this.resolveOnDiskGamesDirBasename(coreId);
-    return this.client.listRecursiveRomFiles({
+
+    // Recursive find: every launchable file under the games dir,
+    // classification-blind.
+    const recursivePaths = await this.client.listRecursiveRomFiles({
       coreId,
       gamesDirBasename,
       marks: this.systemFilesMarksCache,
+    });
+    // Top-level row classification — `listRoms` returns one Rom per
+    // top-level entry with a `kind` discriminator + `containedRomPath`
+    // for atomic folders.
+    const topLevelRoms = await this.client.listRoms(
+      coreId,
+      '',
+      this.folderClassificationsCache,
+    );
+    // The merge: dedupe contained-file paths inside top-level atomic
+    // folders to a single representative each, plus the
+    // atomicFolderPaths set the orchestrator routes name-search hints
+    // by. See `mergeRecursivePathsWithAtomicFolders` for the full
+    // rule + nested-classification scope note.
+    return mergeRecursivePathsWithAtomicFolders({
+      recursivePaths,
+      topLevelRoms,
     });
   }
 

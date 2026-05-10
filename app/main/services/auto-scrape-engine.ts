@@ -71,22 +71,42 @@ export type AutoScrapeListener = (event: AutoScrapeEvent) => void;
 /**
  * Everything the engine needs from the outside world. Kept as a
  * narrow interface so tests pass in-memory fakes; production wires
- * `listRomPaths` to `ConnectionManager.listRoms` and `scrape` to
- * `MetadataOrchestrator.getRomsMetadata`.
+ * `listRomPaths` to `ConnectionManager.listAllRomPathsForCore` and
+ * `scrape` to `MetadataOrchestrator.getRomsMetadata`.
+ *
+ * feat/atomic-folder-consistency: `listRomPaths` returns
+ * `ScrapeTargets` (paths + atomicFolderPaths set) instead of just
+ * paths. The atomicFolderPaths set threads through `scrape` so the
+ * orchestrator can route those paths' name-search through the
+ * parent folder name (the strongest hint when hash misses on a
+ * floppy-disk image, which is essentially never indexed by SS at
+ * the disk level). For X68000 this collapses ~1455 per-disk paths
+ * into ~647 per-game paths — every disk no longer hashes individually
+ * + the same folder-name search no longer runs 2-4 times per game.
  */
+export interface ScrapeTargets {
+  readonly paths: readonly string[];
+  readonly atomicFolderPaths: ReadonlySet<string>;
+}
+
 export interface AutoScrapeDeps {
-  /** Resolve the list of ROM paths to scrape for a given core. */
-  readonly listRomPaths: (coreId: string) => Promise<readonly string[]>;
+  /** Resolve the scrape targets for a given core. */
+  readonly listRomPaths: (coreId: string) => Promise<ScrapeTargets>;
   /**
    * Scrape one core. Calls `onPathResolved` after each path finishes
    * (resolved, errored, or sentinel — every terminal state counts).
    * Reads `shouldAbort()` between paths and exits early when true,
    * leaving the partial work in the cache (which is the source of
    * truth for "this path is scanned").
+   *
+   * `targets.atomicFolderPaths` is forwarded to the orchestrator so
+   * paths that came from atomic folders get
+   * `parentFolderIsAtomic=true` — the routing key for the SS
+   * name-search hint pipeline.
    */
   readonly scrape: (
     coreId: string,
-    paths: readonly string[],
+    targets: ScrapeTargets,
     onPathResolved: () => void,
     shouldAbort: () => boolean,
   ) => Promise<void>;
@@ -207,14 +227,14 @@ export class AutoScrapeEngine {
         this.currentCoreId = coreId;
         this.abortFlag = false;
         try {
-          const paths = await this.deps.listRomPaths(coreId);
+          const targets = await this.deps.listRomPaths(coreId);
           // The path-list resolution itself can race with a setFocus —
           // re-check the abort flag here so we don't paint a stale
           // "active" event for a core the user just navigated away from.
           if (this.abortFlag || this.isPaused) {
             continue;
           }
-          const total = paths.length;
+          const total = targets.paths.length;
           let done = 0;
           this.emit({
             state: 'active',
@@ -226,7 +246,7 @@ export class AutoScrapeEngine {
           if (total > 0) {
             await this.deps.scrape(
               coreId,
-              paths,
+              targets,
               () => {
                 done += 1;
                 this.emit({

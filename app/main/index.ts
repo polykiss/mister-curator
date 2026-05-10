@@ -238,12 +238,18 @@ void app.whenReady().then(() => {
     // exactly the files the sidebar count promised.
     listRomPaths: async (coreId) =>
       manager.listAllRomPathsForCore(coreId),
-    scrape: async (coreId, paths, onPathResolved, shouldAbort) => {
+    scrape: async (coreId, targets, onPathResolved, shouldAbort) => {
+      // feat/atomic-folder-consistency: forward `atomicFolderPaths`
+      // so the orchestrator routes those paths' name-search through
+      // the parent folder name (the strongest hint when the disk
+      // image's hash misses, which is essentially always for floppy
+      // formats SS doesn't index per-disk).
       await metadataOrchestrator.getRomsMetadata(
         coreId,
-        paths,
+        targets.paths,
         () => onPathResolved(),
         shouldAbort,
+        targets.atomicFolderPaths,
       );
     },
   });

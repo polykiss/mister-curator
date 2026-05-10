@@ -15,23 +15,40 @@ import {
  */
 function makeEngine(args: {
   readonly pathsByCore?: Record<string, readonly string[]>;
+  /**
+   * feat/atomic-folder-consistency: subset of `pathsByCore[coreId]`
+   * the test wants to mark as "came from an atomic folder" so the
+   * engine forwards them to the scrape callback's
+   * `targets.atomicFolderPaths`. Tests that don't care default to
+   * an empty set (legacy file-only behavior).
+   */
+  readonly atomicFolderPathsByCore?: Record<string, ReadonlySet<string>>;
   readonly scrapeOverride?: AutoScrapeDeps['scrape'];
 }): {
   readonly engine: AutoScrapeEngine;
   readonly events: AutoScrapeEvent[];
-  readonly scrapeCalls: { coreId: string; paths: readonly string[] }[];
+  readonly scrapeCalls: {
+    coreId: string;
+    paths: readonly string[];
+    atomicFolderPaths: ReadonlySet<string>;
+  }[];
 } {
   const events: AutoScrapeEvent[] = [];
-  const scrapeCalls: { coreId: string; paths: readonly string[] }[] = [];
+  const scrapeCalls: {
+    coreId: string;
+    paths: readonly string[];
+    atomicFolderPaths: ReadonlySet<string>;
+  }[] = [];
   const pathsByCore = args.pathsByCore ?? {};
+  const atomicByCore = args.atomicFolderPathsByCore ?? {};
 
   const defaultScrape: AutoScrapeDeps['scrape'] = async (
     _coreId,
-    paths,
+    targets,
     onPathResolved,
     shouldAbort,
   ) => {
-    for (const _path of paths) { void _path;
+    for (const _path of targets.paths) { void _path;
       if (shouldAbort()) return;
       onPathResolved();
       // Yield the microtask queue so the engine's emit fires before
@@ -41,11 +58,18 @@ function makeEngine(args: {
   };
 
   const deps: AutoScrapeDeps = {
-    listRomPaths: async (coreId) => pathsByCore[coreId] ?? [],
-    scrape: async (coreId, paths, onPathResolved, shouldAbort) => {
-      scrapeCalls.push({ coreId, paths });
+    listRomPaths: async (coreId) => ({
+      paths: pathsByCore[coreId] ?? [],
+      atomicFolderPaths: atomicByCore[coreId] ?? new Set(),
+    }),
+    scrape: async (coreId, targets, onPathResolved, shouldAbort) => {
+      scrapeCalls.push({
+        coreId,
+        paths: targets.paths,
+        atomicFolderPaths: targets.atomicFolderPaths,
+      });
       const fn = args.scrapeOverride ?? defaultScrape;
-      await fn(coreId, paths, onPathResolved, shouldAbort);
+      await fn(coreId, targets, onPathResolved, shouldAbort);
     },
   };
 
@@ -81,6 +105,58 @@ describe('AutoScrapeEngine', () => {
       // EMPTY has no paths — scrape is never called for it (the
       // engine guards on `total > 0`). NES still runs.
       expect(scrapeCalls.map((c) => c.coreId)).toEqual(['NES']);
+    });
+  });
+
+  describe('atomicFolderPaths threading (feat/atomic-folder-consistency)', () => {
+    // The engine takes `ScrapeTargets` ({ paths, atomicFolderPaths })
+    // from listRomPaths and forwards both fields to scrape so the
+    // orchestrator can route atomic-folder paths through the
+    // parent-folder name-search.
+    it('forwards atomicFolderPaths from listRomPaths into the scrape call verbatim', async () => {
+      const atomicSet = new Set([
+        '/media/fat/games/X68000/Carrot Party/disk1.dim',
+        '/media/fat/games/X68000/Some Game/main.dim',
+      ]);
+      const { engine, scrapeCalls } = makeEngine({
+        pathsByCore: {
+          X68000: [
+            '/media/fat/games/X68000/loose-rom.zip',
+            '/media/fat/games/X68000/Carrot Party/disk1.dim',
+            '/media/fat/games/X68000/Some Game/main.dim',
+          ],
+        },
+        atomicFolderPathsByCore: { X68000: atomicSet },
+      });
+      engine.start(['X68000']);
+      await flush();
+      expect(scrapeCalls).toHaveLength(1);
+      expect(scrapeCalls[0]?.atomicFolderPaths).toBe(atomicSet);
+      // Loose ROM is NOT in the atomic set; the contained-file paths
+      // ARE. Membership is what the orchestrator branches on.
+      expect(
+        scrapeCalls[0]?.atomicFolderPaths.has(
+          '/media/fat/games/X68000/loose-rom.zip',
+        ),
+      ).toBe(false);
+      expect(
+        scrapeCalls[0]?.atomicFolderPaths.has(
+          '/media/fat/games/X68000/Carrot Party/disk1.dim',
+        ),
+      ).toBe(true);
+    });
+
+    it('defaults to an empty atomicFolderPaths set when listRomPaths returns none', async () => {
+      // Cores with no atomic folders (SNES + zips, NES + nes files)
+      // get an empty set. The orchestrator's atomicFolderPaths.has(p)
+      // check returns false for everything — same behavior as the
+      // pre-feature code path.
+      const { engine, scrapeCalls } = makeEngine({
+        pathsByCore: { SNES: ['/media/fat/games/SNES/Sonic.zip'] },
+      });
+      engine.start(['SNES']);
+      await flush();
+      expect(scrapeCalls[0]?.atomicFolderPaths.size).toBe(0);
     });
   });
 
@@ -136,11 +212,11 @@ describe('AutoScrapeEngine', () => {
       let resolveFirstPath: () => void = (): void => undefined;
       const slowScrape: AutoScrapeDeps['scrape'] = async (
         _coreId,
-        paths,
+        targets,
         onPathResolved,
         shouldAbort,
       ) => {
-        for (const _path of paths) { void _path;
+        for (const _path of targets.paths) { void _path;
           if (shouldAbort()) return;
           await new Promise<void>((r) => {
             resolveFirstPath = r;
@@ -187,11 +263,11 @@ describe('AutoScrapeEngine', () => {
       let resolveFirstPath: () => void = (): void => undefined;
       const slowScrape: AutoScrapeDeps['scrape'] = async (
         _coreId,
-        paths,
+        targets,
         onPathResolved,
         shouldAbort,
       ) => {
-        for (const _path of paths) { void _path;
+        for (const _path of targets.paths) { void _path;
           if (shouldAbort()) return;
           await new Promise<void>((r) => {
             resolveFirstPath = r;
@@ -225,11 +301,11 @@ describe('AutoScrapeEngine', () => {
       let resolveCurrent: () => void = (): void => undefined;
       const slowScrape: AutoScrapeDeps['scrape'] = async (
         _coreId,
-        paths,
+        targets,
         onPathResolved,
         shouldAbort,
       ) => {
-        for (const _path of paths) { void _path;
+        for (const _path of targets.paths) { void _path;
           if (shouldAbort()) return;
           await new Promise<void>((r) => {
             resolveCurrent = r;
@@ -381,11 +457,11 @@ describe('AutoScrapeEngine', () => {
       let resolveCurrent: () => void = (): void => undefined;
       const slowScrape: AutoScrapeDeps['scrape'] = async (
         _coreId,
-        paths,
+        targets,
         onPathResolved,
         shouldAbort,
       ) => {
-        for (const _path of paths) { void _path;
+        for (const _path of targets.paths) { void _path;
           if (shouldAbort()) return;
           await new Promise<void>((r) => {
             resolveCurrent = r;
@@ -449,12 +525,12 @@ describe('AutoScrapeEngine', () => {
       let engineRef: AutoScrapeEngine | null = null;
       const scrape: AutoScrapeDeps['scrape'] = async (
         coreId,
-        paths,
+        targets,
         onResolved,
         shouldAbort,
       ) => {
         let count = 0;
-        for (const _path of paths) { void _path;
+        for (const _path of targets.paths) { void _path;
           if (shouldAbort()) {
             if (coreId === 'SNES' && firstSnesScrapePathsResolved.length === 0) {
               firstSnesScrapePathsResolved.push(count);
