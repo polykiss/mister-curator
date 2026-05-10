@@ -27,8 +27,15 @@ const HASH_CACHE_SCHEMA_VERSION = 1 as const;
  *                           one pass per file. SHA-1 alongside MD5
  *                           lets ScreenScraper match either hash;
  *                           cached size feeds SS's `romtaille`.
+ *   v4 (fix/scrape-and-count-correctness commit 1):
+ *                           adds `diskSizeBytes` (wrapper bytes via
+ *                           `stat -c %s`) alongside the existing
+ *                           extracted `size`. For non-archive paths
+ *                           the two are identical; for `.zip` they
+ *                           differ. Forces a re-hash so older entries
+ *                           pick up the new field.
  */
-const HASH_STRATEGY_VERSION = 3 as const;
+const HASH_STRATEGY_VERSION = 4 as const;
 
 /** Cap per SSH round-trip. Larger inputs chunk in JS. */
 const DEFAULT_BATCH_SIZE = 100;
@@ -38,12 +45,16 @@ const DEFAULT_BATCH_SIZE = 100;
  * (cache invalidation key — what the user actually touches). md5
  * and sha1 are hashes of the EXTRACTED ROM content (inner-file for
  * .zip wrappers, raw bytes for direct files). size is the extracted
- * byte count, matching SS's `romtaille` semantics.
+ * byte count, matching SS's `romtaille` semantics. diskSizeBytes is
+ * the wrapper's `stat -c %s` value — what the file system says the
+ * file is — which differs from `size` for `.zip` archives and is
+ * the right number for any "size on disk" display.
  */
 export interface HashEntry {
   readonly md5: string;
   readonly sha1: string;
   readonly size: number;
+  readonly diskSizeBytes: number;
   readonly mtime: number;
   readonly hashedAt: string;
 }
@@ -367,6 +378,7 @@ export class HashService {
           md5: r.md5,
           sha1: r.sha1,
           size: r.size,
+          diskSizeBytes: r.diskSize,
           mtime: r.mtime,
           hashedAt: nowIso,
         };
@@ -377,6 +389,7 @@ export class HashService {
           path: pathBasename(r.path),
           md5: r.md5,
           size: r.size,
+          diskSize: r.diskSize,
         });
       }
     }
@@ -485,9 +498,16 @@ export class HashService {
       md5: r.md5,
       sha1: r.sha1,
       size: r.size,
+      diskSizeBytes: r.diskSize,
       mtime: r.mtime,
       hashedAt: this.now().toISOString(),
     };
+    diagLog('info', 'meta', '·', 'hash-computed', {
+      path: pathBasename(r.path),
+      md5: r.md5,
+      size: r.size,
+      diskSize: r.diskSize,
+    });
     const entries = await this.loadEntries(host);
     const next = { ...entries, [r.path]: entry };
     this.memCache.set(host, next);
@@ -615,6 +635,7 @@ function isHashEntry(v: unknown): v is HashEntry {
     typeof o.md5 === 'string' &&
     typeof o.sha1 === 'string' &&
     typeof o.size === 'number' &&
+    typeof o.diskSizeBytes === 'number' &&
     typeof o.mtime === 'number' &&
     typeof o.hashedAt === 'string'
   );

@@ -852,6 +852,11 @@ export class FakeMisterClient implements IMisterClient {
         md5: hashes.md5,
         sha1: hashes.sha1,
         size: hashes.size,
+        // fix/scrape-and-count-correctness commit 1: emit wrapper
+        // disk bytes alongside the (possibly extracted) `size`. For
+        // non-archives the two coincide; for `.zip` they differ
+        // exactly the way the real device-side script reports them.
+        diskSize: st.size,
         mtime: Math.floor(st.mtimeMs / 1000),
       });
     }

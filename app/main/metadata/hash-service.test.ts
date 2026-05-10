@@ -14,6 +14,12 @@ interface FixtureHash {
   readonly md5: string;
   readonly sha1: string;
   readonly size: number;
+  /**
+   * Wrapper bytes-on-disk. Defaults to `size` (matching the
+   * non-archive case where extracted == wrapper). Override to model
+   * the .zip case where they differ.
+   */
+  readonly diskSize?: number;
   readonly mtime: number;
 }
 
@@ -42,6 +48,11 @@ function makeClient(opts: {
             md5: rec.md5,
             sha1: rec.sha1,
             size: rec.size,
+            // The fixture's `size` doubles as the disk-size for tests
+            // — non-archive fixtures coincide naturally; archive
+            // fixtures override via `diskSize` when they need to
+            // exercise the wrapper-vs-extracted distinction.
+            diskSize: rec.diskSize ?? rec.size,
             mtime: rec.mtime,
           };
         })
@@ -115,7 +126,10 @@ describe('HashService', () => {
       entries: Record<string, FixtureHash & { hashedAt: string }>;
     };
     expect(raw.version).toBe(1);
-    expect(raw.hashStrategyVersion).toBe(3); // PR #16 round 2 bump
+    // fix/scrape-and-count-correctness commit 1: bump from v3 to v4
+    // when `diskSizeBytes` was added. v3 entries get re-hashed on
+    // first read so the new field populates.
+    expect(raw.hashStrategyVersion).toBe(4);
     expect(raw.host).toBe('host-1');
     expect(raw.entries['/media/fat/games/A.sfc']?.md5).toBe('a'.repeat(32));
     expect(raw.entries['/media/fat/games/A.sfc']?.sha1).toBe('a'.repeat(40));
@@ -302,7 +316,9 @@ describe('HashService', () => {
       );
     }
 
-    it('writes hashStrategyVersion: 3 alongside the v1 schema field', async () => {
+    it('writes hashStrategyVersion: 4 alongside the v1 schema field', async () => {
+      // fix/scrape-and-count-correctness commit 1 bumped to v4 when
+      // `diskSizeBytes` was added to HashEntry.
       const svc = new HashService(dir);
       const hashes = new Map([['/p/a', fix('a', 1, 1)]]);
       await svc.getHash(makeClient({ hashes }), 'host-1', ['/p/a']);
@@ -310,7 +326,7 @@ describe('HashService', () => {
         await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
       ) as { version: number; hashStrategyVersion: number };
       expect(raw.version).toBe(1);
-      expect(raw.hashStrategyVersion).toBe(3);
+      expect(raw.hashStrategyVersion).toBe(4);
     });
 
     it('treats a v2 (md5-only) cache as invalid and re-hashes', async () => {
@@ -382,16 +398,17 @@ describe('HashService', () => {
       expect(client.hashCalls).toHaveLength(1);
     });
 
-    it('serves a current-version cache with full triple without re-hashing', async () => {
+    it('serves a current-version cache with full quad without re-hashing', async () => {
       await seedCache('host-1', {
         version: 1,
-        hashStrategyVersion: 3,
+        hashStrategyVersion: 4,
         host: 'host-1',
         entries: {
           '/p/a': {
             md5: 'c'.repeat(32),
             sha1: 'd'.repeat(40),
             size: 4242,
+            diskSizeBytes: 1234,
             mtime: 100,
             hashedAt: '2025-01-01T00:00:00.000Z',
           },
@@ -406,7 +423,73 @@ describe('HashService', () => {
       expect(result.get('/p/a')?.md5).toBe('c'.repeat(32));
       expect(result.get('/p/a')?.sha1).toBe('d'.repeat(40));
       expect(result.get('/p/a')?.size).toBe(4242);
+      expect(result.get('/p/a')?.diskSizeBytes).toBe(1234);
       expect(client.hashCalls).toEqual([]);
+    });
+
+    it('treats a v3 cache (missing diskSizeBytes) as invalid and re-hashes', async () => {
+      // The user observation that motivated commit 1: cache `size`
+      // looked stale because it was extracted-content bytes, not
+      // wrapper bytes. v3 entries lack the new `diskSizeBytes` field,
+      // so the validator returns null and a re-hash populates both
+      // fields fresh.
+      await seedCache('host-1', {
+        version: 1,
+        hashStrategyVersion: 3,
+        host: 'host-1',
+        entries: {
+          '/p/a': {
+            md5: 'a'.repeat(32),
+            sha1: 'a'.repeat(40),
+            size: 100,
+            mtime: 100,
+            hashedAt: '2025-01-01T00:00:00.000Z',
+          },
+        },
+      });
+      const svc = new HashService(dir);
+      const hashes = new Map([['/p/a', fix('z', 1, 100)]]);
+      const client = makeClient({ hashes });
+      const result = await svc.getHash(client, 'host-1', ['/p/a']);
+      expect(result.get('/p/a')?.md5).toBe('z'.repeat(32));
+      expect(result.get('/p/a')?.diskSizeBytes).toBeDefined();
+      expect(client.hashCalls).toHaveLength(1);
+    });
+
+    it('persists wrapper diskSizeBytes distinctly from extracted size', async () => {
+      // Verifies the load-bearing fix from commit 1: the cache now
+      // records BOTH the extracted-content size (existing `size`,
+      // which still feeds SS romtaille) and the wrapper-bytes-on-disk
+      // (`diskSizeBytes`, what the size column displays). For the
+      // `.grdians.zip` reproduction case those numbers differ.
+      const svc = new HashService(dir);
+      const hashes = new Map<string, FixtureHash>([
+        [
+          '/media/fat/games/mame/grdians.zip',
+          {
+            md5: '5'.repeat(32),
+            sha1: '7'.repeat(40),
+            size: 36700160,
+            diskSize: 14199857,
+            mtime: 1709054222,
+          },
+        ],
+      ]);
+      const client = makeClient({ hashes });
+      await svc.getHash(client, 'host-1', [
+        '/media/fat/games/mame/grdians.zip',
+      ]);
+      const raw = JSON.parse(
+        await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
+      ) as {
+        entries: Record<
+          string,
+          { size: number; diskSizeBytes: number }
+        >;
+      };
+      const e = raw.entries['/media/fat/games/mame/grdians.zip'];
+      expect(e?.size).toBe(36700160);
+      expect(e?.diskSizeBytes).toBe(14199857);
     });
   });
 

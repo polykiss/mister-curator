@@ -378,7 +378,13 @@ export interface IMisterClient {
  *   - md5: 32-char lowercase hex
  *   - sha1: 40-char lowercase hex
  *   - size: bytes of the (extracted) ROM content; for .zip wrappers
- *     this is the inner-file size, for direct files the wrapper size
+ *     this is the inner-file size, for direct files the wrapper size.
+ *     This is what ScreenScraper's `romtaille` expects.
+ *   - diskSize: bytes of the wrapper file on disk (`stat -c %s`). For
+ *     non-archive paths this equals `size`; for .zip wrappers this is
+ *     the compressed wrapper size, distinct from the extracted `size`.
+ *     Surfaces the user-visible "what does the file system say this
+ *     is?" answer alongside the SS-matching extracted size.
  *   - mtime: epoch seconds of the wrapper file (cache invalidation
  *     key — what the user actually touches)
  */
@@ -387,6 +393,7 @@ export interface HashRecord {
   readonly md5: string;
   readonly sha1: string;
   readonly size: number;
+  readonly diskSize: number;
   readonly mtime: number;
 }
 
