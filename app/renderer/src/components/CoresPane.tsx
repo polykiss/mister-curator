@@ -465,31 +465,28 @@ function densityValueFor(core: CoreEntry): number {
 
 /**
  * Cores-list count summary. PR-B (PR #24): one exact integer per core
- * — the recursive-walk launchable-ROM count from the matcher. The
- * previous "X folders · ~Y ROMs" breakdown was dropped along with
- * the "~" tilde:
+ * — the recursive-walk launchable-ROM count from the matcher.
  *
- *   • Folders are no longer a distinct concept in the sidebar — they
- *     drill down into contents and contribute their filtered file
- *     counts (or 1 for atomic folders) to the single number here.
- *   • The "~" tilde meant "approximate". The matcher's count IS now
- *     exact (positive launchable-extension filter on top of the
- *     existing system-file filter — no more .png / .ips / .nfo
- *     inflation).
- *
- * Falls back to `romCount` when `recursiveRomCount` is undefined
- * (matcher input lacked subfolder data — shouldn't happen in
- * production, kept for legacy fixture compatibility). The hidden-
- * count parenthetical stays — it's distinct information (how many
- * of the visible total are dot-prefixed).
+ * fix/scrape-and-count-correctness commit 5:
+ *   • The hidden-count parenthetical drops the "hidden" word — the
+ *     muted dim-grey paren is the visual cue, the count is the
+ *     payload. PR #38 commit 3 originally dropped the word; a later
+ *     refactor brought it back. Pinned via test now.
+ *   • Both numerator and parenthetical pull from `recursive*Count`,
+ *     so "100 (50)" reports "50 of those 100 total are hidden" with
+ *     a consistent basis. Pre-fix the parenthetical drew from
+ *     `hiddenCount` (top-level only) while the visible total drew
+ *     from `recursiveRomCount` (whole walk) — incoherent for cores
+ *     with hidden ROMs nested inside container subfolders.
  */
-function CoreCountSummary({ core }: { readonly core: CoreEntry }): JSX.Element {
+export function CoreCountSummary({ core }: { readonly core: CoreEntry }): JSX.Element {
   const total = core.recursiveRomCount ?? core.romCount;
+  const hidden = core.recursiveHiddenCount ?? core.hiddenCount;
   return (
     <>
       <span className="min-w-[2.5rem] text-right">{total}</span>
-      {core.hiddenCount > 0 ? (
-        <span className="text-fg-disabled">({core.hiddenCount} hidden)</span>
+      {hidden > 0 ? (
+        <span className="text-fg-disabled">({hidden})</span>
       ) : null}
     </>
   );
