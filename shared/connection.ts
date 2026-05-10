@@ -20,11 +20,19 @@ import type { ConnectionErrorCode, MisterProfile } from '@shared/types';
 export const CONNECTING_REVEAL_MS = 3_000;
 
 /**
- * After 8 seconds, soften the message ("Still connecting… your MiSTer
+ * After 15 seconds, soften the message ("Still connecting… your MiSTer
  * may be slow to respond."). The user knows something is up but
  * shouldn't think the app is broken.
+ *
+ * fix/auto-scrape-correctness-suite: bumped from 8s → 15s. Real
+ * MiSTer connects routinely take 10-12s on slow SD cards / WiFi-
+ * attached hardware (the prime-connect path stats every games dir
+ * + reads the ledger + marks files in one round-trip; first run
+ * after a power cycle hits cold filesystem caches). Below the new
+ * threshold the user sees the steady "Connecting… (Ns)" tick;
+ * above it the softer "Still connecting…" message takes over.
  */
-export const STILL_CONNECTING_MS = 8_000;
+export const STILL_CONNECTING_MS = 15_000;
 
 /**
  * Mid-session reconnect backoff. Three attempts, then surface the

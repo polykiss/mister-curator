@@ -70,20 +70,26 @@ describe('formatConnectingMessage', () => {
   });
 
   it('shows seconds-counted message between reveal and still-connecting', () => {
+    // fix/auto-scrape-correctness-suite — STILL_CONNECTING_MS
+    // bumped from 8s → 15s to accommodate normal ~12s connects.
+    // Inside the window the user sees the "(Ns)" tick, not the
+    // "Still connecting…" softening.
     expect(formatConnectingMessage(CONNECTING_REVEAL_MS)).toBe(
       'Connecting… (3s)',
     );
     expect(formatConnectingMessage(5_000)).toBe('Connecting… (5s)');
+    expect(formatConnectingMessage(12_000)).toBe('Connecting… (12s)');
+    expect(formatConnectingMessage(14_000)).toBe('Connecting… (14s)');
     expect(formatConnectingMessage(STILL_CONNECTING_MS - 1)).toBe(
-      'Connecting… (7s)',
+      'Connecting… (14s)',
     );
   });
 
-  it('softens the message after the still-connecting threshold', () => {
+  it('softens the message after the still-connecting threshold (15s)', () => {
     expect(formatConnectingMessage(STILL_CONNECTING_MS)).toMatch(
       /Still connecting/,
     );
-    expect(formatConnectingMessage(15_000)).toMatch(/Still connecting/);
+    expect(formatConnectingMessage(16_000)).toMatch(/Still connecting/);
     expect(formatConnectingMessage(60_000)).toMatch(/may be slow/);
   });
 
