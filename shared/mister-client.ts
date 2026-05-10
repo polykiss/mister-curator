@@ -1,4 +1,4 @@
-import type { WitnessMtimes } from '@shared/prime-parse';
+import type { SizeAndMtime, WitnessMtimes } from '@shared/prime-parse';
 import type {
   CoreEntry,
   FolderClassifications,
@@ -351,6 +351,20 @@ export interface IMisterClient {
    * treats that as a mismatch via `witnessesMatch`.
    */
   statWitnesses(paths: readonly string[]): Promise<WitnessMtimes>;
+
+  /**
+   * fix/count-and-status-indicator commit 4 — stat (size + mtime)
+   * for a batch of absolute file paths in one SSH round-trip. Used
+   * by the hash-cache v3→v4 lazy migration to populate the new
+   * `diskSizeBytes` field WITHOUT re-running `unzip -p | md5sum`
+   * across thousands of cached entries.
+   *
+   * Paths that don't exist or aren't regular files come back with
+   * `{ size: 0, mtime: 0 }` so the caller can spot the miss.
+   */
+  statPathsWithSize(
+    paths: readonly string[],
+  ): Promise<Record<string, SizeAndMtime>>;
 
   /**
    * Compute md5 + sha1 + size for a batch of absolute file paths in

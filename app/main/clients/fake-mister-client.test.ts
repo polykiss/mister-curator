@@ -829,6 +829,41 @@ describe('FakeMisterClient', () => {
     });
   });
 
+  describe('statPathsWithSize (fix/count-and-status-indicator commit 4)', () => {
+    it('returns size + mtime for existing files; zeros for missing', async () => {
+      const result = await client.statPathsWithSize([
+        '/media/fat/games/NES/Castlevania (USA, Europe).nes',
+        '/media/fat/games/NES/__no_such_file__.nes',
+      ]);
+      expect(
+        result['/media/fat/games/NES/Castlevania (USA, Europe).nes'],
+      ).toMatchObject({
+        size: expect.any(Number),
+        mtime: expect.any(Number),
+      });
+      // Missing path → {0, 0} per the contract.
+      expect(result['/media/fat/games/NES/__no_such_file__.nes']).toEqual({
+        size: 0,
+        mtime: 0,
+      });
+    });
+
+    it('returns an empty object for empty input', async () => {
+      expect(await client.statPathsWithSize([])).toEqual({});
+    });
+
+    it('throws when called before connect', async () => {
+      const disconnected = new FakeMisterClient({
+        rootPath: workDir,
+        pristineRootPath: fixturesDir,
+        latencyMs: 0,
+      });
+      await expect(
+        disconnected.statPathsWithSize(['/x']),
+      ).rejects.toThrow();
+    });
+  });
+
   describe('hashPaths', () => {
     it('returns md5 + sha1 + size + diskSize + mtime per file', async () => {
       const targets = [

@@ -75,7 +75,7 @@ import type {
   RomVisibilityChange,
   SystemFileMarkChange,
 } from '@shared/mister-client';
-import type { WitnessMtimes } from '@shared/prime-parse';
+import type { SizeAndMtime, WitnessMtimes } from '@shared/prime-parse';
 
 export interface FakeMisterClientOptions {
   /** Working root that simulates `/media/fat/` on the device. */
@@ -811,6 +811,37 @@ export class FakeMisterClient implements IMisterClient {
       } catch (err) {
         if (isNodeError(err) && err.code === 'ENOENT') {
           out[p] = 0;
+          continue;
+        }
+        throw err;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * fix/count-and-status-indicator commit 4 — fake counterpart to
+   * the device-side stat batch. Mirrors the real client's contract:
+   * missing paths come back as `{ size: 0, mtime: 0 }`.
+   */
+  async statPathsWithSize(
+    paths: readonly string[],
+  ): Promise<Record<string, SizeAndMtime>> {
+    this.assertConnected();
+    if (paths.length === 0) return {};
+    const out: Record<string, SizeAndMtime> = {};
+    for (const p of paths) {
+      const local = this.toLocal(p);
+      try {
+        const st = await fs.stat(local);
+        if (!st.isFile()) {
+          out[p] = { size: 0, mtime: 0 };
+          continue;
+        }
+        out[p] = { size: st.size, mtime: Math.floor(st.mtimeMs / 1000) };
+      } catch (err) {
+        if (isNodeError(err) && err.code === 'ENOENT') {
+          out[p] = { size: 0, mtime: 0 };
           continue;
         }
         throw err;

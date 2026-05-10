@@ -358,6 +358,23 @@ void app.whenReady().then(() => {
       autoScrapeEngine.pause();
       return;
     }
+    // fix/count-and-status-indicator commit 4 — lazy v3→v4 hash-cache
+    // migration. Runs once per connect, before the first prefetch
+    // queues anything. v3 entries with mtimes that still match get
+    // their `diskSizeBytes` populated from a stat batch; the rest
+    // fall through to the existing rehash path. Eliminates the mass
+    // re-hash that the v3→v4 strategy bump from PR #42 commit 1
+    // would otherwise force.
+    const session = manager.getActiveSession();
+    if (session !== null) {
+      try {
+        await hashService.migrateV3Entries(session.client, session.host);
+      } catch {
+        // Migration failure is best-effort. The strict v4 validator
+        // rejects v3 files on next loadEntries, so the existing
+        // rehash path takes over — no worse off than before.
+      }
+    }
     try {
       const cores = await manager.listAllCoresWithFiles({});
       // feat/arcade-phase-1.5 — drop the synthetic Arcade row.
