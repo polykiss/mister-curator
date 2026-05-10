@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import { BrowserWindow, dialog, ipcMain } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
 
+import type { ArcadeMraEntry } from '@shared/arcade-mra';
 import { diagLog, makeIdGen } from '@shared/diag-log';
 import { encodeIpcError, IPC_CHANNELS } from '@shared/preload-api';
 import type {
@@ -328,6 +329,25 @@ export function registerIpcHandlers(
   handle<[string], void>(IPC_CHANNELS.setAutoScrapeFocus, (coreId) => {
     autoScrapeEngine.setFocus(coreId);
   });
+
+  // feat/arcade-phase-1.5 — .mra listing + hide/unhide.
+  handle<
+    [{ readonly forceRefresh?: boolean } | undefined],
+    readonly ArcadeMraEntry[]
+  >(IPC_CHANNELS.listArcadeMraEntries, (options) =>
+    manager.listArcadeMraEntries(options ?? {}),
+  );
+  handle<[string, boolean], void>(
+    IPC_CHANNELS.setArcadeMraVisibility,
+    (relativePath, hidden) =>
+      manager.setArcadeMraVisibility(relativePath, hidden),
+  );
+  handle<
+    [readonly { readonly relativePath: string; readonly hidden: boolean }[]],
+    BulkRomResult
+  >(IPC_CHANNELS.setBulkArcadeMraVisibility, (changes) =>
+    manager.setBulkArcadeMraVisibility(changes),
+  );
 
   // PR-D1 round 2 (PR #27 round 2): pure-disk cache snapshot for the
   // optimistic-render path. RomsPane fires this on mount/click for
