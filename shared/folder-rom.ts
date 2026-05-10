@@ -217,17 +217,32 @@ const FLOPPY_EXTENSIONS: ReadonlySet<string> = new Set([
 const SAME_EXTENSION_THRESHOLD = 5;
 
 /**
+ * fix/scrape-and-count-correctness commit 3: above this many
+ * distinct game-groups (after `.cue + .bin` grouping), a disc-marker
+ * folder flips from atomic to container — the user is looking at a
+ * collection (PSX `_translations/` with 30 `.iso` files, MegaCD
+ * `Romhacks/` with many discs), not one game. Same numeric threshold
+ * as `SAME_EXTENSION_THRESHOLD` for consistency.
+ *
+ * One Saturn dump = 1 group (the .cue claims its bins) → atomic.
+ * A multi-disc release = 2-4 groups → atomic.
+ * A collection with 6+ discs → container.
+ */
+const DISC_COLLECTION_THRESHOLD = 5;
+
+/**
  * Content-based classifier. Pure: feed it the files / dirs listing for
  * a folder, get back the call. Rule order matters; PR #11 round 5
  * reorders the rules so the X68000 single-game-folder shape
  * (`<game>/<game>.zip`) classifies atomic instead of container:
  *
  *   1. Disc markers / track patterns / floppy-disk images → atomic
- *      (a `.cue` folder full of `.bin`s is the Saturn shape; a
- *      multi-disk X68000 game is `<name>/disk1.dim` + `disk2.dim` +
- *      …; both pin to atomic so the rule-2/3 container signals don't
- *      drag a multi-disk game into drillable). Floppy precedence
- *      added in fix/floppy-folder-classification.
+ *      UNLESS the folder is a flat disc collection (commit 3
+ *      refinement). A `.cue` folder full of `.bin`s is the Saturn
+ *      shape; a multi-disk X68000 game is `<name>/disk1.dim` +
+ *      `disk2.dim` + …; both pin to atomic. But a flat folder with
+ *      6+ distinct disc-image groups (PSX `_translations/` shape)
+ *      flips to container so the user can drill in to pick a game.
  *   2. Has subdirectories → container (likely an organisational tree;
  *      the user expects to drill in).
  *   3. Many files share a single extension → container. Catches NEOGEO
@@ -240,11 +255,23 @@ const SAME_EXTENSION_THRESHOLD = 5;
  *   5. Otherwise → unknown (resolves to atomic for safety).
  */
 export function classifyFolder(contents: FolderContents): FolderClassification {
-  if (
-    hasDiscMarker(contents.files) ||
-    hasTrackPattern(contents.files) ||
-    hasFloppyExtension(contents.files)
-  ) {
+  // Floppy precedence (fix/floppy-folder-classification): any floppy
+  // disk image pins to atomic, regardless of count. Multi-disk
+  // computer games are still one game per folder.
+  if (hasFloppyExtension(contents.files)) {
+    return 'atomic';
+  }
+  // Disc-marker / track-pattern: atomic in the typical Saturn /
+  // MegaCD shape, container when the folder is a flat collection
+  // (commit 3). The threshold check uses `countRomGroups` so a
+  // single `.cue + .bin` set counts as one group, not many.
+  if (hasDiscMarker(contents.files) || hasTrackPattern(contents.files)) {
+    if (
+      contents.dirs.length === 0 &&
+      countRomGroups(contents.files) > DISC_COLLECTION_THRESHOLD
+    ) {
+      return 'container';
+    }
     return 'atomic';
   }
   if (contents.dirs.length > 0) {

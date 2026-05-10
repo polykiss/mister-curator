@@ -430,6 +430,78 @@ describe('classifyFolder — fix/floppy-folder-classification (FLOPPY_EXTENSIONS
   });
 });
 
+describe('classifyFolder — fix/scrape-and-count-correctness commit 3 (disc collection refinement)', () => {
+  // Pre-fix: any folder containing a disc extension pinned to atomic
+  // unconditionally — so a PSX `_translations/` directory holding 30
+  // independent `.iso` files rendered as one drill-down-blocked row.
+  // Post-fix: when the disc-marker rule fires AND the folder is flat
+  // AND > 5 distinct game-groups live there, classify as container so
+  // the user can pick a game.
+
+  it('PSX collection: 30 flat .iso files → container (was atomic)', () => {
+    const files: string[] = [];
+    for (let i = 0; i < 30; i += 1) {
+      files.push(`Translation ${String(i).padStart(2, '0')}.iso`);
+    }
+    expect(classifyFolder({ files, dirs: [] })).toBe('container');
+  });
+
+  it('above the threshold (6 .iso files) → container', () => {
+    const files = [
+      'A.iso', 'B.iso', 'C.iso', 'D.iso', 'E.iso', 'F.iso',
+    ];
+    expect(classifyFolder({ files, dirs: [] })).toBe('container');
+  });
+
+  it('exactly at the threshold (5 .iso files) → atomic', () => {
+    const files = ['A.iso', 'B.iso', 'C.iso', 'D.iso', 'E.iso'];
+    expect(classifyFolder({ files, dirs: [] })).toBe('atomic');
+  });
+
+  it('Saturn shape: 1 .cue + 30 .bin → 1 group → atomic (unchanged)', () => {
+    const files: string[] = ['game.cue'];
+    for (let i = 1; i <= 30; i += 1) {
+      files.push(`game (Track ${String(i).padStart(2, '0')}).bin`);
+    }
+    expect(classifyFolder({ files, dirs: [] })).toBe('atomic');
+  });
+
+  it('multi-disc release: 2 .cue + their .bins → 2 groups → atomic (unchanged)', () => {
+    expect(
+      classifyFolder({
+        files: [
+          'Game.cue',
+          'Game (Track 01).bin',
+          'Game (Track 02).bin',
+          'Game Disc 2.cue',
+          'Game Disc 2 (Track 01).bin',
+        ],
+        dirs: [],
+      }),
+    ).toBe('atomic');
+  });
+
+  it('disc-collection refinement DOES NOT fire when subdirs are present', () => {
+    // Subdirs mean the user organised content into folders — the
+    // dirs rule (or the looksLikeDiscSet shape) handles it.
+    // Refinement only flips flat folders.
+    const files: string[] = [];
+    for (let i = 0; i < 10; i += 1) files.push(`Game ${String(i)}.iso`);
+    expect(
+      classifyFolder({ files, dirs: ['Manuals'] }),
+    ).toBe('atomic');
+  });
+
+  it('floppy precedence still wins over the disc-collection refinement', () => {
+    // A folder with both floppy AND many disc images: floppy pins
+    // first. (Real-world this combo is rare but the rule order is
+    // the load-bearing contract.)
+    const files: string[] = ['game.dim'];
+    for (let i = 0; i < 10; i += 1) files.push(`Game ${String(i)}.iso`);
+    expect(classifyFolder({ files, dirs: [] })).toBe('atomic');
+  });
+});
+
 describe('groupRomFiles — fix/scrape-and-count-correctness commit 2', () => {
   // Disc-set grouping: a `.cue` claims sibling `.bin` files whose
   // basename starts at a name boundary with the cue's stem. Other
