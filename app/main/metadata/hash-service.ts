@@ -399,6 +399,21 @@ export class HashService {
     const cachedPaths = paths.filter((p) => entries[p] !== undefined);
     const uncachedPaths = paths.filter((p) => entries[p] === undefined);
     if (paths.length === 0) return result;
+    // fix/auto-scrape-correctness-suite — log the input vs cache
+    // shape so the user can pin "we asked about N paths, cache had
+    // M entries, K of the input were already cached." If the user
+    // reports `validated=0 needsHash=680` after a session that
+    // successfully hashed paths, this trace pins whether the cache
+    // file came back empty (loadEntries problem) or the input
+    // paths don't match the cached keys (path-normalization
+    // problem).
+    diagLog('info', 'hashes-cache', '·', 'check', {
+      host,
+      paths: paths.length,
+      inMemEntries: Object.keys(entries).length,
+      cachedHits: cachedPaths.length,
+      uncached: uncachedPaths.length,
+    });
     // feat/rename-aware-hash-cache: stat ALL paths so the rename
     // recovery (uncached paths whose mtime uniquely identifies an
     // existing cache entry) can run alongside the normal cached-path
@@ -535,13 +550,43 @@ export class HashService {
   private async loadEntries(host: string): Promise<Record<string, HashEntry>> {
     const cached = this.memCache.get(host);
     if (cached !== undefined) return cached;
-    const file = await readJsonOrNull<unknown>(this.cachePath(host));
-    if (file === null || !isHashCacheFile(file) || file.host !== host) {
+    const path = this.cachePath(host);
+    const file = await readJsonOrNull<unknown>(path);
+    if (file === null) {
+      // fix/auto-scrape-correctness-suite — distinguish "no file
+      // yet" from "file present but rejected" so the user can pin
+      // a write-path failure vs a schema mismatch.
+      diagLog('info', 'hashes-cache', '·', 'load', {
+        host,
+        path,
+        result: 'no-file',
+        entries: 0,
+      });
+      const empty: Record<string, HashEntry> = {};
+      this.memCache.set(host, empty);
+      return empty;
+    }
+    if (!isHashCacheFile(file) || file.host !== host) {
+      diagLog('warn', 'hashes-cache', '·', 'load', {
+        host,
+        path,
+        result: 'rejected',
+        reason: !isHashCacheFile(file)
+          ? 'shape-mismatch'
+          : 'host-mismatch',
+        entries: 0,
+      });
       const empty: Record<string, HashEntry> = {};
       this.memCache.set(host, empty);
       return empty;
     }
     const entries = { ...file.entries };
+    diagLog('info', 'hashes-cache', '·', 'load', {
+      host,
+      path,
+      result: 'ok',
+      entries: Object.keys(entries).length,
+    });
     this.memCache.set(host, entries);
     return entries;
   }
@@ -556,7 +601,17 @@ export class HashService {
       host,
       entries,
     };
-    await writeJsonAtomic(this.cachePath(host), data);
+    const path = this.cachePath(host);
+    await writeJsonAtomic(path, data);
+    // fix/auto-scrape-correctness-suite — log every write so the
+    // user can verify "we wrote N entries to disk" via the trace.
+    // Writes happen per-path-hashed (atomic tmp + rename) plus
+    // on-migration; high frequency expected during a cold scrape.
+    diagLog('info', 'hashes-cache', '·', 'write', {
+      host,
+      path,
+      entries: Object.keys(entries).length,
+    });
   }
 
   private cachePath(host: string): string {
