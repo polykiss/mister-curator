@@ -657,6 +657,17 @@ export class MetadataOrchestrator {
       }
     }
 
+    // fix/auto-scrape-correctness-suite — disambiguate the
+    // "complete" log line. The for-loop emits this unconditionally
+    // when it exits; that includes the early-break path where
+    // shouldAbort fired (the per-iteration `aborted` log is
+    // already there but the trailing `complete` made the trace
+    // confusing). Add an explicit `aborted: 0|1` field so the
+    // engine's downstream "did this complete cleanly" check is
+    // unambiguous for anyone reading the log later.
+    const aborted =
+      shouldAbort?.() === true ||
+      resolved + errors + hashSkipped < romPaths.length;
     diagLog('info', 'prefetch', '←', 'complete', {
       coreId,
       ms: Date.now() - startWall,
@@ -664,6 +675,7 @@ export class MetadataOrchestrator {
       errors,
       hashSkipped,
       total: romPaths.length,
+      aborted: aborted ? 1 : 0,
     });
   }
 

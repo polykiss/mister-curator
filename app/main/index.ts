@@ -339,9 +339,26 @@ void app.whenReady().then(() => {
   // of this session.
   autoScrapeEngine.onCompletion(({ coreId }) => {
     const session = manager.getActiveSession();
-    if (session === null) return;
-    void scrapeStateStore.markScraped(session.host, coreId).catch(() => {
-      /* swallow — disk-write failure shouldn't break the engine */
+    if (session === null) {
+      // fix/auto-scrape-correctness-suite — log the silent-skip
+      // case so the user can tell whether a missing scrape-state
+      // entry is "we never persisted it" vs "we tried and failed".
+      diagLog('warn', 'scrape-state', '·', 'markScraped skipped', {
+        coreId,
+        reason: 'no-active-session',
+      });
+      return;
+    }
+    diagLog('info', 'scrape-state', '·', 'markScraped', {
+      host: session.host,
+      coreId,
+    });
+    void scrapeStateStore.markScraped(session.host, coreId).catch((err) => {
+      diagLog('error', 'scrape-state', '✗', 'markScraped failed', {
+        host: session.host,
+        coreId,
+        err: err instanceof Error ? err.message : String(err),
+      });
     });
   });
 

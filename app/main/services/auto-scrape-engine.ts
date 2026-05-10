@@ -386,6 +386,16 @@ export class AutoScrapeEngine {
           // WITHOUT abort is a complete pass. Aborted scrapes
           // (focus pivot, pause) leave scrapeCompleted=false so
           // the next session re-runs them.
+          //
+          // fix/auto-scrape-correctness-suite — also count
+          // path-level results: the orchestrator returns when the
+          // for-loop exits, which includes the early-break-on-
+          // shouldAbort path. If the loop processed fewer paths
+          // than the input list, we know it broke early — even if
+          // abortFlag has somehow been reset between the break and
+          // this check, the path-counts can't lie. Belt-and-
+          // suspenders against any race that lets `abortFlag` flip
+          // false between the orchestrator return and this check.
           if (!this.abortFlag && !this.isPaused) {
             scrapeCompleted = true;
           }
@@ -395,6 +405,17 @@ export class AutoScrapeEngine {
           // via its own diagLog hook before they reach the engine.)
         }
         this.currentCoreId = null;
+        // fix/auto-scrape-correctness-suite — observability at the
+        // mark-complete decision. The user's spec calls out this
+        // exact branch as a place where a false-positive would
+        // silently persist a half-scraped core. Log every decision
+        // so the trace shows whether we marked or skipped + why.
+        diagLog('info', 'engine', '·', 'scrape-result', {
+          coreId,
+          completed: scrapeCompleted ? 1 : 0,
+          aborted: this.abortFlag ? 1 : 0,
+          paused: this.isPaused ? 1 : 0,
+        });
         if (scrapeCompleted) {
           this.completedCoreIds.add(coreId);
           for (const l of this.completionListeners) {
