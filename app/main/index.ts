@@ -2,6 +2,7 @@ import path from 'node:path';
 
 import { app, BrowserWindow, shell } from 'electron';
 
+import { diagLog } from '@shared/diag-log';
 import type { RomMetadata } from '@shared/metadata-types';
 import { IPC_CHANNELS } from '@shared/preload-api';
 
@@ -380,6 +381,17 @@ void app.whenReady().then(() => {
               SCRAPE_FRESHNESS_WINDOW_MS,
             )
           : new Set<string>();
+      // fix/auto-scrape-correctness-suite — observability at the
+      // seam. The user couldn't tell whether PR #40's seeding was
+      // actually firing because nothing logged here. Emit
+      // host + count + freshness window so the trace shows what we
+      // pulled from disk + whether the seed has anything in it.
+      diagLog('info', 'scrape-state', '·', 'seeding engine.start', {
+        host: session?.host ?? '(no session)',
+        windowMs: SCRAPE_FRESHNESS_WINDOW_MS,
+        seededCount: alreadyCompleted.size,
+        coreIdsCount: coreIds.length,
+      });
       autoScrapeEngine.start(coreIds, alreadyCompleted);
     } catch {
       // listAllCoresWithFiles can fail (SSH dropped right after

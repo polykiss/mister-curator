@@ -39,7 +39,20 @@ export type DiagSubsystem =
   // ImageCache fetch, the orchestrator's bytes wrapper, the IPC
   // hop, and the renderer's useBoxArt → <img> render path. Grep
   // `[boxart]` to follow one URL from request to display.
-  | 'boxart';
+  | 'boxart'
+  // fix/auto-scrape-correctness-suite — auto-scrape engine
+  // lifecycle. Distinct from `prefetch` (the orchestrator) so a
+  // grep `[engine]` isolates the queue / start / pivot / skip /
+  // complete-mark decisions without the per-path noise.
+  | 'engine'
+  // Per-host scrape-state persistence (the "lastScrapedAt" file).
+  // Grep `[scrape-state]` to see seeding on connect, marking on
+  // completion, and the rejection path for aborted scrapes.
+  | 'scrape-state'
+  // Hash cache load / write / mtime-batch decisions. Distinct
+  // from `meta` (the per-path decision tree); grep `[hashes-cache]`
+  // to isolate "did the cache survive between sessions" questions.
+  | 'hashes-cache';
 export type DiagGlyph = '→' | '←' | '✗' | '·';
 
 /**

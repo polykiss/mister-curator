@@ -1,4 +1,5 @@
 import { coreDisplayName } from '@shared/core-matching';
+import { diagLog } from '@shared/diag-log';
 
 /**
  * PR-C (PR #26) — Auto-scrape engine.
@@ -236,6 +237,14 @@ export class AutoScrapeEngine {
     this.completedCoreIds = new Set(
       [...alreadyCompleted].filter((c) => queueSet.has(c)),
     );
+    // fix/auto-scrape-correctness-suite — observability at the
+    // seed seam. The user couldn't tell whether PR #40's seeding
+    // was actually firing because nothing logged here.
+    diagLog('info', 'engine', '·', 'start', {
+      coreIdsCount: coreIds.length,
+      seededRaw: alreadyCompleted.size,
+      seededAfterFilter: this.completedCoreIds.size,
+    });
     if (!this.isLoopRunning) {
       void this.runLoop();
     }
@@ -319,6 +328,13 @@ export class AutoScrapeEngine {
         // successful scrape this session. Continues to the next
         // queue entry without firing any active/scrape events.
         if (this.completedCoreIds.has(coreId)) {
+          // fix/auto-scrape-correctness-suite — log every skip so
+          // the trace surfaces "engine skipping <coreId> — already
+          // scraped recently" per the user's verification spec.
+          diagLog('info', 'engine', '·', 'skip', {
+            coreId,
+            reason: 'already-scraped',
+          });
           continue;
         }
         this.currentCoreId = coreId;
