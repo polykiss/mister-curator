@@ -219,8 +219,8 @@ function FolderTile(props: {
 }
 
 /**
- * Inner content for the Name TableCell — single-line, with optional
- * leading icon. PR-A item 8 promoted year out of this stack into a
+ * Inner content for the Name TableCell — title + (optional) filename
+ * subline. PR-A item 8 promoted year out of this stack into a
  * dedicated `RomYearCell`. The parent owns the surrounding
  * `<TableCell>` so the existing icons (system / folder), click
  * handlers, and dim styling stay where they were.
@@ -232,6 +232,21 @@ function FolderTile(props: {
  * the conditional avoids needing JS scrollWidth detection or a
  * dedicated Tooltip primitive (the codebase doesn't ship one and the
  * existing tooltips throughout the app use the same `title=` pattern).
+ *
+ * feat/filename-in-listings: when the resolved title differs from
+ * the on-disk filename (i.e. metadata gave us a real name), surface
+ * the filename below in muted/smaller style. Disambiguates rows that
+ * share a title but have different region/version tags
+ * (`Sonic the Hedgehog (USA).bin` vs `Sonic the Hedgehog (Japan).bin`)
+ * and confirms the underlying file even when metadata is rich.
+ *
+ * Skipped when:
+ *   • the row is an atomic folder — the folder name IS the
+ *     displayed name; surfacing it again is redundant.
+ *   • the row is a container folder — drill-in is the action; no
+ *     meaningful filename to disambiguate.
+ *   • title === filename (no metadata yet → displayName falls back
+ *     to filename → showing both is duplicated noise).
  */
 export function RomNameInner(
   props: RomMetadataCellProps & { readonly leadingIcon?: ReactNode },
@@ -250,19 +265,50 @@ export function RomNameInner(
   // markup degrades cleanly for the common case.
   const tags =
     metadata !== null && metadata !== undefined ? displayTagsOf(metadata) : [];
+  const showFilename = shouldShowFilenameSubline(rom, displayName);
 
   return (
     <span className="flex min-w-0 items-center gap-2">
       {leadingIcon}
-      <span
-        className={cn('truncate text-body-sm', !dimmed && 'text-fg')}
-        title={displayName}
-      >
-        {displayName}
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span
+          className={cn('truncate text-body-sm', !dimmed && 'text-fg')}
+          title={displayName}
+        >
+          {displayName}
+        </span>
+        {showFilename ? (
+          <span
+            className="truncate text-caption text-fg-muted"
+            title={rom.filename}
+          >
+            {rom.filename}
+          </span>
+        ) : null}
       </span>
       <RomTagPills tags={tags} />
     </span>
   );
+}
+
+/**
+ * feat/filename-in-listings: filename-subline gate. Exported so the
+ * test file can pin the contract directly without rendering JSX.
+ */
+export function shouldShowFilenameSubline(
+  rom: { readonly kind: Rom['kind']; readonly filename: string },
+  displayName: string,
+): boolean {
+  // Folder rows never show a filename subline. Atomic folders
+  // already surface the folder name as the title; container
+  // folders are drillable and don't have a meaningful filename
+  // beyond the folder name itself.
+  if (rom.kind !== 'file') return false;
+  // Skip when the title is identical to the filename — happens when
+  // there's no metadata yet and `displayName` falls back to the
+  // on-disk name. Surfacing both would be duplicate noise.
+  if (displayName === rom.filename) return false;
+  return true;
 }
 
 /**
