@@ -458,17 +458,26 @@ function densityValueFor(core: CoreEntry): number {
  *
  * Falls back to `romCount` when `recursiveRomCount` is undefined
  * (matcher input lacked subfolder data — shouldn't happen in
- * production, kept for legacy fixture compatibility). The hidden-
- * count parenthetical stays — it's distinct information (how many
- * of the visible total are dot-prefixed).
+ * production, kept for legacy fixture compatibility).
+ *
+ * fix/sidebar-count-and-mtime-batch: the hidden-count
+ * parenthetical drops the literal "hidden" word — the muted /
+ * parenthesised styling carries that meaning visually. `100 (50)`
+ * scans faster than `100 (50 hidden)` when the eye sweeps the
+ * sidebar list. Hidden-count `0` still omits the parens entirely
+ * (existing behavior preserved).
  */
-function CoreCountSummary({ core }: { readonly core: CoreEntry }): JSX.Element {
+export function CoreCountSummary({
+  core,
+}: {
+  readonly core: CoreEntry;
+}): JSX.Element {
   const total = core.recursiveRomCount ?? core.romCount;
   return (
     <>
       <span className="min-w-[2.5rem] text-right">{total}</span>
       {core.hiddenCount > 0 ? (
-        <span className="text-fg-disabled">({core.hiddenCount} hidden)</span>
+        <span className="text-fg-disabled">({core.hiddenCount})</span>
       ) : null}
     </>
   );
