@@ -559,3 +559,89 @@ describe('isLaunchableRomExtension — PR-B (PR #24) positive ROM filter', () =>
     });
   });
 });
+
+// fix/auto-scrape-correctness-suite (commit 4a) — multi-disc games
+// where the OUTER folder has subdirs but no immediate disc/floppy
+// files. Pre-fix the dirs-mean-container rule fired and the user saw
+// each disc subfolder as an independent row in a "browsable" parent.
+describe('classifyFolder — disc-set subdir pattern (commit 4a)', () => {
+  describe('multi-disc games → atomic', () => {
+    it.each([
+      ['Disc 1', 'Disc 2'],
+      ['Disc 1', 'Disc 2', 'Disc 3'],
+      ['Disk 1', 'Disk 2'],
+      ['CD 1', 'CD 2'],
+      ['DVD 1', 'DVD 2'],
+      ['Side 1', 'Side 2'],
+      ['Track 1', 'Track 2', 'Track 3'],
+      ['Vol 1', 'Vol 2'],
+      ['Volume 1', 'Volume 2'],
+      ['Part 1', 'Part 2'],
+      ['disc1', 'disc2'], // no space, lowercase
+      ['DISK1', 'DISK2'], // uppercase
+    ])('outer folder with subdirs %s + %s → atomic', (...dirs) => {
+      expect(
+        classifyFolder({ files: [], dirs }),
+      ).toBe('atomic');
+    });
+  });
+
+  describe('organisational containers stay browsable', () => {
+    it('PSX _translations with arbitrarily-named game subfolders → container', () => {
+      expect(
+        classifyFolder({
+          files: [],
+          dirs: ['Game A', 'Game B', 'Translated Final Fantasy'],
+        }),
+      ).toBe('container');
+    });
+
+    it('NEOGEO 1 World A-Z with category subdirs → container', () => {
+      expect(
+        classifyFolder({
+          files: [],
+          dirs: ['1 World A-Z', '2 USA', '3 JPN'],
+        }),
+      ).toBe('container');
+    });
+
+    it('mixed: one disc-name and one game-name subfolder → container', () => {
+      // Conservative: the pattern requires ALL subdirs to match.
+      // Mixed shape implies an organisational container that
+      // happens to have a disc-named subfolder, not a multi-disc
+      // game.
+      expect(
+        classifyFolder({
+          files: [],
+          dirs: ['Disc 1', 'Bonus Material'],
+        }),
+      ).toBe('container');
+    });
+
+    it('single subfolder named "Disc 1" alone → container', () => {
+      // Pattern requires 2+ subdirs; a single "Disc 1" is more
+      // likely a quirky one-disc layout than a multi-disc set.
+      // The unknown→atomic fallback already handles single-folder
+      // cases — this guard prevents spurious atomic on
+      // organisational folders that contain ONE oddly-named child.
+      expect(
+        classifyFolder({ files: [], dirs: ['Disc 1'] }),
+      ).toBe('container');
+    });
+  });
+
+  describe('precedence', () => {
+    it('immediate disc/floppy files still win (rule 1) over the subdir pattern', () => {
+      // Folder with a top-level .cue PLUS Disc 1/Disc 2 subdirs:
+      // the immediate disc-marker pin to atomic short-circuits
+      // rule 2's disc-set check. Outcome is the same (atomic),
+      // but verifies rule ordering hasn't shifted.
+      expect(
+        classifyFolder({
+          files: ['game.cue', 'game.bin'],
+          dirs: ['Disc 1', 'Disc 2'],
+        }),
+      ).toBe('atomic');
+    });
+  });
+});

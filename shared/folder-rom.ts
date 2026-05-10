@@ -217,6 +217,37 @@ const FLOPPY_EXTENSIONS: ReadonlySet<string> = new Set([
 const SAME_EXTENSION_THRESHOLD = 5;
 
 /**
+ * Disc-set name pattern — subfolders that look like multi-disc /
+ * multi-side / multi-volume splits of one game.
+ *
+ * fix/auto-scrape-correctness-suite (commit 4a): the original X68000
+ * multi-disc shape is `<Game>/Disc 1/file.cue` + `<Game>/Disc 2/file.cue`.
+ * The outer `<Game>` folder has subdirs but no immediate files — pre-fix
+ * the dirs-mean-container rule fired and the user saw the discs as
+ * independent rows in a "browsable" parent.
+ *
+ * The DISCRIMINATOR vs an organisational container (PSX
+ * `_translations/Game A/` + `_translations/Game B/` — different
+ * subfolder names, each is its own game) is the SUBFOLDER NAME shape.
+ * Disc-set subfolders match a tight pattern with a noun + number;
+ * organisational subfolders use arbitrary game names.
+ *
+ * Conservative pattern — leading anchored, only the well-known nouns,
+ * separator+number required. False positives are rare; the manual
+ * classification override is the safety valve when one happens.
+ */
+const DISC_SET_SUBDIR_PATTERN =
+  /^(disc|disk|cd|dvd|side|track|vol(?:ume)?|part)\s*\d+$/i;
+
+export function looksLikeDiscSet(dirs: readonly string[]): boolean {
+  if (dirs.length < 2) return false;
+  for (const d of dirs) {
+    if (!DISC_SET_SUBDIR_PATTERN.test(d)) return false;
+  }
+  return true;
+}
+
+/**
  * Content-based classifier. Pure: feed it the files / dirs listing for
  * a folder, get back the call. Rule order matters; PR #11 round 5
  * reorders the rules so the X68000 single-game-folder shape
@@ -228,16 +259,24 @@ const SAME_EXTENSION_THRESHOLD = 5;
  *      …; both pin to atomic so the rule-2/3 container signals don't
  *      drag a multi-disk game into drillable). Floppy precedence
  *      added in fix/floppy-folder-classification.
- *   2. Has subdirectories → container (likely an organisational tree;
+ *   2. (NEW — commit 4a) ALL subdirs match the disc-set name
+ *      pattern (`Disc 1`, `Disk 2`, `CD 1`, `Side A`-style) →
+ *      atomic. This catches the `<Game>/Disc 1/file.cue` +
+ *      `<Game>/Disc 2/file.cue` layout where the outer `<Game>`
+ *      has subdirs but no immediate disc/floppy files. PSX
+ *      `_translations/Game A/...` + `_translations/Game B/...`
+ *      DOES NOT match (subdirs use arbitrary game names) so it
+ *      stays browsable.
+ *   3. Has subdirectories → container (likely an organisational tree;
  *      the user expects to drill in).
- *   3. Many files share a single extension → container. Catches NEOGEO
+ *   4. Many files share a single extension → container. Catches NEOGEO
  *      (30+ `.zip` files in `1 World A-Z/`) and the long tail of
  *      formats we haven't enumerated (`.neo` was the original
  *      motivator).
- *   4. Known cart / archive extension → atomic. The folder is one
+ *   5. Known cart / archive extension → atomic. The folder is one
  *      game whose ROM is a single archive/cart file; companion files
  *      (manuals, art) sit alongside.
- *   5. Otherwise → unknown (resolves to atomic for safety).
+ *   6. Otherwise → unknown (resolves to atomic for safety).
  */
 export function classifyFolder(contents: FolderContents): FolderClassification {
   if (
@@ -245,6 +284,9 @@ export function classifyFolder(contents: FolderContents): FolderClassification {
     hasTrackPattern(contents.files) ||
     hasFloppyExtension(contents.files)
   ) {
+    return 'atomic';
+  }
+  if (contents.dirs.length > 0 && looksLikeDiscSet(contents.dirs)) {
     return 'atomic';
   }
   if (contents.dirs.length > 0) {

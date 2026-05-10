@@ -67,29 +67,43 @@ describe('CoresContext — cache-intent split (PR #12 round 2)', () => {
   it('only the audited callsites carry a `forceRefresh: true` literal', () => {
     // Belt-and-suspenders: enumerate every `forceRefresh: true`
     // literal in NON-COMMENT code and assert it appears in exactly
-    // the expected contexts. A future refactor that adds a third
+    // the expected contexts. A future refactor that adds a fourth
     // bypass path slips through silently otherwise.
     //
-    // Audited callsites (PR #12 round 2):
-    //   1. `refresh` wrapper — Refresh-button entry point.
-    //   2. `refetchRoms` — post-mutation listRoms refetch (mark/unmark
-    //      flips that need to land before the renderer re-renders;
-    //      the manager invalidates the roms cache on these mutations
-    //      so the witness-stat would hit a miss anyway, but
-    //      forceRefresh skips the redundant stat).
+    // Audited callsites:
+    //   1. `refresh` wrapper — Refresh-button entry point. PR #12
+    //      round 2.
+    //   2. `refetchRoms` — post-mutation listRoms refetch
+    //      (mark/unmark flips that need to land before the
+    //      renderer re-renders; the manager invalidates the roms
+    //      cache on these mutations so the witness-stat would hit
+    //      a miss anyway, but forceRefresh skips the redundant
+    //      stat). PR #12 round 2.
+    //   3. `setFolderClassification` — fix/auto-scrape-correctness-suite
+    //      commit 4b. The matcher's `recursiveRomCount` (the
+    //      sidebar's per-core integer) depends on per-folder
+    //      classification overrides; an override changes which
+    //      branch fires for that folder so the count needs to
+    //      recompute. Re-runs loadCores with forceRefresh so the
+    //      matcher sees the updated overrides file.
     const codeOnly = stripLineComments(CORES_CONTEXT);
     const matches = [...codeOnly.matchAll(/forceRefresh\s*:\s*true/g)];
-    expect(matches).toHaveLength(2);
+    expect(matches).toHaveLength(3);
 
-    // Ensure each `true` literal sits inside one of the two audited
+    // Ensure each `true` literal sits inside one of the audited
     // callsites. Catches a paste-into-the-wrong-function regression.
     const refreshBlock = extractTopLevelBinding(CORES_CONTEXT, 'refresh');
     const refetchRomsBlock = extractTopLevelBinding(
       CORES_CONTEXT,
       'refetchRoms',
     );
+    const setFolderClassificationBlock = extractTopLevelBinding(
+      CORES_CONTEXT,
+      'setFolderClassification',
+    );
     expect(refreshBlock).toMatch(/forceRefresh:\s*true/);
     expect(refetchRomsBlock).toMatch(/forceRefresh:\s*true/);
+    expect(setFolderClassificationBlock).toMatch(/forceRefresh:\s*true/);
   });
 
   it('post-connect lazy ROM load (`ensureRoms`) does NOT bypass the cache', () => {

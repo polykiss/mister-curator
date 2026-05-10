@@ -709,8 +709,20 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       } catch {
         /* best-effort */
       }
+      // fix/auto-scrape-correctness-suite (commit 4b): the matcher's
+      // `recursiveRomCount` (the sidebar's per-core integer) depends
+      // on per-folder classification — atomic folders count 1,
+      // container folders contribute their recursive file count. A
+      // user override flips that for one folder, so the count needs
+      // to recompute. Pre-fix `setFolderClassification` only refetched
+      // listRoms (the row table); the sidebar count stayed stuck at
+      // the pre-override value (PSX `_translations/` showed 3 even
+      // after the user overrode it to drill in). Re-run loadCores
+      // with forceRefresh so the matcher sees the updated overrides
+      // file. Single extra SSH op per override; overrides are rare.
+      void loadCores({ forceRefresh: true });
     },
-    [],
+    [loadCores],
   );
 
   const setSystemFileMarks = useCallback(
