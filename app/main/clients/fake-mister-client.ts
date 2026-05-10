@@ -788,6 +788,31 @@ export class FakeMisterClient implements IMisterClient {
     return out;
   }
 
+  async statPathsWithSize(
+    paths: readonly string[],
+  ): Promise<Record<string, { readonly mtime: number; readonly size: number }>> {
+    this.assertConnected();
+    if (paths.length === 0) return {};
+    const out: Record<string, { mtime: number; size: number }> = {};
+    for (const p of paths) {
+      const local = this.toLocal(p);
+      try {
+        const st = await fs.stat(local);
+        out[p] = {
+          mtime: Math.floor(st.mtimeMs / 1000),
+          size: st.size,
+        };
+      } catch (err) {
+        if (isNodeError(err) && err.code === 'ENOENT') {
+          out[p] = { mtime: 0, size: 0 };
+          continue;
+        }
+        throw err;
+      }
+    }
+    return out;
+  }
+
   async hashPaths(paths: readonly string[]): Promise<readonly HashRecord[]> {
     this.assertConnected();
     if (paths.length === 0) return [];

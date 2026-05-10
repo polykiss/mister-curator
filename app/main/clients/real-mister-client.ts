@@ -1386,6 +1386,58 @@ export class RealMisterClient implements IMisterClient {
   }
 
   /**
+   * fix/sidebar-count-and-mtime-batch round 2: like `statWitnesses`
+   * but also returns each path's size in bytes. Used by hash-service's
+   * rename-recovery to discriminate by (mtime, size) instead of mtime
+   * alone — bulk-copied ROMs share mtimes within the second, and
+   * mtime-only matching refuses those as ambiguous → every renamed
+   * file re-hashes on connect even with PR #35's migration in place.
+   *
+   * Single SSH `stat` batch with `%Y %s %n`. Missing-on-device paths
+   * report `{ mtime: 0, size: 0 }`.
+   */
+  async statPathsWithSize(
+    paths: readonly string[],
+  ): Promise<Record<string, { readonly mtime: number; readonly size: number }>> {
+    this.assertConnected();
+    if (paths.length === 0) return {};
+    const lines: string[] = [];
+    for (const p of paths) {
+      lines.push(
+        `if [ -e ${shellQuote(p)} ]; then stat -c '%Y %s %n' ${shellQuote(p)} 2>/dev/null || echo "0 0 ${p}"; else echo "0 0 ${p}"; fi`,
+      );
+    }
+    const script = lines.join('\n');
+    const result = await this.runSshOp(script, () =>
+      this.ssh.execCommand(script),
+    );
+    if (result.code !== 0) {
+      throw new Error(
+        `Failed to stat paths with size: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+      );
+    }
+    const out: Record<string, { mtime: number; size: number }> = {};
+    for (const line of result.stdout.split('\n')) {
+      if (line === '') continue;
+      // Format: "<mtime> <size> <full path>" — path may contain
+      // spaces, so split off the first two tokens.
+      const firstSpace = line.indexOf(' ');
+      if (firstSpace < 0) continue;
+      const secondSpace = line.indexOf(' ', firstSpace + 1);
+      if (secondSpace < 0) continue;
+      const mtime = Number.parseInt(line.slice(0, firstSpace), 10);
+      const size = Number.parseInt(line.slice(firstSpace + 1, secondSpace), 10);
+      const path = line.slice(secondSpace + 1);
+      if (path === '') continue;
+      out[path] = {
+        mtime: Number.isFinite(mtime) ? mtime : 0,
+        size: Number.isFinite(size) ? size : 0,
+      };
+    }
+    return out;
+  }
+
+  /**
    * PR #16 round 2: hash a batch of paths in one SSH round trip.
    * Returns md5 + sha1 + size + mtime per path. HashService caches
    * the lot; ScreenScraper takes md5+sha1 in one query for variant

@@ -20,16 +20,27 @@ interface FixtureHash {
 function makeClient(opts: {
   hashes: Map<string, FixtureHash>;
   stat?: Map<string, number>;
+  /**
+   * fix/sidebar-count-and-mtime-batch round 2: per-path size
+   * override for the new `statPathsWithSize` shape. Defaults to the
+   * matching hash fixture's size, so existing tests don't need to
+   * supply this — only the rename-recovery tests that synthesize
+   * a fresh path matching an old cache entry need to.
+   */
+  size?: Map<string, number>;
   shouldFail?: boolean;
 }): HashClient & {
   hashCalls: string[][];
   statCalls: string[][];
+  statSizeCalls: string[][];
 } {
   const hashCalls: string[][] = [];
   const statCalls: string[][] = [];
+  const statSizeCalls: string[][] = [];
   return {
     hashCalls,
     statCalls,
+    statSizeCalls,
     async hashPaths(paths: readonly string[]): Promise<readonly HashRecord[]> {
       hashCalls.push([...paths]);
       if (opts.shouldFail) throw new Error('SSH failure');
@@ -52,6 +63,20 @@ function makeClient(opts: {
       const out: Record<string, number> = {};
       for (const p of paths) {
         out[p] = opts.stat?.get(p) ?? opts.hashes.get(p)?.mtime ?? 0;
+      }
+      return out;
+    },
+    async statPathsWithSize(
+      paths: readonly string[],
+    ): Promise<Record<string, { mtime: number; size: number }>> {
+      statSizeCalls.push([...paths]);
+      const out: Record<string, { mtime: number; size: number }> = {};
+      for (const p of paths) {
+        const f = opts.hashes.get(p);
+        out[p] = {
+          mtime: opts.stat?.get(p) ?? f?.mtime ?? 0,
+          size: opts.size?.get(p) ?? f?.size ?? 0,
+        };
       }
       return out;
     },
@@ -131,11 +156,13 @@ describe('HashService', () => {
     expect(client.hashCalls).toHaveLength(1);
 
     // Second call: mtime in stat matches the cached entry, so no
-    // hashPaths call.
+    // hashPaths call. Round 2 (fix/sidebar-count-and-mtime-batch):
+    // hash-service now uses `statPathsWithSize` instead of
+    // `statWitnesses`, so the call lands in `statSizeCalls`.
     const result = await svc.getHash(client, 'host-1', ['/p/a']);
     expect(result.get('/p/a')?.md5).toBe('a'.repeat(32));
     expect(client.hashCalls).toHaveLength(1); // unchanged
-    expect(client.statCalls).toHaveLength(1);
+    expect(client.statSizeCalls).toHaveLength(1);
   });
 
   it('re-hashes when the device mtime drifts from the cached one', async () => {
@@ -524,12 +551,20 @@ describe('HashService', () => {
         'host-1',
         ['/p/A.nes', '/p/B.nes'],
       );
-      // Bulk hide → both renamed. Distinct mtimes → both migrate.
+      // Bulk hide → both renamed. Distinct (mtime, size) → both
+      // migrate. Round 2 (fix/sidebar-count-and-mtime-batch): the
+      // migration discriminates by (mtime, size), so the synthetic
+      // renamed paths must report the same size as the cached
+      // entries — Unix `mv` preserves both.
       const client = makeClient({
         hashes: new Map(),
         stat: new Map([
           ['/p/.A.nes', 1700000001],
           ['/p/.B.nes', 1700000002],
+        ]),
+        size: new Map([
+          ['/p/.A.nes', 100],
+          ['/p/.B.nes', 200],
         ]),
       });
       const result = await svc.getHash(client, 'host-1', [
@@ -577,6 +612,84 @@ describe('HashService', () => {
       expect(client2.hashCalls).toEqual([]); // no re-hash
     });
 
+    // fix/sidebar-count-and-mtime-batch round 2 — the load-bearing
+    // case the original (mtime-only) round 1 missed: bulk-copied ROM
+    // collections share mtimes within the second (e.g. mame's 600+
+    // files copied via SMB in one batch). Mtime-only matching
+    // refused those as ambiguous → every renamed file re-hashed on
+    // connect even with the migration logic in place. (mtime, size)
+    // discrimination cleanly resolves the collision.
+    it('mtime collision with distinct sizes: BOTH migrate (size discriminates)', async () => {
+      const svc = new HashService(dir);
+      const sharedMtime = 1700000000;
+      const aFix = fix('a', 1024, sharedMtime);
+      const bFix = fix('b', 2048, sharedMtime);
+      // Seed: two cache entries with the SAME mtime but different
+      // sizes — the bulk-copy scenario.
+      await svc.getHash(
+        makeClient({
+          hashes: new Map([
+            ['/p/A.nes', aFix],
+            ['/p/B.nes', bFix],
+          ]),
+        }),
+        'host-1',
+        ['/p/A.nes', '/p/B.nes'],
+      );
+      // Both renamed (hide). Stat reports same mtime, distinct sizes
+      // matching the cached entries.
+      const client = makeClient({
+        hashes: new Map(),
+        stat: new Map([
+          ['/p/.A.nes', sharedMtime],
+          ['/p/.B.nes', sharedMtime],
+        ]),
+        size: new Map([
+          ['/p/.A.nes', 1024],
+          ['/p/.B.nes', 2048],
+        ]),
+      });
+      const result = await svc.checkCachedMtimes(client, 'host-1', [
+        '/p/.A.nes',
+        '/p/.B.nes',
+      ]);
+      // Pre-fix (round 1): both lookups would refuse as ambiguous.
+      // Post-fix: size discriminates → both migrate uniquely.
+      expect(result.get('/p/.A.nes')?.md5).toBe('a'.repeat(32));
+      expect(result.get('/p/.B.nes')?.md5).toBe('b'.repeat(32));
+    });
+
+    it('mtime collision with the SAME size: refuses migration (truly ambiguous)', async () => {
+      // Pin the (rare) genuine ambiguity case. Two files with
+      // identical (mtime, size) — e.g. two empty placeholder files
+      // or two same-shape ROM patches — can't be discriminated.
+      // Refuse the migration; re-hash fresh.
+      const svc = new HashService(dir);
+      const sharedMtime = 1700000000;
+      const sharedSize = 1024;
+      await svc.getHash(
+        makeClient({
+          hashes: new Map([
+            ['/p/A.nes', fix('a', sharedSize, sharedMtime)],
+            ['/p/B.nes', fix('b', sharedSize, sharedMtime)],
+          ]),
+        }),
+        'host-1',
+        ['/p/A.nes', '/p/B.nes'],
+      );
+      const client = makeClient({
+        hashes: new Map([
+          ['/p/.A.nes', fix('c', sharedSize, sharedMtime)],
+        ]),
+        stat: new Map([['/p/.A.nes', sharedMtime]]),
+        size: new Map([['/p/.A.nes', sharedSize]]),
+      });
+      const result = await svc.getHash(client, 'host-1', ['/p/.A.nes']);
+      // Got the fresh hash, not a migration.
+      expect(result.get('/p/.A.nes')?.md5).toBe('c'.repeat(32));
+      expect(client.hashCalls).toHaveLength(1);
+    });
+
     it('checkCachedMtimes also migrates renamed paths', async () => {
       // The orchestrator's primary lookup path uses
       // checkCachedMtimes (PR #20 round 9 batched validation), not
@@ -593,6 +706,7 @@ describe('HashService', () => {
       const client = makeClient({
         hashes: new Map(),
         stat: new Map([[newPath, 1700000000]]),
+        size: new Map([[newPath, 1024]]),
       });
       const result = await svc.checkCachedMtimes(client, 'host-1', [newPath]);
       expect(result.get(newPath)?.md5).toBe('a'.repeat(32));

@@ -326,6 +326,26 @@ export interface IMisterClient {
   statWitnesses(paths: readonly string[]): Promise<WitnessMtimes>;
 
   /**
+   * fix/sidebar-count-and-mtime-batch round 2: like `statWitnesses`
+   * but also returns each path's size in bytes alongside its mtime.
+   *
+   * Used by the hash-service rename-recovery path to discriminate
+   * by (mtime, size) instead of mtime alone — bulk-copied ROMs
+   * (e.g. mame's 600+ files copied via SMB in one batch) share
+   * mtimes within the second, and mtime-only matching refuses
+   * those as ambiguous → every renamed file re-hashes on connect
+   * even with PR #35's migration in place.
+   *
+   * Same single-SSH-batch shape as `statWitnesses`. Missing-on-
+   * device paths report `{ mtime: 0, size: 0 }` (mirrors the
+   * statWitnesses=0 sentinel) so the migration treats them as
+   * uncached.
+   */
+  statPathsWithSize(
+    paths: readonly string[],
+  ): Promise<Record<string, { readonly mtime: number; readonly size: number }>>;
+
+  /**
    * Compute md5 + sha1 + size for a batch of absolute file paths in
    * one SSH round-trip. PR #16 round 2 expanded this from md5-only
    * to multi-hash so ScreenScraper can match on either algorithm.

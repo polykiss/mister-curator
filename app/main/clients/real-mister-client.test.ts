@@ -2874,6 +2874,86 @@ describe('RealMisterClient', () => {
     });
   });
 
+  // fix/sidebar-count-and-mtime-batch round 2: per-path stat that
+  // returns mtime AND size, for hash-service's rename-recovery
+  // (mtime, size) discriminator. Mtime alone collapsed too easily on
+  // bulk-copied ROMs that share mtimes within the second.
+  describe('statPathsWithSize (round 2)', () => {
+    it('builds a stat -c %Y %s %n script and parses the three-token output', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            '1700000001 1024 /media/fat/games/NES/Sonic.zip',
+            '1700000002 4096 /media/fat/games/NES/Mario.zip',
+            '',
+          ].join('\n'),
+        ),
+      );
+      const result = await client.statPathsWithSize([
+        '/media/fat/games/NES/Sonic.zip',
+        '/media/fat/games/NES/Mario.zip',
+      ]);
+      expect(result['/media/fat/games/NES/Sonic.zip']).toEqual({
+        mtime: 1700000001,
+        size: 1024,
+      });
+      expect(result['/media/fat/games/NES/Mario.zip']).toEqual({
+        mtime: 1700000002,
+        size: 4096,
+      });
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain(`stat -c '%Y %s %n'`);
+    });
+
+    it('reports {mtime: 0, size: 0} for missing paths', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk('0 0 /media/fat/games/NES/Vanished.zip\n'),
+      );
+      const result = await client.statPathsWithSize([
+        '/media/fat/games/NES/Vanished.zip',
+      ]);
+      expect(result['/media/fat/games/NES/Vanished.zip']).toEqual({
+        mtime: 0,
+        size: 0,
+      });
+    });
+
+    it('handles paths containing spaces (split on first two tokens only)', async () => {
+      // The stat output format is `<mtime> <size> <full path>` —
+      // path may contain spaces, so the parser splits off the first
+      // two whitespace-separated tokens and treats the rest as the
+      // path.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk('1700000001 1024 /media/fat/games/NES/Some Game (USA).zip\n'),
+      );
+      const result = await client.statPathsWithSize([
+        '/media/fat/games/NES/Some Game (USA).zip',
+      ]);
+      expect(result['/media/fat/games/NES/Some Game (USA).zip']).toEqual({
+        mtime: 1700000001,
+        size: 1024,
+      });
+    });
+
+    it('returns empty object for empty input without an SSH call', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      const result = await client.statPathsWithSize([]);
+      expect(result).toEqual({});
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+  });
+
   describe('hashPaths (PR #16 round 2 — md5 + sha1 + size)', () => {
     it('shell-quotes paths into a `set --` script and parses the 5-tab result', async () => {
       const client = new RealMisterClient();

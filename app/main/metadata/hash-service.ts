@@ -64,6 +64,17 @@ interface HashCacheFile {
  */
 export interface HashClient {
   statWitnesses(paths: readonly string[]): Promise<Record<string, number>>;
+  /**
+   * fix/sidebar-count-and-mtime-batch round 2: per-path stat that
+   * returns mtime AND size. Used by the rename-recovery path to
+   * discriminate by (mtime, size) — mtime alone collapses too
+   * easily on bulk-copied ROMs that share mtimes within a second
+   * (refused as ambiguous → pre-fix every renamed file re-hashed
+   * on connect).
+   */
+  statPathsWithSize(
+    paths: readonly string[],
+  ): Promise<Record<string, { readonly mtime: number; readonly size: number }>>;
   hashPaths(paths: readonly string[]): Promise<readonly HashRecord[]>;
 }
 
@@ -250,32 +261,39 @@ export class HashService {
     }
 
     // Stat both cached + uncached in one SSH op so the rename-
-    // recovery pass below has an mtime for each uncached path.
+    // recovery pass below has (mtime, size) for each uncached path.
     // Skip the stat for uncached paths when the cache is empty —
     // there's nothing to migrate them onto, and the empty-cache
     // first-run path was the previous behavior (kept fast).
+    //
+    // round 2 (fix/sidebar-count-and-mtime-batch): use
+    // `statPathsWithSize` instead of `statWitnesses` so the
+    // migration discriminates by (mtime, size) — bulk-copied ROMs
+    // (e.g. mame's 600+ files copied via SMB in one batch) share
+    // mtimes within the second, and mtime-only matching refused
+    // them as ambiguous.
     const cacheIsEmpty = Object.keys(entries).length === 0;
     const statTargets = cacheIsEmpty
       ? cachedPaths
       : [...cachedPaths, ...uncachedPaths];
-    const mtimes = statTargets.length > 0
-      ? await client.statWitnesses(statTargets)
-      : ({} as Record<string, number>);
+    const stats = statTargets.length > 0
+      ? await client.statPathsWithSize(statTargets)
+      : ({} as Record<string, { mtime: number; size: number }>);
 
     for (const p of cachedPaths) {
       const entry = entries[p];
-      const current = mtimes[p];
+      const current = stats[p];
       if (
         entry !== undefined &&
         current !== undefined &&
-        current !== 0 &&
-        current === entry.mtime
+        current.mtime !== 0 &&
+        current.mtime === entry.mtime
       ) {
         diagLog('info', 'meta', '·', 'hash-decision', {
           path: pathBasename(p),
           action: 'use-cache',
           reason: 'mtime-match',
-          mtime: current,
+          mtime: current.mtime,
         });
         result.set(p, entry);
       } else {
@@ -286,29 +304,34 @@ export class HashService {
           path: pathBasename(p),
           action: 'stale-revalidate',
           reason:
-            current === undefined || current === 0
+            current === undefined || current.mtime === 0
               ? 'missing-on-device'
               : 'mtime-drift',
           cachedMtime: entry?.mtime,
-          currentMtime: current,
+          currentMtime: current?.mtime,
         });
         needsHash.push(p);
       }
     }
 
     // Rename recovery: for each uncached path, see if its current
-    // mtime uniquely identifies an existing cache entry under a
-    // different (old) key. If so, rewrite the key — the file just
-    // moved. Track `claimed` keys so a 2+ collision (multiple
-    // renamed-to paths trying to claim the same old key) refuses
-    // ambiguous migrations rather than aliasing two paths to one
-    // hash entry.
+    // (mtime, size) uniquely identifies an existing cache entry
+    // under a different (old) key. If so, rewrite the key — the
+    // file just moved. Track `claimed` keys so a 2+ collision
+    // (multiple renamed-to paths trying to claim the same old key)
+    // refuses ambiguous migrations rather than aliasing two paths
+    // to one hash entry.
     const migrated: { from: string; to: string; entry: HashEntry }[] = [];
     const claimed = new Set<string>();
     for (const p of uncachedPaths) {
-      const current = mtimes[p];
-      if (current === undefined || current === 0) continue;
-      const oldKey = findCacheKeyByMtime(entries, current, claimed);
+      const current = stats[p];
+      if (current === undefined || current.mtime === 0) continue;
+      const oldKey = findCacheKeyByMtimeAndSize(
+        entries,
+        current.mtime,
+        current.size,
+        claimed,
+      );
       if (oldKey === null || oldKey === p) continue;
       const entry = entries[oldKey]!;
       claimed.add(oldKey);
@@ -318,7 +341,8 @@ export class HashService {
         path: pathBasename(p),
         action: 'use-cache',
         reason: 'rename-migrated',
-        mtime: current,
+        mtime: current.mtime,
+        size: current.size,
         oldKey: pathBasename(oldKey),
       });
     }
@@ -400,10 +424,17 @@ export class HashService {
     const uncachedPaths = paths.filter((p) => entries[p] === undefined);
     if (paths.length === 0) return result;
     // feat/rename-aware-hash-cache: stat ALL paths so the rename
-    // recovery (uncached paths whose mtime uniquely identifies an
-    // existing cache entry) can run alongside the normal cached-path
-    // mtime validation. Skip the stat for uncached paths when the
-    // cache is empty — there's nothing to migrate them onto.
+    // recovery (uncached paths whose (mtime, size) uniquely identify
+    // an existing cache entry) can run alongside the normal
+    // cached-path mtime validation. Skip the stat for uncached paths
+    // when the cache is empty — there's nothing to migrate them onto.
+    //
+    // round 2 (fix/sidebar-count-and-mtime-batch): use
+    // `statPathsWithSize` so the migration discriminates by (mtime,
+    // size). Mtime-only collisions on bulk-copied ROMs prevented the
+    // PR-#35 migration from firing on the dominant real-world case
+    // (mame's 600+ files copied via SMB in one batch share mtimes
+    // within the second).
     const cacheIsEmpty = Object.keys(entries).length === 0;
     const statTargets = cacheIsEmpty ? cachedPaths : paths;
     if (statTargets.length === 0) {
@@ -412,9 +443,9 @@ export class HashService {
       }
       return result;
     }
-    let mtimes: Awaited<ReturnType<HashClient['statWitnesses']>>;
+    let stats: Awaited<ReturnType<HashClient['statPathsWithSize']>>;
     try {
-      mtimes = await client.statWitnesses(statTargets);
+      stats = await client.statPathsWithSize(statTargets);
     } catch {
       // Stat batch failed (transport error, etc.) — return all paths
       // as null so the caller falls through to computeHash for each.
@@ -425,12 +456,12 @@ export class HashService {
     }
     for (const p of cachedPaths) {
       const entry = entries[p];
-      const current = mtimes[p];
+      const current = stats[p];
       if (
         entry !== undefined &&
         current !== undefined &&
-        current !== 0 &&
-        current === entry.mtime
+        current.mtime !== 0 &&
+        current.mtime === entry.mtime
       ) {
         result.set(p, entry);
       } else {
@@ -444,12 +475,17 @@ export class HashService {
     const migrated: { from: string; to: string; entry: HashEntry }[] = [];
     const claimed = new Set<string>();
     for (const p of uncachedPaths) {
-      const current = mtimes[p];
-      if (current === undefined || current === 0) {
+      const current = stats[p];
+      if (current === undefined || current.mtime === 0) {
         result.set(p, null);
         continue;
       }
-      const oldKey = findCacheKeyByMtime(entries, current, claimed);
+      const oldKey = findCacheKeyByMtimeAndSize(
+        entries,
+        current.mtime,
+        current.size,
+        claimed,
+      );
       if (oldKey === null || oldKey === p) {
         result.set(p, null);
         continue;
@@ -627,24 +663,48 @@ function pathBasename(path: string): string {
 }
 
 /**
- * feat/rename-aware-hash-cache: scan cache entries for one whose
- * `mtime` uniquely matches `target`. Returns the key (path) of that
- * entry, or `null` when zero or two-or-more entries match.
+ * feat/rename-aware-hash-cache (PR #35) + round 2
+ * (fix/sidebar-count-and-mtime-batch): scan cache entries for one
+ * whose (mtime, size) uniquely matches the target tuple. Returns
+ * the key (path) of that entry, or `null` when zero or two-or-more
+ * entries match.
  *
- * Mtime-only matching is sufficient for the typical use case: a
- * Unix `mv` (the hide / unhide rename op) preserves mtime exactly,
- * so the renamed file's current mtime equals the cached entry's
- * recorded mtime. Two distinct files coincidentally sharing a
- * mtime is rare but possible — refusing the migration in that case
- * costs at most a re-hash, which is exactly the pre-fix behavior.
+ * (mtime, size) matching is the right discriminator for the
+ * dominant real-world rename case (Unix `mv` preserves both):
+ * round 1 used mtime alone, but bulk-copied ROM collections
+ * (mame's 600+ files copied via SMB in one batch) share mtimes
+ * within the second, and mtime-only matching refused them as
+ * ambiguous → every renamed file re-hashed on connect even with
+ * the migration logic in place. Adding size cleanly resolves
+ * those collisions: distinct ROM dumps almost never share a byte
+ * count to the byte.
  *
  * `claimed` excludes keys already migrated in the current pass so
- * a 2+ collision (two renamed-to paths both targeting the same old
- * key) refuses ambiguous migrations rather than aliasing both to
- * one hash entry.
- *
- * Future: extend to (mtime, size) for stricter matching when SS
- * itself starts indexing per-disk in some core.
+ * a 2+ collision (two renamed-to paths both targeting the same
+ * old key) refuses ambiguous migrations rather than aliasing both
+ * to one hash entry.
+ */
+export function findCacheKeyByMtimeAndSize(
+  entries: Readonly<Record<string, HashEntry>>,
+  targetMtime: number,
+  targetSize: number,
+  claimed: ReadonlySet<string>,
+): string | null {
+  let match: string | null = null;
+  for (const [key, entry] of Object.entries(entries)) {
+    if (claimed.has(key)) continue;
+    if (entry.mtime !== targetMtime) continue;
+    if (entry.size !== targetSize) continue;
+    if (match !== null) return null; // 2+ matches → ambiguous
+    match = key;
+  }
+  return match;
+}
+
+/**
+ * Mtime-only variant kept exported for tests + callers that don't
+ * have size data on hand. Production code paths use the (mtime,
+ * size) discriminator above.
  */
 export function findCacheKeyByMtime(
   entries: Readonly<Record<string, HashEntry>>,
@@ -655,7 +715,7 @@ export function findCacheKeyByMtime(
   for (const [key, entry] of Object.entries(entries)) {
     if (claimed.has(key)) continue;
     if (entry.mtime !== target) continue;
-    if (match !== null) return null; // 2+ matches → ambiguous
+    if (match !== null) return null;
     match = key;
   }
   return match;
