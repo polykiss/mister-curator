@@ -173,6 +173,22 @@ export interface IMisterClient {
   }): Promise<readonly string[]>;
 
   /**
+   * feat/arcade-mra-management Phase 1: walk `_Arcade/` and emit
+   * one raw `{type, relPath}` row per filesystem entry under it
+   * (recursive, bounded depth). Called by the renderer-facing
+   * arcade listing IPC; the shared `parseArcadeMraEntries` filter
+   * turns the raw rows into typed entries (`.mra` files,
+   * subfolders, with hidden state).
+   *
+   * Returns an empty list when `_Arcade/` doesn't exist on the
+   * device — same shape as `listRecursiveRomFiles` for missing
+   * games dirs.
+   */
+  listArcadeRawListing(): Promise<
+    readonly { readonly type: 'f' | 'd'; readonly relPath: string }[]
+  >;
+
+  /**
    * Toggle the visibility of one ROM at `<coreDir>/<subPath>/<filename>`.
    * `subPath` defaults to the empty string (top-level); pass it when
    * the user is operating inside a drilled-in container.

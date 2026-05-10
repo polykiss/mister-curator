@@ -875,6 +875,83 @@ describe('RealMisterClient', () => {
     });
   });
 
+  // feat/arcade-mra-management Phase 1: SSH-side raw listing of
+  // _Arcade/. Returns find output as {type, relPath} rows; the
+  // shared `parseArcadeMraEntries` filter (in shared/arcade-mra.ts)
+  // handles classification + AppleDouple drop.
+  describe('listArcadeRawListing (Phase 1)', () => {
+    it('returns parsed find output as {type, relPath} rows', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'f\tMetal Slug.mra',
+            'f\tStreet Fighter II.mra',
+            'd\t_Konami',
+            'f\t_Konami/TMNT.mra',
+            'd\tcores',
+            'f\tcores/MetalSlug.rbf',
+            '',
+          ].join('\n'),
+        ),
+      );
+      const raw = await client.listArcadeRawListing();
+      expect(raw).toEqual([
+        { type: 'f', relPath: 'Metal Slug.mra' },
+        { type: 'f', relPath: 'Street Fighter II.mra' },
+        { type: 'd', relPath: '_Konami' },
+        { type: 'f', relPath: '_Konami/TMNT.mra' },
+        { type: 'd', relPath: 'cores' },
+        { type: 'f', relPath: 'cores/MetalSlug.rbf' },
+      ]);
+    });
+
+    it('targets /media/fat/_Arcade with mindepth=1 maxdepth=3', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+      await client.listArcadeRawListing();
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain(`[ -d '/media/fat/_Arcade' ]`);
+      expect(script).toContain(`-mindepth 1 -maxdepth 3`);
+      expect(script).toContain(`-printf '%y\\t%P\\n'`);
+    });
+
+    it('returns empty array when SSH command fails', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execFail(1));
+      const raw = await client.listArcadeRawListing();
+      expect(raw).toEqual([]);
+    });
+
+    it('skips malformed lines (no tab) but keeps the rest', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'f\tMetal Slug.mra',
+            'malformed-no-tab',
+            '\t',
+            'f\tStreet Fighter II.mra',
+            '',
+          ].join('\n'),
+        ),
+      );
+      const raw = await client.listArcadeRawListing();
+      expect(raw).toEqual([
+        { type: 'f', relPath: 'Metal Slug.mra' },
+        { type: 'f', relPath: 'Street Fighter II.mra' },
+      ]);
+    });
+  });
+
   describe('listRoms', () => {
     it('targets the games-dir basename via the coreId argument (PR #11 round 3 / Bug 1)', async () => {
       // The matcher's invariant guarantees CoreEntry.id === on-disk

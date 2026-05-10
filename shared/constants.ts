@@ -2,6 +2,16 @@ import type { CoreCategory } from '@shared/types';
 
 export const MISTER_FAT_DIR = '/media/fat';
 export const MISTER_GAMES_DIR = '/media/fat/games';
+/**
+ * Arcade game directory. The MiSTer arcade menu is driven by .mra
+ * files here (NOT by the .zip ROMs in `/media/fat/games/mame/`).
+ * Hide convention: same single-leading-dot rename that hides files
+ * everywhere else in the firmware.
+ *
+ * feat/arcade-mra-management Phase 1: enumerate + hide/unhide.
+ * Metadata extraction from .mra XML is Phase 2.
+ */
+export const MISTER_ARCADE_DIR = '/media/fat/_Arcade';
 export const MISTER_AGENT_DIR = '/tmp/mistercurator';
 export const MISTER_LEDGER_DIR = '/media/fat/.mistercurator';
 export const MISTER_LEDGER_PATH = '/media/fat/.mistercurator/state.json';

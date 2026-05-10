@@ -3,6 +3,7 @@ import { NodeSSH } from 'node-ssh';
 import { shellQuote } from '@app/main/clients/shell';
 import {
   HIDEABLE_CATEGORIES,
+  MISTER_ARCADE_DIR,
   MISTER_CATEGORY_DIRS,
   MISTER_FOLDER_CLASSIFICATIONS_PATH,
   MISTER_GAMES_DIR,
@@ -654,6 +655,37 @@ export class RealMisterClient implements IMisterClient {
       }
       if (!isLaunchableRomExtension(line)) continue;
       out.push(`${targetDir}/${line}`);
+    }
+    return out;
+  }
+
+  async listArcadeRawListing(): Promise<
+    readonly { readonly type: 'f' | 'd'; readonly relPath: string }[]
+  > {
+    this.assertConnected();
+    // `find -mindepth 1 -maxdepth 3` matches the shape `listRoms`
+    // uses for ROM trees — captures top-level entries, one level
+    // of subfolder content, and nested .mra files inside organisational
+    // subfolders. Deeper trees (4+ levels) don't surface in Phase 1.
+    const script = [
+      `[ -d ${shellQuote(MISTER_ARCADE_DIR)} ] || exit 0`,
+      `find ${shellQuote(MISTER_ARCADE_DIR)} -mindepth 1 -maxdepth 3 -printf '%y\\t%P\\n' 2>/dev/null`,
+    ].join('\n');
+    const result = await this.runSshOp(script, () =>
+      this.ssh.execCommand(script),
+    );
+    if (result.code !== 0) return [];
+    const out: { type: 'f' | 'd'; relPath: string }[] = [];
+    for (const line of result.stdout.split('\n')) {
+      if (line === '') continue;
+      const tab = line.indexOf('\t');
+      if (tab < 0) continue;
+      const type = line.slice(0, tab);
+      const relPath = line.slice(tab + 1);
+      if (relPath === '') continue;
+      if (type === 'f' || type === 'd') {
+        out.push({ type, relPath });
+      }
     }
     return out;
   }
