@@ -1517,6 +1517,135 @@ describe('matchRbfsToGamesDirs', () => {
   });
 });
 
+describe('matchRbfsToGamesDirs — fix/scrape-and-count-correctness commit 4 (NeoGeo-CD alias)', () => {
+  it('folds NeoGeo-CD/ into the NeoGeo entry — single sidebar row, summed counts', () => {
+    const result = matchRbfsToGamesDirs({
+      rbfs: [
+        {
+          category: 'Console',
+          filename: 'NeoGeo_20240115.rbf',
+          fullPath: '/media/fat/_Console/NeoGeo_20240115.rbf',
+          isFolder: false,
+        },
+      ],
+      gamesDirs: [
+        {
+          rawName: 'NEOGEO',
+          files: ['mslug.zip', 'kof97.zip'],
+          dirs: [],
+          subFolders: [],
+        },
+        {
+          rawName: 'NeoGeo-CD',
+          files: ['Magician Lord.cue', 'Magician Lord.bin'],
+          dirs: [],
+          subFolders: [],
+        },
+      ],
+    });
+
+    // Only ONE sidebar entry — NeoGeo-CD folded into NeoGeo.
+    expect(result.filter((c) => c.id.toLowerCase().includes('neogeo')))
+      .toHaveLength(1);
+
+    const neogeo = result.find((c) => c.id === 'NEOGEO');
+    expect(neogeo).toBeDefined();
+    // Counts SUM across the two dirs. NEOGEO contributes 2 (mslug,
+    // kof97); NeoGeo-CD contributes 1 (the .cue + .bin set is one
+    // group). Total = 3.
+    expect(neogeo?.romCount).toBe(3);
+    // The aliased dir's basename is preserved on the primary so the
+    // ConnectionManager can redirect drill-in / hide ops back to the
+    // alias dir on the device.
+    expect(neogeo?.extraGamesDirNames).toEqual(['NeoGeo-CD']);
+    // Primary's gamesDirName / id stays the on-disk basename of the
+    // primary games-dir, NOT the alias's.
+    expect(neogeo?.gamesDirName).toBe('NEOGEO');
+  });
+
+  it('handles alias arriving BEFORE primary — placeholder gets overwritten', () => {
+    // Test order independence: matcher must produce the same result
+    // whether the alias dir is enumerated before or after its primary.
+    const result = matchRbfsToGamesDirs({
+      rbfs: [
+        {
+          category: 'Console',
+          filename: 'NeoGeo.rbf',
+          fullPath: '/media/fat/_Console/NeoGeo.rbf',
+          isFolder: false,
+        },
+      ],
+      gamesDirs: [
+        // Alias first
+        {
+          rawName: 'NeoGeo-CD',
+          files: ['Game.iso'],
+          dirs: [],
+          subFolders: [],
+        },
+        // Primary later
+        {
+          rawName: 'NEOGEO',
+          files: ['mslug.zip'],
+          dirs: [],
+          subFolders: [],
+        },
+      ],
+    });
+    expect(result.filter((c) => c.id.toLowerCase().includes('neogeo')))
+      .toHaveLength(1);
+    const neogeo = result.find((c) => c.id === 'NEOGEO');
+    expect(neogeo?.romCount).toBe(2);
+    expect(neogeo?.extraGamesDirNames).toEqual(['NeoGeo-CD']);
+    expect(neogeo?.gamesDirName).toBe('NEOGEO');
+  });
+
+  it('alias dir without a primary surfaces under the primary canonical id (no silent drop)', () => {
+    // Edge case: device has NeoGeo-CD/ but no NeoGeo .rbf and no
+    // NEOGEO/ games dir. Pre-fix, the orphan filter would have kept
+    // NeoGeo-CD as its own entry; post-fix, it surfaces under the
+    // primary canonical id ('neogeo') as an Unknown-category placeholder
+    // so the user still sees the content rather than silently losing it.
+    const result = matchRbfsToGamesDirs({
+      rbfs: [],
+      gamesDirs: [
+        {
+          rawName: 'NeoGeo-CD',
+          files: ['Game.iso'],
+          dirs: [],
+          subFolders: [],
+        },
+      ],
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0]?.id.toLowerCase()).toBe('neogeo');
+    expect(result[0]?.extraGamesDirNames).toEqual(['NeoGeo-CD']);
+    expect(result[0]?.romCount).toBe(1);
+  });
+
+  it('does not flip the primary hide row when only the alias is hidden', () => {
+    const result = matchRbfsToGamesDirs({
+      rbfs: [
+        {
+          category: 'Console',
+          filename: 'NeoGeo.rbf',
+          fullPath: '/media/fat/_Console/NeoGeo.rbf',
+          isFolder: false,
+        },
+      ],
+      gamesDirs: [
+        { rawName: 'NEOGEO', files: ['a.zip'], dirs: [], subFolders: [] },
+        // Hidden alias dir.
+        { rawName: '.NeoGeo-CD', files: ['b.iso'], dirs: [], subFolders: [] },
+      ],
+    });
+    const neogeo = result.find((c) => c.id === 'NEOGEO');
+    // The primary stays visible — its own dir isn't hidden, and the
+    // alias's hidden state doesn't transfer.
+    expect(neogeo?.gamesDirHidden).toBe(false);
+  });
+});
+
 describe('isRealCore', () => {
   function makeCore(overrides: Partial<CoreEntry> = {}): CoreEntry {
     return {

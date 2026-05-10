@@ -63,6 +63,20 @@ export interface CoreEntry {
    * paired with `games/.APOGEE`).
    */
   readonly gamesDirName?: string;
+  /**
+   * fix/scrape-and-count-correctness commit 4 — additional games-dirs
+   * folded into this core via `shared/core-aliases.ts`. `NeoGeo` for
+   * example carries `['NeoGeo-CD']` so the firmware's single .rbf
+   * surfaces both cartridge and CD ROMs in one sidebar row. Each
+   * extra dir's contents are listed at the primary's drill-in via a
+   * synthetic top-level `folder-container` row whose path the
+   * ConnectionManager redirects under the alias dir on the device.
+   *
+   * Undefined for cores with no alias relationships (the common
+   * case). Empty array means the same thing — callers should treat
+   * both as "no extras".
+   */
+  readonly extraGamesDirNames?: readonly string[];
 }
 
 export interface Rom {
