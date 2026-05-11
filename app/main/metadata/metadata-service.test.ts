@@ -1202,10 +1202,19 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       const stub = {
         getStatus: vi.fn(() => 'available'),
         lookup: vi.fn(async () => opts.lookupResult ?? null),
+        // feat/manual-search-observability — searchByName now returns
+        // a discriminated outcome. The fixture maps a search term to
+        // an empty/`ok` envelope based on whether the test seeded
+        // candidates for it; `searchCalls` continues to capture the
+        // raw args for the existing per-hint sequence assertions.
         searchByName: vi.fn(
           async (args: { systemId: number; searchTerm: string }) => {
             searchCalls.push(args);
-            return opts.searchResults?.[args.searchTerm] ?? [];
+            const results = opts.searchResults?.[args.searchTerm];
+            if (results === undefined || results.length === 0) {
+              return { kind: 'empty', reason: 'parser-empty' };
+            }
+            return { kind: 'ok', results };
           },
         ),
       } as unknown as ScreenScraperService;

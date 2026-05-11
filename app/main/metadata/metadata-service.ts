@@ -380,10 +380,17 @@ export class MetadataService {
     for (const h of hints) {
       let candidates: readonly ScreenScraperGame[];
       try {
-        candidates = await this.screenScraper.searchByName({
+        // feat/manual-search-observability: searchByName now returns
+        // a discriminated outcome so the IPC manual-search path can
+        // log granular empty-reasons. Auto-scrape's name-search
+        // keeps the old "candidates array" shape by extracting from
+        // the union — the existing per-hint diag line below covers
+        // this layer's observability needs.
+        const outcome = await this.screenScraper.searchByName({
           systemId,
           searchTerm: h.value,
         });
+        candidates = outcome.kind === 'ok' ? outcome.results : [];
         triedAny = true;
       } catch (err) {
         if (err instanceof ScreenScraperAuthError) {

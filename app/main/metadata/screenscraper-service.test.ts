@@ -1218,28 +1218,66 @@ describe('searchByName — PR-D1 jeuRecherche client', () => {
       }),
     );
     const svc = makeService({ fetch: fetch as unknown as typeof globalThis.fetch });
-    const games = await svc.searchByName({ systemId: 75, searchTerm: 'mslug2' });
-    expect(games).toHaveLength(2);
-    expect(games[0]?.name).toBe('Metal Slug 2');
-    expect(games[1]?.name).toBe('Metal Slug 2 Special');
+    const outcome = await svc.searchByName({ systemId: 75, searchTerm: 'mslug2' });
+    expect(outcome.kind).toBe('ok');
+    if (outcome.kind !== 'ok') throw new Error('expected ok');
+    expect(outcome.results).toHaveLength(2);
+    expect(outcome.results[0]?.name).toBe('Metal Slug 2');
+    expect(outcome.results[1]?.name).toBe('Metal Slug 2 Special');
   });
 
-  it('returns empty array when response.jeux is missing or empty', async () => {
+  it('returns empty/parser-empty when response.jeux is missing', async () => {
+    // feat/manual-search-observability — `response.jeux` not an
+    // array → reason='parser-empty' so the trace shows the SS
+    // body had an unexpected shape (vs an empty array).
     const svc = makeService({
       fetch: (async () => jsonResponse({ response: {} })) as unknown as typeof globalThis.fetch,
     });
-    expect(await svc.searchByName({ systemId: 4, searchTerm: 'x' })).toEqual([]);
+    const outcome = await svc.searchByName({ systemId: 4, searchTerm: 'x' });
+    expect(outcome).toEqual({ kind: 'empty', reason: 'parser-empty' });
   });
 
-  it('returns empty array when an individual jeu fails to parse (no name)', async () => {
-    // SS sometimes returns a jeu with no usable name in any region —
-    // those are dropped, but the rest of the array still parses.
+  it('returns empty/parser-empty when response.jeux is an empty array', async () => {
+    // SS sent jeux=[]. No usable matches, but the body shape was
+    // valid. Distinct from the body-malformed case above only in
+    // intent; both surface as parser-empty for log readers.
+    const svc = makeService({
+      fetch: (async () =>
+        jsonResponse({ response: { jeux: [] } })) as unknown as typeof globalThis.fetch,
+    });
+    const outcome = await svc.searchByName({ systemId: 4, searchTerm: 'x' });
+    expect(outcome).toEqual({ kind: 'empty', reason: 'parser-empty' });
+  });
+
+  it('returns empty/all-parsed-dropped when every jeu fails to parse', async () => {
+    // SS returned jeux with content, but no jeu had a usable name
+    // in any region. Distinct reason so the trace tells us the
+    // body wasn't shape-broken — the per-jeu parser dropped every
+    // candidate.
     const svc = makeService({
       fetch: (async () =>
         jsonResponse({
           response: {
             jeux: [
               { id: 1, noms: [] }, // no name → dropped
+              { id: 2, noms: [] }, // no name → dropped
+            ],
+          },
+        })) as unknown as typeof globalThis.fetch,
+    });
+    const outcome = await svc.searchByName({ systemId: 75, searchTerm: 'x' });
+    expect(outcome).toEqual({ kind: 'empty', reason: 'all-parsed-dropped' });
+  });
+
+  it('mixed jeux (some parseable, some not) returns ok with only the parsed entries', async () => {
+    // Existing PR-D1 contract preserved: parseable jeux survive
+    // even when sibling jeux drop. Outcome stays 'ok'.
+    const svc = makeService({
+      fetch: (async () =>
+        jsonResponse({
+          response: {
+            jeux: [
+              { id: 1, noms: [] }, // dropped
               {
                 id: 2,
                 systeme: { id: '75', text: 'Arcade' },
@@ -1249,11 +1287,13 @@ describe('searchByName — PR-D1 jeuRecherche client', () => {
           },
         })) as unknown as typeof globalThis.fetch,
     });
-    const games = await svc.searchByName({ systemId: 75, searchTerm: 'x' });
-    expect(games.map((g) => g.name)).toEqual(['OK Game']);
+    const outcome = await svc.searchByName({ systemId: 75, searchTerm: 'x' });
+    expect(outcome.kind).toBe('ok');
+    if (outcome.kind !== 'ok') throw new Error('expected ok');
+    expect(outcome.results.map((g) => g.name)).toEqual(['OK Game']);
   });
 
-  it('returns empty array when credentials are missing (no fetch issued)', async () => {
+  it('returns empty/no-credentials when devId/devPassword are missing', async () => {
     const fetch = vi.fn();
     const svc = new ScreenScraperService({
       // No devId / devPassword.
@@ -1262,24 +1302,33 @@ describe('searchByName — PR-D1 jeuRecherche client', () => {
       minIntervalMs: 0,
       fetch: fetch as unknown as typeof globalThis.fetch,
     });
-    const games = await svc.searchByName({ systemId: 4, searchTerm: 'x' });
-    expect(games).toEqual([]);
+    const outcome = await svc.searchByName({ systemId: 4, searchTerm: 'x' });
+    expect(outcome).toEqual({ kind: 'empty', reason: 'no-credentials' });
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it('returns empty array for a whitespace-only search term (no fetch issued)', async () => {
+  it('returns empty/parser-empty for a whitespace-only search term (no fetch issued)', async () => {
+    // Pre-fetch defensive skip — treated as parser-empty for
+    // log-reader simplicity (no point inventing a sixth reason for
+    // an internal precondition the IPC handler should have guarded
+    // against in the first place).
     const fetch = vi.fn();
     const svc = makeService({ fetch: fetch as unknown as typeof globalThis.fetch });
-    const games = await svc.searchByName({ systemId: 4, searchTerm: '   ' });
-    expect(games).toEqual([]);
+    const outcome = await svc.searchByName({ systemId: 4, searchTerm: '   ' });
+    expect(outcome).toEqual({ kind: 'empty', reason: 'parser-empty' });
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it('returns empty array on HTTP errors (404, 5xx after retry-exhaustion)', async () => {
+  it('returns empty/fetch-failed with httpStatus on HTTP errors (404, 5xx exhausted)', async () => {
     const svc = makeService({
       fetch: (async () => emptyResponse(404)) as unknown as typeof globalThis.fetch,
     });
-    expect(await svc.searchByName({ systemId: 4, searchTerm: 'x' })).toEqual([]);
+    const outcome = await svc.searchByName({ systemId: 4, searchTerm: 'x' });
+    expect(outcome).toEqual({
+      kind: 'empty',
+      reason: 'fetch-failed',
+      httpStatus: 404,
+    });
   });
 
   it('shares the rate-limit queue with hash lookups (1.1s gap between calls)', async () => {

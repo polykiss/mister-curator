@@ -313,3 +313,167 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
     expect(readyEvent?.path).toBeUndefined();
   });
 });
+
+/**
+ * feat/manual-search-observability — IPC-handler coverage for the
+ * search-by-name channel. Two early-return paths (`service-null`,
+ * `no-system-mapping`) fire in `register.ts` before the service is
+ * touched; the call-through path threads to the service stub. Per
+ * the spec each branch needs an `ss-manual-search-attempt` and
+ * `ss-manual-search-result` diag pair.
+ */
+describe('IPC bridge — searchScreenScraperByName diag logs', () => {
+  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+  let stubScreenScraper: {
+    getStatus: ReturnType<typeof vi.fn>;
+    isConfigured: boolean;
+    searchByName: ReturnType<typeof vi.fn>;
+  };
+
+  function diagLines(): readonly string[] {
+    return consoleLogSpy.mock.calls
+      .map((c) => String(c[0] ?? ''))
+      .filter((l) => l.startsWith('[meta] · ss-manual-search-'));
+  }
+
+  beforeEach(() => {
+    handlers.clear();
+    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {
+      /* swallow noise from the handler-attempt/result log lines */
+    });
+    stubScreenScraper = {
+      getStatus: vi.fn(() => 'available'),
+      isConfigured: true,
+      searchByName: vi.fn(),
+    };
+  });
+
+  function register(opts: { readonly withSS?: boolean } = {}): void {
+    registerIpcHandlers(
+      { listAllCoresWithFiles: vi.fn(), listRoms: vi.fn() } as never,
+      { list: () => [] } as never,
+      {
+        getRomMetadata: vi.fn(),
+        prefetchHashes: vi.fn(),
+        prefetchMetadata: vi.fn(),
+        clearMetadataCache: vi.fn(),
+        getBoxArtLocal: vi.fn(),
+        getBoxArtBytes: vi.fn(),
+        getRomsMetadata: vi.fn(),
+        ensureMetadataDatabase: vi.fn(),
+      } as never,
+      vi.fn() as never,
+      vi.fn() as never,
+      vi.fn() as never,
+      { setFocus: () => undefined } as never,
+      (opts.withSS ?? true ? stubScreenScraper : null) as never,
+    );
+  }
+
+  it('emits attempt + result(service-null) when screenScraper is null', async () => {
+    register({ withSS: false });
+    const h = handlers.get(IPC_CHANNELS.searchScreenScraperByName);
+    const result = (await h!.handler({}, 'PSX', 'policenauts')) as readonly unknown[];
+    expect(result).toEqual([]);
+    const lines = diagLines();
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('ss-manual-search-attempt');
+    expect(lines[0]).toContain('coreId=PSX');
+    expect(lines[0]).toContain('searchTerm=policenauts');
+    expect(lines[1]).toContain('ss-manual-search-result');
+    expect(lines[1]).toContain('outcome=empty');
+    expect(lines[1]).toContain('reason=service-null');
+  });
+
+  it('emits attempt + result(no-system-mapping) for an unmapped coreId', async () => {
+    register();
+    const h = handlers.get(IPC_CHANNELS.searchScreenScraperByName);
+    const result = (await h!.handler({}, 'hbmame', 'mslug2')) as readonly unknown[];
+    expect(result).toEqual([]);
+    const lines = diagLines();
+    expect(lines[1]).toContain('outcome=empty');
+    expect(lines[1]).toContain('reason=no-system-mapping');
+    expect(stubScreenScraper.searchByName).not.toHaveBeenCalled();
+  });
+
+  it('threads through service.searchByName for a mapped core, logging outcome=results', async () => {
+    register();
+    stubScreenScraper.searchByName.mockResolvedValueOnce({
+      kind: 'ok',
+      results: [
+        {
+          id: 1,
+          name: 'Policenauts',
+          system: 'Sony - PlayStation',
+          description: null,
+          year: 1994,
+          publisher: null,
+          developer: null,
+          genres: [],
+          players: null,
+          rating: null,
+          releaseDate: null,
+          boxArtUrl: null,
+          extra: { titleScreenUrl: null, snapUrl: null },
+        },
+      ],
+    });
+    const h = handlers.get(IPC_CHANNELS.searchScreenScraperByName);
+    const result = (await h!.handler({}, 'PSX', 'policenauts')) as readonly unknown[];
+    expect(result).toHaveLength(1);
+    expect(stubScreenScraper.searchByName).toHaveBeenCalledWith({
+      systemId: 57,
+      searchTerm: 'policenauts',
+    });
+    const lines = diagLines();
+    expect(lines[1]).toContain('outcome=results');
+    expect(lines[1]).toContain('count=1');
+  });
+
+  it('logs the service-layer reason verbatim on outcome=empty', async () => {
+    // Every service-layer empty branch hits the same logging path —
+    // pin the no-credentials case as a representative; the other
+    // service-layer reasons (service-unavailable, fetch-failed,
+    // parser-empty, all-parsed-dropped) are covered separately in
+    // screenscraper-service.test.ts. This test ensures the IPC
+    // handler echoes whatever `reason` the service returns.
+    register();
+    stubScreenScraper.searchByName.mockResolvedValueOnce({
+      kind: 'empty',
+      reason: 'no-credentials',
+    });
+    const h = handlers.get(IPC_CHANNELS.searchScreenScraperByName);
+    await h!.handler({}, 'PSX', 'policenauts');
+    const lines = diagLines();
+    expect(lines[1]).toContain('outcome=empty');
+    expect(lines[1]).toContain('reason=no-credentials');
+  });
+
+  it('surfaces httpStatus when the service returns reason=fetch-failed', async () => {
+    register();
+    stubScreenScraper.searchByName.mockResolvedValueOnce({
+      kind: 'empty',
+      reason: 'fetch-failed',
+      httpStatus: 429,
+    });
+    const h = handlers.get(IPC_CHANNELS.searchScreenScraperByName);
+    await h!.handler({}, 'PSX', 'policenauts');
+    const lines = diagLines();
+    expect(lines[1]).toContain('reason=fetch-failed');
+    expect(lines[1]).toContain('httpStatus=429');
+  });
+
+  it('surfaces status when the service returns reason=service-unavailable', async () => {
+    register();
+    stubScreenScraper.searchByName.mockResolvedValueOnce({
+      kind: 'empty',
+      reason: 'service-unavailable',
+      status: 'rate-limited',
+    });
+    const h = handlers.get(IPC_CHANNELS.searchScreenScraperByName);
+    await h!.handler({}, 'PSX', 'policenauts');
+    const lines = diagLines();
+    expect(lines[1]).toContain('reason=service-unavailable');
+    expect(lines[1]).toContain('status=rate-limited');
+  });
+});

@@ -393,13 +393,71 @@ export function registerIpcHandlers(
   //     AO486 / etc. — search modal will show "no matches" and
   //     the user can still try the edit modal for free-form
   //     overrides).
+  //
+  // feat/manual-search-observability: emits two diag lines per
+  // click — `ss-manual-search-attempt` before the call (records
+  // service state + input) and `ss-manual-search-result` after
+  // (records outcome + granular reason on empty). Lets a future
+  // "No matches found" report be traced to one of seven distinct
+  // silent-return paths via grep `ss-manual-search`. No behavior
+  // change — empty paths still return empty.
   handle<[string, string], readonly ScreenScraperGame[]>(
     IPC_CHANNELS.searchScreenScraperByName,
     async (coreId, searchTerm) => {
-      if (screenScraper === null) return [];
+      const startMs = Date.now();
       const systemId = lookupScreenScraperSystemId(coreId);
-      if (systemId === null) return [];
-      return screenScraper.searchByName({ systemId, searchTerm });
+      const status = screenScraper?.getStatus();
+      diagLog('info', 'meta', '·', 'ss-manual-search-attempt', {
+        coreId,
+        systemId: systemId ?? undefined,
+        searchTerm,
+        status,
+        hasCredentials:
+          screenScraper !== null && screenScraper.isConfigured ? 1 : 0,
+      });
+      if (screenScraper === null) {
+        diagLog('info', 'meta', '·', 'ss-manual-search-result', {
+          coreId,
+          outcome: 'empty',
+          reason: 'service-null',
+          count: 0,
+          ms: Date.now() - startMs,
+        });
+        return [];
+      }
+      if (systemId === null) {
+        diagLog('info', 'meta', '·', 'ss-manual-search-result', {
+          coreId,
+          outcome: 'empty',
+          reason: 'no-system-mapping',
+          count: 0,
+          ms: Date.now() - startMs,
+        });
+        return [];
+      }
+      const outcome = await screenScraper.searchByName({
+        systemId,
+        searchTerm,
+      });
+      if (outcome.kind === 'ok') {
+        diagLog('info', 'meta', '·', 'ss-manual-search-result', {
+          coreId,
+          outcome: 'results',
+          count: outcome.results.length,
+          ms: Date.now() - startMs,
+        });
+        return outcome.results;
+      }
+      diagLog('info', 'meta', '·', 'ss-manual-search-result', {
+        coreId,
+        outcome: 'empty',
+        reason: outcome.reason,
+        status: outcome.status,
+        httpStatus: outcome.httpStatus,
+        count: 0,
+        ms: Date.now() - startMs,
+      });
+      return [];
     },
   );
 
