@@ -61,3 +61,34 @@ export function useScrapedCoreIds(): ReadonlySet<string> {
   const event = useContext(AutoScrapeContext);
   return new Set(event.completedCoreIds);
 }
+
+/**
+ * fix/count-and-status-indicator commit 2 — per-core scrape progress
+ * for the StatusIndicator gradient. Returns the progress in [0, 1]:
+ *
+ *   - 1.0 if `coreId` is in `completedCoreIds` (already done).
+ *   - `done / total` if the engine is actively scraping `coreId`.
+ *   - 0 otherwise (not started).
+ *
+ * Pure derivation against the latest event — no extra subscriptions.
+ */
+export function useCoreScrapeProgress(coreId: string): number {
+  const event = useContext(AutoScrapeContext);
+  if (event.completedCoreIds.includes(coreId)) return 1;
+  if (event.state === 'active' && event.coreId === coreId) {
+    if (event.total <= 0) return 0;
+    return Math.max(0, Math.min(1, event.done / event.total));
+  }
+  return 0;
+}
+
+/**
+ * Progress of the currently-scraping core, or null when the engine
+ * is idle. Powers the StatusBar footer indicator.
+ */
+export function useActiveScrapeProgress(): number | null {
+  const event = useContext(AutoScrapeContext);
+  if (event.state !== 'active') return null;
+  if (event.total <= 0) return 0;
+  return Math.max(0, Math.min(1, event.done / event.total));
+}

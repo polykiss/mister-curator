@@ -69,9 +69,12 @@ import {
 } from '@shared/hash-script';
 import {
   buildPrimeScript,
+  buildSizeAndMtimeScript,
   buildWitnessScript,
+  parseSizeAndMtimeOutput,
   parsePrimeOutput,
   parseWitnessOutput,
+  type SizeAndMtime,
   type WitnessMtimes,
 } from '@shared/prime-parse';
 import { MisterConnectionError } from '@shared/types';
@@ -860,6 +863,11 @@ export class RealMisterClient implements IMisterClient {
       const heuristic = classifyFolder({
         files: acc.directFiles,
         dirs: acc.directDirs,
+        // fix/count-and-status-indicator commit 1: pass the folder
+        // basename (un-dotted) so the shared-prefix-atomic rule can
+        // fire on X68000 game folders whose .zip variants all share
+        // the game name as a prefix.
+        folderName: visibleBase,
       });
       const override = getFolderOverride(
         folderClassifications,
@@ -1505,6 +1513,39 @@ export class RealMisterClient implements IMisterClient {
     if (parsed === null) {
       throw new Error(
         'Witness output did not match the expected shape (likely truncated).',
+      );
+    }
+    return parsed;
+  }
+
+  /**
+   * fix/count-and-status-indicator commit 4 — stat (size + mtime)
+   * for a batch of absolute file paths in one SSH round-trip. Used
+   * by the hash-cache v3→v4 lazy migration to populate `diskSizeBytes`
+   * without re-running the slow `unzip -p | md5sum` pipeline.
+   *
+   * Empty input short-circuits — no SSH call. Throws on a non-zero
+   * exit so the caller treats this as "couldn't validate" → fall
+   * back to the existing rehash path.
+   */
+  async statPathsWithSize(
+    paths: readonly string[],
+  ): Promise<Record<string, SizeAndMtime>> {
+    this.assertConnected();
+    if (paths.length === 0) return {};
+    const script = buildSizeAndMtimeScript(paths);
+    const result = await this.runSshOp(script, () =>
+      this.ssh.execCommand(script),
+    );
+    if (result.code !== 0) {
+      throw new Error(
+        `Failed to stat paths with size: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+      );
+    }
+    const parsed = parseSizeAndMtimeOutput(result.stdout);
+    if (parsed === null) {
+      throw new Error(
+        'Size+mtime output did not match the expected shape (likely truncated).',
       );
     }
     return parsed;

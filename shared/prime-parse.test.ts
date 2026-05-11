@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildPrimeScript,
+  buildSizeAndMtimeScript,
   buildWitnessScript,
   parsePrimeOutput,
+  parseSizeAndMtimeOutput,
   parseWitnessOutput,
 } from '@shared/prime-parse';
 
@@ -252,5 +254,103 @@ describe('buildWitnessScript', () => {
     expect(script).toContain(`echo 'WITNESSES'`);
     expect(script).toContain(`echo 'END'`);
     expect(script).toContain(`stat -c '%Y %n'`);
+  });
+});
+
+describe('buildSizeAndMtimeScript / parseSizeAndMtimeOutput (commit 4 lazy migration)', () => {
+  it('build: emits a SIZE_MTIME-bracketed script with stat -c using real tab separators', () => {
+    const script = buildSizeAndMtimeScript(['/media/fat/games/NEOGEO/mslug.zip']);
+    expect(script).toContain(`echo 'SIZE_MTIME'`);
+    expect(script).toContain(`echo 'END'`);
+    // The format must be tab-separated so paths with spaces don't
+    // fragment. The witness script uses space; this one uses real
+    // TAB characters in the stat format string (the JS template
+    // literal renders `\t` as a literal tab).
+    expect(script).toContain('stat -c \'%s\t%Y\t%n\'');
+  });
+
+  it('build: shell-quotes paths with spaces and apostrophes', () => {
+    const script = buildSizeAndMtimeScript([
+      "/media/fat/games/X68000/D'Oh.dim",
+      '/media/fat/games/SNES/Super Mario World.sfc',
+    ]);
+    // Single-quote escape: '\'' inside the wrapping quotes.
+    expect(script).toContain(`'/media/fat/games/X68000/D'\\''Oh.dim'`);
+    expect(script).toContain(`'/media/fat/games/SNES/Super Mario World.sfc'`);
+  });
+
+  it('build: emits a fallback line (size=0, mtime=0) for paths that vanish', () => {
+    // The script's `if [ -f ...; ... else printf '0\t0\t<path>\n'; fi`
+    // structure ensures the parser sees one entry per requested
+    // path even when the path is missing.
+    const script = buildSizeAndMtimeScript(['/missing']);
+    expect(script).toContain(`printf '0\\t0\\t%s\\n'`);
+  });
+
+  it('parse: decodes a populated SIZE_MTIME block with multiple paths', () => {
+    const stdout = [
+      'SIZE_MTIME',
+      '14199857\t1709054222\t/media/fat/games/mame/grdians.zip',
+      '524288\t1700000000\t/media/fat/games/SNES/SMW.sfc',
+      'END',
+      '',
+    ].join('\n');
+    expect(parseSizeAndMtimeOutput(stdout)).toEqual({
+      '/media/fat/games/mame/grdians.zip': {
+        size: 14199857,
+        mtime: 1709054222,
+      },
+      '/media/fat/games/SNES/SMW.sfc': {
+        size: 524288,
+        mtime: 1700000000,
+      },
+    });
+  });
+
+  it('parse: returns null when END is missing (truncation)', () => {
+    expect(
+      parseSizeAndMtimeOutput('SIZE_MTIME\n100\t200\t/a\n'),
+    ).toBeNull();
+  });
+
+  it('parse: handles missing-on-device entries (size=0, mtime=0)', () => {
+    const stdout = ['SIZE_MTIME', '0\t0\t/vanished', 'END', ''].join('\n');
+    expect(parseSizeAndMtimeOutput(stdout)).toEqual({
+      '/vanished': { size: 0, mtime: 0 },
+    });
+  });
+
+  it('parse: paths containing tabs use the SECOND tab as the path delimiter', () => {
+    // Path with embedded tab is rare but legal. The first two tabs
+    // delimit the numeric fields; everything after is the path.
+    const stdout = [
+      'SIZE_MTIME',
+      '100\t200\t/games/odd\tname.sfc',
+      'END',
+      '',
+    ].join('\n');
+    expect(parseSizeAndMtimeOutput(stdout)).toEqual({
+      '/games/odd\tname.sfc': { size: 100, mtime: 200 },
+    });
+  });
+
+  it('parse: ignores garbage lines outside the SIZE_MTIME section', () => {
+    const stdout = [
+      'random preamble',
+      'SIZE_MTIME',
+      '1\t2\t/a',
+      'END',
+      '',
+    ].join('\n');
+    expect(parseSizeAndMtimeOutput(stdout)).toEqual({
+      '/a': { size: 1, mtime: 2 },
+    });
+  });
+
+  it('parse: clamps non-numeric size/mtime to 0 (defensive against busybox quirks)', () => {
+    const stdout = ['SIZE_MTIME', 'NaN\txyz\t/a', 'END', ''].join('\n');
+    expect(parseSizeAndMtimeOutput(stdout)).toEqual({
+      '/a': { size: 0, mtime: 0 },
+    });
   });
 });

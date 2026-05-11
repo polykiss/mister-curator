@@ -624,10 +624,22 @@ export class MetadataOrchestrator {
           { filename, parentFolder, parentFolderIsAtomic },
           ssHint,
         );
+        // fix/count-and-status-indicator commit 3 — surface
+        // boxArtUrl presence per-row so live trace can confirm
+        // whether the user-perceived "no box art" cases are the
+        // metadata fetch returning null URLs vs. the hash being
+        // missing entirely (commit 4's lazy migration scope) vs.
+        // the renderer dropping the URL.
         diagLog('info', 'prefetch', '·', 'lookup', {
           coreId,
           path: basename(path),
           source: metadata?.source ?? 'none',
+          hasBoxArt:
+            metadata !== null &&
+            metadata.boxArtUrl !== null &&
+            metadata.boxArtUrl !== ''
+              ? 1
+              : 0,
           ms: Date.now() - lookupStart,
           totalMs: Date.now() - perRomStart,
         });

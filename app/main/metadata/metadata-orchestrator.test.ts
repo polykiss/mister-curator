@@ -168,6 +168,7 @@ function makeOrchestrator(opts: {
           client: {
             statWitnesses: vi.fn(async () => ({})),
             hashPaths: vi.fn(async () => []),
+            statPathsWithSize: vi.fn(async () => ({})),
           },
           host: 'host-1',
         }
