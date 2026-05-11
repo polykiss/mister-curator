@@ -134,16 +134,17 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
   });
 
   it('writes a cache file in the current schema version', async () => {
-    // PR-D2 (PR #29) bumped the schema from 4 → 5 (added the
-    // userOverride block). New writes always use the current
-    // ROM_METADATA_SCHEMA_VERSION; v4 records on disk still parse.
+    // Schema bumps so far: PR-D2 (PR #29) 4 → 5 (userOverride
+    // block); feat/metadata-detail-modal 5 → 6 (screenshotUrls).
+    // New writes always use the current ROM_METADATA_SCHEMA_VERSION;
+    // older records on disk still parse via the dual-read validator.
     const m = makeMocks({ dbReturns: buildDbHit() });
     const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
     await svc.getMetadata(HASH);
 
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
     const onDisk = JSON.parse(await fs.readFile(path, 'utf-8')) as RomMetadata;
-    expect(onDisk.version).toBe(5);
+    expect(onDisk.version).toBe(6);
     expect(onDisk.source).toBe('openvgdb');
     expect(onDisk.system).toBe('Super Nintendo Entertainment System');
   });
@@ -157,8 +158,8 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
     const onDisk = JSON.parse(await fs.readFile(path, 'utf-8')) as RomMetadata;
     expect(onDisk.source).toBe('none');
-    // PR-D2 (PR #29): writes use current schema (v5).
-    expect(onDisk.version).toBe(5);
+    // Writes use current schema (v6 after feat/metadata-detail-modal).
+    expect(onDisk.version).toBe(6);
   });
 
   it('hit on a system not in the libretro map → null thumbnail URLs but full metadata', async () => {
@@ -1801,6 +1802,236 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
       const updated = await svc.bindManualOverride(HASH, buildSsHit());
       expect(updated.triedNameSearch).toBe(true);
+    });
+
+    // feat/metadata-detail-modal — schema v6 introduces
+    // `screenshotUrls`. Manual bind composes via
+    // `composeFromScreenScraper`, so plumbing screenshots through SS
+    // hits also gives manual-bound records the gallery for free.
+    it('bindManualOverride: persists the screenshot gallery from extra.screenshots', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      const updated = await svc.bindManualOverride(
+        HASH,
+        buildSsHit({
+          extra: {
+            box3DUrl: null,
+            marqueeUrl: null,
+            titleScreenUrl: null,
+            snapUrl: 'https://ss-cdn/snap.png',
+            clearLogoUrl: null,
+            screenshots: [
+              'https://ss-cdn/screenshot-1.png',
+              'https://ss-cdn/screenshot-2.png',
+              'https://ss-cdn/screenshot-3.png',
+            ],
+          },
+        }),
+      );
+      expect(updated.screenshotUrls).toEqual([
+        'https://ss-cdn/screenshot-1.png',
+        'https://ss-cdn/screenshot-2.png',
+        'https://ss-cdn/screenshot-3.png',
+      ]);
+      expect(updated.version).toBe(6);
+    });
+  });
+
+  describe('feat/metadata-detail-modal — schema v6 + screenshotUrls', () => {
+    function buildSsHit(
+      overrides: Partial<ScreenScraperGame> = {},
+    ): ScreenScraperGame {
+      return {
+        id: 9999,
+        name: 'Detail Game',
+        system: 'PSX',
+        description: null,
+        developer: null,
+        publisher: null,
+        genres: [],
+        releaseDate: null,
+        rating: null,
+        players: null,
+        boxArtUrl: null,
+        extra: {
+          box3DUrl: null,
+          marqueeUrl: null,
+          titleScreenUrl: null,
+          snapUrl: null,
+          clearLogoUrl: null,
+          screenshots: [],
+        },
+        ...overrides,
+      };
+    }
+
+    it('composeFromScreenScraper dedupes snapUrl out of the screenshots gallery', async () => {
+      // pickAllMedia(['ss', 'screenmarqueesmall']) re-collects entries
+      // also picked into `snapUrl`, so the raw gallery typically has
+      // snapUrl in slot 0. The composer must drop that duplicate so
+      // the strip doesn't repeat the primary screenshot.
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      const updated = await svc.bindManualOverride(
+        HASH,
+        buildSsHit({
+          extra: {
+            box3DUrl: null,
+            marqueeUrl: null,
+            titleScreenUrl: null,
+            snapUrl: 'https://ss-cdn/snap.png',
+            clearLogoUrl: null,
+            screenshots: [
+              'https://ss-cdn/snap.png', // duplicate of snapUrl — drop
+              'https://ss-cdn/extra-1.png',
+              'https://ss-cdn/extra-2.png',
+            ],
+          },
+        }),
+      );
+      expect(updated.screenshotUrls).toEqual([
+        'https://ss-cdn/extra-1.png',
+        'https://ss-cdn/extra-2.png',
+      ]);
+    });
+
+    it('composeFromScreenScraper dedupes within the gallery itself', async () => {
+      // SS sometimes returns the same URL across `ss` and
+      // `screenmarqueesmall`. Make sure within-array duplicates also
+      // get collapsed, not just snapUrl duplicates.
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      const updated = await svc.bindManualOverride(
+        HASH,
+        buildSsHit({
+          extra: {
+            box3DUrl: null,
+            marqueeUrl: null,
+            titleScreenUrl: null,
+            snapUrl: null,
+            clearLogoUrl: null,
+            screenshots: [
+              'https://ss-cdn/a.png',
+              'https://ss-cdn/b.png',
+              'https://ss-cdn/a.png', // within-array dup
+            ],
+          },
+        }),
+      );
+      expect(updated.screenshotUrls).toEqual([
+        'https://ss-cdn/a.png',
+        'https://ss-cdn/b.png',
+      ]);
+    });
+
+    it('v5 records without screenshotUrls still parse and read back as records (validator backward-compat)', async () => {
+      // A pre-v6 record on disk has no `screenshotUrls` field. The
+      // validator must accept the shape; the renderer treats
+      // `undefined` as an empty gallery. This is the dual-read
+      // pattern that lets the schema bump be a no-op for existing
+      // users — no forced migration.
+      const seed = {
+        version: 5,
+        hash: HASH,
+        name: 'Legacy v5 Game',
+        system: 'SNES',
+        year: 1991,
+        publisher: 'Nintendo',
+        developer: 'Nintendo',
+        genre: 'Platform',
+        description: 'Old.',
+        players: '1',
+        rating: 9,
+        releaseDate: '1991-08-13',
+        boxArtUrl: 'https://ss-cdn/legacy-box.png',
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        source: 'screenscraper' as const,
+        fetchedAt: new Date().toISOString(),
+        // No screenshotUrls field — this is the v5 shape on disk.
+      };
+      await fs.mkdir(join(dir, 'by-hash', HASH.slice(0, 2)), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`),
+        JSON.stringify(seed),
+      );
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      const cached = await svc.readCachedMetadata(HASH);
+      expect(cached).not.toBeNull();
+      expect(cached!.name).toBe('Legacy v5 Game');
+      expect(cached!.screenshotUrls).toBeUndefined();
+      expect(cached!.version).toBe(5);
+    });
+
+    it('writes round-trip with screenshotUrls on disk at v6', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      const written = await svc.bindManualOverride(
+        HASH,
+        buildSsHit({
+          extra: {
+            box3DUrl: null,
+            marqueeUrl: null,
+            titleScreenUrl: null,
+            snapUrl: null,
+            clearLogoUrl: null,
+            screenshots: ['https://ss-cdn/a.png', 'https://ss-cdn/b.png'],
+          },
+        }),
+      );
+      expect(written.version).toBe(6);
+      expect(written.screenshotUrls).toEqual([
+        'https://ss-cdn/a.png',
+        'https://ss-cdn/b.png',
+      ]);
+      // Read back from disk via the service (round-trip the JSON).
+      const reread = await svc.readCachedMetadata(HASH);
+      expect(reread?.screenshotUrls).toEqual([
+        'https://ss-cdn/a.png',
+        'https://ss-cdn/b.png',
+      ]);
+    });
+
+    it('validator rejects records with a non-array screenshotUrls', async () => {
+      // Defense against malformed cache files (manual edits, partial
+      // writes from older shapes). If `screenshotUrls` is present but
+      // shaped wrong, treat the whole record as invalid so the
+      // pipeline refetches rather than carrying poisoned state.
+      const bad = {
+        version: 6,
+        hash: HASH,
+        name: 'Bad Shape',
+        system: 'SNES',
+        year: null,
+        publisher: null,
+        developer: null,
+        genre: null,
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: null,
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        screenshotUrls: 'not-an-array',
+        source: 'screenscraper',
+        fetchedAt: new Date().toISOString(),
+      };
+      await fs.mkdir(join(dir, 'by-hash', HASH.slice(0, 2)), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`),
+        JSON.stringify(bad),
+      );
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      // Validator rejects → readCachedMetadata returns null as if
+      // the record didn't exist.
+      expect(await svc.readCachedMetadata(HASH)).toBeNull();
     });
   });
 });

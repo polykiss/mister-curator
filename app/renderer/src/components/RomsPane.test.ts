@@ -52,3 +52,88 @@ describe('RomsPane — Find on ScreenScraper menu entry (PR-D2 r2 c2)', () => {
     expect(SOURCE).toMatch(/!hasMetadata \|\| sourceState === 'none'/);
   });
 });
+
+/**
+ * feat/metadata-detail-modal — wiring for the new detail dialog.
+ * Same source-string scan pattern.
+ *
+ * The structural contract here is:
+ *   1. `detailDialogFor` state is declared and follows the same
+ *      shape as the other two row-scoped modal states.
+ *   2. The name TableCell's onClick handler routes by `rom.kind`:
+ *      folder-container drills (unchanged); file + folder-atomic
+ *      with metadata opens the detail modal.
+ *   3. The `RomDetailDialog` instance is mounted alongside the
+ *      existing two modals.
+ *   4. The detail modal's onEdit / onSearch callbacks hand off to
+ *      the existing edit / search modal state setters — they do
+ *      NOT duplicate the modal logic.
+ */
+describe('RomsPane — single-click → detail modal (feat/metadata-detail-modal)', () => {
+  it('declares detailDialogFor state', () => {
+    expect(SOURCE).toMatch(
+      /const \[detailDialogFor, setDetailDialogFor\] = useState/,
+    );
+  });
+
+  it('imports RomDetailDialog', () => {
+    expect(SOURCE).toContain(
+      "import { RomDetailDialog } from '@app/renderer/src/components/RomDetailDialog'",
+    );
+  });
+
+  it('name-cell click handler preserves folder-container drill semantics', () => {
+    // The folder-container drill case must hit FIRST and `return`
+    // before any detail-modal branch — otherwise a clicked
+    // folder-container would also try to open the detail modal.
+    expect(SOURCE).toMatch(
+      /if \(rom\.kind === 'folder-container' && !rom\.hidden\) \{\s*e\.preventDefault\(\);\s*onRowActivate\(rom\);\s*return;\s*\}/,
+    );
+  });
+
+  it('name-cell click handler opens detail modal for file / folder-atomic regardless of metadata state', () => {
+    // The detail-modal branch fires for ANY file / folder-atomic
+    // row — the modal's empty-state branch handles the no-record
+    // case so unmatched / source=none rows are still clickable
+    // (the modal becomes the single discovery point + offers
+    // "Find on ScreenScraper" as the primary action).
+    expect(SOURCE).toMatch(
+      /rom\.kind === 'file' \|\|\s*rom\.kind === 'folder-atomic'/,
+    );
+    expect(SOURCE).toMatch(/setDetailDialogFor\(\{/);
+  });
+
+  it('detail modal renders for any detailDialogFor — metadata passed through nullable', () => {
+    // No defensive null-gate on the mount (unlike the edit modal,
+    // which requires a populated record). The dialog accepts a
+    // nullable `metadata` prop and renders an empty state when
+    // none has landed.
+    expect(SOURCE).toMatch(
+      /metadata=\{metadataByPath\[detailDialogFor\.path\]\?\.metadata \?\? null\}/,
+    );
+  });
+
+  it('onEdit hand-off sets the edit-modal state (no duplicate modal logic)', () => {
+    // The detail modal's Edit button must reuse the existing
+    // edit-metadata modal. Pin that the callback calls the same
+    // setter the menu uses — not a new modal of its own.
+    expect(SOURCE).toMatch(
+      /onEdit=\{\(\) => \{\s*setEditMetadataFor\(\{[\s\S]*?path: detailDialogFor\.path/,
+    );
+  });
+
+  it('onSearch hand-off sets the search-modal state', () => {
+    expect(SOURCE).toMatch(
+      /onSearch=\{\(\) => \{\s*setSearchScreenScraperFor\(\{[\s\S]*?path: detailDialogFor\.path/,
+    );
+  });
+
+  it('cursor-pointer is applied to file / folder-atomic name cells unconditionally', () => {
+    // The cursor change is the affordance. Applied to every file /
+    // folder-atomic row regardless of metadata state — they're all
+    // clickable (the modal handles the no-record case).
+    expect(SOURCE).toMatch(
+      /\(rom\.kind === 'file' \|\|\s*rom\.kind === 'folder-atomic'\) &&\s*'cursor-pointer'/,
+    );
+  });
+});
