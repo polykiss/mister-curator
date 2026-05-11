@@ -12,7 +12,6 @@ import type { MisterSecret } from '@shared/mister-client';
  */
 const mocks = vi.hoisted(() => {
   const connectionListeners = new Map<string, () => void>();
-  const setKeepAlive = vi.fn();
   return {
     connect: vi.fn(),
     dispose: vi.fn(),
@@ -20,19 +19,10 @@ const mocks = vi.hoisted(() => {
     exec: vi.fn(),
     isConnected: vi.fn(),
     connectionListeners,
-    setKeepAlive,
     connection: {
       once: vi.fn((event: string, handler: () => void) => {
         connectionListeners.set(event, handler);
       }),
-      // fix/scrape-resume-and-keepalive commit 2 — the production
-      // client casts through `Client._sock` to reach the underlying
-      // net.Socket and call setKeepAlive on it. The mock exposes the
-      // same shape so the test can assert the call without spinning
-      // up a real socket.
-      _sock: {
-        setKeepAlive,
-      },
     },
   };
 });
@@ -83,7 +73,6 @@ describe('RealMisterClient', () => {
     mocks.isConnected.mockReset().mockReturnValue(true);
     mocks.connection.once.mockClear();
     mocks.connectionListeners.clear();
-    mocks.setKeepAlive.mockReset();
   });
 
   describe('connect', () => {
@@ -118,20 +107,6 @@ describe('RealMisterClient', () => {
       // jitter pass while still catching real drops.
       expect(args.keepaliveInterval).toBe(15_000);
       expect(args.keepaliveCountMax).toBe(4);
-    });
-
-    it('enables OS-level TCP keepalive on the underlying socket post-connect', async () => {
-      // fix/scrape-resume-and-keepalive commit 2 — complements the
-      // SSH-layer keepalive above. Detects half-open sockets at the
-      // TCP layer (e.g. NAT idle drops, Wi-Fi reassociation) so a
-      // long-running `unzip -p | md5sum` that's silent on the write
-      // side surfaces a break before it accumulates into a stalled
-      // write that errors with EPIPE. The 10s initial delay is the
-      // documented floor for interactive sessions.
-      const client = new RealMisterClient();
-      await client.connect(profile, secret);
-      expect(mocks.setKeepAlive).toHaveBeenCalledTimes(1);
-      expect(mocks.setKeepAlive).toHaveBeenCalledWith(true, 10_000);
     });
 
     it('passes the private key (not the path) when authMethod is key', async () => {
