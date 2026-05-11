@@ -125,6 +125,42 @@ export type ScreenScraperStatus =
   | 'quota-exceeded';
 
 /**
+ * feat/manual-search-observability — discriminated outcome for
+ * `searchByName`. The IPC handler at `app/main/ipc/register.ts`
+ * reads the `reason` field on the empty branch to emit a granular
+ * `ss-manual-search-result` diag line, so a "No matches found"
+ * dialog message can be traced to one of five service-layer
+ * silent-return paths instead of being conflated as "SS said no."
+ *
+ * Two additional reasons (`service-null`, `no-system-mapping`)
+ * fire in the IPC handler BEFORE `searchByName` is called, so
+ * they're handled at that layer and never appear here.
+ */
+export type ScreenScraperSearchOutcome =
+  | { readonly kind: 'ok'; readonly results: readonly ScreenScraperGame[] }
+  | {
+      readonly kind: 'empty';
+      readonly reason:
+        | 'no-credentials'
+        | 'service-unavailable'
+        | 'fetch-failed'
+        | 'parser-empty'
+        | 'all-parsed-dropped';
+      /**
+       * The actual ScreenScraperStatus when reason='service-unavailable'.
+       * Disambiguates the four sub-states ('rate-limited',
+       * 'quota-exceeded', 'unavailable' from auth-failed/blacklisted/
+       * no-creds — though the no-creds case is its own reason above).
+       */
+      readonly status?: ScreenScraperStatus;
+      /**
+       * Last HTTP status seen when reason='fetch-failed'. Undefined
+       * when the failure was a pre-response network/timeout error.
+       */
+      readonly httpStatus?: number;
+    };
+
+/**
  * Thrown on HTTP 401/403. Latches the service to `unavailable` for
  * the remainder of the session — credentials don't suddenly start
  * working, and retrying just stacks per-call rate-limit waits.
@@ -299,6 +335,17 @@ export class ScreenScraperService {
   }
 
   /**
+   * feat/manual-search-observability — public accessor for the
+   * configured-credentials flag. `getStatus()` collapses
+   * no-credentials, authFailed, and blacklisted into the same
+   * `'unavailable'` value; the manual-search IPC handler wants to
+   * surface the no-credentials case distinctly in its attempt log.
+   */
+  get isConfigured(): boolean {
+    return this.hasCredentials;
+  }
+
+  /**
    * Current state. Lazily transitions out of `rate-limited` when the
    * cooldown window has elapsed. Latched states (`unavailable` due
    * to authFailed/blacklisted; `quota-exceeded`) never transition
@@ -362,11 +409,23 @@ export class ScreenScraperService {
   async searchByName(args: {
     readonly systemId: number;
     readonly searchTerm: string;
-  }): Promise<readonly ScreenScraperGame[]> {
-    if (!this.hasCredentials) return [];
-    if (this.getStatus() !== 'available') return [];
+  }): Promise<ScreenScraperSearchOutcome> {
+    if (!this.hasCredentials) {
+      return { kind: 'empty', reason: 'no-credentials' };
+    }
+    const status = this.getStatus();
+    if (status !== 'available') {
+      return { kind: 'empty', reason: 'service-unavailable', status };
+    }
     const term = args.searchTerm.trim();
-    if (term === '') return [];
+    // Empty-after-trim keeps the existing silent-skip behavior; the
+    // IPC handler guards against this earlier but the service stays
+    // defensive. Treated as parser-empty since there's nothing to
+    // parse — distinct from a fetched empty response we'd also call
+    // parser-empty, but functionally identical for log readers.
+    if (term === '') {
+      return { kind: 'empty', reason: 'parser-empty' };
+    }
     return this.enqueue(() => this.doSearchByName(args.systemId, term));
   }
 
@@ -394,9 +453,9 @@ export class ScreenScraperService {
     query: ScreenScraperLookupQuery,
   ): Promise<ScreenScraperGame | null> {
     const url = this.buildUrl(query);
-    const body = await this.fetchWithRetries(url);
-    if (body === null) return null;
-    return parseScreenScraperResponse(body);
+    const outcome = await this.fetchWithRetries(url);
+    if (outcome.kind !== 'ok') return null;
+    return parseScreenScraperResponse(outcome.body);
   }
 
   /**
@@ -408,22 +467,59 @@ export class ScreenScraperService {
   private async doSearchByName(
     systemId: number,
     searchTerm: string,
-  ): Promise<readonly ScreenScraperGame[]> {
+  ): Promise<ScreenScraperSearchOutcome> {
     const url = this.buildSearchUrl(systemId, searchTerm);
-    const body = await this.fetchWithRetries(url);
-    if (body === null) return [];
-    return parseScreenScraperSearchResponse(body);
+    const outcome = await this.fetchWithRetries(url);
+    if (outcome.kind !== 'ok') {
+      return {
+        kind: 'empty',
+        reason: 'fetch-failed',
+        httpStatus: outcome.httpStatus,
+      };
+    }
+    // feat/manual-search-observability: the parser-empty case
+    // (`response.jeux` missing or non-array) and the
+    // all-parsed-dropped case (every per-jeu parse returned null)
+    // were collapsed before. Split them so the trace tells us
+    // whether SS returned an unexpected body shape vs returned a
+    // response with jeux we couldn't extract names from.
+    const jeux = readPath<unknown>(outcome.body, ['response', 'jeux']);
+    if (!Array.isArray(jeux)) {
+      return { kind: 'empty', reason: 'parser-empty' };
+    }
+    const results = parseScreenScraperSearchResponse(outcome.body);
+    if (results.length === 0) {
+      // jeux was an array but every entry failed to parse, OR jeux
+      // was empty. Both surface as no usable matches; the input
+      // length tells the user whether SS sent jeux at all.
+      return jeux.length === 0
+        ? { kind: 'empty', reason: 'parser-empty' }
+        : { kind: 'empty', reason: 'all-parsed-dropped' };
+    }
+    return { kind: 'ok', results };
   }
 
   /**
-   * Shared fetch + retry + status-handling routine. Returns the
-   * parsed JSON body on success, or null on any error / latched
-   * unavailability. Both `doLookup` (jeuInfos) and `doSearchByName`
-   * (jeuRecherche) call this with the appropriate URL — the only
-   * difference between them is the per-endpoint response shape
-   * which the caller handles with its own parser.
+   * Shared fetch + retry + status-handling routine. Returns either
+   * the parsed JSON body on success OR a structured failure with
+   * the last httpStatus seen (when applicable). Both `doLookup`
+   * (jeuInfos) and `doSearchByName` (jeuRecherche) call this with
+   * the appropriate URL — the only difference between them is the
+   * per-endpoint response shape which the caller handles with its
+   * own parser.
+   *
+   * feat/manual-search-observability: the return type widened from
+   * `unknown | null` to a discriminated union so the search-by-name
+   * caller can thread the failure cause into its outcome envelope.
+   * Hash-lookup callers (doLookup) still collapse a failure to
+   * `null` immediately — no behavior change for that branch.
    */
-  private async fetchWithRetries(url: string): Promise<unknown | null> {
+  private async fetchWithRetries(
+    url: string,
+  ): Promise<
+    | { readonly kind: 'ok'; readonly body: unknown }
+    | { readonly kind: 'fail'; readonly httpStatus?: number }
+  > {
     let attempts401 = 0;
     let attempts429 = 0;
     let attempts5xx = 0;
@@ -440,7 +536,7 @@ export class ScreenScraperService {
             `[ScreenScraper] network/timeout after ${String(attemptsNetwork + 1)} attempts; ` +
               `giving up on ${redactScreenScraperUrl(url)}`,
           );
-          return null;
+          return { kind: 'fail' };
         }
         await this.sleepImpl(this.backoffMs(attemptsNetwork));
         attemptsNetwork += 1;
@@ -457,7 +553,7 @@ export class ScreenScraperService {
           this.enterRateLimitedCooldown(
             'API closed (HTTP 401, server-load saturation)',
           );
-          return null;
+          return { kind: 'fail', httpStatus: 401 };
         }
         await this.sleepImpl(this.backoffMs(attempts401));
         attempts401 += 1;
@@ -473,7 +569,7 @@ export class ScreenScraperService {
         );
         throw new ScreenScraperAuthError(res.status);
       }
-      if (res.status === 404) return null;
+      if (res.status === 404) return { kind: 'fail', httpStatus: 404 };
       // 426: software blacklisted. Fatal config — only fixable by
       // changing the softname identifier upstream. Latch unavailable
       // with a distinct log line.
@@ -483,19 +579,19 @@ export class ScreenScraperService {
           '[ScreenScraper] HTTP 426 — this software\'s softname is blacklisted. ' +
             'Disabling for this session. The MiSTerCurator softname needs to be updated.',
         );
-        return null;
+        return { kind: 'fail', httpStatus: 426 };
       }
       if (res.status === 429) {
         if (attempts429 >= MAX_429_RETRIES) {
           this.enterRateLimitedCooldown('rate-limit (HTTP 429) budget exhausted');
-          return null;
+          return { kind: 'fail', httpStatus: 429 };
         }
         const backoff = this.backoffMs(attempts429);
         if (total429BackoffMs + backoff > TOTAL_429_BUDGET_MS) {
           this.enterRateLimitedCooldown(
             `rate-limit (HTTP 429) aggregate budget (${String(TOTAL_429_BUDGET_MS)}ms) exhausted`,
           );
-          return null;
+          return { kind: 'fail', httpStatus: 429 };
         }
         await this.sleepImpl(backoff);
         total429BackoffMs += backoff;
@@ -512,7 +608,7 @@ export class ScreenScraperService {
         this.logger(
           '[ScreenScraper] HTTP 430 — daily scrape quota exceeded. Disabled until next day.',
         );
-        return null;
+        return { kind: 'fail', httpStatus: 430 };
       }
       if (res.status === 431) {
         this.quotaExceeded = true;
@@ -520,7 +616,7 @@ export class ScreenScraperService {
           '[ScreenScraper] HTTP 431 — too many ROMs not recognised today. ' +
             'Disabled to avoid further KO penalty.',
         );
-        return null;
+        return { kind: 'fail', httpStatus: 431 };
       }
       if (res.status >= 500) {
         if (attempts5xx >= MAX_5XX_RETRIES) {
@@ -528,7 +624,7 @@ export class ScreenScraperService {
             `[ScreenScraper] HTTP ${String(res.status)} persisted after ${String(attempts5xx + 1)} attempts; ` +
               `giving up on ${redactScreenScraperUrl(url)}`,
           );
-          return null;
+          return { kind: 'fail', httpStatus: res.status };
         }
         await this.sleepImpl(this.backoffMs(attempts5xx));
         attempts5xx += 1;
@@ -538,16 +634,16 @@ export class ScreenScraperService {
         this.logger(
           `[ScreenScraper] unexpected HTTP ${String(res.status)} on ${redactScreenScraperUrl(url)}; treating as no-match.`,
         );
-        return null;
+        return { kind: 'fail', httpStatus: res.status };
       }
 
       let body: unknown;
       try {
         body = await res.json();
       } catch {
-        return null;
+        return { kind: 'fail', httpStatus: res.status };
       }
-      return body;
+      return { kind: 'ok', body };
     }
   }
 
