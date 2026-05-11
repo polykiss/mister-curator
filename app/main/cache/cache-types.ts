@@ -1,3 +1,4 @@
+import { mtimesMatch } from '@shared/mtime-compare';
 import type { WitnessMtimes } from '@shared/prime-parse';
 import type { CoreEntry, Rom } from '@shared/types';
 
@@ -90,9 +91,17 @@ export function sanitiseFsSegment(input: string): string {
 
 /**
  * True iff `cached` and `fresh` describe the same set of paths and
- * each path's mtime matches exactly. Path order doesn't matter; key
- * presence does. A path missing from `fresh` (mtime 0 or omitted)
- * counts as a mismatch — the resource on the device went away.
+ * each path's mtime matches within the ±2-second tolerance window.
+ * Path order doesn't matter; key presence does. A path missing from
+ * `fresh` (mtime 0 or omitted) counts as a mismatch — the resource
+ * on the device went away.
+ *
+ * fix/mtime-tolerance — pre-fix this was strict equality, which
+ * forced a full cores/roms cache rebuild every reconnect to an
+ * SD-rebuilt MiSTer (exFAT/FAT32 round mtimes to 2-second
+ * resolution, drifting every cached witness by ≤1s). The tolerance
+ * applies to non-zero values only; the 0-sentinel still mismatches
+ * unconditionally per `mtimesMatch`.
  */
 export function witnessesMatch(
   cached: WitnessMtimes,
@@ -105,11 +114,7 @@ export function witnessesMatch(
     const a = cached[k];
     const b = fresh[k];
     if (a === undefined || b === undefined) return false;
-    if (a !== b) return false;
-    // mtime 0 is our "MISSING" sentinel — treat it as a mismatch even
-    // if both sides happen to agree on it. A path that's gone is
-    // never a hit.
-    if (a === 0) return false;
+    if (!mtimesMatch(a, b)) return false;
   }
   return true;
 }

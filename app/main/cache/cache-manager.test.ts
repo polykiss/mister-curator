@@ -309,27 +309,53 @@ describe('sanitiseFsSegment', () => {
 
 describe('witnessesMatch', () => {
   it('exact match → true', () => {
-    expect(witnessesMatch({ a: 1, b: 2 }, { a: 1, b: 2 })).toBe(true);
+    // Use values well outside the ±2s tolerance window so the test
+    // pins exact-equality behavior independent of tolerance.
+    expect(witnessesMatch({ a: 100, b: 200 }, { a: 100, b: 200 })).toBe(
+      true,
+    );
   });
 
-  it('any single mtime mismatch → false', () => {
-    expect(witnessesMatch({ a: 1 }, { a: 2 })).toBe(false);
+  it('any single mtime mismatch outside the tolerance window → false', () => {
+    // fix/mtime-tolerance — widened from (1 vs 2) to (1 vs 100) so
+    // the assertion targets the genuine-mismatch case, not the
+    // SD-rebuild rounding artifact (which the tolerance now allows).
+    expect(witnessesMatch({ a: 1 }, { a: 100 })).toBe(false);
+  });
+
+  it('mtime within ±2s of cached → true (SD-rebuild tolerance)', () => {
+    // fix/mtime-tolerance regression pin: exFAT / FAT32 round mtimes
+    // to 2-second resolution, so a rebuilt SD's stat output drifts
+    // every cached witness by ≤1s. Strict equality treated these as
+    // misses and forced a full cores/roms cache rebuild every
+    // reconnect.
+    expect(witnessesMatch({ a: 100 }, { a: 101 })).toBe(true);
+    expect(witnessesMatch({ a: 100 }, { a: 99 })).toBe(true);
+    expect(witnessesMatch({ a: 100 }, { a: 102 })).toBe(true); // window edge
+    expect(witnessesMatch({ a: 100 }, { a: 98 })).toBe(true); // window edge
+  });
+
+  it('mtime ±3s outside the tolerance window → false', () => {
+    expect(witnessesMatch({ a: 100 }, { a: 103 })).toBe(false);
+    expect(witnessesMatch({ a: 100 }, { a: 97 })).toBe(false);
   });
 
   it('different key sets → false', () => {
-    expect(witnessesMatch({ a: 1 }, { a: 1, b: 2 })).toBe(false);
-    expect(witnessesMatch({ a: 1, b: 2 }, { a: 1 })).toBe(false);
+    expect(witnessesMatch({ a: 100 }, { a: 100, b: 200 })).toBe(false);
+    expect(witnessesMatch({ a: 100, b: 200 }, { a: 100 })).toBe(false);
   });
 
   it('mtime 0 (path missing on device) is always a mismatch even if both sides agree', () => {
     // The path went away. Anything we cached for it is by definition
-    // stale — never a hit.
+    // stale — never a hit. Tolerance never widens this case.
     expect(witnessesMatch({ a: 0 }, { a: 0 })).toBe(false);
-    expect(witnessesMatch({ a: 0, b: 1 }, { a: 0, b: 1 })).toBe(false);
+    expect(witnessesMatch({ a: 0, b: 100 }, { a: 0, b: 100 })).toBe(false);
   });
 
   it('order-independent across keys', () => {
-    expect(witnessesMatch({ a: 1, b: 2 }, { b: 2, a: 1 })).toBe(true);
+    expect(witnessesMatch({ a: 100, b: 200 }, { b: 200, a: 100 })).toBe(
+      true,
+    );
   });
 });
 

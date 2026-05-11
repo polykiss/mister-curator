@@ -942,13 +942,234 @@ describe('HashService', () => {
         stat: new Map([[newPath, 1700000000]]),
       });
       const result = await svc.checkCachedMtimes(client, 'host-1', [newPath]);
-      expect(result.get(newPath)?.md5).toBe('a'.repeat(32));
+      expect(result.entries.get(newPath)?.md5).toBe('a'.repeat(32));
       // Rewritten on disk.
       const file = JSON.parse(
         await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
       ) as { entries: Record<string, FixtureHash> };
       expect(file.entries[newPath]).toBeDefined();
       expect(file.entries[oldPath]).toBeUndefined();
+    });
+  });
+
+  describe('±2s tolerance on SD-rebuild-style drift (fix/mtime-tolerance)', () => {
+    // Models the user's reported scenario: data partition rebuilt
+    // onto exFAT/FAT32 rounds mtimes to 2-second resolution, drifting
+    // every cached entry by up to 1s. Pre-fix `validated=0
+    // needsHash=665` on mame; post-fix all entries match within
+    // tolerance and the cache stays warm.
+
+    it('getHash: stat mtime within ±1s of cached → cache hit, no rehash', async () => {
+      const svc = new HashService(dir);
+      const fixture = fix('a', 100, 1700000000);
+      // Seed cache.
+      await svc.getHash(
+        makeClient({ hashes: new Map([['/p/a', fixture]]) }),
+        'host-1',
+        ['/p/a'],
+      );
+      // Reconnect after SD rebuild: stat reports mtime +1s.
+      const driftedClient = makeClient({
+        hashes: new Map(),
+        stat: new Map([['/p/a', 1700000001]]),
+      });
+      const result = await svc.getHash(driftedClient, 'host-1', ['/p/a']);
+      expect(result.get('/p/a')?.md5).toBe('a'.repeat(32));
+      // No new hash call — the tolerance kept the entry warm.
+      expect(driftedClient.hashCalls).toEqual([]);
+    });
+
+    it('getHash: stat mtime within ±2s (window edge) → cache hit', async () => {
+      const svc = new HashService(dir);
+      const fixture = fix('a', 100, 1700000000);
+      await svc.getHash(
+        makeClient({ hashes: new Map([['/p/a', fixture]]) }),
+        'host-1',
+        ['/p/a'],
+      );
+      const driftedClient = makeClient({
+        hashes: new Map(),
+        stat: new Map([['/p/a', 1700000002]]),
+      });
+      const result = await svc.getHash(driftedClient, 'host-1', ['/p/a']);
+      expect(result.get('/p/a')?.md5).toBe('a'.repeat(32));
+      expect(driftedClient.hashCalls).toEqual([]);
+    });
+
+    it('getHash: stat mtime ±3s outside window → cache miss, rehash', async () => {
+      const svc = new HashService(dir);
+      const fixture = fix('a', 100, 1700000000);
+      await svc.getHash(
+        makeClient({ hashes: new Map([['/p/a', fixture]]) }),
+        'host-1',
+        ['/p/a'],
+      );
+      // Drift of 3s = past the tolerance window → genuine
+      // file-changed signal.
+      const fresh = fix('z', 200, 1700000003);
+      const driftedClient = makeClient({
+        hashes: new Map([['/p/a', fresh]]),
+        stat: new Map([['/p/a', 1700000003]]),
+      });
+      const result = await svc.getHash(driftedClient, 'host-1', ['/p/a']);
+      expect(result.get('/p/a')?.md5).toBe('z'.repeat(32));
+      // One rehash call — the cached entry was invalidated.
+      expect(driftedClient.hashCalls).toHaveLength(1);
+    });
+
+    it('checkCachedMtimes: tolerance match counts under toleranceCount', async () => {
+      const svc = new HashService(dir);
+      const fixture = fix('a', 100, 1700000000);
+      await svc.getHash(
+        makeClient({ hashes: new Map([['/p/a', fixture]]) }),
+        'host-1',
+        ['/p/a'],
+      );
+      const driftedClient = makeClient({
+        hashes: new Map(),
+        stat: new Map([['/p/a', 1700000001]]),
+      });
+      const result = await svc.checkCachedMtimes(driftedClient, 'host-1', [
+        '/p/a',
+      ]);
+      expect(result.entries.get('/p/a')?.md5).toBe('a'.repeat(32));
+      expect(result.exactCount).toBe(0);
+      expect(result.toleranceCount).toBe(1);
+    });
+
+    it('checkCachedMtimes: exact match counts under exactCount, not toleranceCount', async () => {
+      const svc = new HashService(dir);
+      const fixture = fix('a', 100, 1700000000);
+      await svc.getHash(
+        makeClient({ hashes: new Map([['/p/a', fixture]]) }),
+        'host-1',
+        ['/p/a'],
+      );
+      const exactClient = makeClient({
+        hashes: new Map(),
+        stat: new Map([['/p/a', 1700000000]]),
+      });
+      const result = await svc.checkCachedMtimes(exactClient, 'host-1', [
+        '/p/a',
+      ]);
+      expect(result.exactCount).toBe(1);
+      expect(result.toleranceCount).toBe(0);
+    });
+
+    it('checkCachedMtimes: mtime 0 sentinel is NEVER a hit, even when cached mtime is 0', async () => {
+      // The missing-file sentinel is preserved across the tolerance —
+      // 0 vs 0 still returns null (the file is gone).
+      const svc = new HashService(dir);
+      // Synthetic v4 cache entry with mtime 0 (degenerate but valid
+      // shape). We can't seed via getHash because hashPaths returns
+      // a non-zero mtime; write the cache file directly.
+      const cacheDir = join(dir, 'host-1');
+      await fs.mkdir(cacheDir, { recursive: true });
+      await fs.writeFile(
+        join(cacheDir, 'hashes.json'),
+        JSON.stringify({
+          version: 1,
+          hashStrategyVersion: 4,
+          host: 'host-1',
+          entries: {
+            '/p/a': {
+              md5: 'a'.repeat(32),
+              sha1: 'b'.repeat(40),
+              size: 100,
+              diskSizeBytes: 100,
+              mtime: 0,
+              hashedAt: '2025-01-01T00:00:00.000Z',
+            },
+          },
+        }),
+      );
+      const client = makeClient({
+        hashes: new Map(),
+        stat: new Map([['/p/a', 0]]),
+      });
+      const result = await svc.checkCachedMtimes(client, 'host-1', ['/p/a']);
+      expect(result.entries.get('/p/a')).toBeNull();
+      expect(result.exactCount).toBe(0);
+      expect(result.toleranceCount).toBe(0);
+    });
+
+    it('migrateV3Entries: v3 entry within ±1s of stat → migrated, not rehashed', async () => {
+      // Seed a v3 cache directly with mtime 1700000000. Stat
+      // reports +1s drift (SD-rebuild rounding artifact).
+      const cacheDir = join(dir, 'host-1');
+      await fs.mkdir(cacheDir, { recursive: true });
+      await fs.writeFile(
+        join(cacheDir, 'hashes.json'),
+        JSON.stringify({
+          version: 1,
+          hashStrategyVersion: 3,
+          host: 'host-1',
+          entries: {
+            '/p/Game.zip': {
+              md5: 'a'.repeat(32),
+              sha1: 'b'.repeat(40),
+              size: 36700160,
+              mtime: 1700000000,
+              hashedAt: '2025-01-01T00:00:00.000Z',
+            },
+          },
+        }),
+      );
+      const svc = new HashService(dir);
+      const client = makeClient({
+        hashes: new Map<string, FixtureHash>([
+          [
+            '/p/Game.zip',
+            {
+              md5: 'a'.repeat(32),
+              sha1: 'b'.repeat(40),
+              size: 36700160,
+              diskSize: 14199857,
+              mtime: 1700000001,
+            },
+          ],
+        ]),
+      });
+      const result = await svc.migrateV3Entries(client, 'host-1');
+      expect(result).toEqual({ migrated: 1, needsRehash: 0 });
+      // Hash NOT recomputed — entry kept verbatim with the v3 mtime.
+      expect(client.hashCalls).toEqual([]);
+      const raw = JSON.parse(
+        await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
+      ) as {
+        entries: Record<string, { md5: string; mtime: number }>;
+      };
+      expect(raw.entries['/p/Game.zip']?.md5).toBe('a'.repeat(32));
+      expect(raw.entries['/p/Game.zip']?.mtime).toBe(1700000000);
+    });
+
+    it('migrateV3Entries: v3 entry ±3s outside window → dropped, needs rehash', async () => {
+      const cacheDir = join(dir, 'host-1');
+      await fs.mkdir(cacheDir, { recursive: true });
+      await fs.writeFile(
+        join(cacheDir, 'hashes.json'),
+        JSON.stringify({
+          version: 1,
+          hashStrategyVersion: 3,
+          host: 'host-1',
+          entries: {
+            '/p/Stale.zip': {
+              md5: 'a'.repeat(32),
+              sha1: 'b'.repeat(40),
+              size: 1024,
+              mtime: 1700000000,
+              hashedAt: '2025-01-01T00:00:00.000Z',
+            },
+          },
+        }),
+      );
+      const svc = new HashService(dir);
+      const client = makeClient({
+        hashes: new Map(),
+        stat: new Map([['/p/Stale.zip', 1700000003]]),
+      });
+      const result = await svc.migrateV3Entries(client, 'host-1');
+      expect(result).toEqual({ migrated: 0, needsRehash: 1 });
     });
   });
 });

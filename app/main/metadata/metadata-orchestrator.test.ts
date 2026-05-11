@@ -97,13 +97,23 @@ function makeOrchestrator(opts: {
         _client: unknown,
         _host: string,
         paths: readonly string[],
-      ): Promise<Map<string, HashEntry | null>> => {
-        const out = new Map<string, HashEntry | null>();
+      ): Promise<{
+        entries: Map<string, HashEntry | null>;
+        exactCount: number;
+        toleranceCount: number;
+      }> => {
+        // fix/mtime-tolerance — fixture treats every warm cache hit as
+        // an exact match. The exact/tolerance split is exercised in
+        // hash-service.test.ts directly; orchestrator-level tests
+        // don't need to vary it.
+        const entries = new Map<string, HashEntry | null>();
+        let exactCount = 0;
         for (const p of paths) {
           const entry = opts.hashEntries?.get(p);
-          out.set(p, entry ?? null);
+          entries.set(p, entry ?? null);
+          if (entry !== undefined) exactCount += 1;
         }
-        return out;
+        return { entries, exactCount, toleranceCount: 0 };
       },
     ),
     computeHash: vi.fn(
@@ -524,11 +534,22 @@ describe('MetadataOrchestrator', () => {
       (
         hashService.checkCachedMtimes as ReturnType<typeof vi.fn>
       ).mockImplementation(async (_c, _h, ps: readonly string[]) => {
-        const out = new Map<string, HashEntry | null>();
+        // fix/mtime-tolerance — checkCachedMtimes now returns
+        // { entries, exactCount, toleranceCount }. The cold-cache
+        // override returns the same entry shape it always did,
+        // wrapped in the new envelope. Counts treat every warm hit
+        // as exact for this test's purposes.
+        const entries = new Map<string, HashEntry | null>();
+        let exactCount = 0;
         for (const p of ps) {
-          out.set(p, p.includes('cached') ? buildHashEntry(HASH) : null);
+          if (p.includes('cached')) {
+            entries.set(p, buildHashEntry(HASH));
+            exactCount += 1;
+          } else {
+            entries.set(p, null);
+          }
         }
-        return out;
+        return { entries, exactCount, toleranceCount: 0 };
       });
       (hashService.computeHash as ReturnType<typeof vi.fn>).mockReset();
       (hashService.computeHash as ReturnType<typeof vi.fn>).mockImplementation(

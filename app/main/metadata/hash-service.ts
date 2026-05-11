@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { sanitiseFsSegment } from '@app/main/cache/cache-types';
 import { diagLog } from '@shared/diag-log';
 import type { HashRecord } from '@shared/mister-client';
+import { mtimesMatch } from '@shared/mtime-compare';
 import type { SizeAndMtime } from '@shared/prime-parse';
 
 const HASH_CACHE_SCHEMA_VERSION = 1 as const;
@@ -66,6 +67,25 @@ export interface HashEntry {
   readonly diskSizeBytes: number;
   readonly mtime: number;
   readonly hashedAt: string;
+}
+
+/**
+ * fix/mtime-tolerance — `checkCachedMtimes` return shape.
+ *
+ * `entries` is the original Round-9 contract: every input path keys
+ * either to its validated cache entry (warm) or `null` (re-hash
+ * needed). Callers iterate this verbatim as before.
+ *
+ * `exactCount` / `toleranceCount` partition the validated entries
+ * so the orchestrator's `mtime-batch done` diag line can surface
+ * how much of the warm-cache hit relied on the ±2s tolerance vs.
+ * exact equality. On an SD rebuild we expect `toleranceCount` to
+ * dominate; on a steady-state ext4 device they should be ~exact.
+ */
+export interface CheckCachedMtimesResult {
+  readonly entries: Map<string, HashEntry | null>;
+  readonly exactCount: number;
+  readonly toleranceCount: number;
 }
 
 interface HashCacheFile {
@@ -187,8 +207,10 @@ export class HashService {
     client: HashClient,
     host: string,
     paths: readonly string[],
-  ): Promise<Map<string, HashEntry | null>> {
-    if (paths.length === 0) return new Map();
+  ): Promise<CheckCachedMtimesResult> {
+    if (paths.length === 0) {
+      return { entries: new Map(), exactCount: 0, toleranceCount: 0 };
+    }
     return this.runGated(host, () =>
       this.doCheckCachedMtimes(client, host, paths),
     );
@@ -332,9 +354,11 @@ export class HashService {
     const next: Record<string, HashEntry> = {};
     let migrated = 0;
     let needsRehash = 0;
+    let migratedExact = 0;
+    let migratedTolerance = 0;
     for (const [path, v3] of Object.entries(v3Entries)) {
       const s = stats[path];
-      if (s !== undefined && s.size > 0 && s.mtime === v3.mtime) {
+      if (s !== undefined && s.size > 0 && mtimesMatch(s.mtime, v3.mtime)) {
         next[path] = {
           md5: v3.md5,
           sha1: v3.sha1,
@@ -347,6 +371,11 @@ export class HashService {
           hashedAt: v3.hashedAt,
         };
         migrated += 1;
+        if (s.mtime === v3.mtime) {
+          migratedExact += 1;
+        } else {
+          migratedTolerance += 1;
+        }
       } else {
         // Either path is gone, or mtime drifted — entry gets
         // dropped. The next access fires the existing
@@ -360,6 +389,8 @@ export class HashService {
       host,
       ms: Date.now() - startMs,
       migrated,
+      migratedExact,
+      migratedTolerance,
       reHashRequired: needsRehash,
       total: paths.length,
     });
@@ -420,14 +451,16 @@ export class HashService {
       if (
         entry !== undefined &&
         current !== undefined &&
-        current !== 0 &&
-        current === entry.mtime
+        mtimesMatch(current, entry.mtime)
       ) {
+        const exact = current === entry.mtime;
         diagLog('info', 'meta', '·', 'hash-decision', {
           path: pathBasename(p),
           action: 'use-cache',
-          reason: 'mtime-match',
+          reason: exact ? 'mtime-match' : 'mtime-match-tolerance',
           mtime: current,
+          cachedMtime: exact ? undefined : entry.mtime,
+          deltaSec: exact ? undefined : Math.abs(current - entry.mtime),
         });
         result.set(p, entry);
       } else {
@@ -547,12 +580,14 @@ export class HashService {
     client: HashClient,
     host: string,
     paths: readonly string[],
-  ): Promise<Map<string, HashEntry | null>> {
+  ): Promise<CheckCachedMtimesResult> {
     const entries = await this.loadEntries(host);
     const result = new Map<string, HashEntry | null>();
     const cachedPaths = paths.filter((p) => entries[p] !== undefined);
     const uncachedPaths = paths.filter((p) => entries[p] === undefined);
-    if (paths.length === 0) return result;
+    if (paths.length === 0) {
+      return { entries: result, exactCount: 0, toleranceCount: 0 };
+    }
     // feat/rename-aware-hash-cache: stat ALL paths so the rename
     // recovery (uncached paths whose mtime uniquely identifies an
     // existing cache entry) can run alongside the normal cached-path
@@ -564,7 +599,7 @@ export class HashService {
       for (const p of paths) {
         if (!result.has(p)) result.set(p, null);
       }
-      return result;
+      return { entries: result, exactCount: 0, toleranceCount: 0 };
     }
     let mtimes: Awaited<ReturnType<HashClient['statWitnesses']>>;
     try {
@@ -575,18 +610,21 @@ export class HashService {
       // The orchestrator's per-path error handling is the right shape
       // for this.
       for (const p of paths) result.set(p, null);
-      return result;
+      return { entries: result, exactCount: 0, toleranceCount: 0 };
     }
+    let exactCount = 0;
+    let toleranceCount = 0;
     for (const p of cachedPaths) {
       const entry = entries[p];
       const current = mtimes[p];
       if (
         entry !== undefined &&
         current !== undefined &&
-        current !== 0 &&
-        current === entry.mtime
+        mtimesMatch(current, entry.mtime)
       ) {
         result.set(p, entry);
+        if (current === entry.mtime) exactCount += 1;
+        else toleranceCount += 1;
       } else {
         // Either missing on device or mtime drifted. Caller will
         // re-hash (or skip if vanished).
@@ -622,7 +660,7 @@ export class HashService {
       this.memCache.set(host, next);
       await this.writeEntries(host, next);
     }
-    return result;
+    return { entries: result, exactCount, toleranceCount };
   }
 
   private async doComputeHash(
