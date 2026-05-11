@@ -452,16 +452,31 @@ export class MetadataOrchestrator {
     } else {
       const mtimeCheckStart = Date.now();
       try {
-        mtimeMap = await this.hashService.checkCachedMtimes(
+        // fix/mtime-tolerance — checkCachedMtimes now returns the
+        // exact / tolerance breakdown alongside the entry map so the
+        // live trace can confirm the tolerance is actually doing work
+        // on an SD-rebuilt device (validatedTolerance dominating
+        // validatedExact when the rebuild rounded mtimes to even
+        // seconds).
+        const checked = await this.hashService.checkCachedMtimes(
           session.client,
           session.host,
           romPaths,
         );
+        mtimeMap = checked.entries;
+        const validated = [...mtimeMap.values()].filter(
+          (v) => v !== null,
+        ).length;
+        const needsHash = [...mtimeMap.values()].filter(
+          (v) => v === null,
+        ).length;
         diagLog('info', 'prefetch', '·', 'mtime-batch done', {
           coreId,
           ms: Date.now() - mtimeCheckStart,
-          validated: [...mtimeMap.values()].filter((v) => v !== null).length,
-          needsHash: [...mtimeMap.values()].filter((v) => v === null).length,
+          validated,
+          validatedExact: checked.exactCount,
+          validatedTolerance: checked.toleranceCount,
+          needsHash,
         });
       } catch (err) {
         // Batched stat failed — fall back to per-ROM compute (same
