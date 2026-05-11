@@ -113,7 +113,11 @@ export function RomSearchScreenScraperDialog(
   async function handleUseMatch(game: ScreenScraperGame): Promise<void> {
     setBindingId(game.id);
     try {
-      const updated = await window.mister.bindRomMetadataFromSearch(path, game);
+      const updated = await window.mister.bindRomMetadataFromSearch(
+        coreId,
+        path,
+        game,
+      );
       if (updated === null) {
         toast.error(
           'Couldn\'t bind — no metadata record for this row yet. Wait for the prefetch to land and try again.',

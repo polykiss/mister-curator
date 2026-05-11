@@ -1029,4 +1029,220 @@ describe('MetadataOrchestrator', () => {
       expect(hashService.computeHash).not.toHaveBeenCalled();
     });
   });
+
+  describe('feat/manual-bind-without-hash — synthetic-key fallback', () => {
+    /**
+     * The bind path used to require a pre-existing md5 entry for
+     * the row, which silently broke for any file too large for the
+     * SSH hash budget (Policenauts on PSX was the trigger case).
+     * The fix is a synthetic `(coreId, path)` key fallback, reusing
+     * the round-11 `noss-` scheme. These tests pin the contract:
+     *
+     *   1. Bind succeeds without a prior hash; the synthetic key
+     *      flows to `MetadataService.bindManualOverride`.
+     *   2. The optimistic-read path can find the synthetic record.
+     *   3. Hash-keyed records win over synthetic records when both
+     *      exist — conflict-resolution rule for paths that gain an
+     *      md5 *after* a manual bind.
+     *   4. The orchestrator delegates to `bindManualOverride`
+     *      verbatim under the synthetic key (the merge semantics
+     *      themselves live in metadata-service.test.ts).
+     */
+    const PATH = '/media/fat/games/PSX/Policenauts.chd';
+    const CORE_ID = 'PSX';
+    const SYNTHETIC_KEY_RE = /^noss-[0-9a-f]{40}$/;
+
+    function buildSsGame(id = 5678, name = 'Policenauts') {
+      return {
+        id,
+        name,
+        system: 'PlayStation',
+        description: null,
+        developer: null,
+        publisher: null,
+        genres: [],
+        releaseDate: null,
+        rating: null,
+        players: null,
+        boxArtUrl: null,
+        extra: {
+          box3DUrl: null,
+          marqueeUrl: null,
+          titleScreenUrl: null,
+          snapUrl: null,
+          clearLogoUrl: null,
+          screenshots: [],
+        },
+      };
+    }
+
+    it('bindManualMetadataOverride: writes under synthetic key when no md5 exists', async () => {
+      const { orchestrator, metadataService } = makeOrchestrator({
+        // No hash entry on file for PATH — mirrors the Policenauts
+        // case where computeHash timed out.
+        hashEntries: new Map(),
+      });
+      const bindSpy = vi.fn(
+        async (key: string, _game: unknown) => buildMeta(key, 'Policenauts'),
+      );
+      (metadataService as unknown as {
+        bindManualOverride: typeof bindSpy;
+      }).bindManualOverride = bindSpy;
+
+      const result = await orchestrator.bindManualMetadataOverride(
+        CORE_ID,
+        PATH,
+        buildSsGame(),
+      );
+
+      expect(result).not.toBeNull();
+      expect(bindSpy).toHaveBeenCalledTimes(1);
+      const [key, gameArg] = bindSpy.mock.calls[0] ?? ['', undefined];
+      expect(key).toMatch(SYNTHETIC_KEY_RE);
+      expect(gameArg).toMatchObject({ id: 5678, name: 'Policenauts' });
+    });
+
+    it('bindManualMetadataOverride: prefers real md5 over synthetic when a hash entry exists', async () => {
+      // Regression case: a path that already has a hash should use
+      // its real md5 — the synthetic fallback is strictly the
+      // hash-missing branch.
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map([[PATH, buildHashEntry(HASH)]]),
+      });
+      const bindSpy = vi.fn(
+        async (key: string, _game: unknown) => buildMeta(key, 'Policenauts'),
+      );
+      (metadataService as unknown as {
+        bindManualOverride: typeof bindSpy;
+      }).bindManualOverride = bindSpy;
+
+      await orchestrator.bindManualMetadataOverride(
+        CORE_ID,
+        PATH,
+        buildSsGame(),
+      );
+
+      const [key] = bindSpy.mock.calls[0] ?? [''];
+      expect(key).toBe(HASH);
+      expect(key).not.toMatch(/^noss-/);
+    });
+
+    it('readCachedRomsMetadata: returns the synthetic-keyed record when no hash exists', async () => {
+      const syntheticMeta = buildMeta('noss-xxx', 'Policenauts');
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map(), // no hash for PATH
+      });
+      // Per-key dispatch so we can distinguish md5 vs synthetic
+      // lookups. Synthetic key returns the bound record; any other
+      // key (none in this test) would return null.
+      const readSpy = vi.fn(async (key: string) =>
+        SYNTHETIC_KEY_RE.test(key) ? syntheticMeta : null,
+      );
+      (metadataService as unknown as {
+        readCachedMetadata: typeof readSpy;
+      }).readCachedMetadata = readSpy;
+
+      const result = await orchestrator.readCachedRomsMetadata(CORE_ID, [
+        PATH,
+      ]);
+
+      expect(result[PATH]?.name).toBe('Policenauts');
+      // Only the synthetic key was queried — no wasted md5 lookup
+      // since hashEntries returned null up front.
+      expect(readSpy).toHaveBeenCalledTimes(1);
+      expect(readSpy.mock.calls[0]?.[0]).toMatch(SYNTHETIC_KEY_RE);
+    });
+
+    it('readCachedRomsMetadata: hash-keyed record wins when both records exist', async () => {
+      // Conflict-resolution policy: if a path gained an md5 after
+      // the user manual-bound a synthetic record, the auto-pipeline
+      // output supersedes the pre-hash synthetic. The orchestrator
+      // should never even try the synthetic key when the hash
+      // lookup succeeds.
+      const hashMeta = buildMeta(HASH, 'AutoResolved');
+      const syntheticMeta = buildMeta('noss-xxx', 'ManuallyBound');
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map([[PATH, buildHashEntry(HASH)]]),
+      });
+      const readSpy = vi.fn(async (key: string) => {
+        if (key === HASH) return hashMeta;
+        if (SYNTHETIC_KEY_RE.test(key)) return syntheticMeta;
+        return null;
+      });
+      (metadataService as unknown as {
+        readCachedMetadata: typeof readSpy;
+      }).readCachedMetadata = readSpy;
+
+      const result = await orchestrator.readCachedRomsMetadata(CORE_ID, [
+        PATH,
+      ]);
+
+      expect(result[PATH]?.name).toBe('AutoResolved');
+      // Synthetic key MUST NOT be probed — short-circuit on the
+      // first hit.
+      expect(readSpy).toHaveBeenCalledTimes(1);
+      expect(readSpy.mock.calls[0]?.[0]).toBe(HASH);
+    });
+
+    it('bindManualMetadataOverride: delegates verbatim to bindManualOverride under the synthetic key (merge logic owned by metadata-service)', async () => {
+      // The merge of pre-existing free-form override fields lives
+      // inside MetadataService.bindManualOverride (covered in
+      // metadata-service.test.ts). At the orchestrator layer the
+      // contract is just "pass the synthetic key + game through
+      // untouched" — pin that no transformation happens between
+      // the orchestrator and the service when the synthetic
+      // fallback fires.
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map(),
+      });
+      const passthrough = buildMeta('noss-out', 'Policenauts');
+      const bindSpy = vi.fn(
+        async (_key: string, _game: unknown) => passthrough,
+      );
+      (metadataService as unknown as {
+        bindManualOverride: typeof bindSpy;
+      }).bindManualOverride = bindSpy;
+
+      const game = buildSsGame(9999, 'Policenauts');
+      const result = await orchestrator.bindManualMetadataOverride(
+        CORE_ID,
+        PATH,
+        game,
+      );
+
+      // Return value is the service's response, unwrapped.
+      expect(result).toBe(passthrough);
+      // Arguments to the service: synthetic key + the same game
+      // object reference (no clone, no field rewrite).
+      const [, gameArg] = bindSpy.mock.calls[0] ?? ['', undefined];
+      expect(gameArg).toBe(game);
+    });
+
+    it('readCachedRomsMetadata: synthetic-key fallback also surfaces unmappable-core sentinels in the optimistic read (incidental side-benefit)', async () => {
+      // Before this fix, synthetic records (the round-11
+      // unmappable-core sentinels) were INVISIBLE to
+      // readCachedRomsMetadata — only the full getRomsMetadata
+      // path could find them. With the synthetic fallback the
+      // optimistic read now picks them up too, so unmappable-core
+      // panes paint instantly on second mount. Pin the
+      // behavior so a future refactor doesn't accidentally
+      // re-hide it.
+      const unmappablePath = '/p/mame/foo.zip';
+      const sentinel = buildMeta('noss-sentinel', 'mame placeholder');
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map(), // unmappable cores never have md5s
+      });
+      const readSpy = vi.fn(async (key: string) =>
+        SYNTHETIC_KEY_RE.test(key) ? sentinel : null,
+      );
+      (metadataService as unknown as {
+        readCachedMetadata: typeof readSpy;
+      }).readCachedMetadata = readSpy;
+
+      const result = await orchestrator.readCachedRomsMetadata('mame', [
+        unmappablePath,
+      ]);
+      expect(result[unmappablePath]?.name).toBe('mame placeholder');
+    });
+  });
 });
