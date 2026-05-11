@@ -15,6 +15,7 @@ import {
   matchRbfsToGamesDirs,
   pathBasename,
   undottedPath,
+  type RawSubFolderInput,
 } from '@shared/core-matching';
 import { InMemoryDiagnosticsCollector } from '@shared/diag';
 
