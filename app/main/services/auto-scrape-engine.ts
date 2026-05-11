@@ -182,23 +182,6 @@ export class AutoScrapeEngine {
    * the renderer's "rescan all").
    */
   private completedCoreIds = new Set<string>();
-  /**
-   * fix/scrape-resume-and-keepalive commit 3 — coreId of the most
-   * recent iteration that started but did NOT finish cleanly.
-   * Captured on iteration enter, cleared on successful completion,
-   * preserved across pause/disconnect. On the next `start()` (a
-   * reconnect rebuilds the queue from the current sidebar), this
-   * id pivots to the head so the engine resumes where it dropped
-   * rather than restarting from the alphabetical first core.
-   *
-   * In-memory only — an app restart between disconnect and
-   * reconnect loses the value, which is fine because the next
-   * connect rebuilds from the sidebar regardless. If app-restart-
-   * during-scrape ever becomes a real pain point we can persist
-   * to disk; not worth the complexity today (hash + metadata
-   * caches make re-running an in-flight core a fast-skip anyway).
-   */
-  private lastInFlightCoreId: string | null = null;
   private readonly listeners = new Set<AutoScrapeListener>();
   private readonly completionListeners =
     new Set<AutoScrapeCompletionListener>();
@@ -260,6 +243,7 @@ export class AutoScrapeEngine {
     coreIds: readonly string[],
     alreadyCompleted: ReadonlySet<string> = new Set(),
   ): void {
+    this.queue = [...coreIds];
     this.isPaused = false;
     // Abort any in-flight scrape so the loop re-evaluates the new queue.
     this.abortFlag = true;
@@ -270,41 +254,16 @@ export class AutoScrapeEngine {
     this.completedCoreIds = new Set(
       [...alreadyCompleted].filter((c) => queueSet.has(c)),
     );
-    // fix/scrape-resume-and-keepalive commit 3 — resume in-flight.
-    // The id captured on the most recent iter-enter wins the head
-    // slot if it's still in the queue AND not in the completed set.
-    // Drops to fresh-queue order when: there's no captured id, the
-    // core has since been removed from the sidebar, or it landed
-    // in the persisted-completed set somehow (rare; defensive).
-    //
-    // The pivot is a queue-shape decision only — the actual
-    // re-running of the in-flight core picks up where the durable
-    // hash + metadata caches left off, so warm paths fast-skip.
-    const resumeId =
-      this.lastInFlightCoreId !== null &&
-      queueSet.has(this.lastInFlightCoreId) &&
-      !this.completedCoreIds.has(this.lastInFlightCoreId)
-        ? this.lastInFlightCoreId
-        : null;
-    if (resumeId !== null) {
-      const rest = coreIds.filter((c) => c !== resumeId);
-      this.queue = [resumeId, ...rest];
-    } else {
-      this.queue = [...coreIds];
-    }
-    diagLog(
-      'info',
-      'scrape-state',
-      '·',
-      resumeId !== null ? 'start-resume' : 'start-fresh',
-      {
-        resumeCoreId: resumeId ?? '(none)',
-        queue: previewQueue(this.queue),
-        queueLen: this.queue.length,
-        alreadyCompleted: previewQueue([...alreadyCompleted]),
-        alreadyCompletedLen: alreadyCompleted.size,
-      },
-    );
+    // fix/scrape-resume-and-keepalive commit 1 — make the start/resume
+    // decision visible in live trace. Distinguishes the two cases live
+    // (resume-in-flight vs fresh-queue) ahead of commit 3 actually
+    // doing the pivot. This commit is logging-only.
+    diagLog('info', 'scrape-state', '·', 'start', {
+      queue: previewQueue(coreIds),
+      queueLen: coreIds.length,
+      alreadyCompleted: previewQueue([...alreadyCompleted]),
+      alreadyCompletedLen: alreadyCompleted.size,
+    });
     if (!this.isLoopRunning) {
       void this.runLoop();
     }
@@ -400,13 +359,6 @@ export class AutoScrapeEngine {
           continue;
         }
         this.currentCoreId = coreId;
-        // fix/scrape-resume-and-keepalive commit 3 — capture the
-        // resume-anchor BEFORE the scrape runs. If the SSH transport
-        // dies mid-scrape, the iteration aborts with `scrapeCompleted
-        // = false` and this id is left in place so the next start()
-        // pivots back to it. Only the successful-complete branch
-        // below clears it.
-        this.lastInFlightCoreId = coreId;
         this.abortFlag = false;
         let scrapeCompleted = false;
         diagLog('info', 'scrape-state', '→', 'iter-enter', {
@@ -486,13 +438,6 @@ export class AutoScrapeEngine {
         );
         if (scrapeCompleted) {
           this.completedCoreIds.add(coreId);
-          // fix/scrape-resume-and-keepalive commit 3 — clear the
-          // resume anchor ONLY on successful completion. An aborted
-          // iteration (focus pivot, pause, disconnect) leaves the
-          // anchor in place so the next start() pivots back.
-          if (this.lastInFlightCoreId === coreId) {
-            this.lastInFlightCoreId = null;
-          }
           for (const l of this.completionListeners) {
             try {
               l({ coreId });
