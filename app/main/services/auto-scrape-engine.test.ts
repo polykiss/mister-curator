@@ -547,11 +547,10 @@ describe('AutoScrapeEngine', () => {
       expect(scrapeCalls.map((c) => c.coreId)).toEqual(['SNES']);
     });
 
-    it('start() after pause resumes by walking the queue from scratch', async () => {
-      // The cache is the source of truth for "scanned" — there's no
-      // engine-side resume state. Pause + start re-walks the full
-      // queue; warm cores zip through (in production via the mtime
-      // cache, in this test via the synchronous default scrape).
+    it('start() after pause when all cores finished pre-pause walks the queue fresh', async () => {
+      // All cores ran to completion before pause → lastInFlightCoreId
+      // is null → next start() takes the fresh-queue path. Pin the
+      // baseline so the resume tests below distinguish themselves.
       const { engine, scrapeCalls } = makeEngine({
         pathsByCore: { SNES: ['a'], NES: ['b'] },
       });
@@ -566,6 +565,284 @@ describe('AutoScrapeEngine', () => {
         'SNES',
         'NES',
         'SNES',
+        'NES',
+      ]);
+    });
+  });
+
+  describe('resume after SSH reconnect (fix/scrape-resume-and-keepalive)', () => {
+    // Models the real-device EPIPE scenario: SSH transport dies
+    // mid-scrape of NES. Engine sees pause(); on the next start()
+    // (driven by main/index.ts's reconnect listener with the fresh
+    // sidebar core list), the in-flight core pivots to the queue
+    // head instead of restarting from the alphabetical first core.
+    //
+    // The durable hash + metadata caches make re-running the
+    // in-flight core a fast-skip in production — the engine layer
+    // only owns the queue-shape decision tested here.
+
+    /**
+     * Helper: a slow scrape that resolves one path at a time, gated
+     * by a manually-resolved promise. Lets the test pause the engine
+     * MID-iteration so the in-flight identity is preserved across
+     * the pause boundary.
+     */
+    function makeSlowScrape(): {
+      readonly scrape: AutoScrapeDeps['scrape'];
+      tick: () => void;
+    } {
+      let resolveCurrent: () => void = (): void => undefined;
+      const scrape: AutoScrapeDeps['scrape'] = async (
+        _coreId,
+        targets,
+        onPathResolved,
+        shouldAbort,
+      ) => {
+        for (const _p of targets.paths) {
+          void _p;
+          if (shouldAbort()) return;
+          await new Promise<void>((r) => {
+            resolveCurrent = r;
+          });
+          onPathResolved();
+        }
+      };
+      return {
+        scrape,
+        tick: () => resolveCurrent(),
+      };
+    }
+
+    it('pivots in-flight core to queue head on the next start()', async () => {
+      // Models the reported bug: engine is mid-scraping NES, SSH
+      // dies, reconnect rebuilds the queue from the alphabetical
+      // sidebar order. Without the pivot the engine would restart
+      // from AcornAtom (the first sidebar entry); with the pivot
+      // NES stays at the head.
+      const slow = makeSlowScrape();
+      const { engine, scrapeCalls } = makeEngine({
+        pathsByCore: {
+          AcornAtom: ['x'],
+          NEOGEO: ['x'],
+          NES: ['a', 'b', 'c'],
+          X68000: ['x'],
+        },
+        scrapeOverride: slow.scrape,
+      });
+      // First start: the user had focused NES so the matcher gives
+      // NES the head slot. Engine parks mid-NES on the slow scrape.
+      engine.start(['NES', 'AcornAtom', 'NEOGEO', 'X68000']);
+      await flush();
+      expect(scrapeCalls.map((c) => c.coreId)).toEqual(['NES']);
+      // Disconnect mid-NES.
+      engine.pause();
+      await flush();
+      // Reconnect — sidebar comes back in alphabetical order. The
+      // pivot promotes NES (the resume anchor) to the queue head.
+      engine.start(['AcornAtom', 'NEOGEO', 'NES', 'X68000']);
+      // Unblock the parked first-NES scrape so it can see the abort
+      // and exit; the loop then advances to the pivoted-head NES.
+      slow.tick();
+      await flush();
+      // First iter-enter post-resume targets NES, NOT AcornAtom.
+      expect(scrapeCalls.map((c) => c.coreId)).toEqual(['NES', 'NES']);
+    });
+
+    it('rebuilt-from-sidebar queue order is preserved after the pivot', async () => {
+      const slow = makeSlowScrape();
+      const { engine, scrapeCalls } = makeEngine({
+        pathsByCore: {
+          AcornAtom: ['x'],
+          NEOGEO: ['x'],
+          NES: ['a', 'b'],
+          X68000: ['x'],
+        },
+        scrapeOverride: slow.scrape,
+      });
+      engine.start(['NES', 'AcornAtom', 'NEOGEO', 'X68000']);
+      await flush();
+      engine.pause();
+      await flush();
+      // Reconnect with alphabetical sidebar order.
+      engine.start(['AcornAtom', 'NEOGEO', 'NES', 'X68000']);
+      // Drain all cores.
+      for (let i = 0; i < 30; i += 1) {
+        slow.tick();
+        await Promise.resolve();
+      }
+      await flush();
+      // Queue after pivot is [NES, AcornAtom, NEOGEO, X68000] — NES
+      // first via pivot; the rest in fresh-sidebar order.
+      const postResume = scrapeCalls.slice(1).map((c) => c.coreId);
+      expect(postResume).toEqual(['NES', 'AcornAtom', 'NEOGEO', 'X68000']);
+    });
+
+    it('clears the in-flight anchor when a scrape completes successfully', async () => {
+      // SNES runs to completion (no abort). On the next pause +
+      // start, the queue order is fresh — no pivot because there's
+      // nothing in-flight.
+      const { engine, scrapeCalls } = makeEngine({
+        pathsByCore: { AcornAtom: ['x'], SNES: ['a'], X68000: ['x'] },
+      });
+      engine.start(['AcornAtom', 'SNES', 'X68000']);
+      await flush();
+      // Everything completes; lastInFlightCoreId clears as each
+      // iteration finishes.
+      engine.pause();
+      await flush();
+      // Reconnect with sidebar; expect fresh order [AcornAtom, SNES,
+      // X68000] (no pivot — nothing was in-flight at the pause).
+      engine.start(['AcornAtom', 'SNES', 'X68000']);
+      await flush();
+      const postResume = scrapeCalls.slice(3).map((c) => c.coreId);
+      expect(postResume).toEqual(['AcornAtom', 'SNES', 'X68000']);
+    });
+
+    it('falls back to fresh queue when the in-flight core has left the sidebar', async () => {
+      // User hid or otherwise removed the in-flight core between
+      // disconnect and reconnect. The pivot drops; queue order
+      // matches the sidebar.
+      const slow = makeSlowScrape();
+      const { engine, scrapeCalls } = makeEngine({
+        pathsByCore: {
+          AcornAtom: ['x'],
+          PSX: ['a', 'b'],
+          X68000: ['x'],
+        },
+        scrapeOverride: slow.scrape,
+      });
+      engine.setFocus('PSX');
+      engine.start(['AcornAtom', 'PSX', 'X68000']);
+      await flush();
+      engine.pause();
+      await flush();
+      // Reconnect with PSX removed from the sidebar.
+      engine.start(['AcornAtom', 'X68000']);
+      for (let i = 0; i < 5; i += 1) {
+        slow.tick();
+        await Promise.resolve();
+      }
+      await flush();
+      const postResume = scrapeCalls.slice(1).map((c) => c.coreId);
+      // First post-resume entry is AcornAtom (the fresh sidebar
+      // order), NOT PSX (no longer present).
+      expect(postResume[0]).toBe('AcornAtom');
+      expect(postResume).not.toContain('PSX');
+    });
+
+    it('falls back to fresh queue when the in-flight core is in alreadyCompleted', async () => {
+      // Defensive: if the in-flight core ends up in the persisted
+      // already-completed set somehow (e.g. another tab completed
+      // it concurrently), the pivot drops and the core is skipped.
+      const slow = makeSlowScrape();
+      const { engine, scrapeCalls } = makeEngine({
+        pathsByCore: { AcornAtom: ['x'], NES: ['a', 'b'], X68000: ['x'] },
+        scrapeOverride: slow.scrape,
+      });
+      engine.setFocus('NES');
+      engine.start(['AcornAtom', 'NES', 'X68000']);
+      await flush();
+      engine.pause();
+      await flush();
+      // Reconnect with NES marked already-completed.
+      engine.start(['AcornAtom', 'NES', 'X68000'], new Set(['NES']));
+      for (let i = 0; i < 5; i += 1) {
+        slow.tick();
+        await Promise.resolve();
+      }
+      await flush();
+      const postResume = scrapeCalls.slice(1).map((c) => c.coreId);
+      // NES is skipped via the already-completed set; the queue
+      // walks AcornAtom → X68000.
+      expect(postResume).toEqual(['AcornAtom', 'X68000']);
+    });
+
+    it('survives multiple disconnects in one session — anchor re-anchors per resume', async () => {
+      // SSH dies mid-NES. Reconnect pivots to NES. SSH dies AGAIN
+      // before NES finishes. Second reconnect ALSO pivots to NES
+      // because the anchor refreshes on every iter-enter.
+      const slow = makeSlowScrape();
+      const { engine, scrapeCalls } = makeEngine({
+        pathsByCore: {
+          AcornAtom: ['x'],
+          NES: ['a', 'b', 'c', 'd'],
+          X68000: ['x'],
+        },
+        scrapeOverride: slow.scrape,
+      });
+      engine.start(['NES', 'AcornAtom', 'X68000']);
+      await flush();
+      expect(scrapeCalls.map((c) => c.coreId)).toEqual(['NES']);
+      // First disconnect mid-NES.
+      engine.pause();
+      await flush();
+      // First reconnect — pivots to NES via alphabetical sidebar.
+      engine.start(['AcornAtom', 'NES', 'X68000']);
+      slow.tick();
+      await flush();
+      expect(scrapeCalls.map((c) => c.coreId)).toEqual(['NES', 'NES']);
+      // Second disconnect — still mid-NES.
+      engine.pause();
+      await flush();
+      // Second reconnect — anchor refreshed on the previous
+      // iter-enter, so still pivots to NES.
+      engine.start(['AcornAtom', 'NES', 'X68000']);
+      slow.tick();
+      await flush();
+      expect(scrapeCalls.map((c) => c.coreId)).toEqual([
+        'NES',
+        'NES',
+        'NES',
+      ]);
+      // Now let NES finish; the queue should walk AcornAtom →
+      // X68000 in fresh-sidebar order.
+      for (let i = 0; i < 30; i += 1) {
+        slow.tick();
+        await Promise.resolve();
+      }
+      await flush();
+      // Final sequence: three NES iter-enters (initial + two
+      // resumes), then AcornAtom, then X68000.
+      expect(scrapeCalls.map((c) => c.coreId)).toEqual([
+        'NES',
+        'NES',
+        'NES',
+        'AcornAtom',
+        'X68000',
+      ]);
+    });
+
+    it('a focus pivot during scrape re-anchors the in-flight identity', async () => {
+      // Engine on SNES → user clicks NES → setFocus pivots to NES →
+      // SNES aborts, NES enters → disconnect mid-NES. The anchor is
+      // NES (the most-recent iter-enter), not SNES.
+      const slow = makeSlowScrape();
+      const { engine, scrapeCalls } = makeEngine({
+        pathsByCore: { SNES: ['a', 'b'], NES: ['x', 'y'] },
+        scrapeOverride: slow.scrape,
+      });
+      engine.start(['SNES', 'NES']);
+      await flush();
+      expect(scrapeCalls.map((c) => c.coreId)).toEqual(['SNES']);
+      // SNES is mid-scrape, parked at the slow await. Pivot to NES.
+      engine.setFocus('NES');
+      // Tick once: SNES resolves its parked promise, increments
+      // onPathResolved, loops to next path, shouldAbort()=true,
+      // returns. NES iter-enters and parks at its own slow await.
+      slow.tick();
+      await flush();
+      expect(scrapeCalls.map((c) => c.coreId)).toEqual(['SNES', 'NES']);
+      // Disconnect mid-NES. Anchor is NES (last iter-enter).
+      engine.pause();
+      await flush();
+      // Reconnect — pivot lands on NES, not SNES.
+      engine.start(['SNES', 'NES']);
+      slow.tick();
+      await flush();
+      // Third iter-enter is NES (the resume), NOT SNES.
+      expect(scrapeCalls.map((c) => c.coreId)).toEqual([
+        'SNES',
+        'NES',
         'NES',
       ]);
     });
