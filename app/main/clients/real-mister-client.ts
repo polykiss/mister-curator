@@ -155,6 +155,24 @@ const SSH_KEEPALIVE_INTERVAL_MS = 15_000;
 const SSH_KEEPALIVE_COUNT_MAX = 4;
 
 /**
+ * fix/scrape-resume-and-keepalive — OS-level TCP keepalive delay,
+ * complementing the SSH-layer probes above. Where ssh2's keepalive
+ * detects a dead transport by missing replies on the encrypted
+ * channel (60s window), the OS-level keepalive runs at the kernel
+ * TCP layer and on some platforms detects half-open sockets
+ * sooner — e.g. when a NAT in the path drops the connection
+ * record but neither side has anything to send.
+ *
+ * 10s initial delay is the recommended floor for interactive
+ * sessions: aggressive enough to surface a broken path during a
+ * long-running `unzip -p | md5sum` that's otherwise silent on the
+ * write side, but not so aggressive it churns the radio on idle
+ * Wi-Fi. The default OS-level retry cadence and count vary by
+ * platform; we don't override those.
+ */
+const TCP_KEEPALIVE_INITIAL_DELAY_MS = 10_000;
+
+/**
  * Marker error thrown by the per-op timeout race. Internal-only —
  * caught by `runSshOp` and converted to a typed
  * `MisterConnectionError` before it leaves the client. Carries the
@@ -260,6 +278,15 @@ export class RealMisterClient implements IMisterClient {
     this.unexpectedFired = false;
     const conn = this.ssh.connection;
     if (conn) {
+      // fix/scrape-resume-and-keepalive commit 2 — enable OS-level
+      // TCP keepalive on the underlying socket. ssh2 doesn't expose
+      // the socket publicly, but Client._sock has been the storage
+      // slot since the v0.x days; the cast here is the documented
+      // way ssh2 consumers reach the socket for setKeepAlive.
+      const sock = (conn as unknown as { _sock?: { setKeepAlive?: (enable: boolean, delay: number) => void } })._sock;
+      if (sock !== undefined && typeof sock.setKeepAlive === 'function') {
+        sock.setKeepAlive(true, TCP_KEEPALIVE_INITIAL_DELAY_MS);
+      }
       const handler = (): void => this.handleUnexpectedDisconnect();
       conn.once('close', handler);
       conn.once('error', handler);
