@@ -3010,8 +3010,8 @@ describe('RealMisterClient', () => {
     });
   });
 
-  describe('hashPaths (PR #16 round 2 — md5 + sha1 + size)', () => {
-    it('shell-quotes paths into a `set --` script and parses the 5-tab result', async () => {
+  describe('hashPaths (PR #16 round 2 — md5 + sha1 + size + diskSize)', () => {
+    it('shell-quotes paths into a `set --` script and parses the 6-field result', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -3022,8 +3022,9 @@ describe('RealMisterClient', () => {
       mocks.execCommand.mockResolvedValueOnce(
         execOk(
           [
-            `/media/fat/games/SNES/SMW.sfc\t${md5a}\t${sha1a}\t524288\t1700000000`,
-            `/media/fat/games/SNES/Sonic.sfc\t${md5b}\t${sha1b}\t1048576\t1700000100`,
+            // Non-archive: extracted size == disk size.
+            `/media/fat/games/SNES/SMW.sfc\t${md5a}\t${sha1a}\t524288\t524288\t1700000000`,
+            `/media/fat/games/SNES/Sonic.sfc\t${md5b}\t${sha1b}\t1048576\t1048576\t1700000100`,
           ].join('\n') + '\n',
         ),
       );
@@ -3035,6 +3036,7 @@ describe('RealMisterClient', () => {
       expect(result[0]?.md5).toBe(md5a);
       expect(result[0]?.sha1).toBe(sha1a);
       expect(result[0]?.size).toBe(524288);
+      expect(result[0]?.diskSize).toBe(524288);
       expect(result[1]?.mtime).toBe(1700000100);
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
@@ -3043,6 +3045,26 @@ describe('RealMisterClient', () => {
       // Sanity: the script computes both algorithms.
       expect(script).toContain('md5sum');
       expect(script).toContain('sha1sum');
+    });
+
+    it('parses distinct extracted/disk sizes for archive entries', async () => {
+      // The reproduction case: a `.zip` whose extracted contents
+      // exceed the wrapper's bytes-on-disk. Both numbers round-trip.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      const md5 = 'a'.repeat(32);
+      const sha1 = 'b'.repeat(40);
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          `/media/fat/games/mame/grdians.zip\t${md5}\t${sha1}\t36700160\t14199857\t1709054222\n`,
+        ),
+      );
+      const [r] = await client.hashPaths([
+        '/media/fat/games/mame/grdians.zip',
+      ]);
+      expect(r?.size).toBe(36700160);
+      expect(r?.diskSize).toBe(14199857);
     });
 
     it('returns [] for empty input without making an SSH call', async () => {

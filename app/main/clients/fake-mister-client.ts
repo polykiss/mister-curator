@@ -28,6 +28,7 @@ import { displayRomName } from '@shared/display';
 import { isOsMetadataDir, isOsMetadataFile } from '@shared/library-filter';
 import {
   classifyFolder,
+  countRomGroups,
   isLaunchableRomExtension,
   resolveClassification,
 } from '@shared/folder-rom';
@@ -74,7 +75,7 @@ import type {
   RomVisibilityChange,
   SystemFileMarkChange,
 } from '@shared/mister-client';
-import type { WitnessMtimes } from '@shared/prime-parse';
+import type { SizeAndMtime, WitnessMtimes } from '@shared/prime-parse';
 
 export interface FakeMisterClientOptions {
   /** Working root that simulates `/media/fat/` on the device. */
@@ -818,6 +819,37 @@ export class FakeMisterClient implements IMisterClient {
     return out;
   }
 
+  /**
+   * fix/count-and-status-indicator commit 4 — fake counterpart to
+   * the device-side stat batch. Mirrors the real client's contract:
+   * missing paths come back as `{ size: 0, mtime: 0 }`.
+   */
+  async statPathsWithSize(
+    paths: readonly string[],
+  ): Promise<Record<string, SizeAndMtime>> {
+    this.assertConnected();
+    if (paths.length === 0) return {};
+    const out: Record<string, SizeAndMtime> = {};
+    for (const p of paths) {
+      const local = this.toLocal(p);
+      try {
+        const st = await fs.stat(local);
+        if (!st.isFile()) {
+          out[p] = { size: 0, mtime: 0 };
+          continue;
+        }
+        out[p] = { size: st.size, mtime: Math.floor(st.mtimeMs / 1000) };
+      } catch (err) {
+        if (isNodeError(err) && err.code === 'ENOENT') {
+          out[p] = { size: 0, mtime: 0 };
+          continue;
+        }
+        throw err;
+      }
+    }
+    return out;
+  }
+
   async hashPaths(paths: readonly string[]): Promise<readonly HashRecord[]> {
     this.assertConnected();
     if (paths.length === 0) return [];
@@ -852,6 +884,11 @@ export class FakeMisterClient implements IMisterClient {
         md5: hashes.md5,
         sha1: hashes.sha1,
         size: hashes.size,
+        // fix/scrape-and-count-correctness commit 1: emit wrapper
+        // disk bytes alongside the (possibly extracted) `size`. For
+        // non-archives the two coincide; for `.zip` they differ
+        // exactly the way the real device-side script reports them.
+        diskSize: st.size,
         mtime: Math.floor(st.mtimeMs / 1000),
       });
     }
@@ -1047,8 +1084,16 @@ export class FakeMisterClient implements IMisterClient {
       if (e.isFile()) files.push(e.name);
       else if (e.isDirectory()) dirs.push(e.name);
     }
+    // fix/count-and-status-indicator commit 1: pass the un-dotted
+    // basename of the local dir so the shared-prefix-atomic rule can
+    // fire. The basename is the last path segment after `path.basename`,
+    // un-dotted to match the matcher's normalization.
+    const folderBasename = path.basename(localDir);
+    const folderName = folderBasename.startsWith('.')
+      ? folderBasename.slice(1)
+      : folderBasename;
     return resolveClassification(
-      classifyFolder({ files, dirs }),
+      classifyFolder({ files, dirs, folderName }),
       getFolderOverride(overrides, coreId, visibleRelPath),
     );
   }
@@ -1197,18 +1242,50 @@ async function readSubFolderForMatcher(
 async function countRecursiveFiles(
   dir: string,
 ): Promise<{ recursiveFileCount: number; recursiveHiddenFileCount: number }> {
+  // fix/scrape-and-count-correctness commit 2: bucket leaf names by
+  // their immediate parent directory so `countRomGroups` can collapse
+  // `.cue + .bin` sets per parent. Mirrors the real client's
+  // bucket-then-group conversion path so the fake reports identical
+  // counts for the same fixture.
+  const filesByParent = new Map<string, string[]>();
+  const hiddenFilesByParent = new Map<string, string[]>();
+  await walkBucket(dir, '', filesByParent, hiddenFilesByParent);
   let total = 0;
   let hidden = 0;
+  for (const list of filesByParent.values()) {
+    total += countRomGroups(list);
+  }
+  for (const list of hiddenFilesByParent.values()) {
+    hidden += countRomGroups(list);
+  }
+  return { recursiveFileCount: total, recursiveHiddenFileCount: hidden };
+}
+
+async function walkBucket(
+  dir: string,
+  parentRel: string,
+  filesByParent: Map<string, string[]>,
+  hiddenFilesByParent: Map<string, string[]>,
+): Promise<void> {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.isFile()) {
-      total += 1;
-      if (entry.name.startsWith('.')) hidden += 1;
+      const list = filesByParent.get(parentRel);
+      if (list) list.push(entry.name);
+      else filesByParent.set(parentRel, [entry.name]);
+      if (entry.name.startsWith('.')) {
+        const hList = hiddenFilesByParent.get(parentRel);
+        if (hList) hList.push(entry.name);
+        else hiddenFilesByParent.set(parentRel, [entry.name]);
+      }
     } else if (entry.isDirectory()) {
-      const nested = await countRecursiveFiles(path.join(dir, entry.name));
-      total += nested.recursiveFileCount;
-      hidden += nested.recursiveHiddenFileCount;
+      const childRel = parentRel === '' ? entry.name : `${parentRel}/${entry.name}`;
+      await walkBucket(
+        path.join(dir, entry.name),
+        childRel,
+        filesByParent,
+        hiddenFilesByParent,
+      );
     }
   }
-  return { recursiveFileCount: total, recursiveHiddenFileCount: hidden };
 }

@@ -5,6 +5,7 @@ import {
 } from '@shared/connection';
 import {
   CORES_CACHE_WITNESS_PATHS,
+  MISTER_GAMES_DIR,
   romsCacheWitnessPath,
 } from '@shared/constants';
 import {
@@ -571,11 +572,63 @@ export class ConnectionManager {
     options: { readonly forceRefresh?: boolean } = {},
   ): Promise<Rom[]> {
     this.assertConnected();
-    const dirBase = this.resolveOnDiskGamesDirBasename(coreId);
-    const witnessPath = romsCacheWitnessPath(dirBase, subPath);
+
+    // fix/scrape-and-count-correctness commit 4 — alias drill-in.
+    // If subPath points at one of this core's alias dirs (e.g.
+    // NeoGeo-CD/ folded under NeoGeo), the SSH walk targets the
+    // alias dir on the device. The returned Roms get their coreId
+    // rewritten to the primary so the renderer's coreId-keyed
+    // lookups stay consistent, and the alias name re-prepends to
+    // their relativePath so further drill-in keeps the prefix.
+    const redirect = this.resolveAliasRedirect(coreId, subPath);
+    const sshCoreId = redirect?.coreId ?? coreId;
+    const sshSubPath = redirect?.subPath ?? subPath;
+
+    const dirBase = this.resolveOnDiskGamesDirBasename(sshCoreId);
+    const witnessPath = romsCacheWitnessPath(dirBase, sshSubPath);
+
+    const finalize = (roms: readonly Rom[]): Rom[] => {
+      if (redirect) {
+        return roms.map((r) => ({
+          ...r,
+          coreId,
+          relativePath:
+            r.relativePath !== undefined && r.relativePath !== ''
+              ? `${redirect.coreId}/${r.relativePath}`
+              : redirect.coreId,
+        }));
+      }
+      // Top-level of the primary: append synthetic 'folder-container'
+      // rows for each alias dir so the user can drill into them. The
+      // synthetic row's `path` points at /media/fat/games/<aliasDir>
+      // — the actual alias dir on the device — so any future
+      // operation that consults `path` directly stays correct.
+      if (subPath === '') {
+        const core = this.coresCache.find((c) => c.id === coreId);
+        const extras = core?.extraGamesDirNames ?? [];
+        if (extras.length > 0) {
+          const synthetic: Rom[] = extras.map((name) => ({
+            coreId,
+            filename: name,
+            displayName: name,
+            sizeBytes: 0,
+            hidden: false,
+            path: `${MISTER_GAMES_DIR}/${name}`,
+            kind: 'folder-container',
+            relativePath: name,
+          }));
+          return [...roms, ...synthetic];
+        }
+      }
+      return [...roms];
+    };
 
     if (!options.forceRefresh && this.currentHost !== null) {
-      const slot = await this.cache.getRomsCache(this.currentHost, coreId, subPath);
+      const slot = await this.cache.getRomsCache(
+        this.currentHost,
+        sshCoreId,
+        sshSubPath,
+      );
       if (slot !== null) {
         // Stat the single witness in one round trip and compare. The
         // stat itself is ~50ms — a worthwhile trade against the
@@ -586,10 +639,10 @@ export class ConnectionManager {
           if (witnessesMatch(slot.witnesses, fresh)) {
             this.cache.recordHit('roms', {
               host: this.currentHost,
-              coreId,
-              subPath,
+              coreId: sshCoreId,
+              subPath: sshSubPath,
             });
-            return [...slot.data];
+            return finalize(slot.data);
           }
           // Witnesses moved — emit stale and fall through. Don't
           // invalidate the file here: the upcoming
@@ -599,8 +652,8 @@ export class ConnectionManager {
           // would drop those siblings unnecessarily.
           this.cache.recordStale('roms', {
             host: this.currentHost,
-            coreId,
-            subPath,
+            coreId: sshCoreId,
+            subPath: sshSubPath,
           });
         } catch {
           // Witness stat failure → fall through to network fetch.
@@ -609,7 +662,13 @@ export class ConnectionManager {
       }
     }
 
-    return this.fetchAndCacheRoms(coreId, dirBase, subPath, witnessPath);
+    const fresh = await this.fetchAndCacheRoms(
+      sshCoreId,
+      dirBase,
+      sshSubPath,
+      witnessPath,
+    );
+    return finalize(fresh);
   }
 
   /**
@@ -666,12 +725,19 @@ export class ConnectionManager {
     subPath = '',
   ): Promise<void> {
     this.assertConnected();
-    const dirBase = this.resolveOnDiskGamesDirBasename(coreId);
-    await this.client.setRomVisibility(dirBase, filename, hidden, subPath);
+    // commit 4: alias drill-in → rename targets the alias dir on the
+    // device; both the alias and primary cache slots get invalidated
+    // since either could be rendering the affected ROM.
+    const redirect = this.resolveAliasRedirect(coreId, subPath);
+    const sshCoreId = redirect?.coreId ?? coreId;
+    const sshSubPath = redirect?.subPath ?? subPath;
+    const dirBase = this.resolveOnDiskGamesDirBasename(sshCoreId);
+    await this.client.setRomVisibility(dirBase, filename, hidden, sshSubPath);
     // ROM rename changes the games dir's mtime → roms cache for this
     // core is invalidated. We don't try to delta-update Rom[] in
     // place; simpler and safer to drop and refetch on next browse.
-    await this.invalidateRomsAfterMutation(coreId);
+    await this.invalidateRomsAfterMutation(sshCoreId);
+    if (redirect) await this.invalidateRomsAfterMutation(coreId);
   }
 
   async setBulkRomVisibility(
@@ -680,12 +746,20 @@ export class ConnectionManager {
     subPath = '',
   ): Promise<BulkRomResult> {
     this.assertConnected();
-    const dirBase = this.resolveOnDiskGamesDirBasename(coreId);
-    const result = await this.client.setBulkRomVisibility(dirBase, changes, subPath);
+    const redirect = this.resolveAliasRedirect(coreId, subPath);
+    const sshCoreId = redirect?.coreId ?? coreId;
+    const sshSubPath = redirect?.subPath ?? subPath;
+    const dirBase = this.resolveOnDiskGamesDirBasename(sshCoreId);
+    const result = await this.client.setBulkRomVisibility(
+      dirBase,
+      changes,
+      sshSubPath,
+    );
     // Invalidate even on partial failure — a non-empty `succeeded`
     // means at least one rename committed and the cache is stale.
     if (result.succeeded.length > 0 || result.failed.length > 0) {
-      await this.invalidateRomsAfterMutation(coreId);
+      await this.invalidateRomsAfterMutation(sshCoreId);
+      if (redirect) await this.invalidateRomsAfterMutation(coreId);
     }
     return result;
   }
@@ -782,6 +856,34 @@ export class ConnectionManager {
     if (!core || !core.gamesDirExists) return coreId;
     const base = core.gamesDirName ?? core.id;
     return core.gamesDirHidden ? `.${base}` : base;
+  }
+
+  /**
+   * fix/scrape-and-count-correctness commit 4 — alias-dir redirect.
+   *
+   * When a CoreEntry has `extraGamesDirNames` (NeoGeo carries
+   * `['NeoGeo-CD']`) and the caller's subPath starts with one of
+   * those names, the SSH-layer call should target the alias dir on
+   * the device — `/media/fat/games/NeoGeo-CD/...` — instead of the
+   * primary's nested path. Returns the (coreId, subPath) the SSH
+   * layer should use, or `null` when no redirect applies.
+   *
+   * Pure read against `coresCache`; no I/O.
+   */
+  private resolveAliasRedirect(
+    coreId: string,
+    subPath: string,
+  ): { readonly coreId: string; readonly subPath: string } | null {
+    if (subPath === '') return null;
+    const core = this.coresCache.find((c) => c.id === coreId);
+    if (!core?.extraGamesDirNames || core.extraGamesDirNames.length === 0) {
+      return null;
+    }
+    const slash = subPath.indexOf('/');
+    const head = slash < 0 ? subPath : subPath.slice(0, slash);
+    if (!core.extraGamesDirNames.includes(head)) return null;
+    const tail = slash < 0 ? '' : subPath.slice(slash + 1);
+    return { coreId: head, subPath: tail };
   }
 
   async listFolderClassifications(): Promise<FolderClassifications> {

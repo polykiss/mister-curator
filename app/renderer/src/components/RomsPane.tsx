@@ -10,6 +10,7 @@ import { toast } from 'sonner';
 
 import { diagLog } from '@shared/diag-log';
 import { coreDisplayName } from '@shared/core-matching';
+import { countRomGroups } from '@shared/folder-rom';
 import { isAutoDetectedSystemFile, isSystemFile } from '@shared/system-files';
 import {
   enumerateRomEntries,
@@ -31,6 +32,24 @@ function romKindForSystemCheck(kind: Rom['kind']): 'file' | 'folder' {
 function shortName(path: string): string {
   const i = path.lastIndexOf('/');
   return i < 0 ? path : path.slice(i + 1);
+}
+
+/**
+ * fix/scrape-and-count-correctness commit 2 — drill-in row count.
+ * File rows pass through `countRomGroups` so a multi-track `.cue +
+ * .bin` set counts as one game; folder rows (atomic and container)
+ * each count as one. Mirrors the matcher's per-bucket grouping so
+ * the sidebar's "1234" and the drill-in's "47 ROMs" speak the same
+ * language.
+ */
+function countRomEntries(roms: readonly Rom[]): number {
+  let folderCount = 0;
+  const fileNames: string[] = [];
+  for (const r of roms) {
+    if (r.kind === 'file') fileNames.push(r.filename);
+    else folderCount += 1;
+  }
+  return folderCount + countRomGroups(fileNames);
 }
 
 import { RomEditMetadataDialog } from '@app/renderer/src/components/RomEditMetadataDialog';
@@ -444,17 +463,29 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   }, [presentableRoms]);
 
   // Counts shown in the header — non-system ROMs only.
+  // fix/scrape-and-count-correctness commit 2: file rows pass
+  // through `countRomGroups` so a `.cue + .bin` set the user sees
+  // as one game contributes 1 to the count instead of N. Folder
+  // rows (atomic + container) each count as 1 — atomic folders are
+  // already one game per definition; container folders are one
+  // navigation row regardless of contents.
   const visibleNonSystem = useMemo(() => {
     if (!roms) return 0;
-    return roms.filter((r) => !r.hidden && systemFlags.get(r.filename) !== true).length;
+    return countRomEntries(
+      roms.filter((r) => !r.hidden && systemFlags.get(r.filename) !== true),
+    );
   }, [roms, systemFlags]);
   const hiddenNonSystem = useMemo(() => {
     if (!roms) return 0;
-    return roms.filter((r) => r.hidden && systemFlags.get(r.filename) !== true).length;
+    return countRomEntries(
+      roms.filter((r) => r.hidden && systemFlags.get(r.filename) !== true),
+    );
   }, [roms, systemFlags]);
   const systemCount = useMemo(() => {
     if (!roms) return 0;
-    return roms.filter((r) => systemFlags.get(r.filename) === true).length;
+    return countRomEntries(
+      roms.filter((r) => systemFlags.get(r.filename) === true),
+    );
   }, [roms, systemFlags]);
 
   const visibleSelectedCount = useMemo(() => {

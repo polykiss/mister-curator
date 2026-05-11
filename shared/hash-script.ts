@@ -4,8 +4,20 @@
  * Lives in `shared/` so the parser is unit-testable without an SSH
  * session (same pattern as `prime-parse.ts`).
  *
- * Output line shape (5 tab-separated fields):
- *   `<path>\t<md5hex>\t<sha1hex>\t<sizeBytes>\t<mtimeEpoch>\n`
+ * Output line shape (6 tab-separated fields):
+ *   `<path>\t<md5hex>\t<sha1hex>\t<sizeBytes>\t<diskSizeBytes>\t<mtimeEpoch>\n`
+ *
+ * `sizeBytes` is the extracted ROM content size (zip-inner for
+ * archives, raw bytes for direct files) — feeds ScreenScraper's
+ * `romtaille`. `diskSizeBytes` is `stat -c %s` on the wrapper file —
+ * what the OS says this file is. For non-archive paths the two are
+ * identical; for `.zip` wrappers they differ. fix/scrape-and-count-
+ * correctness commit 1 added the second field after the user
+ * observed cache `size: 36MB` against on-disk `14MB` for a mame .zip
+ * and assumed staleness. Investigation: `size` was always extracted-
+ * content bytes, captured fresh per compute via `unzip -p | wc -c`.
+ * Adding `diskSize` makes both numbers available so the discrepancy
+ * is visible-by-design rather than a phantom bug.
  *
  * Paths that don't exist or aren't regular files don't emit a line —
  * `parseHashOutput` simply sees fewer rows than were sent in.
@@ -55,8 +67,10 @@ import type { HashRecord } from '@shared/mister-client';
 export function buildHashScript(paths: readonly string[]): string {
   // For `.zip` wrappers we run THREE passes — md5, sha1, then
   // `wc -c` for the inner-content size. SS's `romtaille` expects
-  // the size of the actual ROM, not the zip wrapper, so a fourth
-  // `stat -c %s` against `$f` would surface the wrong value.
+  // the size of the actual ROM, not the zip wrapper. A fourth
+  // `stat -c %s` against `$f` records the WRAPPER size into the
+  // `disk_size` field — that's the bytes-on-disk value the size
+  // column displays. For non-archive paths the two coincide.
   // Three reads of a 50MB zip is ~1–2s on the Nano's SD card — fine
   // for a one-time prefetch. mtime stays on the wrapper since
   // that's what the user actually touches.
@@ -70,16 +84,18 @@ export function buildHashScript(paths: readonly string[]): string {
     "        md5=$(unzip -p \"$f\" 2>/dev/null | md5sum 2>/dev/null | cut -d' ' -f1)",
     "        sha1=$(unzip -p \"$f\" 2>/dev/null | sha1sum 2>/dev/null | cut -d' ' -f1)",
     '        size=$(unzip -p "$f" 2>/dev/null | wc -c | tr -d \' \')',
+    '        disk_size=$(stat -c %s "$f" 2>/dev/null)',
     '        ;;',
     '      *)',
     "        md5=$(md5sum \"$f\" 2>/dev/null | cut -d' ' -f1)",
     "        sha1=$(sha1sum \"$f\" 2>/dev/null | cut -d' ' -f1)",
     '        size=$(stat -c %s "$f" 2>/dev/null)',
+    '        disk_size=$size',
     '        ;;',
     '    esac',
     '    mtime=$(stat -c %Y "$f" 2>/dev/null)',
-    '    if [ -n "$md5" ] && [ -n "$sha1" ] && [ -n "$size" ] && [ -n "$mtime" ]; then',
-    '      printf \'%s\\t%s\\t%s\\t%s\\t%s\\n\' "$f" "$md5" "$sha1" "$size" "$mtime"',
+    '    if [ -n "$md5" ] && [ -n "$sha1" ] && [ -n "$size" ] && [ -n "$disk_size" ] && [ -n "$mtime" ]; then',
+    '      printf \'%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n\' "$f" "$md5" "$sha1" "$size" "$disk_size" "$mtime"',
     '    fi',
     '  fi',
     'done',
@@ -90,10 +106,12 @@ export function parseHashOutput(stdout: string): readonly HashRecord[] {
   const out: HashRecord[] = [];
   for (const line of stdout.split('\n')) {
     if (line === '') continue;
-    // Path may itself contain tabs (rare but legal POSIX). The four
+    // Path may itself contain tabs (rare but legal POSIX). The five
     // trailing fields are fixed-width / numeric so we split from the
-    // right with `lastIndexOf` four times.
-    const t4 = line.lastIndexOf('\t');
+    // right with `lastIndexOf` five times.
+    const t5 = line.lastIndexOf('\t');
+    if (t5 < 0) continue;
+    const t4 = line.lastIndexOf('\t', t5 - 1);
     if (t4 < 0) continue;
     const t3 = line.lastIndexOf('\t', t4 - 1);
     if (t3 < 0) continue;
@@ -106,16 +124,19 @@ export function parseHashOutput(stdout: string): readonly HashRecord[] {
     const md5 = line.slice(t1 + 1, t2);
     const sha1 = line.slice(t2 + 1, t3);
     const sizeStr = line.slice(t3 + 1, t4);
-    const mtimeStr = line.slice(t4 + 1);
+    const diskSizeStr = line.slice(t4 + 1, t5);
+    const mtimeStr = line.slice(t5 + 1);
 
     if (!isHexLength(md5, 32)) continue;
     if (!isHexLength(sha1, 40)) continue;
     const size = Number.parseInt(sizeStr, 10);
     if (!Number.isFinite(size) || size < 0) continue;
+    const diskSize = Number.parseInt(diskSizeStr, 10);
+    if (!Number.isFinite(diskSize) || diskSize < 0) continue;
     const mtime = Number.parseInt(mtimeStr, 10);
     if (!Number.isFinite(mtime) || mtime < 0) continue;
 
-    out.push({ path, md5, sha1, size, mtime });
+    out.push({ path, md5, sha1, size, diskSize, mtime });
   }
   return out;
 }

@@ -14,6 +14,12 @@ interface FixtureHash {
   readonly md5: string;
   readonly sha1: string;
   readonly size: number;
+  /**
+   * Wrapper bytes-on-disk. Defaults to `size` (matching the
+   * non-archive case where extracted == wrapper). Override to model
+   * the .zip case where they differ.
+   */
+  readonly diskSize?: number;
   readonly mtime: number;
 }
 
@@ -42,6 +48,11 @@ function makeClient(opts: {
             md5: rec.md5,
             sha1: rec.sha1,
             size: rec.size,
+            // The fixture's `size` doubles as the disk-size for tests
+            // — non-archive fixtures coincide naturally; archive
+            // fixtures override via `diskSize` when they need to
+            // exercise the wrapper-vs-extracted distinction.
+            diskSize: rec.diskSize ?? rec.size,
             mtime: rec.mtime,
           };
         })
@@ -52,6 +63,21 @@ function makeClient(opts: {
       const out: Record<string, number> = {};
       for (const p of paths) {
         out[p] = opts.stat?.get(p) ?? opts.hashes.get(p)?.mtime ?? 0;
+      }
+      return out;
+    },
+    async statPathsWithSize(paths: readonly string[]) {
+      // Migration tests pass `stat` with mtime and `hashes` with size
+      // separately. Default semantics: mtime falls back to the hashes
+      // fixture; size comes from hashes' `diskSize` (or `size` for
+      // non-archive fixtures). Missing entries report {0, 0} per the
+      // device-side contract.
+      const out: Record<string, { size: number; mtime: number }> = {};
+      for (const p of paths) {
+        const rec = opts.hashes.get(p);
+        const mtime = opts.stat?.get(p) ?? rec?.mtime ?? 0;
+        const size = rec?.diskSize ?? rec?.size ?? 0;
+        out[p] = { size, mtime };
       }
       return out;
     },
@@ -115,7 +141,10 @@ describe('HashService', () => {
       entries: Record<string, FixtureHash & { hashedAt: string }>;
     };
     expect(raw.version).toBe(1);
-    expect(raw.hashStrategyVersion).toBe(3); // PR #16 round 2 bump
+    // fix/scrape-and-count-correctness commit 1: bump from v3 to v4
+    // when `diskSizeBytes` was added. v3 entries get re-hashed on
+    // first read so the new field populates.
+    expect(raw.hashStrategyVersion).toBe(4);
     expect(raw.host).toBe('host-1');
     expect(raw.entries['/media/fat/games/A.sfc']?.md5).toBe('a'.repeat(32));
     expect(raw.entries['/media/fat/games/A.sfc']?.sha1).toBe('a'.repeat(40));
@@ -302,7 +331,9 @@ describe('HashService', () => {
       );
     }
 
-    it('writes hashStrategyVersion: 3 alongside the v1 schema field', async () => {
+    it('writes hashStrategyVersion: 4 alongside the v1 schema field', async () => {
+      // fix/scrape-and-count-correctness commit 1 bumped to v4 when
+      // `diskSizeBytes` was added to HashEntry.
       const svc = new HashService(dir);
       const hashes = new Map([['/p/a', fix('a', 1, 1)]]);
       await svc.getHash(makeClient({ hashes }), 'host-1', ['/p/a']);
@@ -310,7 +341,7 @@ describe('HashService', () => {
         await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
       ) as { version: number; hashStrategyVersion: number };
       expect(raw.version).toBe(1);
-      expect(raw.hashStrategyVersion).toBe(3);
+      expect(raw.hashStrategyVersion).toBe(4);
     });
 
     it('treats a v2 (md5-only) cache as invalid and re-hashes', async () => {
@@ -382,16 +413,17 @@ describe('HashService', () => {
       expect(client.hashCalls).toHaveLength(1);
     });
 
-    it('serves a current-version cache with full triple without re-hashing', async () => {
+    it('serves a current-version cache with full quad without re-hashing', async () => {
       await seedCache('host-1', {
         version: 1,
-        hashStrategyVersion: 3,
+        hashStrategyVersion: 4,
         host: 'host-1',
         entries: {
           '/p/a': {
             md5: 'c'.repeat(32),
             sha1: 'd'.repeat(40),
             size: 4242,
+            diskSizeBytes: 1234,
             mtime: 100,
             hashedAt: '2025-01-01T00:00:00.000Z',
           },
@@ -406,8 +438,323 @@ describe('HashService', () => {
       expect(result.get('/p/a')?.md5).toBe('c'.repeat(32));
       expect(result.get('/p/a')?.sha1).toBe('d'.repeat(40));
       expect(result.get('/p/a')?.size).toBe(4242);
+      expect(result.get('/p/a')?.diskSizeBytes).toBe(1234);
       expect(client.hashCalls).toEqual([]);
     });
+
+    it('treats a v3 cache (missing diskSizeBytes) as invalid and re-hashes', async () => {
+      // The user observation that motivated commit 1: cache `size`
+      // looked stale because it was extracted-content bytes, not
+      // wrapper bytes. v3 entries lack the new `diskSizeBytes` field,
+      // so the validator returns null and a re-hash populates both
+      // fields fresh.
+      await seedCache('host-1', {
+        version: 1,
+        hashStrategyVersion: 3,
+        host: 'host-1',
+        entries: {
+          '/p/a': {
+            md5: 'a'.repeat(32),
+            sha1: 'a'.repeat(40),
+            size: 100,
+            mtime: 100,
+            hashedAt: '2025-01-01T00:00:00.000Z',
+          },
+        },
+      });
+      const svc = new HashService(dir);
+      const hashes = new Map([['/p/a', fix('z', 1, 100)]]);
+      const client = makeClient({ hashes });
+      const result = await svc.getHash(client, 'host-1', ['/p/a']);
+      expect(result.get('/p/a')?.md5).toBe('z'.repeat(32));
+      expect(result.get('/p/a')?.diskSizeBytes).toBeDefined();
+      expect(client.hashCalls).toHaveLength(1);
+    });
+
+    it('persists wrapper diskSizeBytes distinctly from extracted size', async () => {
+      // Verifies the load-bearing fix from commit 1: the cache now
+      // records BOTH the extracted-content size (existing `size`,
+      // which still feeds SS romtaille) and the wrapper-bytes-on-disk
+      // (`diskSizeBytes`, what the size column displays). For the
+      // `.grdians.zip` reproduction case those numbers differ.
+      const svc = new HashService(dir);
+      const hashes = new Map<string, FixtureHash>([
+        [
+          '/media/fat/games/mame/grdians.zip',
+          {
+            md5: '5'.repeat(32),
+            sha1: '7'.repeat(40),
+            size: 36700160,
+            diskSize: 14199857,
+            mtime: 1709054222,
+          },
+        ],
+      ]);
+      const client = makeClient({ hashes });
+      await svc.getHash(client, 'host-1', [
+        '/media/fat/games/mame/grdians.zip',
+      ]);
+      const raw = JSON.parse(
+        await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
+      ) as {
+        entries: Record<
+          string,
+          { size: number; diskSizeBytes: number }
+        >;
+      };
+      const e = raw.entries['/media/fat/games/mame/grdians.zip'];
+      expect(e?.size).toBe(36700160);
+      expect(e?.diskSizeBytes).toBe(14199857);
+    });
+  });
+
+  describe('migrateV3Entries (fix/count-and-status-indicator commit 4)', () => {
+    async function seedV3Cache(
+      host: string,
+      entries: Readonly<
+        Record<
+          string,
+          {
+            md5: string;
+            sha1: string;
+            size: number;
+            mtime: number;
+            hashedAt: string;
+          }
+        >
+      >,
+    ): Promise<void> {
+      const cacheDir = join(dir, host);
+      await fs.mkdir(cacheDir, { recursive: true });
+      await fs.writeFile(
+        join(cacheDir, 'hashes.json'),
+        JSON.stringify(
+          {
+            version: 1,
+            hashStrategyVersion: 3,
+            host,
+            entries,
+          },
+          null,
+          2,
+        ),
+      );
+    }
+
+    it('migrates a v3 entry to v4 when mtime still matches — no hash recompute', async () => {
+      // Pre-fix: v3 → v4 strategy bump invalidated every entry,
+      // forcing a full rehash. Post-fix: stat-only batch populates
+      // diskSizeBytes from `stat -c '%s'` and bumps the entry to
+      // v4 in place.
+      await seedV3Cache('host-1', {
+        '/p/Game.zip': {
+          md5: 'a'.repeat(32),
+          sha1: 'b'.repeat(40),
+          size: 36700160, // extracted-content size from v3
+          mtime: 1700000000,
+          hashedAt: '2025-01-01T00:00:00.000Z',
+        },
+      });
+      const svc = new HashService(dir);
+      // Stat-only client: hashPaths MUST NOT be called.
+      const hashes = new Map<string, FixtureHash>([
+        [
+          '/p/Game.zip',
+          {
+            md5: 'a'.repeat(32),
+            sha1: 'b'.repeat(40),
+            size: 36700160,
+            diskSize: 14199857, // wrapper bytes from stat
+            mtime: 1700000000,
+          },
+        ],
+      ]);
+      const client = makeClient({ hashes });
+      const result = await svc.migrateV3Entries(client, 'host-1');
+      expect(result).toEqual({ migrated: 1, needsRehash: 0 });
+      expect(client.hashCalls).toEqual([]);
+      // Cache file is now v4 with diskSizeBytes populated from
+      // stat. Hash + sha1 + size are preserved verbatim from v3.
+      const raw = JSON.parse(
+        await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
+      ) as {
+        hashStrategyVersion: number;
+        entries: Record<
+          string,
+          {
+            md5: string;
+            sha1: string;
+            size: number;
+            diskSizeBytes: number;
+            mtime: number;
+          }
+        >;
+      };
+      expect(raw.hashStrategyVersion).toBe(4);
+      const e = raw.entries['/p/Game.zip'];
+      expect(e?.md5).toBe('a'.repeat(32));
+      expect(e?.size).toBe(36700160);
+      expect(e?.diskSizeBytes).toBe(14199857);
+      expect(e?.mtime).toBe(1700000000);
+    });
+
+    it('drops a v3 entry whose mtime drifted (existing rehash path handles)', async () => {
+      await seedV3Cache('host-1', {
+        '/p/Stale.zip': {
+          md5: 'a'.repeat(32),
+          sha1: 'b'.repeat(40),
+          size: 1024,
+          mtime: 1700000000,
+          hashedAt: '2025-01-01T00:00:00.000Z',
+        },
+      });
+      const svc = new HashService(dir);
+      // Stat returns a different mtime → entry is invalid.
+      const hashes = new Map<string, FixtureHash>([
+        [
+          '/p/Stale.zip',
+          {
+            md5: '0'.repeat(32),
+            sha1: '0'.repeat(40),
+            size: 1024,
+            mtime: 1800000000, // drifted
+          },
+        ],
+      ]);
+      const client = makeClient({
+        hashes,
+        stat: new Map([['/p/Stale.zip', 1800000000]]),
+      });
+      const result = await svc.migrateV3Entries(client, 'host-1');
+      expect(result).toEqual({ migrated: 0, needsRehash: 1 });
+      expect(client.hashCalls).toEqual([]);
+      // Entry got dropped from cache; existing rehash path will
+      // refire on next access.
+      const raw = JSON.parse(
+        await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
+      ) as { entries: Record<string, unknown> };
+      expect(raw.entries['/p/Stale.zip']).toBeUndefined();
+    });
+
+    it('drops a v3 entry whose path vanished (size=0)', async () => {
+      await seedV3Cache('host-1', {
+        '/p/Gone.zip': {
+          md5: 'a'.repeat(32),
+          sha1: 'b'.repeat(40),
+          size: 1024,
+          mtime: 1700000000,
+          hashedAt: '2025-01-01T00:00:00.000Z',
+        },
+      });
+      const svc = new HashService(dir);
+      // Empty hashes map AND stat=0 → fixture treats as missing.
+      const client = makeClient({
+        hashes: new Map(),
+        stat: new Map([['/p/Gone.zip', 0]]),
+      });
+      const result = await svc.migrateV3Entries(client, 'host-1');
+      expect(result).toEqual({ migrated: 0, needsRehash: 1 });
+    });
+
+    it('mixed batch: some migrate, some need rehash', async () => {
+      await seedV3Cache('host-1', {
+        '/p/Fresh.zip': {
+          md5: 'a'.repeat(32),
+          sha1: 'b'.repeat(40),
+          size: 100,
+          mtime: 100,
+          hashedAt: '2025-01-01T00:00:00.000Z',
+        },
+        '/p/Stale.zip': {
+          md5: 'c'.repeat(32),
+          sha1: 'd'.repeat(40),
+          size: 200,
+          mtime: 200,
+          hashedAt: '2025-01-01T00:00:00.000Z',
+        },
+      });
+      const svc = new HashService(dir);
+      const hashes = new Map<string, FixtureHash>([
+        [
+          '/p/Fresh.zip',
+          { md5: 'a'.repeat(32), sha1: 'b'.repeat(40), size: 100, diskSize: 50, mtime: 100 },
+        ],
+        [
+          '/p/Stale.zip',
+          { md5: 'c'.repeat(32), sha1: 'd'.repeat(40), size: 200, diskSize: 150, mtime: 999 },
+        ],
+      ]);
+      const client = makeClient({ hashes });
+      const result = await svc.migrateV3Entries(client, 'host-1');
+      expect(result).toEqual({ migrated: 1, needsRehash: 1 });
+      expect(client.hashCalls).toEqual([]);
+    });
+
+    it('idempotent on a v4 cache (no migration)', async () => {
+      // Seed a fresh v4 cache via the normal path, then re-run
+      // the migration — it should no-op.
+      const svc = new HashService(dir);
+      const hashes = new Map([['/p/a', fix('a', 100, 100)]]);
+      await svc.getHash(makeClient({ hashes }), 'host-1', ['/p/a']);
+      const client2 = makeClient({ hashes });
+      const result = await svc.migrateV3Entries(client2, 'host-1');
+      expect(result).toEqual({ migrated: 0, needsRehash: 0 });
+      expect(client2.hashCalls).toEqual([]);
+    });
+
+    it('no-op when there is no cache file', async () => {
+      const svc = new HashService(dir);
+      const client = makeClient({ hashes: new Map() });
+      const result = await svc.migrateV3Entries(client, 'host-empty');
+      expect(result).toEqual({ migrated: 0, needsRehash: 0 });
+    });
+
+    it('chunks the SSH stat batch at batchSize', async () => {
+      // Seed 250 v3 entries; with batchSize=100 the migration
+      // should issue 3 statPathsWithSize calls (100 / 100 / 50).
+      const entries: Record<
+        string,
+        {
+          md5: string;
+          sha1: string;
+          size: number;
+          mtime: number;
+          hashedAt: string;
+        }
+      > = {};
+      const hashes = new Map<string, FixtureHash>();
+      for (let i = 0; i < 250; i += 1) {
+        const p = `/p/file-${String(i).padStart(3, '0')}`;
+        entries[p] = {
+          md5: 'a'.repeat(32),
+          sha1: 'b'.repeat(40),
+          size: 1,
+          mtime: i + 1,
+          hashedAt: '2025-01-01T00:00:00.000Z',
+        };
+        hashes.set(p, {
+          md5: 'a'.repeat(32),
+          sha1: 'b'.repeat(40),
+          size: 1,
+          diskSize: 1,
+          mtime: i + 1,
+        });
+      }
+      await seedV3Cache('host-1', entries);
+      const svc = new HashService(dir, { batchSize: 100 });
+      const client = makeClient({ hashes });
+      // Spy on the stat call boundary by wrapping the mock.
+      const statBatchCalls: number[] = [];
+      const origStat = client.statPathsWithSize.bind(client);
+      client.statPathsWithSize = async (paths) => {
+        statBatchCalls.push(paths.length);
+        return origStat(paths);
+      };
+      const result = await svc.migrateV3Entries(client, 'host-1');
+      expect(result).toEqual({ migrated: 250, needsRehash: 0 });
+      expect(statBatchCalls).toEqual([100, 100, 50]);
+    });
+
   });
 
   // feat/rename-aware-hash-cache: when a file is renamed (e.g. dot-

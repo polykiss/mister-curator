@@ -27,7 +27,10 @@ import {
   makeIdGen,
   truncateForLog,
 } from '@shared/diag-log';
-import { isLaunchableRomExtension } from '@shared/folder-rom';
+import {
+  countRomGroups,
+  isLaunchableRomExtension,
+} from '@shared/folder-rom';
 import { isOsMetadataDir, isOsMetadataFile } from '@shared/library-filter';
 import { shouldCountAsRom } from '@shared/system-files';
 import {
@@ -66,9 +69,12 @@ import {
 } from '@shared/hash-script';
 import {
   buildPrimeScript,
+  buildSizeAndMtimeScript,
   buildWitnessScript,
+  parseSizeAndMtimeOutput,
   parsePrimeOutput,
   parseWitnessOutput,
+  type SizeAndMtime,
   type WitnessMtimes,
 } from '@shared/prime-parse';
 import { MisterConnectionError } from '@shared/types';
@@ -340,8 +346,16 @@ export class RealMisterClient implements IMisterClient {
       name: string;
       files: string[];
       dirs: string[];
-      recursiveFileCount?: number;
-      recursiveHiddenFileCount?: number;
+      /**
+       * fix/scrape-and-count-correctness commit 2: leaf basenames
+       * bucketed by their immediate parent dir. The `recursive*Count`
+       * fields are derived from these at conversion time by running
+       * `countRomGroups` per bucket and summing — so a `Game.cue`
+       * plus 30 sibling `.bin` tracks contributes 1 to the count
+       * instead of 31.
+       */
+      filesByParent: Map<string, string[]>;
+      hiddenFilesByParent: Map<string, string[]>;
     }
     const gamesDirsBuilder = new Map<string, DirBuilder>();
     const ensureDirBuilder = (rawName: string): DirBuilder => {
@@ -358,7 +372,13 @@ export class RealMisterClient implements IMisterClient {
     ): MutableSubFolder => {
       let sub = bucket.subFolders.get(subName);
       if (!sub) {
-        sub = { name: subName, files: [], dirs: [] };
+        sub = {
+          name: subName,
+          files: [],
+          dirs: [],
+          filesByParent: new Map(),
+          hiddenFilesByParent: new Map(),
+        };
         bucket.subFolders.set(subName, sub);
       }
       return sub;
@@ -475,12 +495,17 @@ export class RealMisterClient implements IMisterClient {
         if (!isLaunchableRomExtension(leafName)) {
           continue;
         }
+        // fix/scrape-and-count-correctness commit 2: bucket leaf
+        // basenames by their immediate parent dir so the grouping
+        // helper can collapse `Game.cue` + sibling `.bin` tracks
+        // into one game. Per-parent so a `Game.cue` in `dirA/` does
+        // not falsely claim a `.bin` from `dirB/`. Group counts
+        // resolve at the conversion step below.
         const sub = ensureSubFolder(ensureDirBuilder(topLevelDir), subName);
-        sub.recursiveFileCount = (sub.recursiveFileCount ?? 0) + 1;
-        const leaf = segs[segs.length - 1]!;
-        if (leaf.startsWith('.')) {
-          sub.recursiveHiddenFileCount =
-            (sub.recursiveHiddenFileCount ?? 0) + 1;
+        const parentRel = segs.slice(0, -1).join('/');
+        bucketLeaf(sub.filesByParent, parentRel, leafName);
+        if (leafName.startsWith('.')) {
+          bucketLeaf(sub.hiddenFilesByParent, parentRel, leafName);
         }
       }
     }
@@ -493,8 +518,8 @@ export class RealMisterClient implements IMisterClient {
             name: s.name,
             files: s.files,
             dirs: s.dirs,
-            recursiveFileCount: s.recursiveFileCount,
-            recursiveHiddenFileCount: s.recursiveHiddenFileCount,
+            recursiveFileCount: sumGroupCounts(s.filesByParent),
+            recursiveHiddenFileCount: sumGroupCounts(s.hiddenFilesByParent),
           }),
         );
         return { rawName, files: b.files, dirs: b.dirs, subFolders };
@@ -838,6 +863,11 @@ export class RealMisterClient implements IMisterClient {
       const heuristic = classifyFolder({
         files: acc.directFiles,
         dirs: acc.directDirs,
+        // fix/count-and-status-indicator commit 1: pass the folder
+        // basename (un-dotted) so the shared-prefix-atomic rule can
+        // fire on X68000 game folders whose .zip variants all share
+        // the game name as a prefix.
+        folderName: visibleBase,
       });
       const override = getFolderOverride(
         folderClassifications,
@@ -1489,6 +1519,39 @@ export class RealMisterClient implements IMisterClient {
   }
 
   /**
+   * fix/count-and-status-indicator commit 4 — stat (size + mtime)
+   * for a batch of absolute file paths in one SSH round-trip. Used
+   * by the hash-cache v3→v4 lazy migration to populate `diskSizeBytes`
+   * without re-running the slow `unzip -p | md5sum` pipeline.
+   *
+   * Empty input short-circuits — no SSH call. Throws on a non-zero
+   * exit so the caller treats this as "couldn't validate" → fall
+   * back to the existing rehash path.
+   */
+  async statPathsWithSize(
+    paths: readonly string[],
+  ): Promise<Record<string, SizeAndMtime>> {
+    this.assertConnected();
+    if (paths.length === 0) return {};
+    const script = buildSizeAndMtimeScript(paths);
+    const result = await this.runSshOp(script, () =>
+      this.ssh.execCommand(script),
+    );
+    if (result.code !== 0) {
+      throw new Error(
+        `Failed to stat paths with size: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+      );
+    }
+    const parsed = parseSizeAndMtimeOutput(result.stdout);
+    if (parsed === null) {
+      throw new Error(
+        'Size+mtime output did not match the expected shape (likely truncated).',
+      );
+    }
+    return parsed;
+  }
+
+  /**
    * PR #16 round 2: hash a batch of paths in one SSH round trip.
    * Returns md5 + sha1 + size + mtime per path. HashService caches
    * the lot; ScreenScraper takes md5+sha1 in one query for variant
@@ -1772,6 +1835,39 @@ export class RealMisterClient implements IMisterClient {
   }
 }
 
+/**
+ * fix/scrape-and-count-correctness commit 2 helpers — push a leaf
+ * basename onto the per-parent-dir bucket within a subFolder. Mutates
+ * the supplied map in place. The parent path is the directory the
+ * leaf lives in (relative to /media/fat/games), so two `Game.cue`
+ * files in different parents never bleed into each other's group.
+ */
+function bucketLeaf(
+  byParent: Map<string, string[]>,
+  parentRel: string,
+  leafName: string,
+): void {
+  const list = byParent.get(parentRel);
+  if (list) list.push(leafName);
+  else byParent.set(parentRel, [leafName]);
+}
+
+/**
+ * Sum `countRomGroups` across every parent bucket. The matcher's
+ * `recursiveFileCount` field is intentionally a single integer the
+ * matcher can sum further; we collapse the per-parent buckets here
+ * so the upstream interface doesn't grow a new payload shape.
+ */
+function sumGroupCounts(byParent: Map<string, string[]>): number | undefined {
+  let total = 0;
+  let any = false;
+  for (const files of byParent.values()) {
+    any = true;
+    total += countRomGroups(files);
+  }
+  return any ? total : undefined;
+}
+
 function buildListAllCoresScript(): string {
   // PR #11 round 2 / Change 1: one `find` per category dir does the
   // entire structural enumeration. Replaces the per-entry shell loop
@@ -1974,8 +2070,8 @@ function parseListAllCoresShellOutput(stdout: string): {
     name: string;
     files: string[];
     dirs: string[];
-    recursiveFileCount?: number;
-    recursiveHiddenFileCount?: number;
+    filesByParent: Map<string, string[]>;
+    hiddenFilesByParent: Map<string, string[]>;
   }
   const gamesDirsBuilder = new Map<string, DirBuilder>();
   const ensureDirBuilder = (rawName: string): DirBuilder => {
@@ -1992,7 +2088,13 @@ function parseListAllCoresShellOutput(stdout: string): {
   ): MutableSubFolderBuilder => {
     let sub = bucket.subFolders.get(subName);
     if (!sub) {
-      sub = { name: subName, files: [], dirs: [] };
+      sub = {
+        name: subName,
+        files: [],
+        dirs: [],
+        filesByParent: new Map(),
+        hiddenFilesByParent: new Map(),
+      };
       bucket.subFolders.set(subName, sub);
     }
     return sub;
@@ -2079,11 +2181,11 @@ function parseListAllCoresShellOutput(stdout: string): {
         continue;
       }
       const sub = ensureSubFolder(ensureDirBuilder(topLevelDir), subName);
-      sub.recursiveFileCount = (sub.recursiveFileCount ?? 0) + 1;
       const leaf = segs[segs.length - 1]!;
+      const parentRel = segs.slice(0, -1).join('/');
+      bucketLeaf(sub.filesByParent, parentRel, leaf);
       if (leaf.startsWith('.')) {
-        sub.recursiveHiddenFileCount =
-          (sub.recursiveHiddenFileCount ?? 0) + 1;
+        bucketLeaf(sub.hiddenFilesByParent, parentRel, leaf);
       }
     }
   }
@@ -2097,8 +2199,8 @@ function parseListAllCoresShellOutput(stdout: string): {
           name: s.name,
           files: s.files,
           dirs: s.dirs,
-          recursiveFileCount: s.recursiveFileCount,
-          recursiveHiddenFileCount: s.recursiveHiddenFileCount,
+          recursiveFileCount: sumGroupCounts(s.filesByParent),
+          recursiveHiddenFileCount: sumGroupCounts(s.hiddenFilesByParent),
         }),
       );
       return { rawName, files: b.files, dirs: b.dirs, subFolders };

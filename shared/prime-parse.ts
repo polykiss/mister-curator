@@ -210,6 +210,82 @@ export function buildPrimeScript(args: {
 }
 
 /**
+ * fix/count-and-status-indicator commit 4 — size + mtime batch.
+ *
+ * The hash-cache v3→v4 lazy migration needs both `stat -c '%s'`
+ * (wrapper bytes; the new `diskSizeBytes` field) and `stat -c '%Y'`
+ * (mtime; validates the v3 entry's hash is still good) in one SSH
+ * round-trip. `buildWitnessScript` returns mtime alone; this
+ * variant emits a 3-field line per path.
+ *
+ * Output line format: `<size>\t<mtime>\t<path>\n`. Missing paths
+ * emit `0\t0\t<path>` so the parser can distinguish "couldn't stat"
+ * from "I never asked." Tab separator (not space) so paths
+ * containing spaces don't fragment.
+ */
+export function buildSizeAndMtimeScript(paths: readonly string[]): string {
+  const lines: string[] = [];
+  lines.push(`echo '${LABEL_SIZE_MTIME}'`);
+  for (const p of paths) {
+    lines.push(
+      `if [ -f ${shellSingleQuote(p)} ]; then ` +
+        `stat -c '%s\t%Y\t%n' ${shellSingleQuote(p)} 2>/dev/null || ` +
+        `printf '0\\t0\\t%s\\n' ${shellSingleQuote(p)}; ` +
+        `else printf '0\\t0\\t%s\\n' ${shellSingleQuote(p)}; fi`,
+    );
+  }
+  lines.push(`echo '${LABEL_END}'`);
+  return lines.join('\n');
+}
+
+const LABEL_SIZE_MTIME = 'SIZE_MTIME';
+
+export interface SizeAndMtime {
+  readonly size: number;
+  readonly mtime: number;
+}
+
+/**
+ * Parse the SIZE_MTIME block. Returns null when the END marker is
+ * absent (truncated output) so callers treat the response as a
+ * cache miss rather than wrong data.
+ *
+ * Path may contain tabs (rare but legal POSIX). The two leading
+ * numeric fields are split on the first two tabs; everything after
+ * the second tab is the path verbatim.
+ */
+export function parseSizeAndMtimeOutput(
+  stdout: string,
+): Record<string, SizeAndMtime> | null {
+  const out: Record<string, SizeAndMtime> = {};
+  let inSection = false;
+  for (const line of stdout.split('\n')) {
+    if (line === LABEL_SIZE_MTIME) {
+      inSection = true;
+      continue;
+    }
+    if (line === LABEL_END) return out;
+    if (!inSection) continue;
+    if (line === '') continue;
+    const t1 = line.indexOf('\t');
+    if (t1 < 0) continue;
+    const t2 = line.indexOf('\t', t1 + 1);
+    if (t2 < 0) continue;
+    const sizeStr = line.slice(0, t1);
+    const mtimeStr = line.slice(t1 + 1, t2);
+    const path = line.slice(t2 + 1);
+    if (path === '') continue;
+    const size = Number.parseInt(sizeStr, 10);
+    const mtime = Number.parseInt(mtimeStr, 10);
+    out[path] = {
+      size: Number.isFinite(size) && size >= 0 ? size : 0,
+      mtime: Number.isFinite(mtime) && mtime >= 0 ? mtime : 0,
+    };
+  }
+  return null;
+}
+
+/**
  * Build a one-shot witness-check script for the given paths. Used by
  * `listRoms` cache validation and write-through stat refreshes.
  */

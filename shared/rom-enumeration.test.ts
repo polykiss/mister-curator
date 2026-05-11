@@ -151,6 +151,37 @@ describe('enumerateRomEntries — container rows are filtered out', () => {
       'file',
     ]);
   });
+
+  it('alias-folded synthetic container rows (PR #42 commit 4) stay out of the prefetch stream', () => {
+    // fix/count-and-status-indicator commit 3 regression pin: PR #42
+    // commit 4's ConnectionManager.listRoms wrapper appends a
+    // synthetic 'folder-container' row to NEOGEO's top-level result
+    // for each alias dir (e.g. NeoGeo-CD). The synthetic row's
+    // `path` points at /media/fat/games/NeoGeo-CD — a directory,
+    // not a file. If it leaked into prefetch, the orchestrator
+    // would attempt to hash a directory and fail (or worse, return
+    // garbage that poisons the metadata cache).
+    //
+    // enumerateRomEntries dropping container rows is the load-
+    // bearing filter that keeps this from happening. Pin it
+    // against a NeoGeo-CD-shape synthetic row directly.
+    const synthetic = {
+      coreId: 'NEOGEO',
+      filename: 'NeoGeo-CD',
+      displayName: 'NeoGeo-CD',
+      sizeBytes: 0,
+      hidden: false,
+      path: '/media/fat/games/NeoGeo-CD',
+      kind: 'folder-container' as const,
+      relativePath: 'NeoGeo-CD',
+    };
+    const out = enumerateRomEntries([file('mslug.zip'), synthetic]);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.kind).toBe('file');
+    expect(out.map((e) => e.path)).not.toContain(
+      '/media/fat/games/NeoGeo-CD',
+    );
+  });
 });
 
 describe('enumerateRomEntries — empty input', () => {

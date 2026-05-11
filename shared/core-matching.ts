@@ -1,6 +1,11 @@
+import { aliasPrimaryCanonical } from '@shared/core-aliases';
 import { MISTER_GAMES_DIR } from '@shared/constants';
 import { emit, type DiagnosticsCollector } from '@shared/diag';
-import { classifyFolder, isLaunchableRomExtension } from '@shared/folder-rom';
+import {
+  classifyFolder,
+  countRomGroups,
+  isLaunchableRomExtension,
+} from '@shared/folder-rom';
 import {
   isAutoDetectedSystemFile,
   isAutoDetectedSystemFolder,
@@ -214,6 +219,7 @@ interface MutableCoreEntry {
   gamesDirExists: boolean;
   gamesDirHidden: boolean;
   gamesDirName?: string;
+  extraGamesDirNames?: string[];
 }
 
 /**
@@ -309,8 +315,16 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
       fileCount: gd.files.length,
       dirCount: gd.dirs.length,
     });
-    const key = canonicalize(visibleName);
-    if (visibleName === '' || key === '') continue;
+    const ownKey = canonicalize(visibleName);
+    if (visibleName === '' || ownKey === '') continue;
+    // fix/scrape-and-count-correctness commit 4: NeoGeo-CD/ folds
+    // into NeoGeo's entry. The aliased dir's counts merge into the
+    // primary; the dir's basename joins `extraGamesDirNames` so the
+    // ConnectionManager redirects drill-in / hide ops back at the
+    // alias dir on the device.
+    const aliasTarget = aliasPrimaryCanonical(visibleName);
+    const key = aliasTarget ?? ownKey;
+    const isAliased = aliasTarget !== null;
 
     // Single-source-of-truth filter: shouldCountAsRom decides whether
     // each top-level entry contributes to the cores-list count.
@@ -361,9 +375,16 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
       });
       return counted;
     });
-    const romCount = filteredFiles.length + filteredDirs.length;
+    // fix/scrape-and-count-correctness commit 4: top-level file
+    // count uses countRomGroups so a .cue + sibling .bin set is one
+    // entry, not two — matches the recursive walk's per-parent
+    // bucket grouping and the user's "one game = one row" mental
+    // model. Folders count one each here; classification (atomic
+    // vs container) decides their recursive contribution downstream.
+    const romCount =
+      countRomGroups(filteredFiles) + filteredDirs.length;
     const hiddenCount =
-      filteredFiles.filter((f) => f.startsWith('.')).length +
+      countRomGroups(filteredFiles.filter((f) => f.startsWith('.'))) +
       filteredDirs.filter((d) => d.startsWith('.')).length;
 
     const { recursiveRomCount, recursiveHiddenCount } = computeRecursiveRomCount(
@@ -376,20 +397,73 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
 
     const existing = byKey.get(key);
     if (existing) {
-      existing.gamesDirExists = true;
-      existing.gamesDirHidden = isHidden;
-      existing.gamesDirName = visibleName;
-      existing.romCount = romCount;
-      existing.hiddenCount = hiddenCount;
-      existing.recursiveRomCount = recursiveRomCount;
-      existing.recursiveHiddenCount = recursiveHiddenCount;
-      // Games-dir name wins as display id when both an rbf and a
-      // games dir exist for the same canonical key — Round 5
-      // spec: "named whichever the games dir was". The rbf prefix's
-      // case (e.g. "Vectrex") is forgotten in favor of the on-disk
-      // basename (e.g. "VECTREX"). Operations target gamesDirName.
-      existing.id = visibleName;
-      existing.name = visibleName;
+      if (isAliased) {
+        // Alias contribution: ADD counts to the primary, append the
+        // dir basename to extras, keep the primary's id/name. Hidden
+        // state stays the primary's — aliased dirs do not flip the
+        // primary's hide-row presentation.
+        existing.romCount += romCount;
+        existing.hiddenCount += hiddenCount;
+        existing.recursiveRomCount += recursiveRomCount;
+        existing.recursiveHiddenCount += recursiveHiddenCount;
+        existing.extraGamesDirNames = [
+          ...(existing.extraGamesDirNames ?? []),
+          visibleName,
+        ];
+      } else {
+        existing.gamesDirExists = true;
+        existing.gamesDirHidden = isHidden;
+        existing.gamesDirName = visibleName;
+        // commit 4: when an alias landed first, the existing bucket
+        // already carries the alias's contribution. The primary's
+        // counts ADD to that contribution rather than replacing it,
+        // so the order in which gamesDirs arrive doesn't change the
+        // final count. The placeholder branch below sets
+        // gamesDirExists=false so the existing-but-no-real-primary
+        // case (primary just an rbf, no games-dir) takes the +=
+        // path here too — adding the primary's romCount=0 is a
+        // no-op there.
+        const alreadyHasContribution =
+          (existing.extraGamesDirNames?.length ?? 0) > 0;
+        if (alreadyHasContribution) {
+          existing.romCount += romCount;
+          existing.hiddenCount += hiddenCount;
+          existing.recursiveRomCount += recursiveRomCount;
+          existing.recursiveHiddenCount += recursiveHiddenCount;
+        } else {
+          existing.romCount = romCount;
+          existing.hiddenCount = hiddenCount;
+          existing.recursiveRomCount = recursiveRomCount;
+          existing.recursiveHiddenCount = recursiveHiddenCount;
+        }
+        // Games-dir name wins as display id when both an rbf and a
+        // games dir exist for the same canonical key — Round 5
+        // spec: "named whichever the games dir was". The rbf prefix's
+        // case (e.g. "Vectrex") is forgotten in favor of the on-disk
+        // basename (e.g. "VECTREX"). Operations target gamesDirName.
+        existing.id = visibleName;
+        existing.name = visibleName;
+      }
+    } else if (isAliased) {
+      // Aliased games-dir landed before its primary. Stash the count
+      // under the primary's canonical key with a placeholder id; the
+      // primary's own loop pass (when it lands) will overwrite id /
+      // name / gamesDirName / category. If the primary genuinely
+      // never lands the user still sees the content via the
+      // placeholder rather than silently losing it.
+      byKey.set(key, {
+        id: aliasTarget,
+        name: aliasTarget,
+        romCount,
+        hiddenCount,
+        recursiveRomCount,
+        recursiveHiddenCount,
+        category: 'Unknown',
+        rbfPaths: [],
+        gamesDirExists: false,
+        gamesDirHidden: false,
+        extraGamesDirNames: [visibleName],
+      });
     } else {
       byKey.set(key, {
         id: visibleName,
@@ -465,6 +539,10 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     gamesDirExists: e.gamesDirExists,
     gamesDirHidden: e.gamesDirHidden,
     gamesDirName: e.gamesDirName,
+    extraGamesDirNames:
+      e.extraGamesDirNames && e.extraGamesDirNames.length > 0
+        ? [...e.extraGamesDirNames]
+        : undefined,
   }));
 
   // Orphan filter (Round 2 Change 4): a games-dir-only core (no
@@ -477,6 +555,18 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
   const filtered = allRaw.filter((c) => {
     if (c.category === 'Arcade') return true;
     if (c.rbfPaths.length > 0) return true;
+    // fix/scrape-and-count-correctness commit 4: an alias-folded
+    // entry whose primary genuinely never landed (no rbf, no
+    // matching games-dir of its own) still surfaces if the alias dir
+    // contributed countable ROMs. Without this, NeoGeo-CD/ on a
+    // device that's missing the NeoGeo .rbf would silently drop.
+    if (
+      c.extraGamesDirNames !== undefined &&
+      c.extraGamesDirNames.length > 0
+    ) {
+      const recursive = c.recursiveRomCount ?? c.romCount;
+      return c.romCount > 0 && recursive > 0;
+    }
     if (!c.gamesDirExists) return false;
     const recursive = c.recursiveRomCount ?? c.romCount;
     return c.romCount > 0 && recursive > 0;
@@ -544,7 +634,12 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
  */
 export function isRealCore(entry: CoreEntry): boolean {
   if (entry.category === 'Arcade') return false;
-  return entry.rbfPaths.length > 0 || entry.gamesDirExists;
+  return (
+    entry.rbfPaths.length > 0 ||
+    entry.gamesDirExists ||
+    (entry.extraGamesDirNames !== undefined &&
+      entry.extraGamesDirNames.length > 0)
+  );
 }
 
 /**
@@ -713,6 +808,18 @@ export function computeCoreRenames(core: CoreEntry, hidden: boolean): CoreRename
  * `recursiveHiddenCount` directly; for container folders, the
  * client's `recursiveHiddenFileCount` is added.
  */
+/**
+ * Drop a single leading dot, leaving the rest of the basename
+ * intact. Used by `classifyFolder` callers that need the visible
+ * (un-dotted) folder name for the shared-prefix rule — `.Akumajou
+ * Dracula (Konami)/` and `Akumajou Dracula (Konami)/` should both
+ * pass `Akumajou Dracula (Konami)` so the rule fires for hidden
+ * folders too.
+ */
+function stripDot(name: string): string {
+  return name.startsWith('.') ? name.slice(1) : name;
+}
+
 function computeRecursiveRomCount(
   topLevelFiles: readonly string[],
   topLevelDirs: readonly string[],
@@ -720,13 +827,18 @@ function computeRecursiveRomCount(
   coreId: string,
   diag: DiagnosticsCollector | undefined,
 ): { recursiveRomCount: number; recursiveHiddenCount: number } {
-  let total = 0;
-  let totalHidden = 0;
+  // fix/scrape-and-count-correctness commit 4: top-level file
+  // counts collapse `.cue + .bin` sets through countRomGroups so a
+  // multi-track Saturn dump sitting at the games-dir root counts as
+  // one game, not many. Per-file diag emits stay (one trace line
+  // per file) — only the total aggregator uses the grouped count.
+  let total = countRomGroups(topLevelFiles);
+  let totalHidden = countRomGroups(
+    topLevelFiles.filter((f) => f.startsWith('.')),
+  );
 
   for (const f of topLevelFiles) {
-    total += 1;
     const hidden = f.startsWith('.') ? 1 : 0;
-    if (hidden) totalHidden += 1;
     emit(diag, {
       kind: 'recursive-count',
       coreId,
@@ -734,7 +846,7 @@ function computeRecursiveRomCount(
       entryType: 'file',
       contributesCount: 1,
       contributesHiddenCount: hidden,
-      reason: 'top-level file counts as 1',
+      reason: 'top-level file (group count rolls up across siblings)',
     });
   }
 
@@ -784,7 +896,18 @@ function computeRecursiveRomCount(
     // same `classifyFolder` heuristic the renderer uses for the drill-
     // in decision, so the cores-list count and the ROMs-list view stay
     // aligned. `unknown` collapses to `atomic` here too.
-    const classification = classifyFolder({ files: sub.files, dirs: sub.dirs });
+    //
+    // fix/count-and-status-indicator commit 1: pass the subfolder's
+    // basename so the shared-prefix-atomic rule can fire when the
+    // folder name is itself a prefix of every child filename. Without
+    // this, an X68000-shape folder ("Akumajou Dracula (Konami)/" with
+    // 8 .zip variants) trips the many-same-extension rule and
+    // contributes its raw file count instead of one game.
+    const classification = classifyFolder({
+      files: sub.files,
+      dirs: sub.dirs,
+      folderName: stripDot(sub.name),
+    });
     if (classification === 'container') {
       // Container folder: contribute the recursive file count. Falls
       // back to immediate file + dir count when the client didn't
@@ -800,9 +923,15 @@ function computeRecursiveRomCount(
       // the inflation. `dirs.length` is kept unfiltered — every dir
       // is still treated as a contributing entry (1 ROM each via the
       // atomic-vs-container heuristic when its turn comes around).
+      //
+      // fix/scrape-and-count-correctness commit 2: collapse the
+      // immediate-files term through `countRomGroups` so a fallback
+      // that fires on a `.cue + .bin` shape still reports one
+      // entry, matching the real per-parent-bucket aggregation.
       const recursive =
         sub.recursiveFileCount ??
-        sub.files.filter(isLaunchableRomExtension).length + sub.dirs.length;
+        countRomGroups(sub.files.filter(isLaunchableRomExtension)) +
+          sub.dirs.length;
       const recursiveHidden = sub.recursiveHiddenFileCount ?? 0;
       total += recursive;
       let hiddenContribution: number;

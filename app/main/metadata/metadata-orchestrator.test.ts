@@ -45,6 +45,7 @@ function buildHashEntry(md5: string, size = 1024, mtime = 100): HashEntry {
     md5,
     sha1: md5.repeat(2).slice(0, 40),
     size,
+    diskSizeBytes: size,
     mtime,
     hashedAt: '2025-01-01T00:00:00.000Z',
   };
@@ -167,6 +168,7 @@ function makeOrchestrator(opts: {
           client: {
             statWitnesses: vi.fn(async () => ({})),
             hashPaths: vi.fn(async () => []),
+            statPathsWithSize: vi.fn(async () => ({})),
           },
           host: 'host-1',
         }

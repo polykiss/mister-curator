@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { sanitiseFsSegment } from '@app/main/cache/cache-types';
 import { diagLog } from '@shared/diag-log';
 import type { HashRecord } from '@shared/mister-client';
+import type { SizeAndMtime } from '@shared/prime-parse';
 
 const HASH_CACHE_SCHEMA_VERSION = 1 as const;
 
@@ -27,8 +28,23 @@ const HASH_CACHE_SCHEMA_VERSION = 1 as const;
  *                           one pass per file. SHA-1 alongside MD5
  *                           lets ScreenScraper match either hash;
  *                           cached size feeds SS's `romtaille`.
+ *   v4 (fix/scrape-and-count-correctness commit 1):
+ *                           adds `diskSizeBytes` (wrapper bytes via
+ *                           `stat -c %s`) alongside the existing
+ *                           extracted `size`. For non-archive paths
+ *                           the two are identical; for `.zip` they
+ *                           differ.
+ *
+ * fix/count-and-status-indicator commit 4: a v3-shaped entry has a
+ * valid hash + mtime; only `diskSizeBytes` is missing. The lazy
+ * v3→v4 migration in `migrateV3Entries` re-stats each path on
+ * connect, populates the missing field for entries whose mtime
+ * still matches, and persists. Eliminates the mass re-hash that
+ * the v3→v4 strategy bump from PR #42 commit 1 would otherwise
+ * force on every existing user.
  */
-const HASH_STRATEGY_VERSION = 3 as const;
+const HASH_STRATEGY_VERSION = 4 as const;
+const HASH_STRATEGY_VERSION_V3 = 3 as const;
 
 /** Cap per SSH round-trip. Larger inputs chunk in JS. */
 const DEFAULT_BATCH_SIZE = 100;
@@ -38,12 +54,16 @@ const DEFAULT_BATCH_SIZE = 100;
  * (cache invalidation key — what the user actually touches). md5
  * and sha1 are hashes of the EXTRACTED ROM content (inner-file for
  * .zip wrappers, raw bytes for direct files). size is the extracted
- * byte count, matching SS's `romtaille` semantics.
+ * byte count, matching SS's `romtaille` semantics. diskSizeBytes is
+ * the wrapper's `stat -c %s` value — what the file system says the
+ * file is — which differs from `size` for `.zip` archives and is
+ * the right number for any "size on disk" display.
  */
 export interface HashEntry {
   readonly md5: string;
   readonly sha1: string;
   readonly size: number;
+  readonly diskSizeBytes: number;
   readonly mtime: number;
   readonly hashedAt: string;
 }
@@ -65,6 +85,14 @@ interface HashCacheFile {
 export interface HashClient {
   statWitnesses(paths: readonly string[]): Promise<Record<string, number>>;
   hashPaths(paths: readonly string[]): Promise<readonly HashRecord[]>;
+  /**
+   * fix/count-and-status-indicator commit 4: stat (size + mtime) per
+   * path in one round-trip. Used by the lazy v3→v4 migration to
+   * populate `diskSizeBytes` without recomputing the hash.
+   */
+  statPathsWithSize(
+    paths: readonly string[],
+  ): Promise<Record<string, SizeAndMtime>>;
 }
 
 export interface HashServiceOptions {
@@ -198,6 +226,39 @@ export class HashService {
     });
   }
 
+  /**
+   * fix/count-and-status-indicator commit 4 — lazy v3→v4 migration.
+   *
+   * PR #42 commit 1 bumped HASH_STRATEGY_VERSION 3→4 to add
+   * `diskSizeBytes` (wrapper bytes) alongside the existing
+   * extracted `size`. The default cache validator rejects v3
+   * entries wholesale, forcing every existing user into a full
+   * rehash on next connect — which on cores like NEOGEO with many
+   * large `.zip` files reads as a multi-minute "no metadata, no
+   * box art" gap.
+   *
+   * This migration reads the v3 cache file directly, batch-stats
+   * each path on device for size + mtime, and:
+   *   - mtime matches → write `diskSizeBytes = stat.size`, upgrade
+   *     entry in place to v4. Hash + sha1 are preserved.
+   *   - mtime drifted → drop entry. The existing rehash path will
+   *     refire when the path is next requested.
+   *   - file missing → drop entry.
+   *
+   * Idempotent — running on an already-v4 cache is a no-op.
+   * Tolerates a missing or malformed cache file (returns zeroed
+   * counts).
+   *
+   * Triggered from `ConnectionManager` after connect, before the
+   * first prefetch, so warm-cache hits land immediately.
+   */
+  async migrateV3Entries(
+    client: HashClient,
+    host: string,
+  ): Promise<{ migrated: number; needsRehash: number }> {
+    return this.runGated(host, () => this.doMigrateV3Entries(client, host));
+  }
+
   /** Wipe all hash cache for one host. */
   async clearForHost(host: string): Promise<void> {
     return this.runGated(host, async () => {
@@ -213,6 +274,97 @@ export class HashService {
   }
 
   // ─── internals ─────────────────────────────────────────────────────
+
+  private async doMigrateV3Entries(
+    client: HashClient,
+    host: string,
+  ): Promise<{ migrated: number; needsRehash: number }> {
+    const startMs = Date.now();
+    const raw = await readJsonOrNull<unknown>(this.cachePath(host));
+    if (!isHashCacheFileV3(raw) || raw.host !== host) {
+      // Either no file, already v4, or some other version. The
+      // default validator handles those — nothing to migrate.
+      return { migrated: 0, needsRehash: 0 };
+    }
+    const v3Entries = raw.entries;
+    const paths = Object.keys(v3Entries);
+    if (paths.length === 0) {
+      // Empty v3 file: rewrite as empty v4 so the validator accepts
+      // it on next load. Cheap.
+      this.memCache.set(host, {});
+      await this.writeEntries(host, {});
+      diagLog('info', 'meta', '·', 'v4-migration', {
+        host,
+        ms: Date.now() - startMs,
+        migrated: 0,
+        reHashRequired: 0,
+        empty: 1,
+      });
+      return { migrated: 0, needsRehash: 0 };
+    }
+    // Batch the SSH stat in DEFAULT_BATCH_SIZE chunks so a 600-path
+    // mame cache doesn't argv-overflow busybox. Each chunk is one
+    // SSH round trip; 6 chunks for 600 paths is well inside the
+    // connect-time budget.
+    const stats: Record<string, SizeAndMtime> = {};
+    for (let i = 0; i < paths.length; i += this.batchSize) {
+      const chunk = paths.slice(i, i + this.batchSize);
+      let chunkStats: Record<string, SizeAndMtime>;
+      try {
+        chunkStats = await client.statPathsWithSize(chunk);
+      } catch (err) {
+        // SSH dropped mid-migration — bail without persisting.
+        // The strict v4 validator rejects the v3 file on next load,
+        // so the existing rehash path takes over. We're no worse
+        // off than before the migration.
+        diagLog('error', 'meta', '✗', 'v4-migration-stat-failed', {
+          host,
+          ms: Date.now() - startMs,
+          chunk: chunk.length,
+          err: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
+      for (const [p, s] of Object.entries(chunkStats)) {
+        stats[p] = s;
+      }
+    }
+    const next: Record<string, HashEntry> = {};
+    let migrated = 0;
+    let needsRehash = 0;
+    for (const [path, v3] of Object.entries(v3Entries)) {
+      const s = stats[path];
+      if (s !== undefined && s.size > 0 && s.mtime === v3.mtime) {
+        next[path] = {
+          md5: v3.md5,
+          sha1: v3.sha1,
+          size: v3.size,
+          // For non-archive files this equals `size` exactly. For
+          // .zip wrappers it's the compressed wrapper bytes — what
+          // the FS says, distinct from the extracted-content size.
+          diskSizeBytes: s.size,
+          mtime: v3.mtime,
+          hashedAt: v3.hashedAt,
+        };
+        migrated += 1;
+      } else {
+        // Either path is gone, or mtime drifted — entry gets
+        // dropped. The next access fires the existing
+        // computeHash path which produces a fresh v4 entry.
+        needsRehash += 1;
+      }
+    }
+    this.memCache.set(host, next);
+    await this.writeEntries(host, next);
+    diagLog('info', 'meta', '·', 'v4-migration', {
+      host,
+      ms: Date.now() - startMs,
+      migrated,
+      reHashRequired: needsRehash,
+      total: paths.length,
+    });
+    return { migrated, needsRehash };
+  }
 
   private async doGetHash(
     client: HashClient,
@@ -367,6 +519,7 @@ export class HashService {
           md5: r.md5,
           sha1: r.sha1,
           size: r.size,
+          diskSizeBytes: r.diskSize,
           mtime: r.mtime,
           hashedAt: nowIso,
         };
@@ -377,6 +530,7 @@ export class HashService {
           path: pathBasename(r.path),
           md5: r.md5,
           size: r.size,
+          diskSize: r.diskSize,
         });
       }
     }
@@ -485,9 +639,16 @@ export class HashService {
       md5: r.md5,
       sha1: r.sha1,
       size: r.size,
+      diskSizeBytes: r.diskSize,
       mtime: r.mtime,
       hashedAt: this.now().toISOString(),
     };
+    diagLog('info', 'meta', '·', 'hash-computed', {
+      path: pathBasename(r.path),
+      md5: r.md5,
+      size: r.size,
+      diskSize: r.diskSize,
+    });
     const entries = await this.loadEntries(host);
     const next = { ...entries, [r.path]: entry };
     this.memCache.set(host, next);
@@ -615,9 +776,57 @@ function isHashEntry(v: unknown): v is HashEntry {
     typeof o.md5 === 'string' &&
     typeof o.sha1 === 'string' &&
     typeof o.size === 'number' &&
+    typeof o.diskSizeBytes === 'number' &&
     typeof o.mtime === 'number' &&
     typeof o.hashedAt === 'string'
   );
+}
+
+/**
+ * fix/count-and-status-indicator commit 4 — v3 entry shape.
+ * Identical to v4 except `diskSizeBytes` is missing (the field
+ * commit 1 of PR #42 added). Used only by the lazy migration —
+ * normal `loadEntries` rejects v3 entries via the strict v4
+ * `isHashEntry` check above.
+ */
+interface HashEntryV3 {
+  readonly md5: string;
+  readonly sha1: string;
+  readonly size: number;
+  readonly mtime: number;
+  readonly hashedAt: string;
+}
+
+interface HashCacheFileV3 {
+  readonly version: typeof HASH_CACHE_SCHEMA_VERSION;
+  readonly hashStrategyVersion: typeof HASH_STRATEGY_VERSION_V3;
+  readonly host: string;
+  readonly entries: Readonly<Record<string, HashEntryV3>>;
+}
+
+function isHashEntryV3(v: unknown): v is HashEntryV3 {
+  if (v === null || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o.md5 === 'string' &&
+    typeof o.sha1 === 'string' &&
+    typeof o.size === 'number' &&
+    typeof o.mtime === 'number' &&
+    typeof o.hashedAt === 'string'
+  );
+}
+
+function isHashCacheFileV3(v: unknown): v is HashCacheFileV3 {
+  if (v === null || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  if (o.version !== HASH_CACHE_SCHEMA_VERSION) return false;
+  if (o.hashStrategyVersion !== HASH_STRATEGY_VERSION_V3) return false;
+  if (typeof o.host !== 'string') return false;
+  if (o.entries === null || typeof o.entries !== 'object') return false;
+  for (const entry of Object.values(o.entries as Record<string, unknown>)) {
+    if (!isHashEntryV3(entry)) return false;
+  }
+  return true;
 }
 
 /** Last path segment, used in diag logs to keep lines readable. */
