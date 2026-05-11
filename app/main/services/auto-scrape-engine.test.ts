@@ -571,15 +571,12 @@ describe('AutoScrapeEngine', () => {
   });
 
   describe('queue behavior after pause/reconnect', () => {
-    // Models the real-device EPIPE scenario: SSH transport dies
-    // mid-scrape of NES. Engine sees pause(); on the next start()
-    // (driven by main/index.ts's reconnect listener with the fresh
-    // sidebar core list), the in-flight core pivots to the queue
-    // head instead of restarting from the alphabetical first core.
-    //
-    // The durable hash + metadata caches make re-running the
-    // in-flight core a fast-skip in production — the engine layer
-    // only owns the queue-shape decision tested here.
+    // Contract enforced by the surviving tests below: pause() does
+    // not retain a resume anchor, and the next start() walks the
+    // freshly-supplied sidebar queue in its natural order. Cores
+    // that completed before pause stay completed; cores that
+    // dropped out of the sidebar between disconnect and reconnect
+    // simply don't run; cores already in `alreadyCompleted` skip.
 
     /**
      * Helper: a slow scrape that resolves one path at a time, gated
