@@ -52,6 +52,7 @@ function countRomEntries(roms: readonly Rom[]): number {
   return folderCount + countRomGroups(fileNames);
 }
 
+import { RomDetailDialog } from '@app/renderer/src/components/RomDetailDialog';
 import { RomEditMetadataDialog } from '@app/renderer/src/components/RomEditMetadataDialog';
 import { RomSearchScreenScraperDialog } from '@app/renderer/src/components/RomSearchScreenScraperDialog';
 import {
@@ -160,6 +161,13 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
   // PR-D2 (PR #29): search-on-ScreenScraper modal state.
   const [searchScreenScraperFor, setSearchScreenScraperFor] = useState<{
     readonly path: string;
+    readonly filename: string;
+  } | null>(null);
+  // feat/metadata-detail-modal: detail-view modal state. Opens on
+  // single-click of a file/folder-atomic row's name cell.
+  const [detailDialogFor, setDetailDialogFor] = useState<{
+    readonly path: string;
+    readonly displayName: string;
     readonly filename: string;
   } | null>(null);
 
@@ -1270,11 +1278,23 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         remaining width after the explicit `w-N`
                         cells and the inner span's `truncate` does
                         the ellipsis. */}
+                    {/* feat/metadata-detail-modal: single-click on the
+                        name cell now has two behaviors split by row
+                        kind. Folder-containers drill (unchanged).
+                        Files + atomic folders open the detail modal
+                        regardless of metadata state — the modal's
+                        empty-state branch handles the no-record case
+                        (typically `source: 'none'` sentinels OR rows
+                        the prefetch hasn't landed yet) and surfaces
+                        "Find on ScreenScraper" as the primary CTA. */}
                     <TableCell
                       className={cn(
                         'max-w-0 truncate',
                         rom.kind === 'folder-container' &&
                           !rom.hidden &&
+                          'cursor-pointer',
+                        (rom.kind === 'file' ||
+                          rom.kind === 'folder-atomic') &&
                           'cursor-pointer',
                       )}
                       onDoubleClick={() => onRowActivate(rom)}
@@ -1282,12 +1302,27 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                         if (rom.kind === 'folder-container' && !rom.hidden) {
                           e.preventDefault();
                           onRowActivate(rom);
+                          return;
+                        }
+                        if (
+                          rom.kind === 'file' ||
+                          rom.kind === 'folder-atomic'
+                        ) {
+                          e.preventDefault();
+                          setDetailDialogFor({
+                            path: metadataLookupPath,
+                            displayName: metadata?.name ?? rom.displayName,
+                            filename: rom.filename,
+                          });
                         }
                       }}
                       title={
                         rom.kind === 'folder-container' && !rom.hidden
                           ? `Open ${rom.displayName}`
-                          : undefined
+                          : rom.kind === 'file' ||
+                              rom.kind === 'folder-atomic'
+                            ? 'View details'
+                            : undefined
                       }
                     >
                       {/* PR #20 round 1: name+year stack replaces the
@@ -1440,6 +1475,38 @@ export function RomsPane({ core }: RomsPaneProps): JSX.Element {
                 error: false,
               },
             }));
+          }}
+        />
+      ) : null}
+      {/* feat/metadata-detail-modal — rich detail view. Opens on
+          single-click of a file / folder-atomic row's name cell.
+          Renders unconditionally for any open `detailDialogFor` —
+          the modal's empty-state branch handles the no-record case
+          (`metadataByPath[path]?.metadata` resolves to undefined or
+          null and the dialog renders the filename + Find CTA).
+          Edit / Find buttons hand off to the existing modals via
+          setEditMetadataFor / setSearchScreenScraperFor — the detail
+          dialog closes itself, then the next modal opens. */}
+      {detailDialogFor !== null ? (
+        <RomDetailDialog
+          path={detailDialogFor.path}
+          filename={detailDialogFor.filename}
+          metadata={metadataByPath[detailDialogFor.path]?.metadata ?? null}
+          open
+          onOpenChange={(open) => {
+            if (!open) setDetailDialogFor(null);
+          }}
+          onEdit={() => {
+            setEditMetadataFor({
+              path: detailDialogFor.path,
+              displayName: detailDialogFor.displayName,
+            });
+          }}
+          onSearch={() => {
+            setSearchScreenScraperFor({
+              path: detailDialogFor.path,
+              filename: detailDialogFor.filename,
+            });
           }}
         />
       ) : null}

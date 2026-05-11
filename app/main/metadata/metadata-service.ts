@@ -525,6 +525,21 @@ export class MetadataService {
     hash: string,
     game: ScreenScraperGame,
   ): RomMetadata {
+    // feat/metadata-detail-modal — `extra.screenshots` is collected via
+    // `pickAllMedia(['ss', 'screenmarqueesmall'])` in the SS parser,
+    // and the single `extra.snapUrl` field also comes from `ss`, so the
+    // gallery typically duplicates the singular screenshot in slot 0.
+    // Drop that duplicate so the detail-modal strip doesn't repeat the
+    // primary screenshot. Also dedup within the array in case SS
+    // returns the same URL across the two collected types.
+    const seen = new Set<string>();
+    if (game.extra.snapUrl !== null) seen.add(game.extra.snapUrl);
+    const screenshotUrls: string[] = [];
+    for (const url of game.extra.screenshots) {
+      if (url.length === 0 || seen.has(url)) continue;
+      seen.add(url);
+      screenshotUrls.push(url);
+    }
     return {
       version: ROM_METADATA_SCHEMA_VERSION,
       hash,
@@ -545,6 +560,7 @@ export class MetadataService {
       boxArtUrl: game.boxArtUrl,
       titleScreenUrl: game.extra.titleScreenUrl,
       screenshotUrl: game.extra.snapUrl,
+      screenshotUrls,
       source: 'screenscraper',
       fetchedAt: new Date(this.now()).toISOString(),
     };
@@ -579,6 +595,10 @@ export class MetadataService {
       boxArtUrl: boxArt,
       titleScreenUrl: title,
       screenshotUrl: snap,
+      // OpenVGDB doesn't surface a gallery — single libretro snap
+      // already lives in `screenshotUrl`. Empty array keeps the
+      // schema shape uniform for the renderer.
+      screenshotUrls: [],
       source: 'openvgdb',
       fetchedAt: new Date(this.now()).toISOString(),
     };
@@ -605,6 +625,7 @@ export class MetadataService {
       boxArtUrl: null,
       titleScreenUrl: null,
       screenshotUrl: null,
+      screenshotUrls: [],
       source: 'none',
       fetchedAt: new Date(this.now()).toISOString(),
       ssAvailableAtWrite,
@@ -862,18 +883,25 @@ function isNodeError(err: unknown): err is NodeJS.ErrnoException {
 function isRomMetadata(v: unknown): v is RomMetadata {
   if (v === null || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
-  // PR-D2 (PR #29) — accept both v4 and v5 records on read so the
-  // userOverride-block schema bump doesn't invalidate existing
-  // cache files. Writes always use the current
-  // `ROM_METADATA_SCHEMA_VERSION` (v5); v4 records get upgraded
-  // naturally on the next write that touches them.
+  // PR-D2 (PR #29) — accept v4/v5/v6 records on read so schema bumps
+  // don't invalidate existing cache files. Writes always use the
+  // current `ROM_METADATA_SCHEMA_VERSION` (v6); older records get
+  // upgraded naturally on the next write that touches them.
   if (
     typeof o.version !== 'number' ||
     !ROM_METADATA_SUPPORTED_SCHEMA_VERSIONS.includes(
-      o.version as 4 | 5,
+      o.version as 4 | 5 | 6,
     )
   ) {
     return false;
+  }
+  // feat/metadata-detail-modal — `screenshotUrls` is optional (v5
+  // records won't have it). When present, must be an array of strings.
+  if (o.screenshotUrls !== undefined) {
+    if (!Array.isArray(o.screenshotUrls)) return false;
+    for (const url of o.screenshotUrls) {
+      if (typeof url !== 'string') return false;
+    }
   }
   return (
     typeof o.hash === 'string' &&

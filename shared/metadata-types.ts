@@ -97,13 +97,15 @@ export interface UserMetadataOverride {
 export interface RomMetadata {
   /**
    * Schema version. PR-D2 (PR #29) bumped from 4 → 5 to add the
-   * `userOverride` block. The validator (`isRomMetadata` in
-   * `metadata-service.ts`) accepts BOTH versions on read so existing
-   * v4 records on disk keep parsing — no forced migration pass; new
-   * writes always use v5 and v4 records get upgraded naturally on
-   * the next write that touches them.
+   * `userOverride` block; feat/metadata-detail-modal bumped from
+   * 5 → 6 to add `screenshotUrls`. The validator (`isRomMetadata`
+   * in `metadata-service.ts`) accepts ALL supported versions on
+   * read so existing records on disk keep parsing — no forced
+   * migration pass; new writes always use the current schema and
+   * older records get upgraded naturally on the next write that
+   * touches them.
    */
-  readonly version: 4 | 5;
+  readonly version: 4 | 5 | 6;
   readonly hash: string;
   readonly name: string;
   readonly system: string;
@@ -123,6 +125,19 @@ export interface RomMetadata {
   readonly boxArtUrl: string | null;
   readonly titleScreenUrl: string | null;
   readonly screenshotUrl: string | null;
+  /**
+   * feat/metadata-detail-modal — gallery URLs for the detail modal's
+   * screenshot strip. SS-only: populated from `extra.screenshots`
+   * (the `pickAllMedia(['ss', 'screenmarqueesmall'])` collection),
+   * deduped against `screenshotUrl` so slot-0 isn't a duplicate of
+   * the singular screenshot field. Empty array for `openvgdb` and
+   * sentinel records — OpenVGDB doesn't surface a gallery.
+   *
+   * Optional so v5 records still parse (`undefined` reads as "no
+   * gallery, render nothing"); v6 writes always emit an array
+   * (possibly empty).
+   */
+  readonly screenshotUrls?: readonly string[];
   readonly source: MetadataSource;
   /** ISO 8601 — when the record was written to cache. Drives TTL. */
   readonly fetchedAt: string;
@@ -227,13 +242,15 @@ export const SENTINEL_AUTHORITATIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * PR-D2 (PR #29) — schema bumped from 4 → 5 to add the `userOverride`
- * block. New writes use 5; reads accept BOTH 4 and 5 so existing
- * cache files keep working without a forced migration pass. v4
- * records get upgraded naturally on the next write.
+ * block. feat/metadata-detail-modal — bumped from 5 → 6 to add
+ * `screenshotUrls`. New writes use the current version; reads accept
+ * ALL supported versions so existing cache files keep working without
+ * a forced migration pass. Older records get upgraded naturally on
+ * the next write.
  */
-export const ROM_METADATA_SCHEMA_VERSION = 5 as const;
+export const ROM_METADATA_SCHEMA_VERSION = 6 as const;
 /** Versions the cache validator will accept on read. */
-export const ROM_METADATA_SUPPORTED_SCHEMA_VERSIONS = [4, 5] as const;
+export const ROM_METADATA_SUPPORTED_SCHEMA_VERSIONS = [4, 5, 6] as const;
 
 /** One progress tick from a long-running prefetch. `done` is 1-based. */
 export interface PrefetchProgress {
