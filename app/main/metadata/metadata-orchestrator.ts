@@ -286,11 +286,19 @@ export class MetadataOrchestrator {
 
   /**
    * PR-D2 (PR #29) — write a manual-bind cache record from a SS
-   * `jeu` the user picked in the search modal. Same path-resolution
-   * shape as `setUserMetadataOverride`; routes to
+   * `jeu` the user picked in the search modal. Routes to
    * `MetadataService.bindManualOverride`.
+   *
+   * feat/manual-bind-without-hash: when no md5 is on file for the
+   * path (compute failed, was never attempted, the core is
+   * unmappable), fall back to the synthetic `(coreId, path)` key
+   * instead of returning null. The metadata cache layer is key-
+   * agnostic — `bindManualOverride` works with any string. The
+   * renderer's optimistic-read path has a matching synthetic-key
+   * fallback so the bound record paints without a refresh.
    */
   async bindManualMetadataOverride(
+    coreId: string,
     path: string,
     game: ScreenScraperGame,
   ): Promise<RomMetadata | null> {
@@ -301,15 +309,17 @@ export class MetadataOrchestrator {
       [path],
     );
     const entry = hashEntries.get(path);
-    if (entry === undefined || entry === null) return null;
-    return this.metadataService.bindManualOverride(entry.md5, game);
+    const cacheKey =
+      entry !== undefined && entry !== null
+        ? entry.md5
+        : makeSyntheticCacheKey(coreId, path);
+    return this.metadataService.bindManualOverride(cacheKey, game);
   }
 
   async readCachedRomsMetadata(
     coreId: string,
     romPaths: readonly string[],
   ): Promise<Record<string, RomMetadata | null>> {
-    void coreId; // present for diag-log symmetry; not used yet
     const out: Record<string, RomMetadata | null> = {};
     if (romPaths.length === 0) return out;
     const session = this.getActiveSession();
@@ -323,11 +333,23 @@ export class MetadataOrchestrator {
     );
     for (const p of romPaths) {
       const entry = hashEntries.get(p);
-      if (entry === null || entry === undefined) {
-        out[p] = null;
+      if (entry !== null && entry !== undefined) {
+        // Hash-keyed record wins when both exist — the conflict-
+        // resolution rule for paths that gained a hash *after* a
+        // manual bind. Auto-pipeline output supersedes pre-hash
+        // synthetic records; revisit if real users want stickier
+        // manual binds.
+        out[p] = await this.metadataService.readCachedMetadata(entry.md5);
         continue;
       }
-      out[p] = await this.metadataService.readCachedMetadata(entry.md5);
+      // feat/manual-bind-without-hash: no hash on file — check for
+      // a synthetic-keyed record (manual bind on an un-hashable
+      // path, or an unmappable-core sentinel). Incidentally
+      // surfaces unmappable-core sentinels in the optimistic read
+      // for the first time; before, only `getRomsMetadata` saw
+      // them.
+      const syntheticKey = makeSyntheticCacheKey(coreId, p);
+      out[p] = await this.metadataService.readCachedMetadata(syntheticKey);
     }
     return out;
   }
@@ -776,18 +798,31 @@ export class MetadataOrchestrator {
 }
 
 /**
- * Round 11 — deterministic synthetic cache key for paths whose
- * coreId has no metadata source. The `noss-` prefix marks the key
- * as synthetic (a real md5 is 32 hex chars with no prefix), so cache
- * files can be `grep`'d for synthetic-only entries. The hash input
- * is `<coreId>:<path>` so two distinct paths under the same core
- * produce distinct keys, and re-clicking the same core is
- * idempotent.
+ * Round 11 — deterministic synthetic cache key for any `(coreId, path)`
+ * pair without a usable md5. Two cases produce one of these:
  *
- * Mtime is intentionally NOT included: if the user replaces the
- * file's bytes the metadata answer doesn't change (still no
- * coverage), and including mtime would orphan the previous
- * synthetic record on every file modification with no benefit.
+ *   1. Unmappable cores (original use): `resolveSystemId` returns null
+ *      so the orchestrator short-circuits the hash compute entirely —
+ *      no metadata source can use the bytes anyway.
+ *   2. feat/manual-bind-without-hash: a file that *would* normally
+ *      hash but doesn't (compute timed out, never attempted, etc.)
+ *      and the user reaches the row via the manual-search dialog.
+ *      The bind path falls back to this key so the record can be
+ *      written + read despite the missing md5.
+ *
+ * The `noss-` prefix marks the key as synthetic (a real md5 is 32 hex
+ * chars with no prefix), so cache files can be `grep`'d for
+ * synthetic-only entries. Despite the now-stale "noss" (no-SS) name,
+ * a synthetic-keyed record CAN have real SS metadata in it — the
+ * prefix only signals "this key didn't come from ROM bytes." Renaming
+ * would force a one-shot migration over every existing on-disk record
+ * for purely cosmetic gain, so the name stays.
+ *
+ * The hash input is `<coreId>:<path>` so two distinct paths under the
+ * same core produce distinct keys, and re-clicking the same core is
+ * idempotent. Mtime is intentionally NOT included: in case 1 the
+ * metadata answer doesn't depend on the bytes, and in case 2 the
+ * user's manual bind is meant to outlive byte-level edits.
  */
 function makeSyntheticCacheKey(coreId: string, path: string): string {
   return (

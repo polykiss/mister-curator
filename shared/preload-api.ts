@@ -504,8 +504,13 @@ export interface MisterApi {
    * search modal) to the cache record for `path`. Source flips to
    * `'manual-override'`; existing field overrides on the record
    * are preserved.
+   *
+   * feat/manual-bind-without-hash: `coreId` is required so the main
+   * process can fall back to the synthetic `(coreId, path)` cache
+   * key when the path has no md5 on file.
    */
   bindRomMetadataFromSearch(
+    coreId: string,
     path: string,
     game: ScreenScraperGame,
   ): Promise<RomMetadata | null>;

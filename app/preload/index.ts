@@ -261,9 +261,14 @@ const api: MisterApi = {
       path,
       override,
     ),
-  bindRomMetadataFromSearch: (path: string, game: ScreenScraperGame) =>
+  bindRomMetadataFromSearch: (
+    coreId: string,
+    path: string,
+    game: ScreenScraperGame,
+  ) =>
     invoke<RomMetadata | null>(
       IPC_CHANNELS.bindRomMetadataFromSearch,
+      coreId,
       path,
       game,
     ),

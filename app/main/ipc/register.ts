@@ -380,9 +380,10 @@ export function registerIpcHandlers(
   >(IPC_CHANNELS.setRomMetadataOverride, (path, override) =>
     metadata.setUserMetadataOverride(path, override),
   );
-  handle<[string, ScreenScraperGame], RomMetadata | null>(
+  handle<[string, string, ScreenScraperGame], RomMetadata | null>(
     IPC_CHANNELS.bindRomMetadataFromSearch,
-    (path, game) => metadata.bindManualMetadataOverride(path, game),
+    (coreId, path, game) =>
+      metadata.bindManualMetadataOverride(coreId, path, game),
   );
 
   // PR-D2 (PR #29) — name-search for the search modal. Resolves
