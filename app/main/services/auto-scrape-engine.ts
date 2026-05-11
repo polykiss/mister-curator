@@ -1,4 +1,22 @@
 import { coreDisplayName } from '@shared/core-matching';
+import { diagLog } from '@shared/diag-log';
+
+/**
+ * fix/scrape-resume-and-keepalive — preview-cap for queue arrays
+ * shown in diag log lines. Long sidebars (~100 cores) would drown
+ * the structured fields under bracket-comma soup; cap at the head
+ * and ellipsize the rest so the line stays grep-friendly.
+ */
+const SCRAPE_STATE_QUEUE_PREVIEW = 8;
+
+function previewQueue(coreIds: readonly string[]): string {
+  if (coreIds.length <= SCRAPE_STATE_QUEUE_PREVIEW) {
+    return `[${coreIds.join(',')}]`;
+  }
+  const head = coreIds.slice(0, SCRAPE_STATE_QUEUE_PREVIEW).join(',');
+  const rest = coreIds.length - SCRAPE_STATE_QUEUE_PREVIEW;
+  return `[${head},…+${String(rest)}]`;
+}
 
 /**
  * PR-C (PR #26) — Auto-scrape engine.
@@ -236,6 +254,16 @@ export class AutoScrapeEngine {
     this.completedCoreIds = new Set(
       [...alreadyCompleted].filter((c) => queueSet.has(c)),
     );
+    // fix/scrape-resume-and-keepalive commit 1 — make the start/resume
+    // decision visible in live trace. Distinguishes the two cases live
+    // (resume-in-flight vs fresh-queue) ahead of commit 3 actually
+    // doing the pivot. This commit is logging-only.
+    diagLog('info', 'scrape-state', '·', 'start', {
+      queue: previewQueue(coreIds),
+      queueLen: coreIds.length,
+      alreadyCompleted: previewQueue([...alreadyCompleted]),
+      alreadyCompletedLen: alreadyCompleted.size,
+    });
     if (!this.isLoopRunning) {
       void this.runLoop();
     }
@@ -258,6 +286,15 @@ export class AutoScrapeEngine {
    * on disconnect.
    */
   pause(): void {
+    // fix/scrape-resume-and-keepalive commit 1 — surface the pause so
+    // the trace shows which core (if any) was mid-scrape at
+    // disconnect. Commit 3 will use this same identity to pivot on
+    // the next start().
+    diagLog('info', 'scrape-state', '·', 'pause', {
+      inFlight: this.currentCoreId ?? '(none)',
+      queueLen: this.queue.length,
+      completedLen: this.completedCoreIds.size,
+    });
     this.isPaused = true;
     this.abortFlag = true;
   }
@@ -324,6 +361,12 @@ export class AutoScrapeEngine {
         this.currentCoreId = coreId;
         this.abortFlag = false;
         let scrapeCompleted = false;
+        diagLog('info', 'scrape-state', '→', 'iter-enter', {
+          coreId,
+          queueRest: previewQueue(this.queue),
+          queueRestLen: this.queue.length,
+          completedLen: this.completedCoreIds.size,
+        });
         try {
           const targets = await this.deps.listRomPaths(coreId);
           // The path-list resolution itself can race with a setFocus —
@@ -379,6 +422,20 @@ export class AutoScrapeEngine {
           // via its own diagLog hook before they reach the engine.)
         }
         this.currentCoreId = null;
+        diagLog(
+          'info',
+          'scrape-state',
+          scrapeCompleted ? '←' : '✗',
+          scrapeCompleted ? 'iter-complete' : 'iter-aborted',
+          {
+            coreId,
+            reason: scrapeCompleted
+              ? 'finished'
+              : this.isPaused
+                ? 'paused'
+                : 'aborted',
+          },
+        );
         if (scrapeCompleted) {
           this.completedCoreIds.add(coreId);
           for (const l of this.completionListeners) {

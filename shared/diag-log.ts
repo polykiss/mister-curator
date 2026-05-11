@@ -39,7 +39,13 @@ export type DiagSubsystem =
   // ImageCache fetch, the orchestrator's bytes wrapper, the IPC
   // hop, and the renderer's useBoxArt → <img> render path. Grep
   // `[boxart]` to follow one URL from request to display.
-  | 'boxart';
+  | 'boxart'
+  // fix/scrape-resume-and-keepalive — auto-scrape engine state
+  // transitions. Tells the live trace whether a reconnect
+  // resumed an in-flight core or built a fresh queue from the
+  // sidebar. Grep `[scrape-state]` to follow start / pause /
+  // iteration enter / iteration complete events.
+  | 'scrape-state';
 export type DiagGlyph = '→' | '←' | '✗' | '·';
 
 /**
