@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CacheManager } from '@app/main/cache/cache-manager';
 import {
@@ -114,6 +114,138 @@ describe('CacheManager — cores cache', () => {
 
     const got = await cm.getCoresCache('host-a');
     expect(got).toBeNull();
+  });
+
+  // feat/cache-miss-observability — `cache.miss` events historically
+  // fired with NO `note` field for both file-missing and corrupt-JSON
+  // cases, hiding any silent-failure mode behind the expected cold-
+  // cache case. The next live-verify against 192.168.50.194 needs the
+  // `note=` to conclusively identify why `readJsonOrNull` returns null
+  // when the on-disk file appears intact.
+  describe('readJsonOrNull failure-reason surfaces in cache.miss note', () => {
+    it("file missing → cache.miss carries note='enoent'", async () => {
+      // Fresh state: nothing on disk for host-a.
+      await cm.getCoresCache('host-a');
+      const miss = events.find((e) => e.kind === 'miss');
+      expect(miss).toMatchObject({
+        kind: 'miss',
+        surface: 'cores',
+        host: 'host-a',
+        note: 'enoent',
+      });
+    });
+
+    it("corrupt JSON → cache.miss carries note='syntax'", async () => {
+      const dir = join(root, sanitiseFsSegment('host-a'));
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, 'cores.json'), '{ this is not json');
+
+      await cm.getCoresCache('host-a');
+      const miss = events.find((e) => e.kind === 'miss');
+      expect(miss).toMatchObject({
+        kind: 'miss',
+        surface: 'cores',
+        host: 'host-a',
+        note: 'syntax',
+      });
+    });
+
+    it("other fs error (path is a directory → EISDIR) → cache.miss carries note='other' AND error is logged", async () => {
+      // Writing a DIRECTORY at the cache file's expected path makes
+      // fs.readFile throw EISDIR — neither ENOENT nor SyntaxError.
+      // Pre-fix this case THREW out of readJsonOrNull and bubbled up
+      // to the caller; post-fix it returns reason='other' and logs
+      // the underlying error so the silent-failure path surfaces.
+      const dir = join(root, sanitiseFsSegment('host-a'));
+      await mkdir(dir, { recursive: true });
+      await mkdir(join(dir, 'cores.json'), { recursive: true });
+
+      const errorSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => undefined);
+      try {
+        const got = await cm.getCoresCache('host-a');
+        expect(got).toBeNull();
+        const miss = events.find((e) => e.kind === 'miss');
+        expect(miss).toMatchObject({
+          kind: 'miss',
+          surface: 'cores',
+          host: 'host-a',
+          note: 'other',
+        });
+        // The 'other' branch must log so the underlying error
+        // shows up in dev logs. Match loosely on the message
+        // prefix; the second arg should be the captured error.
+        expect(errorSpy).toHaveBeenCalled();
+        const call = errorSpy.mock.calls[0];
+        expect(call?.[0]).toMatch(/readJsonOrNull/);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('arcade surface carries the same reason note', async () => {
+      // Same observability contract on the arcade-mra-meta cache.
+      await cm.getArcadeMraMetaCache('host-a');
+      const miss = events.find(
+        (e) => e.kind === 'miss' && e.surface === 'arcade',
+      );
+      expect(miss).toMatchObject({
+        kind: 'miss',
+        surface: 'arcade',
+        host: 'host-a',
+        note: 'enoent',
+      });
+    });
+
+    it('roms surface carries the reason on a cold cache', async () => {
+      await cm.getRomsCache('host-a', 'NES', '');
+      const miss = events.find(
+        (e) => e.kind === 'miss' && e.surface === 'roms',
+      );
+      expect(miss).toMatchObject({
+        kind: 'miss',
+        surface: 'roms',
+        host: 'host-a',
+        coreId: 'NES',
+        subPath: '',
+        note: 'enoent',
+      });
+    });
+
+    it("roms surface — corrupt file → cache.miss note='syntax'", async () => {
+      const dir = join(root, sanitiseFsSegment('host-a'), 'roms');
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, 'NES.json'), '{ this is not json');
+
+      await cm.getRomsCache('host-a', 'NES', '');
+      const miss = events.find(
+        (e) => e.kind === 'miss' && e.surface === 'roms',
+      );
+      expect(miss).toMatchObject({ note: 'syntax' });
+    });
+
+    it("roms surface — schema mismatch still surfaces note='schema mismatch' (unchanged)", async () => {
+      // Pre-fix the roms read swallowed schema mismatches as a no-
+      // note miss. The new path threads them through to the event.
+      const dir = join(root, sanitiseFsSegment('host-a'), 'roms');
+      await mkdir(dir, { recursive: true });
+      await writeFile(
+        join(dir, 'NES.json'),
+        JSON.stringify({
+          version: 999,
+          host: 'host-a',
+          coreId: 'NES',
+          bySubPath: {},
+        }),
+      );
+
+      await cm.getRomsCache('host-a', 'NES', '');
+      const miss = events.find(
+        (e) => e.kind === 'miss' && e.surface === 'roms',
+      );
+      expect(miss).toMatchObject({ note: 'schema mismatch' });
+    });
   });
 
   it('invalidateCoresCache removes the file and emits invalidate', async () => {
