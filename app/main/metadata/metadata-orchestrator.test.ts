@@ -179,6 +179,7 @@ function makeOrchestrator(opts: {
             statWitnesses: vi.fn(async () => ({})),
             hashPaths: vi.fn(async () => []),
             statPathsWithSize: vi.fn(async () => ({})),
+            computeSampleMd5s: vi.fn(async () => ({})),
           },
           host: 'host-1',
         }

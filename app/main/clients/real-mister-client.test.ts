@@ -3180,6 +3180,73 @@ describe('RealMisterClient', () => {
       expect(result.witnesses['/media/fat/_Vanished']).toBe(0);
       expect(result.witnesses['/media/fat/games']).toBe(1700000010);
     });
+
+    // feat/sample-based-hashing — chunking math. `buildWitnessScript`
+    // embeds each path 3× per line (the `[ -e ]` test, the `stat`
+    // arg, the fallback echo); un-chunked, a 666-path mame core
+    // produces a ~177 KB script — past ssh2's 32 KB exec-channel
+    // send window and the EPIPE-in-27ms loop the user hit in the
+    // disconnect-cycle investigation. 100-path chunks bring each
+    // script under ~26 KB.
+    describe('chunking — feat/sample-based-hashing', () => {
+      it('chunks 250 paths into 3 execCommand calls (100 / 100 / 50)', async () => {
+        const client = new RealMisterClient();
+        await client.connect(profile, secret);
+        mocks.execCommand.mockClear();
+        const paths = Array.from(
+          { length: 250 },
+          (_, i) => `/p/${String(i).padStart(4, '0')}`,
+        );
+        // Per-chunk: emit a stat line per quoted path in the chunk.
+        mocks.execCommand.mockImplementation(async (script: string) => {
+          const chunkPaths = [
+            ...script.matchAll(/stat -c '%Y %n' '(\/p\/[0-9]{4})'/g),
+          ].map((m) => m[1]!);
+          const stdout = [
+            'WITNESSES',
+            ...chunkPaths.map((p, i) => `${String(1700000000 + i)} ${p}`),
+            'END',
+            '',
+          ].join('\n');
+          return { stdout, stderr: '', code: 0, signal: null };
+        });
+        const result = await client.statWitnesses(paths);
+        expect(Object.keys(result)).toHaveLength(250);
+        expect(mocks.execCommand).toHaveBeenCalledTimes(3);
+        // Per-chunk size: each script's stat command appears once
+        // per path in the chunk.
+        const chunkSizes = mocks.execCommand.mock.calls.map(
+          (call) =>
+            [...(call[0] as string).matchAll(/stat -c '%Y %n' '\/p\//g)]
+              .length,
+        );
+        expect(chunkSizes).toEqual([100, 100, 50]);
+      });
+
+      it('regression: 5 paths still issue exactly ONE execCommand (small-list path)', async () => {
+        const client = new RealMisterClient();
+        await client.connect(profile, secret);
+        mocks.execCommand.mockClear();
+        mocks.execCommand.mockResolvedValueOnce(
+          execOk(
+            [
+              'WITNESSES',
+              ...Array.from(
+                { length: 5 },
+                (_, i) => `${String(1700000000 + i)} /p/${String(i)}`,
+              ),
+              'END',
+              '',
+            ].join('\n'),
+          ),
+        );
+        const result = await client.statWitnesses(
+          Array.from({ length: 5 }, (_, i) => `/p/${String(i)}`),
+        );
+        expect(Object.keys(result)).toHaveLength(5);
+        expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      });
+    });
   });
 
   describe('hashPaths (PR #16 round 2 — md5 + sha1 + size + diskSize)', () => {
@@ -3255,6 +3322,136 @@ describe('RealMisterClient', () => {
       await expect(client.hashPaths(['/x'])).rejects.toThrow(
         /Failed to hash paths/,
       );
+    });
+  });
+
+  // feat/sample-based-hashing — companion to hashPaths. Same mock
+  // pattern; asserts on the script shape + parses the 2-field TSV.
+  describe('computeSampleMd5s (feat/sample-based-hashing)', () => {
+    it('shell-quotes paths into a `set --` script and parses path\\tmd5 rows', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      const md5a = 'a'.repeat(32);
+      const md5b = 'b'.repeat(32);
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            `/media/fat/games/mame/foo.zip\t${md5a}`,
+            `/media/fat/games/mame/bar.zip\t${md5b}`,
+          ].join('\n') + '\n',
+        ),
+      );
+      const result = await client.computeSampleMd5s([
+        '/media/fat/games/mame/foo.zip',
+        '/media/fat/games/mame/bar.zip',
+      ]);
+      expect(result).toEqual({
+        '/media/fat/games/mame/foo.zip': md5a,
+        '/media/fat/games/mame/bar.zip': md5b,
+      });
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain("set -- '/media/fat/games/mame/foo.zip'");
+      expect(script).toContain('for f in "$@"');
+      // Recipe sanity: dd reads head + tail blocks, size hex appended.
+      expect(script).toContain('dd if="$f" bs=65536 count=1');
+      expect(script).toContain('dd if="$f" bs=65536 skip=$tskip count=1');
+      expect(script).toContain("printf '%016x' \"$sz\"");
+      expect(script).toContain('md5sum');
+    });
+
+    it('skips paths that emit no row (missing / non-stat-able)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      // Only one of two requested paths returns a row — the missing
+      // path is silently absent from the result (caller treats as
+      // "couldn't sample, fall through to full re-hash").
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(`/p/present.zip\t${'a'.repeat(32)}\n`),
+      );
+      const result = await client.computeSampleMd5s([
+        '/p/present.zip',
+        '/p/missing.zip',
+      ]);
+      expect(result).toEqual({ '/p/present.zip': 'a'.repeat(32) });
+    });
+
+    it('returns {} for empty input without making an SSH call', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      const result = await client.computeSampleMd5s([]);
+      expect(result).toEqual({});
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+
+    it('throws on non-zero exit so the caller can route to "couldn\'t sample"', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockResolvedValueOnce(execFail(2, 'shell broke'));
+      await expect(
+        client.computeSampleMd5s(['/x']),
+      ).rejects.toThrow(/Failed to compute sample md5s/);
+    });
+
+    // feat/sample-based-hashing — chunking math. `buildSampleScript`
+    // builds a `set --` line per call; un-chunked, that argv list
+    // approaches busybox's argv limit on large cores (the same
+    // overflow that hit `statWitnesses` and produced the
+    // EPIPE-in-27ms loop the user reported during a mame scrape).
+    describe('chunking — feat/sample-based-hashing', () => {
+      it('chunks 250 paths into 3 execCommand calls (100 / 100 / 50)', async () => {
+        const client = new RealMisterClient();
+        await client.connect(profile, secret);
+        mocks.execCommand.mockClear();
+        const paths = Array.from(
+          { length: 250 },
+          (_, i) => `/p/${String(i).padStart(4, '0')}.zip`,
+        );
+        // Per-chunk: emit a TSV row per path in the chunk so the
+        // merged result has all 250 keys.
+        mocks.execCommand.mockImplementation(async (script: string) => {
+          // The script's `set --` line lists this chunk's paths;
+          // reproduce the per-chunk response from that.
+          const chunkPaths = [
+            ...script.matchAll(/'(\/p\/[0-9]{4}\.zip)'/g),
+          ].map((m) => m[1]!);
+          const stdout = chunkPaths
+            .map((p) => `${p}\t${'a'.repeat(32)}`)
+            .join('\n');
+          return { stdout: stdout + '\n', stderr: '', code: 0, signal: null };
+        });
+        const result = await client.computeSampleMd5s(paths);
+        expect(Object.keys(result)).toHaveLength(250);
+        expect(mocks.execCommand).toHaveBeenCalledTimes(3);
+        // Pin the per-chunk argv shape — counts each chunk's path
+        // mentions in its `set --` line.
+        const chunkSizes = mocks.execCommand.mock.calls.map(
+          (call) => [...(call[0] as string).matchAll(/'\/p\//g)].length,
+        );
+        expect(chunkSizes).toEqual([100, 100, 50]);
+      });
+
+      it('regression: 5 paths still issue exactly ONE execCommand (small-list path)', async () => {
+        const client = new RealMisterClient();
+        await client.connect(profile, secret);
+        mocks.execCommand.mockClear();
+        mocks.execCommand.mockResolvedValueOnce(
+          execOk(
+            Array.from(
+              { length: 5 },
+              (_, i) => `/p/${String(i)}.zip\t${'a'.repeat(32)}`,
+            ).join('\n') + '\n',
+          ),
+        );
+        const result = await client.computeSampleMd5s(
+          Array.from({ length: 5 }, (_, i) => `/p/${String(i)}.zip`),
+        );
+        expect(Object.keys(result)).toHaveLength(5);
+        expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      });
     });
   });
 });
