@@ -1,5 +1,5 @@
 import type { ArcadeMraMeta } from '@shared/arcade-mra-parse';
-import type { SizeAndMtime, WitnessMtimes } from '@shared/prime-parse';
+import type { SizeAndMtime } from '@shared/prime-parse';
 import type {
   CoreEntry,
   FolderClassifications,
@@ -20,12 +20,13 @@ export interface PrimeConnectResult {
   readonly marks: SystemFilesMarks;
   readonly classifications: FolderClassifications;
   /**
-   * Mtime epoch per cores-cache witness path. The caller compares
-   * these against `cores.json`'s recorded witnesses to decide hit /
-   * stale. Missing-on-device paths report mtime 0 — `witnessesMatch`
-   * already treats 0 as a mismatch.
+   * Content-hash digest per cores-cache witness path. The caller
+   * compares these against `cores.json`'s recorded witnesses to
+   * decide hit / stale. Missing-on-device paths come back as the
+   * `'0'` sentinel string — `witnessesMatch` rejects `'0'`
+   * unconditionally, same contract as the prior mtime `0`.
    */
-  readonly witnesses: WitnessMtimes;
+  readonly witnesses: Readonly<Record<string, string>>;
 }
 
 export type MisterSecret =
@@ -379,12 +380,29 @@ export interface IMisterClient {
    * Stat the supplied absolute paths and return mtime epochs in one
    * shell round trip. Used by the listRoms cache (one path per call:
    * `/media/fat/games/<coreId>` or a sub-path) and by write-through
-   * post-mutation refreshes.
+   * post-mutation refreshes for the arcade and roms caches.
    *
    * Paths that don't exist on the device map to mtime 0; the caller
-   * treats that as a mismatch via `witnessesMatch`.
+   * treats that as a mismatch via `witnessesMatch`. NOT used for the
+   * cores cache anymore — see `computeCoresWitnessHashes`.
    */
-  statWitnesses(paths: readonly string[]): Promise<WitnessMtimes>;
+  statWitnesses(paths: readonly string[]): Promise<Readonly<Record<string, number>>>;
+
+  /**
+   * Compute a content-hash witness per supplied directory: a 32-char
+   * hex digest of `<basename> <mtime>` for every direct-child
+   * .rbf/.mgl file (visible or hidden), sorted then md5'd. Replaces
+   * the directory mtime as the cores cache's witness — bulk
+   * downloader / update_all touches that bump dir mtime without
+   * adding or removing any actual cores leave the hash untouched, so
+   * the warm-reconnect path stays warm.
+   *
+   * Paths that don't exist as directories map to the string `'0'`;
+   * the caller treats that as a mismatch via `witnessesMatch`.
+   */
+  computeCoresWitnessHashes(
+    paths: readonly string[],
+  ): Promise<Readonly<Record<string, string>>>;
 
   /**
    * fix/count-and-status-indicator commit 4 — stat (size + mtime)

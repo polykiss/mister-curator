@@ -6,6 +6,7 @@ import type { HiddenCoreEntry, HideLedger } from '@shared/types';
 import type { CoreEntry } from '@shared/types';
 
 import {
+  arcadeMraHiddenPath,
   arcadeMraVisiblePath,
   EMPTY_LEDGER,
   healArcadeLedger,
@@ -335,6 +336,21 @@ describe('arcadeMraVisiblePath', () => {
   it('only strips the dot from the basename, not parent segments', () => {
     expect(arcadeMraVisiblePath('_Konami/.Foo.mra')).toBe('_Konami/Foo.mra');
     expect(arcadeMraVisiblePath('_Konami/Foo.mra')).toBe('_Konami/Foo.mra');
+  });
+});
+
+describe('arcadeMraHiddenPath', () => {
+  it('prepends a leading dot to a visible basename', () => {
+    expect(arcadeMraHiddenPath('Foo.mra')).toBe('.Foo.mra');
+  });
+
+  it('leaves an already-hidden basename alone (idempotent)', () => {
+    expect(arcadeMraHiddenPath('.Foo.mra')).toBe('.Foo.mra');
+  });
+
+  it('only dots the basename, not parent segments', () => {
+    expect(arcadeMraHiddenPath('_Konami/Foo.mra')).toBe('_Konami/.Foo.mra');
+    expect(arcadeMraHiddenPath('_Konami/.Foo.mra')).toBe('_Konami/.Foo.mra');
   });
 });
 

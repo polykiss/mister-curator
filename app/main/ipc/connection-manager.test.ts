@@ -110,24 +110,45 @@ describe('ConnectionManager — PR #12 disk cache', () => {
     networkSpy.mockRestore();
   });
 
-  it('an out-of-band mutation (mtime change) invalidates the cache and triggers a fresh walk', async () => {
+  it('an out-of-band content change (new .rbf) invalidates the cache and triggers a fresh walk', async () => {
     await manager.connect(profile.id);
     await manager.listAllCoresWithFiles(); // populate cache
     await manager.disconnect();
 
-    // Bump games/ mtime explicitly. Plain fs operations within the
-    // same wall-clock second produce identical floor-to-second
-    // mtimes, which would falsely look like a cache hit. utimes
-    // sidesteps the resolution issue by setting a deterministic
-    // future mtime on the parent dir.
+    // Cores cache now uses CONTENT-HASH witnesses (not dir mtimes),
+    // so this scenario must add or remove an actual .rbf to flip
+    // the digest. Drop a new .rbf into _Console/ to mirror an
+    // out-of-band downloader run.
+    await fs.writeFile(
+      path.join(workDir, '_Console', 'OutOfBand_99999999.rbf'),
+      '',
+    );
+
+    const networkSpy = vi.spyOn(client, 'listAllCoresWithFiles');
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+    expect(networkSpy).toHaveBeenCalled();
+    networkSpy.mockRestore();
+  });
+
+  it('an mtime-only touch on a cores witness dir does NOT invalidate (Phase 2 fix)', async () => {
+    // Phase 2 regression pin: downloaders and update_all.sh bump
+    // `_Console/` mtime without changing any .rbf/.mgl. The
+    // content-hash witness must ignore the touch — otherwise we'd
+    // re-pay the 19.7s cores walk on every reconnect even though
+    // nothing actually changed.
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles(); // populate cache
+    await manager.disconnect();
+
     const future = new Date(Date.now() + 60_000);
+    await fs.utimes(path.join(workDir, '_Console'), future, future);
     await fs.utimes(path.join(workDir, 'games'), future, future);
 
     const networkSpy = vi.spyOn(client, 'listAllCoresWithFiles');
     await manager.connect(profile.id);
-    // A network call IS expected here (cache witnesses don't match).
     await manager.listAllCoresWithFiles();
-    expect(networkSpy).toHaveBeenCalled();
+    expect(networkSpy).not.toHaveBeenCalled();
     networkSpy.mockRestore();
   });
 
@@ -293,14 +314,17 @@ describe('ConnectionManager — cache observability events (PR #12 round 3)', ()
     expect(events.find((e) => e.kind === 'hit' && e.surface === 'cores')).toBeDefined();
   });
 
-  it('warm reconnect with mtime drift emits cache.stale + cache.invalidate (no hit)', async () => {
+  it('warm reconnect after a content change emits cache.stale + cache.invalidate (no hit)', async () => {
     await manager.connect(profile.id);
     await manager.listAllCoresWithFiles();
     await manager.disconnect();
-    // Bump games/ mtime out-of-band. Witnesses recorded on the
-    // cold connect no longer match.
-    const future = new Date(Date.now() + 60_000);
-    await fs.utimes(path.join(workDir, 'games'), future, future);
+    // Cores cache witness is content-hash, not mtime — must add or
+    // remove an actual .rbf/.mgl to flip the digest. A bare mtime
+    // touch (the pre-fix scenario) would now correctly be ignored.
+    await fs.writeFile(
+      path.join(workDir, '_Console', 'NewlyAdded_20990101.rbf'),
+      '',
+    );
 
     events.length = 0;
     await manager.connect(profile.id);
@@ -927,6 +951,92 @@ describe('ConnectionManager — arcade auto-hide rule + ledger (PR 2/2)', () => 
     perTestCacheDir = await fs.mkdtemp(path.join(cacheDir, 'run-'));
     cache = new CacheManager(perTestCacheDir);
     manager = new ConnectionManager(client, makeStubStore(), cache);
+  });
+
+  it('Phase 2 — auto-hide rewrites arcade-mra-meta.json with post-rename witnesses (no cold rewalk on reconnect)', async () => {
+    // Pre-Phase-2, applyArcadeAutoHideRule INVALIDATED the cache
+    // after each rename — every connect that did any auto-hide
+    // work cost a 22s rewalk on the NEXT connect. The fix: patch
+    // the in-memory snapshot, re-stat witnesses, and rewrite the
+    // cache with the post-rename state. Net: cache hits on
+    // reconnect, no rewalk.
+    const setCacheSpy = vi.spyOn(cache, 'setArcadeMraMetaCache');
+    const parseSpy = vi.spyOn(client, 'parseArcadeMras');
+
+    // First connect: cold walk + initial cache write + auto-hide
+    // rename + write-through. setArcadeMraMetaCache fires TWICE
+    // (loadArcadeData's cold write, then the post-heal rewrite).
+    // parseArcadeMras runs exactly ONCE (the cold walk).
+    const first = await manager.connect(profile.id);
+    expect(first.firstConnectArcadeAutoHidden).toBe(1);
+    expect(parseSpy).toHaveBeenCalledTimes(1);
+    expect(setCacheSpy).toHaveBeenCalledTimes(2);
+
+    // The second cache write captured POST-rename state: patched
+    // entries (the renamed mra now appears with its dot-prefixed
+    // relativePath and `hidden: true`) plus refreshed witnesses
+    // (post-rename `_Arcade/` mtime).
+    const secondCall = setCacheSpy.mock.calls[1];
+    if (!secondCall) throw new Error('expected two setArcadeMraMetaCache calls');
+    const [, postPatchEntries, , postWitnesses] = secondCall;
+    const missing = postPatchEntries.find(
+      (e) => e.relativePath === '.Missing Game.mra',
+    );
+    expect(missing).toBeDefined();
+    expect(missing?.hidden).toBe(true);
+    // The witness for `_Arcade/` must reflect its CURRENT (post-
+    // rename) mtime — that's the whole point of the write-through.
+    // We can't assert the exact epoch, but we can confirm the
+    // recorded value matches what stat returns right now.
+    const freshArcadeMtime = Math.floor(
+      (await fs.stat(path.join(workDir, '_Arcade'))).mtimeMs / 1000,
+    );
+    expect(postWitnesses['/media/fat/_Arcade']).toBe(freshArcadeMtime);
+
+    // Reconnect: cache hits — `parseArcadeMras` MUST NOT fire a
+    // second time. This is the Phase 2 regression pin: pre-fix the
+    // witness mismatch would force a cold rewalk every reconnect.
+    parseSpy.mockClear();
+    setCacheSpy.mockClear();
+    await manager.disconnect();
+    await manager.connect(profile.id);
+    expect(parseSpy).not.toHaveBeenCalled();
+    expect(setCacheSpy).not.toHaveBeenCalled();
+
+    setCacheSpy.mockRestore();
+    parseSpy.mockRestore();
+  });
+
+  it('Phase 2 — auto-hide write-through falls back to invalidate on stat failure', async () => {
+    // Best-effort contract: if the post-heal `statWitnesses` throws
+    // (transient SSH glitch, etc.), the write-through invalidates
+    // the cache so the next connect re-walks cleanly rather than
+    // serving never-self-healing stale data.
+    const invalidateSpy = vi.spyOn(cache, 'invalidateArcadeMraMetaCache');
+    const statWitnessesOrig = client.statWitnesses.bind(client);
+    let arcadeStatCallCount = 0;
+    vi.spyOn(client, 'statWitnesses').mockImplementation(async (paths) => {
+      const wantsArcade = paths.includes('/media/fat/_Arcade');
+      if (wantsArcade) {
+        arcadeStatCallCount += 1;
+        // Let the FIRST arcade stat (in loadArcadeData's cold-cache
+        // write path) succeed so the initial cache write happens.
+        // Fail the SECOND one (the post-heal write-through) so the
+        // catch arm runs.
+        if (arcadeStatCallCount > 1) {
+          throw new Error('simulated post-heal stat failure');
+        }
+      }
+      return statWitnessesOrig(paths);
+    });
+
+    await manager.connect(profile.id);
+    // The post-heal invalidation fired with the recovery note.
+    const recoveryInvalidate = invalidateSpy.mock.calls.find(
+      ([, opts]) => opts?.note === 'write-through-failed',
+    );
+    expect(recoveryInvalidate).toBeDefined();
+    invalidateSpy.mockRestore();
   });
 
   it('first connect auto-hides every missing-ROM mra and emits the toast signal', async () => {

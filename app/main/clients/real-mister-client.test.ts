@@ -3043,7 +3043,10 @@ describe('RealMisterClient', () => {
       readonly ledger?: string;
       readonly marks?: string;
       readonly classifications?: string;
-      readonly witnesses: readonly { readonly path: string; readonly mtime: number }[];
+      // Cores witnesses are content-hash strings (or the `'0'`
+      // missing sentinel); other call-sites pass the raw shell-line
+      // value the test wants to feed the parser.
+      readonly witnesses: readonly { readonly path: string; readonly value: string }[];
     }): string {
       const enc = (s: string): string =>
         s === '' ? '' : Buffer.from(s, 'utf-8').toString('base64');
@@ -3055,14 +3058,21 @@ describe('RealMisterClient', () => {
         'CLASSIFICATIONS',
         enc(args.classifications ?? ''),
         'WITNESSES',
-        ...args.witnesses.map((w) => `${String(w.mtime)} ${w.path}`),
+        ...args.witnesses.map((w) => `${w.value} ${w.path}`),
         'END',
         '',
       ];
       return lines.join('\n');
     }
 
-    it('primeConnect issues exactly one execCommand and parses ledger / marks / witnesses', async () => {
+    // Content-hash witnesses: cores cache's prime emits 32-char hex
+    // md5 digests instead of mtimes. These fixture values aren't
+    // real digests of any directory — just hex-32 strings that
+    // satisfy the parser's discriminator.
+    const HASH_CONSOLE = '1111111111111111111111111111aaaa';
+    const HASH_GAMES = '2222222222222222222222222222bbbb';
+
+    it('primeConnect issues exactly one execCommand and parses ledger / marks / content-hash witnesses', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -3074,8 +3084,8 @@ describe('RealMisterClient', () => {
             marks: '{"schemaVersion":1,"marked":[]}',
             classifications: '{"schemaVersion":1,"overrides":[]}',
             witnesses: [
-              { path: '/media/fat/_Console', mtime: 1700000001 },
-              { path: '/media/fat/games', mtime: 1700000010 },
+              { path: '/media/fat/_Console', value: HASH_CONSOLE },
+              { path: '/media/fat/games', value: HASH_GAMES },
             ],
           }),
         ),
@@ -3094,17 +3104,21 @@ describe('RealMisterClient', () => {
       expect(result.ledger.hiddenCores).toEqual([]);
       expect(result.marks.marked).toEqual([]);
       expect(result.classifications.overrides).toEqual([]);
-      expect(result.witnesses['/media/fat/_Console']).toBe(1700000001);
-      expect(result.witnesses['/media/fat/games']).toBe(1700000010);
-      // The script body: contains the section labels and the witness
-      // stat command. Defensive — guards against a future refactor
-      // accidentally splitting prime into multiple round trips.
+      expect(result.witnesses['/media/fat/_Console']).toBe(HASH_CONSOLE);
+      expect(result.witnesses['/media/fat/games']).toBe(HASH_GAMES);
+      // Script body: contains the section labels and the cores-
+      // witness content-hash pipeline (NOT `stat -c '%Y %n'` —
+      // post-content-hash prime emits the find/md5sum pipeline
+      // instead). Defensive — guards against a future refactor
+      // accidentally regressing to mtime witnesses or splitting
+      // prime into multiple round trips.
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
       expect(script).toContain(`echo 'LEDGER'`);
       expect(script).toContain(`echo 'MARKS'`);
       expect(script).toContain(`echo 'CLASSIFICATIONS'`);
       expect(script).toContain(`echo 'WITNESSES'`);
-      expect(script).toContain(`stat -c '%Y %n'`);
+      expect(script).toContain(`md5sum`);
+      expect(script).not.toContain(`stat -c '%Y %n'`);
     });
 
     it('statWitnesses issues exactly one execCommand and parses the WITNESSES block', async () => {
@@ -3142,6 +3156,55 @@ describe('RealMisterClient', () => {
       expect(mocks.execCommand).not.toHaveBeenCalled();
     });
 
+    it('computeCoresWitnessHashes issues a find/md5sum pipeline per path and parses hex digests', async () => {
+      // Phase 2 — cores cache uses content-hash witnesses to ignore
+      // bulk dir-touch from downloaders. The shell shape must be
+      // `find ... | sort | md5sum | cut`. Parser tolerates the `'0'`
+      // missing sentinel; comparator rejects it.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      const H_CONSOLE = '1111111111111111111111111111aaaa';
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'WITNESSES',
+            `${H_CONSOLE} /media/fat/_Console`,
+            '0 /media/fat/_Missing',
+            'END',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const result = await client.computeCoresWitnessHashes([
+        '/media/fat/_Console',
+        '/media/fat/_Missing',
+      ]);
+
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      expect(result).toEqual({
+        '/media/fat/_Console': H_CONSOLE,
+        '/media/fat/_Missing': '0',
+      });
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain(`echo 'WITNESSES'`);
+      expect(script).toContain(`find '/media/fat/_Console' -mindepth 1 -maxdepth 1`);
+      expect(script).toContain(`-iname '*.rbf'`);
+      expect(script).toContain(`-iname '*.mgl'`);
+      expect(script).toContain(`sort | md5sum | cut -d' ' -f1`);
+      expect(script).not.toContain(`stat -c '%Y %n'`);
+    });
+
+    it('computeCoresWitnessHashes short-circuits an empty path list with no SSH call', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      const result = await client.computeCoresWitnessHashes([]);
+      expect(result).toEqual({});
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+
     it('primeConnect throws when the prime output is truncated (treated by caller as cache miss)', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
@@ -3157,7 +3220,7 @@ describe('RealMisterClient', () => {
       ).rejects.toThrow(/expected shape/);
     });
 
-    it('primeConnect records mtime 0 for paths the device has lost (cache treats as mismatch)', async () => {
+    it('primeConnect records the `\'0\'` sentinel for paths the device has lost (cache treats as mismatch)', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -3166,8 +3229,11 @@ describe('RealMisterClient', () => {
         execOk(
           buildPrimeStdout({
             witnesses: [
-              { path: '/media/fat/_Vanished', mtime: 0 },
-              { path: '/media/fat/games', mtime: 1700000010 },
+              // Shell emits `0 <path>` for non-dir / missing paths;
+              // parser stores `'0'` (string) for the cores cache
+              // flavour. `witnessesMatch` rejects `'0'` always.
+              { path: '/media/fat/_Vanished', value: '0' },
+              { path: '/media/fat/games', value: HASH_GAMES },
             ],
           }),
         ),
@@ -3177,8 +3243,8 @@ describe('RealMisterClient', () => {
         '/media/fat/_Vanished',
         '/media/fat/games',
       ]);
-      expect(result.witnesses['/media/fat/_Vanished']).toBe(0);
-      expect(result.witnesses['/media/fat/games']).toBe(1700000010);
+      expect(result.witnesses['/media/fat/_Vanished']).toBe('0');
+      expect(result.witnesses['/media/fat/games']).toBe(HASH_GAMES);
     });
 
     // feat/sample-based-hashing — chunking math. `buildWitnessScript`

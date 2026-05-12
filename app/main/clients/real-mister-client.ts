@@ -79,14 +79,15 @@ import {
   parseSampleOutput,
 } from '@shared/sample-script';
 import {
+  buildContentHashScript,
   buildPrimeScript,
   buildSizeAndMtimeScript,
   buildWitnessScript,
+  parseContentHashOutput,
   parseSizeAndMtimeOutput,
   parsePrimeOutput,
   parseWitnessOutput,
   type SizeAndMtime,
-  type WitnessMtimes,
 } from '@shared/prime-parse';
 import { MisterConnectionError } from '@shared/types';
 import type {
@@ -1616,7 +1617,9 @@ export class RealMisterClient implements IMisterClient {
    * (the witnesses we recorded for cores.json need to be re-stat'd
    * after we mutate the device).
    */
-  async statWitnesses(paths: readonly string[]): Promise<WitnessMtimes> {
+  async statWitnesses(
+    paths: readonly string[],
+  ): Promise<Readonly<Record<string, number>>> {
     this.assertConnected();
     if (paths.length === 0) return {};
     // feat/sample-based-hashing — JS-side chunking via the shared
@@ -1628,7 +1631,7 @@ export class RealMisterClient implements IMisterClient {
     // disconnect-cycle investigation. 100-path chunks bring each
     // script under ~26 KB. Errors propagate from the first failing
     // chunk; no partial-result merging on failure.
-    return chunked<string, WitnessMtimes>(
+    return chunked<string, Record<string, number>>(
       paths,
       WITNESS_CHUNK_SIZE,
       async (chunk) => {
@@ -1649,6 +1652,49 @@ export class RealMisterClient implements IMisterClient {
         if (parsed === null) {
           throw new Error(
             'Witness output did not match the expected shape (likely truncated).',
+          );
+        }
+        return parsed;
+      },
+      (acc, next) => Object.assign(acc, next),
+      {},
+    );
+  }
+
+  /**
+   * Compute a content-hash witness for each cores-witness directory.
+   * One SSH round trip; each line `<32-hex-hash> <path>` or `0 <path>`
+   * for missing. See `buildContentHashScript` for the shell pipeline
+   * and rationale.
+   *
+   * Empty input short-circuits — no SSH call. Same chunking pattern
+   * as `statWitnesses` (cores-witness lines are markedly longer than
+   * mtime lines because each embeds a `find ... | sort | md5sum`
+   * pipeline). For the 5-path `CORES_CACHE_WITNESS_PATHS` the cost
+   * is one round trip and a few KB of script.
+   */
+  async computeCoresWitnessHashes(
+    paths: readonly string[],
+  ): Promise<Readonly<Record<string, string>>> {
+    this.assertConnected();
+    if (paths.length === 0) return {};
+    return chunked<string, Record<string, string>>(
+      paths,
+      WITNESS_CHUNK_SIZE,
+      async (chunk) => {
+        const script = buildContentHashScript(chunk);
+        const result = await this.runSshOp(script, () =>
+          this.ssh.execCommand(script),
+        );
+        if (result.code !== 0) {
+          throw new Error(
+            `Failed to compute cores witness hashes: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+          );
+        }
+        const parsed = parseContentHashOutput(result.stdout);
+        if (parsed === null) {
+          throw new Error(
+            'Cores-witness-hash output did not match the expected shape (likely truncated).',
           );
         }
         return parsed;

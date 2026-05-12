@@ -21,6 +21,7 @@ import {
   isRealCore,
 } from '@shared/core-matching';
 import {
+  arcadeMraHiddenPath,
   arcadeMraVisiblePath,
   DEFAULT_ARCADE_AUTO_HIDE_ENABLED,
   EMPTY_LEDGER,
@@ -989,20 +990,75 @@ export class ConnectionManager {
         tombstones: tombstones.size,
         ledgerSize: next.size,
       });
-      // Any successful rename bumps _Arcade/ mtime, so the
-      // playability snapshot we computed is now stale w.r.t. the
-      // hidden-flag of those entries. Drop the in-memory copy +
-      // the on-disk cache so the next read re-walks. Cheap
-      // (top-level mras only) and the renderer triggers a fresh
-      // listArcadeMraEntries soon after anyway.
-      this.arcadePlayabilityCache = null;
       this.arcadeMraCache = null;
+      // Write-through: every successful rename flipped one .mra's
+      // on-disk basename AND bumped `_Arcade/` mtime. The pre-fix
+      // path invalidated the cache here, which forced a 22s rewalk
+      // on the next connect every time auto-hide did any work
+      // (Phase 1 bug surface "Arcade cache — internal post-write
+      // rename"). Instead, patch the in-memory snapshot to reflect
+      // the renames, re-stat the witnesses (now reflecting the
+      // post-rename `_Arcade/` mtime), and rewrite the cache.
+      // Result: next connect's witness check passes and serves the
+      // cached snapshot.
+      const renamedHidden = new Set<string>();
+      for (const change of toHide) {
+        if (hideOk.has(change.relativePath)) {
+          renamedHidden.add(change.relativePath);
+        }
+      }
+      const renamedShown = new Set<string>();
+      for (const change of toShow) {
+        if (showOk.has(change.relativePath)) {
+          renamedShown.add(change.relativePath);
+        }
+      }
+      const patchedEntries: ArcadeMraMeta[] = snapshot.entries.map((e) => {
+        if (renamedHidden.has(e.relativePath)) {
+          return {
+            ...e,
+            relativePath: arcadeMraHiddenPath(e.relativePath),
+            hidden: true,
+          };
+        }
+        if (renamedShown.has(e.relativePath)) {
+          return {
+            ...e,
+            relativePath: arcadeMraVisiblePath(e.relativePath),
+            hidden: false,
+          };
+        }
+        return e;
+      });
+      const zipBasenames = [...snapshot.zipBasenames];
+      this.arcadePlayabilityCache = buildPlayabilitySnapshot(
+        patchedEntries,
+        zipBasenames,
+      );
       if (this.currentHost !== null) {
-        await this.cache
-          .invalidateArcadeMraMetaCache(this.currentHost)
-          .catch(() => {
-            /* swallow */
-          });
+        try {
+          const freshWitnesses = await this.client.statWitnesses(
+            ARCADE_MRA_META_WITNESS_PATHS,
+          );
+          await this.cache.setArcadeMraMetaCache(
+            this.currentHost,
+            patchedEntries,
+            zipBasenames,
+            freshWitnesses,
+          );
+        } catch {
+          // Best-effort write-through. If the re-stat or write
+          // fails, fall back to invalidating so the next connect
+          // re-walks cleanly rather than serving never-self-healing
+          // stale data.
+          await this.cache
+            .invalidateArcadeMraMetaCache(this.currentHost, {
+              note: 'write-through-failed',
+            })
+            .catch(() => {
+              /* swallow */
+            });
+        }
       }
     }
   }
@@ -1088,7 +1144,7 @@ export class ConnectionManager {
     this.coresCache = cores;
     if (this.currentHost !== null) {
       try {
-        const witnesses = await this.client.statWitnesses(
+        const witnesses = await this.client.computeCoresWitnessHashes(
           CORES_CACHE_WITNESS_PATHS,
         );
         await this.cache.setCoresCache(this.currentHost, cores, witnesses);
@@ -1585,7 +1641,9 @@ export class ConnectionManager {
   private async writeThroughAfterCoreMutation(coreId: string): Promise<void> {
     if (this.currentHost === null) return;
     try {
-      const witnesses = await this.client.statWitnesses(CORES_CACHE_WITNESS_PATHS);
+      const witnesses = await this.client.computeCoresWitnessHashes(
+        CORES_CACHE_WITNESS_PATHS,
+      );
       await this.cache.setCoresCache(
         this.currentHost,
         this.coresCache,
@@ -1703,7 +1761,9 @@ export class ConnectionManager {
     // dropped one-by-one — their on-disk basenames just changed.
     if (this.currentHost !== null && succeededIds.size > 0) {
       try {
-        const witnesses = await this.client.statWitnesses(CORES_CACHE_WITNESS_PATHS);
+        const witnesses = await this.client.computeCoresWitnessHashes(
+          CORES_CACHE_WITNESS_PATHS,
+        );
         await this.cache.setCoresCache(
           this.currentHost,
           this.coresCache,

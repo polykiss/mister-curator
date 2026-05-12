@@ -460,7 +460,7 @@ function isRomsCacheSlot(v: unknown): v is RomsCacheSlot {
 function isWitnessMtimes(v: unknown): v is WitnessMtimes {
   if (v === null || typeof v !== 'object') return false;
   for (const value of Object.values(v as Record<string, unknown>)) {
-    if (typeof value !== 'number') return false;
+    if (typeof value !== 'number' && typeof value !== 'string') return false;
   }
   return true;
 }
