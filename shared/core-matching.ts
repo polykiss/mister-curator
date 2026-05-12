@@ -1,3 +1,4 @@
+import { ARCADE_VIRTUAL_CORE_ID } from '@shared/arcade-mra';
 import { aliasPrimaryCanonical } from '@shared/core-aliases';
 import { MISTER_GAMES_DIR } from '@shared/constants';
 import { emit, type DiagnosticsCollector } from '@shared/diag';
@@ -100,10 +101,22 @@ export function canonicalize(name: string): string {
  */
 /**
  * Render a user-facing label for a core. Default returns the coreId
- * verbatim. The override case maps `mame` → `Arcade` so the user's
- * actual MAME core surfaces in the sidebar under the friendlier
- * arcade label (since the v0.1 build deliberately stopped emitting
- * a separate `_Arcade/` placeholder row).
+ * verbatim. Two overrides today:
+ *
+ *   • The synthetic Arcade row's id (`ARCADE_VIRTUAL_CORE_ID` =
+ *     `__arcade__`) renders as `Arcade`. The id itself is reserved
+ *     namespace the renderer never wants the user to see.
+ *   • `mame` renders as `MAME` (Multiple Arcade Machine Emulator,
+ *     conventional spelling). The on-disk dir is lowercase but the
+ *     display label uses the standard acronym casing and reads
+ *     visually distinct from the synthetic `Arcade` row in the
+ *     sidebar.
+ *
+ * fix/arcade-sidebar-labels: previously the `mame` rename was
+ * `mame` → `Arcade` (a v0.1-era workaround for the absent
+ * synthetic Arcade row). PRs #50/#51 re-introduced the synthetic,
+ * so the old rename produced a two-rows-both-labeled-`Arcade`
+ * collision. The two cases above are the post-V1 contract.
  *
  * Internal coreId stays unchanged — IPC calls (`listRoms`,
  * `prefetchRomsMetadata`, etc.), ledger entries, classification
@@ -113,7 +126,8 @@ export function canonicalize(name: string): string {
  * a per-profile rename map.
  */
 export function coreDisplayName(coreId: string): string {
-  if (coreId === 'mame') return 'Arcade';
+  if (coreId === ARCADE_VIRTUAL_CORE_ID) return 'Arcade';
+  if (coreId === 'mame') return 'MAME';
   return coreId;
 }
 
