@@ -7,6 +7,10 @@ import { IPC_CHANNELS } from '@shared/preload-api';
 
 import { CacheManager } from '@app/main/cache/cache-manager';
 import type { CacheEvent } from '@app/main/cache/cache-types';
+import {
+  MISTER_CACHE_DIR_NAME,
+  migrateOldCacheDirIfNeeded,
+} from '@app/main/cache/userdata-paths';
 import { createMisterClient } from '@app/main/clients';
 import { ConnectionManager } from '@app/main/ipc/connection-manager';
 import { registerIpcHandlers } from '@app/main/ipc/register';
@@ -88,19 +92,41 @@ function createWindow(): BrowserWindow {
   return window;
 }
 
-void app.whenReady().then(() => {
+void app.whenReady().then(async () => {
+  const userDataDir = app.getPath('userData');
   const profileStore = new ProfileStore({
-    profilesPath: path.join(app.getPath('userData'), 'profiles.json'),
-    secretsPath: path.join(app.getPath('userData'), 'secrets.json'),
+    profilesPath: path.join(userDataDir, 'profiles.json'),
+    secretsPath: path.join(userDataDir, 'secrets.json'),
   });
 
+  // feat/cache-path-rename — one-shot migration off the
+  // case-insensitive-APFS-colliding `<userData>/cache/` (which
+  // Chromium silently wiped between sessions; see PR #59). Idempotent
+  // and cheap on no-op; runs synchronously before CacheManager so
+  // any prior-session subdirs land at the new path before the cache
+  // touches anything.
+  try {
+    const result = await migrateOldCacheDirIfNeeded(userDataDir);
+    if (result.moved.length > 0 || result.skippedDestinationExists.length > 0) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[cache] migration: moved=${String(result.moved.length)} skipped=${String(result.skippedDestinationExists.length)}`,
+      );
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[cache] migration: unexpected error', err);
+  }
+
   const client = createMisterClient(resolveClientMode());
-  // PR #12 cache. Lives at <userData>/cache/<host>/. Documented in
-  // AGENTS.md so users / support can locate it for diagnostic
-  // deletion. The optional logger is gated on
-  // MISTERCURATOR_CACHE_LOG=1 so dev runs can confirm hit/miss
+  // PR #12 cache. Lives at <userData>/mister-cache/<host>/. The
+  // directory name avoids the `<userData>/cache/` ↔ `<userData>/Cache/`
+  // collision with Chromium's HTTP cache on case-insensitive
+  // filesystems. Documented in AGENTS.md so users / support can
+  // locate it for diagnostic deletion. The optional logger is gated
+  // on MISTERCURATOR_CACHE_LOG=1 so dev runs can confirm hit/miss
   // behavior without flooding production stderr.
-  const cache = new CacheManager(path.join(app.getPath('userData'), 'cache'), {
+  const cache = new CacheManager(path.join(userDataDir, MISTER_CACHE_DIR_NAME), {
     onEvent: cacheEventLogger(),
   });
   const manager = new ConnectionManager(client, profileStore, cache);

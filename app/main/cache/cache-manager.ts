@@ -21,8 +21,11 @@ import {
  * keyed by host and validated against on-device mtime witnesses.
  *
  * Design constraints (PR #12):
- *   - Cache lives entirely under `<userData>/cache/<host>/`. No
- *     on-device writes. The MiSTer is unaware the cache exists.
+ *   - Cache lives entirely under `<userData>/mister-cache/<host>/`.
+ *     (Pre-rename: `<userData>/cache/`, which collided with Chromium's
+ *     case-insensitive `<userData>/Cache/` and got wiped between
+ *     sessions on macOS APFS — see `userdata-paths.ts`.) No on-device
+ *     writes. The MiSTer is unaware the cache exists.
  *   - All file I/O is async (no `fs.*Sync` per AGENTS.md).
  *   - Writes are atomic: write to `<file>.tmp`, fsync, rename. A
  *     half-written cache file on a crashed app must never be served.
