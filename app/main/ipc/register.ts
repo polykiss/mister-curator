@@ -387,6 +387,23 @@ export function registerIpcHandlers(
       manager.setArcadeUserShownDespiteMissing(relativePath, on),
   );
 
+  // feat/arcade-parity-2-metadata — cache-only read of ScreenScraper
+  // metadata for every playable `.mra`. Returns a `relativePath →
+  // RomMetadata | null` map; null when the zip's md5 isn't in the
+  // hash cache yet OR the SS lookup hasn't completed. NO SSH calls
+  // (background prefetch via auto-scrape-engine handles
+  // population).
+  handle<[], Record<string, RomMetadata | null>>(
+    IPC_CHANNELS.getArcadeMetadataBatch,
+    async () => {
+      const session = manager.getActiveSession();
+      if (session === null) return {};
+      const snapshot = manager.getArcadePlayabilitySnapshot();
+      if (snapshot === null) return {};
+      return metadata.getCachedArcadeMetadataBatch(session.host, snapshot);
+    },
+  );
+
   // PR-D1 round 2 (PR #27 round 2): pure-disk cache snapshot for the
   // optimistic-render path. RomsPane fires this on mount/click for
   // immediate row paint, then dispatches the normal validation

@@ -26,6 +26,9 @@ import { MetadataService } from '@app/main/metadata/metadata-service';
 import { OpenVGDBService } from '@app/main/metadata/openvgdb-service';
 import { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
 import { AutoScrapeEngine } from '@app/main/services/auto-scrape-engine';
+import { groupByPrimaryZipBasename } from '@app/main/services/arcade-prefetch-paths';
+import { ARCADE_VIRTUAL_CORE_ID } from '@shared/arcade-mra';
+import { MISTER_ARCADE_ZIP_DIRS } from '@shared/constants';
 import { ScrapeStateStore } from '@app/main/services/scrape-state';
 import { ProfileStore } from '@app/main/storage/profile-store';
 
@@ -282,9 +285,57 @@ void app.whenReady().then(async () => {
     // footer. The new wrapper does an SSH find for the whole core
     // tree and returns absolute paths, so the engine queues
     // exactly the files the sidebar count promised.
-    listRomPaths: async (coreId) =>
-      manager.listAllRomPathsForCore(coreId),
+    listRomPaths: async (coreId) => {
+      // feat/arcade-parity-2-metadata — arcade pass. ARCADE_VIRTUAL_CORE_ID
+      // is the engine sentinel for the synthetic Arcade row.
+      // listRomPaths returns one pseudo-path per UNIQUE primary zip
+      // (deduped across .mras — parent + clone usually share a zip);
+      // the orchestrator's getArcadeMetadata emits one event per
+      // group so the engine's done/total ticking is accurate.
+      if (coreId === ARCADE_VIRTUAL_CORE_ID) {
+        const snapshot = manager.getArcadePlayabilitySnapshot();
+        if (snapshot === null) {
+          return { paths: [], atomicFolderPaths: new Set() };
+        }
+        const playable = snapshot.entries.filter(
+          (e) => snapshot.byPath.get(e.relativePath) === 'playable',
+        );
+        const groups = groupByPrimaryZipBasename(
+          playable,
+          snapshot.zipBasenames,
+        );
+        // Pseudo-paths for accounting only — the actual zip path
+        // resolves inside getArcadeMetadata via statPathsWithSize
+        // (snapshot's zipBasenames union doesn't preserve per-dir
+        // membership). Pick the first MAME dir for the synthesised
+        // string; the engine matches events by COUNT, not path.
+        const paths = groups.map(
+          (g) => `${MISTER_ARCADE_ZIP_DIRS[0]}/${g.zipBasename}`,
+        );
+        return { paths, atomicFolderPaths: new Set() };
+      }
+      return manager.listAllRomPathsForCore(coreId);
+    },
     scrape: async (coreId, targets, onPathResolved, shouldAbort) => {
+      // feat/arcade-parity-2-metadata — arcade pass dispatches to
+      // getArcadeMetadata, which builds .mra-derived SS hints
+      // (displayName + setname) rather than the path-derived hints
+      // getRomsMetadata uses. Same `onPathResolved` signature so the
+      // engine's progress ticking is uniform across coreIds.
+      if (coreId === ARCADE_VIRTUAL_CORE_ID) {
+        const snapshot = manager.getArcadePlayabilitySnapshot();
+        if (snapshot === null) return;
+        const playable = snapshot.entries.filter(
+          (e) => snapshot.byPath.get(e.relativePath) === 'playable',
+        );
+        await metadataOrchestrator.getArcadeMetadata(
+          playable,
+          snapshot.zipBasenames,
+          () => onPathResolved(),
+          shouldAbort,
+        );
+        return;
+      }
       // feat/atomic-folder-consistency: forward `atomicFolderPaths`
       // so the orchestrator routes those paths' name-search through
       // the parent folder name (the strongest hint when the disk
@@ -415,6 +466,20 @@ void app.whenReady().then(async () => {
         .filter((c) => c.gamesDirExists)
         .filter((c) => c.category !== 'Arcade')
         .map((c) => c.id);
+      // feat/arcade-parity-2-metadata — queue the arcade pass when
+      // there's a playability snapshot with at least one playable
+      // entry. The snapshot is hot from connect's loadArcadeData
+      // (the arcade-mra-meta cache write happens before this status
+      // listener fires); if for some reason it isn't, skip — the
+      // user can manually refresh later.
+      const arcadeSnapshot = manager.getArcadePlayabilitySnapshot();
+      if (arcadeSnapshot !== null) {
+        const anyPlayable = arcadeSnapshot.entries.some(
+          (e) =>
+            arcadeSnapshot.byPath.get(e.relativePath) === 'playable',
+        );
+        if (anyPlayable) coreIds.push(ARCADE_VIRTUAL_CORE_ID);
+      }
       const session = manager.getActiveSession();
       const alreadyCompleted =
         session !== null

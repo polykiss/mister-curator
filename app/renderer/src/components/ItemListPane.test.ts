@@ -173,6 +173,69 @@ describe('ArcadeMraPane.tsx wrapper', () => {
   });
 });
 
+describe('arcade-adapter metadata wiring (feat/arcade-parity-2-metadata)', () => {
+  it('imports `RomMetadata` for the entry-shape extension', () => {
+    expect(ARCADE_ADAPTER).toMatch(
+      /import type \{ RomMetadata \} from '@shared\/metadata-types'/,
+    );
+  });
+
+  it('calls `window.mister.getArcadeMetadataBatch()` during refresh', () => {
+    // PR B exposes a cache-only IPC that returns relativePath →
+    // RomMetadata. The adapter fires it inside the same refresh
+    // call that loads entries / playability / auto-hide. Pinned
+    // here so a future refactor doesn't drop the call silently.
+    expect(ARCADE_ADAPTER).toMatch(
+      /window\.mister[\s\S]{0,80}\.getArcadeMetadataBatch\(\)/,
+    );
+  });
+
+  it('stores the metadata batch in a `metadataByMra` state map', () => {
+    // The state name is part of the contract — PR C reads it from
+    // the same handle. Renaming without updating PR C's cell
+    // wiring would break the rendering with no compile error.
+    expect(ARCADE_ADAPTER).toMatch(
+      /\[metadataByMra,\s*setMetadataByMra\] = useState/,
+    );
+  });
+
+  it('builds `enrichedPresentable` so each entry carries a `metadata` field', () => {
+    // The renderer-side data shape extension: every visible row's
+    // entry has `metadata: RomMetadata | null`. Cells in this PR
+    // don't READ the field (per spec); PR C will display it.
+    expect(ARCADE_ADAPTER).toMatch(/enrichedPresentable = useMemo/);
+    expect(ARCADE_ADAPTER).toMatch(
+      /metadata:\s*metadataByMra\[entry\.relativePath\]\s*\?\?\s*null/,
+    );
+  });
+
+  it('iterates `enrichedPresentable` (not `presentable`) in the table body', () => {
+    // The table-body map MUST use the enriched list so each row's
+    // `entry.metadata` is accessible. If the row map iterates
+    // `presentable` instead, PR C's cell additions silently won't
+    // see metadata.
+    expect(ARCADE_ADAPTER).toMatch(/enrichedPresentable\.map\(\(entry\)/);
+  });
+});
+
+describe('preload-api: getArcadeMetadataBatch IPC surface', () => {
+  it('declares the IPC channel constant', () => {
+    const preloadApi = readFileSync(
+      resolve(__dirname, '..', '..', '..', '..', 'shared', 'preload-api.ts'),
+      'utf8',
+    );
+    expect(preloadApi).toMatch(
+      /getArcadeMetadataBatch:\s*'mister:getArcadeMetadataBatch'/,
+    );
+    // Return shape is `Record<string, RomMetadata | null>` — every
+    // playable .mra's relativePath keys into a metadata record (or
+    // null). The shape is what enriches the adapter entries.
+    expect(preloadApi).toMatch(
+      /getArcadeMetadataBatch\(\)[\s\S]{0,80}Record<string, RomMetadata \| null>/,
+    );
+  });
+});
+
 describe('no inter-adapter state leakage', () => {
   it('neither adapter file declares module-level mutable state (each hook owns its state in React)', () => {
     // The "switching adapters at runtime doesn't leak state" guarantee

@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 
 import type { ArcadeMraEntry } from '@shared/arcade-mra';
 import { arcadeMraVisiblePath } from '@shared/ledger';
+import type { RomMetadata } from '@shared/metadata-types';
 import type {
   ArcadeMraEntryWire,
   ArcadePlayabilityWire,
@@ -69,6 +70,16 @@ export function useArcadeAdapter(): ItemListAdapter {
   const [pendingPaths, setPendingPaths] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  // feat/arcade-parity-2-metadata — cached ScreenScraper metadata per
+  // playable `.mra`, keyed by relativePath. Populated by a cache-only
+  // IPC after the entries+playability load resolves. Background
+  // prefetch (auto-scrape engine's arcade pass) keeps this fresh
+  // across sessions. Values are null when no record exists yet —
+  // PR C's UI will display "loading" or skip the metadata cells for
+  // those rows; this PR doesn't render them.
+  const [metadataByMra, setMetadataByMra] = useState<
+    Record<string, RomMetadata | null>
+  >({});
   // PR 2/2 — default OFF so the pane visually matches what the
   // firmware menu shows. Pre-2/2 this defaulted ON because the
   // typical user hadn't hidden many .mras and seeing them dimmed
@@ -99,6 +110,18 @@ export function useArcadeAdapter(): ItemListAdapter {
         setEntries(wireToEntries(wire));
         setPlayability(play);
         setAutoHideEnabled(enabled);
+        // feat/arcade-parity-2-metadata — fire-and-forget metadata
+        // load. Cache-only on the main side; cheap. Independent of
+        // the entries/playability fetch so a slow read here doesn't
+        // delay the visible list paint.
+        void window.mister
+          .getArcadeMetadataBatch()
+          .then((batch) => setMetadataByMra(batch))
+          .catch(() => {
+            // Best-effort. Metadata is supplementary in this PR (no
+            // cells render it); if the IPC fails the user just
+            // doesn't see the supplementary fields.
+          });
       } catch (err) {
         const message =
           err instanceof Error ? err.message : 'Failed to load arcade entries.';
@@ -155,6 +178,22 @@ export function useArcadeAdapter(): ItemListAdapter {
   const presentable = useMemo(
     () => (showHidden ? mraRows : mraRows.filter((e) => !e.hidden)),
     [mraRows, showHidden],
+  );
+
+  // feat/arcade-parity-2-metadata — enrich entries with cached SS
+  // metadata keyed by relativePath. The cells in this PR do NOT read
+  // the `metadata` field (PR C wires up year/genre/rating/box-art
+  // cells); this enrichment runs so the shape is in place and the
+  // wiring is exercised in dev. Multiple .mras sharing a primary zip
+  // see the SAME RomMetadata reference here — `getArcadeMetadataBatch`
+  // fans the cached record across each row.
+  const enrichedPresentable = useMemo(
+    () =>
+      presentable.map((entry) => ({
+        ...entry,
+        metadata: metadataByMra[entry.relativePath] ?? null,
+      })),
+    [presentable, metadataByMra],
   );
 
   const visibleCount = mraRows.filter((e) => !e.hidden).length;
@@ -349,7 +388,7 @@ export function useArcadeAdapter(): ItemListAdapter {
           <div className="p-4 text-body-sm text-destructive">
             {error}
           </div>
-        ) : presentable.length === 0 ? (
+        ) : enrichedPresentable.length === 0 ? (
           <div className="p-4 text-body-sm text-fg-muted">
             {entries === null || mraRows.length === 0
               ? 'No .mra files found in _Arcade/.'
@@ -364,7 +403,7 @@ export function useArcadeAdapter(): ItemListAdapter {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {presentable.map((entry) => {
+              {enrichedPresentable.map((entry) => {
                 const isPending = pendingPaths.has(entry.relativePath);
                 const visiblePath = arcadeMraVisiblePath(entry.relativePath);
                 const isAutoHidden =
