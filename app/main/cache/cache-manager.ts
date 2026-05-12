@@ -7,6 +7,7 @@ import {
   CACHE_SCHEMA_VERSION,
   ROMS_CACHE_FILE_BUDGET,
   sanitiseFsSegment,
+  type ArcadeMraMetaCacheEntry,
   type CacheEvent,
   type CacheEventKind,
   type CoresCacheEntry,
@@ -167,6 +168,65 @@ export class CacheManager {
     }
   }
 
+  // ─── arcade-mra-meta cache ────────────────────────────────────────
+
+  async getArcadeMraMetaCache(
+    host: string,
+  ): Promise<ArcadeMraMetaCacheEntry | null> {
+    const path = this.arcadeMraMetaCachePath(host);
+    const parsed = await readJsonOrNull<unknown>(path);
+    if (parsed === null) {
+      this.fire('miss', { surface: 'arcade', host });
+      return null;
+    }
+    if (!isArcadeMraMetaCacheEntry(parsed)) {
+      this.fire('miss', {
+        surface: 'arcade',
+        host,
+        note: 'schema mismatch',
+      });
+      return null;
+    }
+    if (parsed.host !== host) {
+      this.fire('miss', { surface: 'arcade', host, note: 'host mismatch' });
+      return null;
+    }
+    return parsed;
+  }
+
+  async setArcadeMraMetaCache(
+    host: string,
+    entries: ArcadeMraMetaCacheEntry['entries'],
+    zipBasenames: readonly string[],
+    witnesses: WitnessMtimes,
+  ): Promise<void> {
+    const entry: ArcadeMraMetaCacheEntry = {
+      version: CACHE_SCHEMA_VERSION,
+      host,
+      cachedAt: new Date().toISOString(),
+      witnesses,
+      entries,
+      zipBasenames,
+    };
+    await writeJsonAtomic(this.arcadeMraMetaCachePath(host), entry);
+    this.fire('write', { surface: 'arcade', host });
+  }
+
+  async invalidateArcadeMraMetaCache(
+    host: string,
+    options: { readonly note?: string } = {},
+  ): Promise<void> {
+    const path = this.arcadeMraMetaCachePath(host);
+    const removed = await unlinkIfExists(path);
+    if (removed) {
+      this.fire('invalidate', {
+        surface: 'arcade',
+        host,
+        note: options.note,
+      });
+    }
+  }
+
   // ─── observability hooks ──────────────────────────────────────────
 
   /**
@@ -180,7 +240,7 @@ export class CacheManager {
    * single most useful signal during cache verification.
    */
   recordHit(
-    surface: 'cores' | 'roms',
+    surface: 'cores' | 'roms' | 'arcade',
     ctx: {
       readonly host: string;
       readonly coreId?: string;
@@ -197,7 +257,7 @@ export class CacheManager {
    * logs can tell "cache was empty" from "cache went out of date".
    */
   recordStale(
-    surface: 'cores' | 'roms',
+    surface: 'cores' | 'roms' | 'arcade',
     ctx: {
       readonly host: string;
       readonly coreId?: string;
@@ -248,6 +308,10 @@ export class CacheManager {
       'roms',
       `${sanitiseFsSegment(coreId)}.json`,
     );
+  }
+
+  private arcadeMraMetaCachePath(host: string): string {
+    return join(this.hostDir(host), 'arcade-mra-meta.json');
   }
 
   /**
@@ -397,6 +461,32 @@ function isWitnessMtimes(v: unknown): v is WitnessMtimes {
   if (v === null || typeof v !== 'object') return false;
   for (const value of Object.values(v as Record<string, unknown>)) {
     if (typeof value !== 'number') return false;
+  }
+  return true;
+}
+
+function isArcadeMraMetaCacheEntry(
+  v: unknown,
+): v is ArcadeMraMetaCacheEntry {
+  if (v === null || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  if (o.version !== CACHE_SCHEMA_VERSION) return false;
+  if (typeof o.host !== 'string') return false;
+  if (typeof o.cachedAt !== 'string') return false;
+  if (!isWitnessMtimes(o.witnesses)) return false;
+  if (!Array.isArray(o.entries)) return false;
+  if (!Array.isArray(o.zipBasenames)) return false;
+  // Spot-check one entry's shape — exhaustive validation isn't
+  // required since a corrupted record surfaces as a runtime error
+  // and gets invalidated on the next mismatched-witness pass.
+  for (const entry of o.entries) {
+    if (entry === null || typeof entry !== 'object') return false;
+    const e = entry as Record<string, unknown>;
+    if (typeof e.relativePath !== 'string') return false;
+    if (!Array.isArray(e.requiredZips)) return false;
+  }
+  for (const basename of o.zipBasenames) {
+    if (typeof basename !== 'string') return false;
   }
   return true;
 }

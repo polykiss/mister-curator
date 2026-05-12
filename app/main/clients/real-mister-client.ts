@@ -3,7 +3,9 @@ import { NodeSSH } from 'node-ssh';
 import { shellQuote } from '@app/main/clients/shell';
 import {
   HIDEABLE_CATEGORIES,
+  MISTER_AGENT_DIR,
   MISTER_ARCADE_DIR,
+  MISTER_ARCADE_ZIP_DIRS,
   MISTER_CATEGORY_DIRS,
   MISTER_FOLDER_CLASSIFICATIONS_PATH,
   MISTER_GAMES_DIR,
@@ -11,6 +13,10 @@ import {
   MISTER_LEDGER_PATH,
   MISTER_SYSTEM_FILES_PATH,
 } from '@shared/constants';
+import {
+  decodeArcadeMraTsv,
+  type ArcadeMraMeta,
+} from '@shared/arcade-mra-parse';
 import {
   computeCoreRenames,
   extractCorePrefix,
@@ -711,6 +717,107 @@ export class RealMisterClient implements IMisterClient {
       if (type === 'f' || type === 'd') {
         out.push({ type, relPath });
       }
+    }
+    return out;
+  }
+
+  async parseArcadeMras(): Promise<readonly ArcadeMraMeta[]> {
+    this.assertConnected();
+    // Server-side parsing in one round-trip. We need four pieces of
+    // information per .mra (relativePath, zip-attr blocks, rbf,
+    // setname); shipping the raw .mra heads over the wire is ~7-9MB
+    // for a typical 1800-mra library. Pushing the regex into awk on
+    // the device drops that to ~200KB (one TSV row per .mra).
+    //
+    // Strategy: heredoc the awk script to MISTER_AGENT_DIR (a
+    // throwaway tmpfs path the rest of the app already uses), then
+    // pipe `find … -print0 | xargs -0 awk -f …` to run it once
+    // across every matching file. The single-file-load approach
+    // sidesteps shell-quoting hell with awk regex literals that
+    // contain both single and double quote characters.
+    //
+    // Top-level mras only (`-maxdepth 1`). `_alternatives/` and
+    // user-organisational subfolders are deferred to a follow-up
+    // by spec — the arcade menu surfaces only top-level entries
+    // anyway, so this matches the firmware's own view.
+    //
+    // The trailing `/dev/null` argument to awk is a defensive
+    // touch: it ensures FILENAME / FNR behave consistently even
+    // when only one .mra file is matched (some awk builds skip
+    // resetting FNR if argv has exactly one entry). Cheap, safe.
+    const awkPath = `${MISTER_AGENT_DIR}/arcade-parse.awk`;
+    const awkScript = buildArcadeParseAwkScript();
+    const script = [
+      `[ -d ${shellQuote(MISTER_ARCADE_DIR)} ] || exit 0`,
+      `mkdir -p ${shellQuote(MISTER_AGENT_DIR)}`,
+      `cat > ${shellQuote(awkPath)} <<'AWK_EOF'`,
+      awkScript,
+      `AWK_EOF`,
+      `cd ${shellQuote(MISTER_ARCADE_DIR)} || exit 1`,
+      // BusyBox find groups `\( ... \)` for the OR; -print0 is widely
+      // supported on the MiSTer's busybox build (already used in
+      // listRecursiveRomFiles' shell sibling).
+      `find . -maxdepth 1 -type f \\( -name '*.mra' -o -name '.*.mra' \\) -print0 2>/dev/null | \\`,
+      `  xargs -0 awk -f ${shellQuote(awkPath)} /dev/null`,
+      `rc=$?`,
+      `rm -f ${shellQuote(awkPath)}`,
+      `exit $rc`,
+    ].join('\n');
+    const result = await this.runSshOp(script, () =>
+      this.ssh.execCommand(script),
+    );
+    if (result.code !== 0) {
+      // Surface the error rather than hiding it — a non-zero exit
+      // here means the awk script blew up or the heredoc failed,
+      // both of which are bugs in this method (not absence of
+      // _Arcade/, which short-circuits cleanly above).
+      throw new Error(
+        `parseArcadeMras failed (code ${String(result.code)}): ${result.stderr.trim() || 'no stderr'}`,
+      );
+    }
+    const out: ArcadeMraMeta[] = [];
+    for (const line of result.stdout.split('\n')) {
+      if (line === '') continue;
+      const meta = decodeArcadeMraTsv(line);
+      if (meta !== null) out.push(meta);
+    }
+    return out;
+  }
+
+  async listArcadeZipBasenames(): Promise<readonly string[]> {
+    this.assertConnected();
+    // One `find` per candidate dir, guarded by `[ -d ]`. Either may
+    // be missing on a freshly-flashed MiSTer; the guard skips the
+    // find cleanly when the dir doesn't exist.
+    //
+    // First-cut (pre-live-verify) tried to build a `$present` list
+    // and run `find $present ...` once. That looked clean but
+    // unquoted variable expansion does NOT honor inner shell quotes
+    // — `present="'/media/fat/games/mame'"` re-tokenized as the
+    // literal four-char path `/'/...'/` and find matched nothing,
+    // yielding an empty zip set and rendering every .mra "missing"
+    // in the live trace (`playable=0 missing=490`). Two finds with
+    // direct quoted args sidestep the fragility; each invocation is
+    // ms-cheap on busybox.
+    //
+    // `-printf '%f\\n'` returns the basename only; duplicates across
+    // dirs (rare — a zip basename usually lives in one or the other)
+    // get folded by the JS Set construction at the call site.
+    const script = [
+      ...MISTER_ARCADE_ZIP_DIRS.map(
+        (d) =>
+          `[ -d ${shellQuote(d)} ] && find ${shellQuote(d)} -maxdepth 1 -name '*.zip' -printf '%f\\n' 2>/dev/null`,
+      ),
+      `exit 0`,
+    ].join('\n');
+    const result = await this.runSshOp(script, () =>
+      this.ssh.execCommand(script),
+    );
+    if (result.code !== 0) return [];
+    const out: string[] = [];
+    for (const line of result.stdout.split('\n')) {
+      if (line === '') continue;
+      out.push(line);
     }
     return out;
   }
@@ -2454,4 +2561,95 @@ function mapConnectError(err: unknown): MisterConnectionError {
     'unknown',
     `Could not connect to the MiSTer: ${message}`,
   );
+}
+
+/**
+ * The on-device awk program that extracts (relativePath, zip-attr
+ * blocks, rbf, setname) from one or more .mra files. Emitted as a
+ * heredoc by `parseArcadeMras` and removed immediately after the
+ * find/xargs invocation. Kept in lock-step with `parseArcadeMra`
+ * (the JS reference parser in `shared/arcade-mra-parse.ts`) — when
+ * a regex changes there, change it here too.
+ *
+ * Output format: one TSV row per .mra:
+ *   relativePath \t zipBlocks \t rbf \t setname
+ *
+ *   • relativePath — basename only (top-level mras), incl. any
+ *     leading dot for hidden entries.
+ *   • zipBlocks    — one entry per `<rom ... zip="...">` block,
+ *     joined by ASCII Unit Separator (0x1F). Each entry retains
+ *     its internal `|` pipe-fallback alternatives. Empty when the
+ *     .mra references no zips (TTL / discrete-logic games).
+ *   • rbf, setname — `<rbf>` / `<setname>` text content. Empty
+ *     when absent or self-closing.
+ *
+ * Portability notes (BusyBox awk):
+ *   • Uses `match() + RSTART/RLENGTH + substr/sub` only; no
+ *     `gensub`, no array capture, no `nextfile`.
+ *   • Bounded at 200 lines per file via a `done` flag — the four
+ *     tags we need are always near the top, so capping protects
+ *     against pathological 100MB .mra files (none exist in the
+ *     wild but the cap is cheap insurance).
+ *   • Builds the value-quote character class via `sprintf("%c",
+ *     39)` / `sprintf("%c", 34)` rather than embedding `'` and `"`
+ *     directly — keeps the heredoc payload free of shell-quoting
+ *     escape hazards regardless of how the embedding evolves.
+ *
+ * The first FNR==1 in each file flushes the previous file's
+ * accumulated state via emit(); the END block flushes the last
+ * file. `done` blocks late lines from contributing to a file
+ * whose first 200 lines we've already scanned.
+ */
+function buildArcadeParseAwkScript(): string {
+  return [
+    `BEGIN {`,
+    `  US = sprintf("%c", 31)`,
+    `  SQ = sprintf("%c", 39)`,
+    `  DQ = sprintf("%c", 34)`,
+    `  # Regexes built from runtime strings so the heredoc never`,
+    `  # has to contain raw single or double quote characters in`,
+    `  # awkward positions.`,
+    `  ZIP_RE = "zip=[" SQ DQ "][^" SQ DQ "]*[" SQ DQ "]"`,
+    `  STRIP_LEFT_RE = "^zip=[" SQ DQ "]"`,
+    `  STRIP_RIGHT_RE = "[" SQ DQ "]$"`,
+    `}`,
+    `FNR == 1 {`,
+    `  if (curfile != "") emit()`,
+    `  curfile = FILENAME`,
+    `  sub(/^.*\\//, "", curfile)`,
+    `  zips = ""; rbf = ""; setname = ""; done = 0`,
+    `}`,
+    `done { next }`,
+    `FNR > 200 { done = 1; next }`,
+    `{`,
+    `  if (rbf == "" && match($0, /<rbf[^>]*>[^<]*<\\/rbf>/)) {`,
+    `    s = substr($0, RSTART, RLENGTH)`,
+    `    sub(/^<rbf[^>]*>/, "", s)`,
+    `    sub(/<\\/rbf>$/, "", s)`,
+    `    rbf = s`,
+    `  }`,
+    `  if (setname == "" && match($0, /<setname[^>]*>[^<]*<\\/setname>/)) {`,
+    `    s = substr($0, RSTART, RLENGTH)`,
+    `    sub(/^<setname[^>]*>/, "", s)`,
+    `    sub(/<\\/setname>$/, "", s)`,
+    `    setname = s`,
+    `  }`,
+    `  line = $0`,
+    `  while (match(line, ZIP_RE)) {`,
+    `    attr = substr(line, RSTART, RLENGTH)`,
+    `    val = attr`,
+    `    sub(STRIP_LEFT_RE, "", val)`,
+    `    sub(STRIP_RIGHT_RE, "", val)`,
+    `    if (val != "") {`,
+    `      if (zips == "") zips = val`,
+    `      else zips = zips US val`,
+    `    }`,
+    `    line = substr(line, RSTART + RLENGTH)`,
+    `  }`,
+    `}`,
+    `END { if (curfile != "") emit() }`,
+    `function emit() {`,
+    `  printf "%s\\t%s\\t%s\\t%s\\n", curfile, zips, rbf, setname`,
+    `}`,
+  ].join('\n');
 }

@@ -1,3 +1,4 @@
+import type { ArcadeMraMeta } from '@shared/arcade-mra-parse';
 import { mtimesMatch } from '@shared/mtime-compare';
 import type { WitnessMtimes } from '@shared/prime-parse';
 import type { CoreEntry, Rom } from '@shared/types';
@@ -55,6 +56,33 @@ export interface RomsCacheFile {
   readonly coreId: string;
   /** subPath → cached slot. Top-level uses the empty string key. */
   readonly bySubPath: Readonly<Record<string, RomsCacheSlot>>;
+}
+
+/**
+ * feat/arcade-playability-data (PR 1/2) — pre-parsed metadata for
+ * every top-level `.mra` under `_Arcade/`, plus the zip basename
+ * union from `games/mame/` + `games/hbmame/`. Combining both into
+ * a single file means the witness check on connect validates the
+ * full pipeline in one stat batch.
+ *
+ * Witnesses cover `_Arcade/` (mtime bumps on .mra add/remove/
+ * hide/show) and both zip dirs (so a fresh zip drop invalidates
+ * the cached playability). Distinct from `CORES_CACHE_WITNESS_PATHS`
+ * so cores-cache state and arcade-meta state stay independent.
+ */
+export interface ArcadeMraMetaCacheEntry {
+  readonly version: typeof CACHE_SCHEMA_VERSION;
+  readonly host: string;
+  readonly cachedAt: string;
+  readonly witnesses: WitnessMtimes;
+  readonly entries: readonly ArcadeMraMeta[];
+  /**
+   * Snapshot of the zip basenames seen under
+   * `MISTER_ARCADE_ZIP_DIRS` at scan time. The playability set
+   * derives from this — cached so a warm reconnect doesn't have
+   * to re-walk the (large-ish) mame/ + hbmame/ dirs.
+   */
+  readonly zipBasenames: readonly string[];
 }
 
 /**
@@ -130,7 +158,7 @@ export type CacheEventKind =
 export interface CacheEvent {
   readonly kind: CacheEventKind;
   /** Which surface the event applies to. */
-  readonly surface: 'cores' | 'roms';
+  readonly surface: 'cores' | 'roms' | 'arcade';
   readonly host: string;
   /** Set when `surface === 'roms'`. */
   readonly coreId?: string;

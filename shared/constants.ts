@@ -12,6 +12,27 @@ export const MISTER_GAMES_DIR = '/media/fat/games';
  * Metadata extraction from .mra XML is Phase 2.
  */
 export const MISTER_ARCADE_DIR = '/media/fat/_Arcade';
+/**
+ * Arcade .mra ROM-zip search dirs. .mras reference zips by basename;
+ * the MiSTer loader looks in both `mame/` (canonical sets) and
+ * `hbmame/` (homebrew variants) at the top level, so playability
+ * scanning walks both with `-maxdepth 1`.
+ */
+export const MISTER_ARCADE_ZIP_DIRS: readonly string[] = [
+  '/media/fat/games/mame',
+  '/media/fat/games/hbmame',
+];
+/**
+ * Witnesses for the arcade-mra-meta cache. Distinct from
+ * `CORES_CACHE_WITNESS_PATHS` so a zip add/remove in `mame/` doesn't
+ * invalidate the cores cache (and vice versa: a `_Arcade/` mtime
+ * bump from a hide/show rename doesn't churn the playability scan
+ * any more than necessary).
+ */
+export const ARCADE_MRA_META_WITNESS_PATHS: readonly string[] = [
+  MISTER_ARCADE_DIR,
+  ...MISTER_ARCADE_ZIP_DIRS,
+];
 export const MISTER_AGENT_DIR = '/tmp/mistercurator';
 export const MISTER_LEDGER_DIR = '/media/fat/.mistercurator';
 export const MISTER_LEDGER_PATH = '/media/fat/.mistercurator/state.json';

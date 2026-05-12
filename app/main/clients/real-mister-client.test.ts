@@ -952,6 +952,178 @@ describe('RealMisterClient', () => {
     });
   });
 
+  // feat/arcade-playability-data (PR 1/2): server-side awk extraction
+  // of the load-bearing slice of every top-level .mra. The on-device
+  // awk emits TSV; the JS decoder is shared with the Fake's pure-JS
+  // path (`shared/arcade-mra-parse.ts`). Asserting on the produced
+  // SSH script catches accidental shape changes that would break the
+  // BusyBox-side execution.
+  describe('parseArcadeMras (PR 1/2)', () => {
+    it('decodes a multi-row TSV blob (one row per .mra)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      const US = '\x1f';
+      // What the on-device awk would emit for 3 mras: a single-zip,
+      // a pipe-fallback, and a multi-block ST-V row.
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            ['Donkey Kong.mra', 'dkong.zip', 'donkeykong', 'dkong'].join('\t'),
+            ['Galaga.mra', 'galaga.zip|galagamw.zip', 'galaga', 'galagamw'].join(
+              '\t',
+            ),
+            [
+              'Astra.mra',
+              ['astrass.zip', 'stvbios.zip', 'astrass.zip'].join(US),
+              'ST-V',
+              'astrass',
+            ].join('\t'),
+            '',
+          ].join('\n'),
+        ),
+      );
+      const out = await client.parseArcadeMras();
+      expect(out).toEqual([
+        {
+          relativePath: 'Donkey Kong.mra',
+          displayName: 'Donkey Kong.mra',
+          hidden: false,
+          requiredZips: [['dkong.zip']],
+          rbf: 'donkeykong',
+          setname: 'dkong',
+        },
+        {
+          relativePath: 'Galaga.mra',
+          displayName: 'Galaga.mra',
+          hidden: false,
+          requiredZips: [['galaga.zip', 'galagamw.zip']],
+          rbf: 'galaga',
+          setname: 'galagamw',
+        },
+        {
+          relativePath: 'Astra.mra',
+          displayName: 'Astra.mra',
+          hidden: false,
+          requiredZips: [['astrass.zip'], ['stvbios.zip'], ['astrass.zip']],
+          rbf: 'ST-V',
+          setname: 'astrass',
+        },
+      ]);
+    });
+
+    it('handles a no-zip TTL row (empty zipBlocks field)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(`Computer Space.mra\t\tcomputerspace\t\n`),
+      );
+      const out = await client.parseArcadeMras();
+      expect(out).toEqual([
+        {
+          relativePath: 'Computer Space.mra',
+          displayName: 'Computer Space.mra',
+          hidden: false,
+          requiredZips: [],
+          rbf: 'computerspace',
+          setname: undefined,
+        },
+      ]);
+    });
+
+    it('targets _Arcade/ top-level only (-maxdepth 1) with both visible and dot-prefixed .mras', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+      await client.parseArcadeMras();
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain(`[ -d '/media/fat/_Arcade' ]`);
+      expect(script).toContain(`cd '/media/fat/_Arcade'`);
+      // Top-level only — pulled in explicitly by spec for this PR.
+      expect(script).toContain(`-maxdepth 1`);
+      // Captures both visible (*.mra) and dot-prefixed (.*.mra) entries
+      // — the renderer's hide state lives in the basename, not a
+      // separate flag, so the awk needs to see both forms.
+      expect(script).toContain(`-name '*.mra'`);
+      expect(script).toContain(`-name '.*.mra'`);
+    });
+
+    it('writes the awk script to MISTER_AGENT_DIR via heredoc + removes it after', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+      await client.parseArcadeMras();
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain(`mkdir -p '/tmp/mistercurator'`);
+      expect(script).toContain(`/tmp/mistercurator/arcade-parse.awk`);
+      expect(script).toContain(`<<'AWK_EOF'`);
+      expect(script).toContain(`rm -f '/tmp/mistercurator/arcade-parse.awk'`);
+    });
+
+    it('throws when the SSH command fails with a non-zero exit', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execFail(1, 'awk: oops'));
+      await expect(client.parseArcadeMras()).rejects.toThrow(/parseArcadeMras failed/);
+    });
+  });
+
+  describe('listArcadeZipBasenames (PR 1/2)', () => {
+    it('returns one basename per line from the find output', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(['galaga.zip', 'pacman.zip', 'pacmanhb.zip', ''].join('\n')),
+      );
+      const out = await client.listArcadeZipBasenames();
+      expect(out).toEqual(['galaga.zip', 'pacman.zip', 'pacmanhb.zip']);
+    });
+
+    it('targets both mame and hbmame at maxdepth 1 with the dir as a direct find arg', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+      await client.listArcadeZipBasenames();
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      // Direct `find <quoted-dir>` form — NOT `find $variable`.
+      // An earlier draft used `find $present ...` to walk a built-up
+      // list of dirs and the unquoted variable expansion ate the
+      // shell quotes, leaving find with bad argv and returning
+      // nothing on a real MiSTer. This regression assertion locks
+      // in the "direct arg" form so a future refactor can't slip
+      // back into the same bug.
+      expect(script).toContain(`find '/media/fat/games/mame' -maxdepth 1`);
+      expect(script).toContain(`find '/media/fat/games/hbmame' -maxdepth 1`);
+      expect(script).not.toMatch(/find \$/);
+      expect(script).toContain(`-name '*.zip'`);
+      expect(script).toContain(`-printf '%f\\n'`);
+    });
+
+    it('returns an empty list when SSH fails (caller treats as no zips)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execFail(1));
+      const out = await client.listArcadeZipBasenames();
+      expect(out).toEqual([]);
+    });
+
+    it('returns an empty list when no candidate dirs exist (script exits 0 with empty stdout)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+      const out = await client.listArcadeZipBasenames();
+      expect(out).toEqual([]);
+    });
+  });
+
   describe('listRoms', () => {
     it('targets the games-dir basename via the coreId argument (PR #11 round 3 / Bug 1)', async () => {
       // The matcher's invariant guarantees CoreEntry.id === on-disk

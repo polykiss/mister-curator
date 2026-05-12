@@ -1,3 +1,4 @@
+import type { ArcadeMraMeta } from '@shared/arcade-mra-parse';
 import type { SizeAndMtime, WitnessMtimes } from '@shared/prime-parse';
 import type {
   CoreEntry,
@@ -187,6 +188,39 @@ export interface IMisterClient {
   listArcadeRawListing(): Promise<
     readonly { readonly type: 'f' | 'd'; readonly relPath: string }[]
   >;
+
+  /**
+   * feat/arcade-playability-data (PR 1/2) — extract the load-bearing
+   * slice (relativePath, zip-attr blocks, rbf, setname) of every
+   * top-level `.mra` under `_Arcade/` in one SSH round-trip.
+   *
+   * Top-level only — entries under `_alternatives/` and other
+   * subfolders are deferred to a follow-up; this PR's scope is the
+   * 1000-ish .mras the firmware actually surfaces in the arcade menu.
+   *
+   * Server-side parsing keeps the wire payload tiny (~200KB vs
+   * ~7-9MB if we shipped each .mra head over the wire). The Real
+   * client implementation drops a one-shot awk script in
+   * `MISTER_AGENT_DIR` and removes it before returning.
+   *
+   * Returns an empty list when `_Arcade/` doesn't exist on the
+   * device — same shape as `listArcadeRawListing` for that case.
+   */
+  parseArcadeMras(): Promise<readonly ArcadeMraMeta[]>;
+
+  /**
+   * feat/arcade-playability-data (PR 1/2) — list every `.zip` basename
+   * under both `games/mame/` and `games/hbmame/` in a single SSH
+   * round-trip. Used to decide which .mra entries reference a zip
+   * that actually exists on disk.
+   *
+   * MAME-side and HBMAME-side namespaces are flat (no subdirs the
+   * MiSTer loader looks at) so a `-maxdepth 1` walk is sufficient.
+   * Duplicates across the two dirs are deduped by the caller.
+   *
+   * Returns an empty list when neither dir exists.
+   */
+  listArcadeZipBasenames(): Promise<readonly string[]>;
 
   /**
    * Toggle the visibility of one ROM at `<coreDir>/<subPath>/<filename>`.

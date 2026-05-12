@@ -39,7 +39,12 @@ export type DiagSubsystem =
   // ImageCache fetch, the orchestrator's bytes wrapper, the IPC
   // hop, and the renderer's useBoxArt → <img> render path. Grep
   // `[boxart]` to follow one URL from request to display.
-  | 'boxart';
+  | 'boxart'
+  // feat/arcade-playability-data (PR 1/2) — playability scan
+  // tracer. One `[arcade]` line per scan emit on connect or
+  // forceRefresh, carrying the cold/warm timing, the cache flag,
+  // and the bucket counts.
+  | 'arcade';
 export type DiagGlyph = '→' | '←' | '✗' | '·';
 
 /**
