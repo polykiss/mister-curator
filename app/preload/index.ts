@@ -309,6 +309,12 @@ const api: MisterApi = {
   },
   setAutoScrapeFocus: (coreId: string) =>
     invoke<void>(IPC_CHANNELS.setAutoScrapeFocus, coreId),
+  // fix/status-bar-recovery — pull the engine's current state.
+  // Returns the same shape `onAutoScrapeProgress` events carry;
+  // the AutoScrapeProvider calls this on every reconnect tick
+  // to recover from event-stream gaps.
+  getAutoScrapeState: () =>
+    invoke<AutoScrapeProgressEvent>(IPC_CHANNELS.getAutoScrapeState),
   // feat/arcade-phase-1.5 — .mra listing + hide/unhide.
   listArcadeMraEntries: (
     options?: { readonly forceRefresh?: boolean },

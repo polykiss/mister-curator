@@ -661,4 +661,53 @@ describe('AutoScrapeEngine', () => {
         });
     });
   });
+
+  // fix/status-bar-recovery — pin the late-subscriber re-sync
+  // contract. The renderer's AutoScrapeProvider calls
+  // `getCurrentState` on every transition into `'connected'` so the
+  // footer recovers from missed progress events. These tests pin
+  // the shape the renderer relies on so a refactor that drops the
+  // `completedCoreIds` field (or flips the state machine) trips
+  // here rather than silently breaking the UI.
+  describe('getCurrentState — late-subscriber re-sync', () => {
+    it('returns the idle event before any start() call', () => {
+      const { engine } = makeEngine({});
+      const snapshot = engine.getCurrentState();
+      expect(snapshot).toEqual({ state: 'idle', completedCoreIds: [] });
+    });
+
+    it('returns an active snapshot while a scrape is in flight', async () => {
+      let resolveScrape: (() => void) | null = null;
+      const { engine } = makeEngine({
+        pathsByCore: { SNES: ['a', 'b'] },
+        // Suspend the scrape so we can interrogate state mid-flight.
+        scrapeOverride: async () => {
+          await new Promise<void>((res) => {
+            resolveScrape = res;
+          });
+        },
+      });
+      engine.start(['SNES']);
+      // Yield until the runLoop has shifted SNES off the queue.
+      await flush();
+      const snapshot = engine.getCurrentState();
+      expect(snapshot.state).toBe('active');
+      if (snapshot.state === 'active') {
+        expect(snapshot.coreId).toBe('SNES');
+        expect(snapshot.total).toBe(2);
+      }
+      // Unblock + drain so afterEach doesn't leak the in-flight scrape.
+      resolveScrape?.();
+      await flush();
+    });
+
+    it('returns the persisted completed set on idle after a finished run', async () => {
+      const { engine } = makeEngine({ pathsByCore: { NES: ['a'] } });
+      engine.start(['NES']);
+      await flush();
+      const snapshot = engine.getCurrentState();
+      expect(snapshot.state).toBe('idle');
+      expect(snapshot.completedCoreIds).toContain('NES');
+    });
+  });
 });

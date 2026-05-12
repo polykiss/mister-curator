@@ -3,6 +3,8 @@ import type { JSX, ReactNode } from 'react';
 
 import type { AutoScrapeProgressEvent } from '@shared/preload-api';
 
+import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
+
 /**
  * PR-C (PR #26) — Auto-scrape progress context.
  *
@@ -15,6 +17,19 @@ import type { AutoScrapeProgressEvent } from '@shared/preload-api';
  * the engine grows more knobs (per-core toggle, multi-core parallel,
  * etc.), this context can extend. For now, single source of truth
  * for the footer's "<core> · <done>/<total>" rendering.
+ *
+ * fix/status-bar-recovery — extends the push-only event stream with
+ * an on-demand `getAutoScrapeState` pull keyed to connection status.
+ * Pre-fix: on a disconnect → reconnect cycle, the engine emits
+ * `'idle'` during pause(), then the post-reconnect `engine.start()`
+ * path is supposed to re-emit `'active'`. If anything in that path
+ * fails silently (the `listAllCoresWithFiles` catch arm in
+ * `app/main/index.ts` swallowed errors pre-fix), the renderer is
+ * stuck on `'idle'` and the footer's `autoScrapeMessageFor` returns
+ * null — the user sees an empty footer-left even though work is
+ * (or should be) underway. Re-syncing on every transition into
+ * `'connected'` closes the gap regardless of the event-stream
+ * reliability.
  */
 
 const DEFAULT_STATE: AutoScrapeProgressEvent = {
@@ -30,6 +45,7 @@ export function AutoScrapeProvider({
   readonly children: ReactNode;
 }): JSX.Element {
   const [progress, setProgress] = useState<AutoScrapeProgressEvent>(DEFAULT_STATE);
+  const { status } = useConnection();
 
   useEffect(() => {
     // Subscribe to engine events. The preload bridge returns an
@@ -40,6 +56,33 @@ export function AutoScrapeProvider({
     });
     return unsubscribe;
   }, []);
+
+  // fix/status-bar-recovery — pull ground truth from the engine on
+  // every transition into `'connected'`. Covers (a) initial mount,
+  // when the renderer hadn't subscribed yet so any pre-mount
+  // engine events were lost, and (b) post-reconnect, where the
+  // last seen event might be a stale `'idle'` from the disconnect-
+  // pause emission and the supposed `'active'` re-emit never
+  // landed (silently-failed engine.start in the main process).
+  // Cancelled requests are tolerated via a stale-flag closure so
+  // a rapid reconnect cycle doesn't apply a superseded snapshot.
+  useEffect(() => {
+    if (status !== 'connected') return;
+    let cancelled = false;
+    void window.mister
+      .getAutoScrapeState()
+      .then((snapshot) => {
+        if (!cancelled) setProgress(snapshot);
+      })
+      .catch(() => {
+        // IPC failed (renderer/main mismatch, etc.) — keep the
+        // previous progress state; the live event stream still
+        // works in the steady-state path.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [status]);
 
   return (
     <AutoScrapeContext.Provider value={progress}>

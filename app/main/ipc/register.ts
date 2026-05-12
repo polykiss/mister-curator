@@ -40,7 +40,10 @@ import type {
 import type { MetadataOrchestrator } from '@app/main/metadata/metadata-orchestrator';
 import { lookupScreenScraperSystemId } from '@app/main/metadata/screenscraper-system-map';
 import type { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
-import type { AutoScrapeEngine } from '@app/main/services/auto-scrape-engine';
+import type {
+  AutoScrapeEngine,
+  AutoScrapeEvent,
+} from '@app/main/services/auto-scrape-engine';
 import type { ProfileStore } from '@app/main/storage/profile-store';
 
 type IpcHandler<TArgs extends readonly unknown[], TResult> = (
@@ -343,6 +346,16 @@ export function registerIpcHandlers(
     if (coreId === ARCADE_VIRTUAL_CORE_ID) return;
     autoScrapeEngine.setFocus(coreId);
   });
+
+  // fix/status-bar-recovery — renderer-driven pull of the engine's
+  // current state. The push-only `autoScrapeProgress` stream is
+  // enough in steady state, but a disconnect/reconnect cycle can
+  // leave the renderer with a stale `'idle'` event from the
+  // pause() emission. The AutoScrapeProvider calls this on every
+  // `'connected'` status transition to re-sync to ground truth.
+  handle<[], AutoScrapeEvent>(IPC_CHANNELS.getAutoScrapeState, () =>
+    autoScrapeEngine.getCurrentState(),
+  );
 
   // feat/arcade-phase-1.5 — .mra listing + hide/unhide.
   handle<

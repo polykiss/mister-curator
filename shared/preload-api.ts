@@ -95,6 +95,17 @@ export const IPC_CHANNELS = {
   // active core resumes after).
   autoScrapeProgress: 'mister:autoScrapeProgress',
   setAutoScrapeFocus: 'mister:setAutoScrapeFocus',
+  // fix/status-bar-recovery — pull the engine's current state on
+  // demand. The push-only `autoScrapeProgress` stream is fine in
+  // steady state but a disconnect/reconnect cycle can leave the
+  // renderer with a stale `'idle'` event from the pause() emission,
+  // and any subsequent `'active'` event depends on the post-
+  // reconnect `listAllCoresWithFiles` + `engine.start` path
+  // succeeding cleanly. If that path throws (silently swallowed in
+  // `index.ts`), the renderer stays stuck on `'idle'`. This IPC
+  // gives the renderer ground truth on every reconnect tick so
+  // the footer recovers regardless of event-stream gaps.
+  getAutoScrapeState: 'mister:getAutoScrapeState',
   // feat/arcade-phase-1.5 — .mra listing + hide/unhide for the
   // MiSTer arcade menu. Distinct from `mame` core ops (which target
   // .zip ROMs in /media/fat/games/mame/); these target .mra files
@@ -581,6 +592,14 @@ export interface MisterApi {
    * position 1. No-op if the focused core is already active.
    */
   setAutoScrapeFocus(coreId: string): Promise<void>;
+  /**
+   * fix/status-bar-recovery — pull the engine's current state.
+   * Called by the AutoScrapeProvider on every reconnect so the
+   * footer recovers even when an event-stream gap (e.g. the
+   * post-reconnect `engine.start` silently failing) would
+   * otherwise leave the renderer stuck on a stale `'idle'`.
+   */
+  getAutoScrapeState(): Promise<AutoScrapeProgressEvent>;
   // feat/arcade-phase-1.5 — .mra listing + hide/unhide. Distinct
   // from `mame` core ops; targets `/media/fat/_Arcade/` instead of
   // `/media/fat/games/mame/`. Same dot-prefix hide convention.

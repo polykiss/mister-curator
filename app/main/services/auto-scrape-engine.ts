@@ -154,6 +154,19 @@ export class AutoScrapeEngine {
   private isPaused = true;
   private isLoopRunning = false;
   /**
+   * fix/status-bar-recovery — last-known progress for the currently-
+   * active scrape. Tracked instance-side (not just inside runLoop's
+   * local scope) so `getCurrentState` can serve a fresh snapshot
+   * to late-subscribers — specifically the renderer's
+   * AutoScrapeProvider after a reconnect, when the event stream
+   * may have skipped the most recent `'active'` emission.
+   *
+   * Reset to `0/0` when no scrape is running (currentCoreId is
+   * null); always synced to the latest emitted values while active.
+   */
+  private currentDone = 0;
+  private currentTotal = 0;
+  /**
    * feat/auto-scrape-persistence: in-session set of cores whose
    * scrape pass finished (without abort). The runLoop SKIPS cores
    * already in this set when shifting the queue. Seeded on
@@ -203,8 +216,8 @@ export class AutoScrapeEngine {
       state: 'active',
       coreId: this.currentCoreId,
       coreLabel: coreDisplayName(this.currentCoreId),
-      done: 0,
-      total: 0,
+      done: this.currentDone,
+      total: this.currentTotal,
       completedCoreIds: [...this.completedCoreIds],
       remainingCount: this.queue.filter(
         (c) => !this.completedCoreIds.has(c),
@@ -334,6 +347,11 @@ export class AutoScrapeEngine {
           }
           const total = targets.paths.length;
           let done = 0;
+          // fix/status-bar-recovery — mirror the just-emitted
+          // counters onto the engine instance so `getCurrentState`
+          // serves accurate progress to late-subscribers.
+          this.currentDone = 0;
+          this.currentTotal = total;
           this.emit({
             state: 'active',
             coreId,
@@ -351,6 +369,7 @@ export class AutoScrapeEngine {
               targets,
               () => {
                 done += 1;
+                this.currentDone = done;
                 this.emit({
                   state: 'active',
                   coreId,
@@ -379,6 +398,12 @@ export class AutoScrapeEngine {
           // via its own diagLog hook before they reach the engine.)
         }
         this.currentCoreId = null;
+        // fix/status-bar-recovery — reset progress counters
+        // alongside currentCoreId so `getCurrentState` reports
+        // idle accurately (and any subsequent active phase
+        // starts from a clean 0/0 baseline).
+        this.currentDone = 0;
+        this.currentTotal = 0;
         if (scrapeCompleted) {
           this.completedCoreIds.add(coreId);
           for (const l of this.completionListeners) {

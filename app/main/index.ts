@@ -2,6 +2,7 @@ import path from 'node:path';
 
 import { app, BrowserWindow, shell } from 'electron';
 
+import { diagLog } from '@shared/diag-log';
 import type { RomMetadata } from '@shared/metadata-types';
 import { IPC_CHANNELS } from '@shared/preload-api';
 
@@ -398,10 +399,21 @@ void app.whenReady().then(() => {
             )
           : new Set<string>();
       autoScrapeEngine.start(coreIds, alreadyCompleted);
-    } catch {
+    } catch (err) {
       // listAllCoresWithFiles can fail (SSH dropped right after
       // connect). The engine stays idle; the next status flip
       // (likely 'disconnected' shortly after) is handled above.
+      //
+      // fix/status-bar-recovery — surface this in the diag stream
+      // so a "footer went blank after reconnect" report can be
+      // pinned to the exact failure point. Pre-fix this was a
+      // silent catch; the renderer was left waiting for an
+      // `'active'` event the engine would never emit. The
+      // companion `getAutoScrapeState` IPC also rescues the
+      // renderer regardless of whether this log surfaces.
+      diagLog('warn', 'conn', '·', 'post-connect-engine-start-failed', {
+        err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
     }
   });
 
