@@ -54,11 +54,18 @@ export class CacheManager {
 
   async getCoresCache(host: string): Promise<CoresCacheEntry | null> {
     const path = this.coresCachePath(host);
-    const parsed = await readJsonOrNull<unknown>(path);
-    if (parsed === null) {
-      this.fire('miss', { surface: 'cores', host });
+    const read = await readJsonOrNull<unknown>(path);
+    if (read.reason !== null) {
+      // Surface the underlying read reason in the event note so
+      // `MISTERCURATOR_CACHE_LOG=1` distinguishes "file missing"
+      // (`enoent`) from "corrupt JSON" (`syntax`) from "something
+      // else threw" (`other`). Pre-fix every cold-cache log line
+      // was an unannotated `cache.miss`, hiding genuine silent
+      // failures behind the expected file-missing case.
+      this.fire('miss', { surface: 'cores', host, note: read.reason });
       return null;
     }
+    const parsed = read.value;
     if (!isCoresCacheEntry(parsed)) {
       // Schema mismatch or corruption. Treat as a miss; the next
       // write replaces the bad file.
@@ -107,12 +114,18 @@ export class CacheManager {
     coreId: string,
     subPath: string,
   ): Promise<RomsCacheSlot | null> {
-    const file = await this.readRomsCacheFile(host, coreId);
-    if (file === null) {
-      this.fire('miss', { surface: 'roms', host, coreId, subPath });
+    const read = await this.readRomsCacheFile(host, coreId);
+    if (read.note !== null) {
+      this.fire('miss', {
+        surface: 'roms',
+        host,
+        coreId,
+        subPath,
+        note: read.note,
+      });
       return null;
     }
-    const slot = file.bySubPath[subPath];
+    const slot = read.value.bySubPath[subPath];
     if (slot === undefined) {
       this.fire('miss', { surface: 'roms', host, coreId, subPath });
       return null;
@@ -134,7 +147,7 @@ export class CacheManager {
       data,
     };
     const bySubPath: Record<string, RomsCacheSlot> = {
-      ...(existing?.bySubPath ?? {}),
+      ...(existing.value?.bySubPath ?? {}),
       [subPath]: slot,
     };
     const file: RomsCacheFile = {
@@ -174,11 +187,12 @@ export class CacheManager {
     host: string,
   ): Promise<ArcadeMraMetaCacheEntry | null> {
     const path = this.arcadeMraMetaCachePath(host);
-    const parsed = await readJsonOrNull<unknown>(path);
-    if (parsed === null) {
-      this.fire('miss', { surface: 'arcade', host });
+    const read = await readJsonOrNull<unknown>(path);
+    if (read.reason !== null) {
+      this.fire('miss', { surface: 'arcade', host, note: read.reason });
       return null;
     }
+    const parsed = read.value;
     if (!isArcadeMraMetaCacheEntry(parsed)) {
       this.fire('miss', {
         surface: 'arcade',
@@ -283,15 +297,29 @@ export class CacheManager {
 
   // ─── internals ────────────────────────────────────────────────────
 
+  /**
+   * Returns the parsed roms-cache file alongside an optional `note`
+   * explaining why it returned null (so the public `getRomsCache`
+   * can thread the reason into the event). `note` is one of:
+   *   - `'enoent' | 'syntax' | 'other'` from `readJsonOrNull`
+   *   - `'schema mismatch'` when the JSON parsed but didn't match
+   *   - `'host mismatch'` when the file was misfiled across hosts
+   *   - `null` on success (in which case `value` is non-null)
+   */
   private async readRomsCacheFile(
     host: string,
     coreId: string,
-  ): Promise<RomsCacheFile | null> {
-    const parsed = await readJsonOrNull<unknown>(this.romsCachePath(host, coreId));
-    if (parsed === null) return null;
-    if (!isRomsCacheFile(parsed)) return null;
-    if (parsed.host !== host || parsed.coreId !== coreId) return null;
-    return parsed;
+  ): Promise<
+    | { readonly value: RomsCacheFile; readonly note: null }
+    | { readonly value: null; readonly note: string }
+  > {
+    const read = await readJsonOrNull<unknown>(this.romsCachePath(host, coreId));
+    if (read.reason !== null) return { value: null, note: read.reason };
+    if (!isRomsCacheFile(read.value)) return { value: null, note: 'schema mismatch' };
+    if (read.value.host !== host || read.value.coreId !== coreId) {
+      return { value: null, note: 'host mismatch' };
+    }
+    return { value: read.value, note: null };
   }
 
   private hostDir(host: string): string {
@@ -340,12 +368,13 @@ export class CacheManager {
     const metas: FileMeta[] = [];
     for (const e of jsonFiles) {
       const path = join(dir, e);
-      const parsed = await readJsonOrNull<unknown>(path);
-      if (!isRomsCacheFile(parsed)) {
+      const read = await readJsonOrNull<unknown>(path);
+      if (read.value === null || !isRomsCacheFile(read.value)) {
         // Unparseable — evict-first candidate (mostRecent = 0).
         metas.push({ path, mostRecent: 0, coreId: e.replace(/\.json$/, '') });
         continue;
       }
+      const parsed = read.value;
       let mostRecent = 0;
       for (const slot of Object.values(parsed.bySubPath)) {
         const t = Date.parse(slot.cachedAt);
@@ -373,14 +402,57 @@ export class CacheManager {
 
 // ─── helpers ────────────────────────────────────────────────────────
 
-async function readJsonOrNull<T>(path: string): Promise<T | null> {
+/**
+ * Why this failed when `value` is null. `'enoent'` and `'syntax'`
+ * are the historically-silenced cases (file missing / JSON corrupt);
+ * `'other'` is the catch-all that used to throw — it now returns the
+ * sentinel AND logs the underlying error so silent-failure cases
+ * surface in dev logs (`console.error`) and in the cache-event note
+ * field. `null` reason means the read succeeded.
+ */
+export type ReadJsonReason = 'enoent' | 'syntax' | 'other';
+
+export type ReadJsonResult<T> =
+  | { readonly value: T; readonly reason: null }
+  | { readonly value: null; readonly reason: ReadJsonReason };
+
+/**
+ * Read + parse a JSON file. Returns a discriminated result so callers
+ * can distinguish file-missing from corrupt-JSON from any-other-thrown
+ * error. Pre-fix this function returned `T | null` for the first two
+ * cases and THREW on anything else — the no-note `cache.miss` events
+ * in production logs could not tell the cases apart, hiding an
+ * unresolved silent-failure bug (cache files present on disk but
+ * `getCoresCache` reporting `miss`).
+ *
+ * The `'other'` branch additionally logs the error + stack at error
+ * level so the next live-verify run produces a definitive line. The
+ * caller decides whether to surface `reason` in user-visible events.
+ */
+async function readJsonOrNull<T>(
+  filePath: string,
+): Promise<ReadJsonResult<T>> {
   try {
-    const raw = await fs.readFile(path, 'utf-8');
-    return JSON.parse(raw) as T;
+    const raw = await fs.readFile(filePath, 'utf-8');
+    return { value: JSON.parse(raw) as T, reason: null };
   } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') return null;
-    if (err instanceof SyntaxError) return null;
-    throw err;
+    if (isNodeError(err) && err.code === 'ENOENT') {
+      return { value: null, reason: 'enoent' };
+    }
+    if (err instanceof SyntaxError) {
+      return { value: null, reason: 'syntax' };
+    }
+    // Catch-all. Pre-fix this branch THREW, which prevented the
+    // unknown failure mode from showing up in production cache-miss
+    // logs. We now surface it through both channels: `console.error`
+    // for the in-process diagnostic stream, and the returned reason
+    // so the caller can mark the `cache.miss` event with note='other'.
+    // eslint-disable-next-line no-console
+    console.error(
+      `[cache] readJsonOrNull: unexpected error reading ${filePath}`,
+      err,
+    );
+    return { value: null, reason: 'other' };
   }
 }
 
