@@ -38,8 +38,11 @@ const ROMS_DENSITY_EYE_SOURCE = readFileSync(
   resolve(__dirname, 'RomMetadataCells.tsx'),
   'utf8',
 );
+// feat/arcade-refactor-1-adapter — RomsPane.tsx is now a thin
+// wrapper around ItemListPane; the JSX that scans match here lives
+// in roms-adapter.tsx.
 const ROMS_PANE = readFileSync(
-  resolve(__dirname, 'RomsPane.tsx'),
+  resolve(__dirname, 'roms-adapter.tsx'),
   'utf8',
 );
 const CORES_PANE = readFileSync(
