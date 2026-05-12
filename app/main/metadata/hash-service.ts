@@ -87,6 +87,36 @@ export interface HashEntry {
 }
 
 /**
+ * feat/hash-failure-sentinel — persisted record of "we tried to hash
+ * this file and couldn't (SSH timeout, transient error, etc.). Don't
+ * retry until its stat changes." The witness is `size + mtime`; on
+ * the next connect the orchestrator validates the witness against a
+ * fresh stat:
+ *   - witness matches  → skip the hash attempt, treat as `source=none`
+ *                        with reason `cached-hash-failed`. This stops
+ *                        the retry-forever loop on files whose md5
+ *                        legitimately can't complete in the 120s
+ *                        device-side SSH timeout (multi-GB wrapper
+ *                        zips on Saturn translations, etc.).
+ *   - witness drifted  → drop the sentinel, retry the hash. The user
+ *                        replaced or shrunk the file; it deserves
+ *                        another shot.
+ *
+ * Stored on `failedEntries` of the same `hashes.json` file as the
+ * successful entries so a single atomic write covers both. Sentinels
+ * are mutually exclusive with successful `HashEntry` for the same
+ * path — `doComputeHash` clears the sentinel on a successful hash
+ * and writes a sentinel after catching a hash failure.
+ */
+export interface HashFailureEntry {
+  readonly size: number;
+  readonly mtime: number;
+  readonly failedAt: string;
+  /** Best-effort error message captured at sentinel-write time. */
+  readonly error?: string;
+}
+
+/**
  * fix/mtime-tolerance — `checkCachedMtimes` return shape.
  *
  * `entries` is the original Round-9 contract: every input path keys
@@ -110,6 +140,20 @@ export interface CheckCachedMtimesResult {
   readonly exactCount: number;
   readonly toleranceCount: number;
   readonly sampleCount: number;
+  /**
+   * feat/hash-failure-sentinel — paths whose cached `HashFailureEntry`
+   * witness (size + mtime) still matches the device's current stat.
+   * Caller MUST skip the hash attempt for these — re-running would
+   * just time out again. A stat drift (mtime past the ±2s tolerance
+   * window or any size change) drops the sentinel and routes the
+   * path back into the normal `entries` / re-hash flow.
+   *
+   * `failedPaths` and `entries.get(p) !== null` are mutually
+   * exclusive: paths in this set are NOT present in the entries map
+   * (deleted there to prevent the orchestrator's existing per-path
+   * branch from picking them up as a hit).
+   */
+  readonly failedPaths: ReadonlySet<string>;
 }
 
 interface HashCacheFile {
@@ -118,6 +162,14 @@ interface HashCacheFile {
   readonly hashStrategyVersion: typeof HASH_STRATEGY_VERSION;
   readonly host: string;
   readonly entries: Readonly<Record<string, HashEntry>>;
+  /**
+   * feat/hash-failure-sentinel — paths whose hash attempt failed
+   * (SSH timeout on multi-GB Saturn wrapper zips, etc.). Persisted
+   * so the next connect can validate the file's stat and skip the
+   * retry. Optional on the wire so older cache files (pre-sentinel)
+   * parse cleanly as `undefined` → empty.
+   */
+  readonly failedEntries?: Readonly<Record<string, HashFailureEntry>>;
 }
 
 /**
@@ -198,6 +250,14 @@ export class HashService {
   private readonly now: () => Date;
   /** Lazily-loaded in-memory copy. Source of truth between calls. */
   private readonly memCache = new Map<string, Record<string, HashEntry>>();
+  /**
+   * feat/hash-failure-sentinel — companion to `memCache`. Populated
+   * by the same `loadFromDisk` pass, persisted via the same atomic
+   * `writeAll` so on-disk hashes.json always reflects a consistent
+   * (entries, failedEntries) pair. A null/absent entry on disk maps
+   * to `{}` in memory; the comparator treats either uniformly.
+   */
+  private readonly memFailedEntries = new Map<string, Record<string, HashFailureEntry>>();
   /** Per-host serialization gate. */
   private readonly gates = new Map<string, Promise<unknown>>();
 
@@ -252,7 +312,13 @@ export class HashService {
     paths: readonly string[],
   ): Promise<CheckCachedMtimesResult> {
     if (paths.length === 0) {
-      return { entries: new Map(), exactCount: 0, toleranceCount: 0, sampleCount: 0 };
+      return {
+        entries: new Map(),
+        exactCount: 0,
+        toleranceCount: 0,
+        sampleCount: 0,
+        failedPaths: new Set(),
+      };
     }
     return this.runGated(host, () =>
       this.doCheckCachedMtimes(client, host, paths),
@@ -715,9 +781,9 @@ export class HashService {
     paths: readonly string[],
   ): Promise<CheckCachedMtimesResult> {
     const entries = await this.loadEntries(host);
+    const failedEntries = await this.loadFailedEntries(host);
     const result = new Map<string, HashEntry | null>();
-    const cachedPaths = paths.filter((p) => entries[p] !== undefined);
-    const uncachedPaths = paths.filter((p) => entries[p] === undefined);
+    const failedPaths = new Set<string>();
     // Lazy clone of `entries` shared by the sample-refresh and the
     // rename-recovery paths. Declared up top so both code paths
     // can call `ensureMutable` without tripping the TDZ on a later
@@ -728,21 +794,122 @@ export class HashService {
       if (mutatedEntries === null) mutatedEntries = { ...entries };
       return mutatedEntries;
     };
+    // feat/hash-failure-sentinel — lazy clone of `failedEntries`.
+    // Modified when we drop a stale sentinel (stat drift) or keep
+    // one as validated. Persisted alongside `mutatedEntries` at the
+    // end of the method via `writeAll`.
+    let mutatedFailed: Record<string, HashFailureEntry> | null = null;
+    const ensureFailedMutable = (): Record<string, HashFailureEntry> => {
+      if (mutatedFailed === null) mutatedFailed = { ...failedEntries };
+      return mutatedFailed;
+    };
     if (paths.length === 0) {
-      return { entries: result, exactCount: 0, toleranceCount: 0, sampleCount: 0 };
+      return {
+        entries: result,
+        exactCount: 0,
+        toleranceCount: 0,
+        sampleCount: 0,
+        failedPaths,
+      };
+    }
+    // feat/hash-failure-sentinel — validate cached sentinels FIRST so
+    // they're resolved regardless of whether the rest of the flow
+    // has work to do (a cache with ONLY sentinels would otherwise
+    // short-circuit at the statTargets-empty early return below and
+    // skip sentinel detection entirely). `statPathsWithSize` runs
+    // only if there ARE sentinels for the input paths — for users
+    // with no failures this is free.
+    const sentinelCandidates = paths.filter((p) => failedEntries[p] !== undefined);
+    if (sentinelCandidates.length > 0) {
+      let sizes: Record<string, SizeAndMtime> = {};
+      let sizesOk = true;
+      try {
+        sizes = await client.statPathsWithSize(sentinelCandidates);
+      } catch {
+        // Best-effort — keep all sentinels as-is so we don't retry
+        // hashes that would just time out again. Falling back to
+        // "drop and retry" on a transient SSH glitch would defeat
+        // the whole sentinel purpose.
+        sizesOk = false;
+      }
+      for (const p of sentinelCandidates) {
+        const sentinel = failedEntries[p]!;
+        const fresh = sizesOk ? sizes[p] : undefined;
+        const stillFailing =
+          fresh !== undefined &&
+          fresh.mtime > 0 &&
+          fresh.size === sentinel.size &&
+          mtimesMatch(fresh.mtime, sentinel.mtime);
+        if (stillFailing) {
+          // Witness matches — keep the sentinel, mark the path as
+          // skip-hash. The orchestrator's per-path branch sees this
+          // path's null entry AND checks `failedPaths` to skip the
+          // SSH op entirely.
+          failedPaths.add(p);
+          result.set(p, null);
+          diagLog('info', 'meta', '·', 'hash-decision', {
+            path: pathBasename(p),
+            action: 'skip-hash',
+            reason: 'cached-hash-failed',
+            size: sentinel.size,
+            mtime: sentinel.mtime,
+          });
+        } else if (sizesOk) {
+          // Stat drifted (size differs, mtime past tolerance, or
+          // file vanished). Drop the sentinel so the next attempt
+          // re-hashes. A vanished file (`fresh.mtime === 0`) re-
+          // hashes cleanly because the device-side script omits
+          // missing paths from its output — the orchestrator sees
+          // `entry === undefined` and emits `unmatched`.
+          delete ensureFailedMutable()[p];
+          diagLog('info', 'meta', '·', 'hash-decision', {
+            path: pathBasename(p),
+            action: 'retry-hash',
+            reason: 'sentinel-stat-drift',
+            cachedSize: sentinel.size,
+            cachedMtime: sentinel.mtime,
+            currentSize: fresh?.size ?? 0,
+            currentMtime: fresh?.mtime ?? 0,
+          });
+        }
+      }
     }
     // feat/rename-aware-hash-cache: stat ALL paths so the rename
     // recovery (uncached paths whose mtime uniquely identifies an
     // existing cache entry) can run alongside the normal cached-path
     // mtime validation. Skip the stat for uncached paths when the
-    // cache is empty — there's nothing to migrate them onto.
+    // cache is empty — there's nothing to migrate them onto. Skip
+    // sentinel-resolved paths too — they don't need re-validation,
+    // we already decided they're skipping.
     const cacheIsEmpty = Object.keys(entries).length === 0;
-    const statTargets = cacheIsEmpty ? cachedPaths : paths;
+    // `cachedPaths` / `uncachedPaths` exclude sentinel-resolved paths
+    // because those have already produced a `failedPaths` decision
+    // above — re-checking them here would just override the result.
+    const remainingPaths = failedPaths.size === 0
+      ? paths
+      : paths.filter((p) => !failedPaths.has(p));
+    const cachedPaths = remainingPaths.filter(
+      (p) => entries[p] !== undefined,
+    );
+    const uncachedPaths = remainingPaths.filter(
+      (p) => entries[p] === undefined,
+    );
+    const statTargets = cacheIsEmpty ? cachedPaths : remainingPaths;
     if (statTargets.length === 0) {
       for (const p of paths) {
         if (!result.has(p)) result.set(p, null);
       }
-      return { entries: result, exactCount: 0, toleranceCount: 0, sampleCount: 0 };
+      if (mutatedFailed !== null) {
+        this.memFailedEntries.set(host, mutatedFailed);
+        await this.writeAll(host, entries, mutatedFailed);
+      }
+      return {
+        entries: result,
+        exactCount: 0,
+        toleranceCount: 0,
+        sampleCount: 0,
+        failedPaths,
+      };
     }
     let mtimes: Awaited<ReturnType<HashClient['statWitnesses']>>;
     try {
@@ -750,10 +917,23 @@ export class HashService {
     } catch {
       // Stat batch failed (transport error, etc.) — return all paths
       // as null so the caller falls through to computeHash for each.
-      // The orchestrator's per-path error handling is the right shape
-      // for this.
-      for (const p of paths) result.set(p, null);
-      return { entries: result, exactCount: 0, toleranceCount: 0, sampleCount: 0 };
+      // Don't overwrite sentinel-resolved paths' `null` (which they
+      // already have); the failedPaths set tells the orchestrator
+      // to skip them regardless.
+      for (const p of paths) {
+        if (!result.has(p)) result.set(p, null);
+      }
+      if (mutatedFailed !== null) {
+        this.memFailedEntries.set(host, mutatedFailed);
+        await this.writeAll(host, entries, mutatedFailed);
+      }
+      return {
+        entries: result,
+        exactCount: 0,
+        toleranceCount: 0,
+        sampleCount: 0,
+        failedPaths,
+      };
     }
     let exactCount = 0;
     let toleranceCount = 0;
@@ -893,11 +1073,20 @@ export class HashService {
         next[m.to] = m.entry;
       }
     }
-    if (mutatedEntries !== null) {
-      this.memCache.set(host, mutatedEntries);
-      await this.writeEntries(host, mutatedEntries);
+    if (mutatedEntries !== null || mutatedFailed !== null) {
+      const nextEntries = mutatedEntries ?? entries;
+      const nextFailed = mutatedFailed ?? failedEntries;
+      if (mutatedEntries !== null) this.memCache.set(host, nextEntries);
+      if (mutatedFailed !== null) this.memFailedEntries.set(host, nextFailed);
+      await this.writeAll(host, nextEntries, nextFailed);
     }
-    return { entries: result, exactCount, toleranceCount, sampleCount };
+    return {
+      entries: result,
+      exactCount,
+      toleranceCount,
+      sampleCount,
+      failedPaths,
+    };
   }
 
   private async doComputeHash(
@@ -905,7 +1094,23 @@ export class HashService {
     host: string,
     path: string,
   ): Promise<HashEntry | undefined> {
-    const records = await client.hashPaths([path]);
+    let records: readonly HashRecord[];
+    try {
+      records = await client.hashPaths([path]);
+    } catch (err) {
+      // feat/hash-failure-sentinel — persist a sentinel keyed by the
+      // file's CURRENT stat so future connects can skip the retry.
+      // Stat-after-the-fact is a separate, cheap SSH op; failing
+      // that too just means we don't record a sentinel this round
+      // and the path will retry on the next connect (today's pre-
+      // PR behaviour). Re-throws the original error so the
+      // orchestrator's existing `[prefetch] ✗ hash failed` log line
+      // still fires.
+      await this.recordHashFailure(client, host, path, err).catch(() => {
+        /* swallow — sentinel recording is best-effort. */
+      });
+      throw err;
+    }
     if (records.length === 0) return undefined;
     // hashPaths can return multiple records on one input only when
     // the script aliases (it doesn't); take the first / only one.
@@ -939,10 +1144,67 @@ export class HashService {
       sampleMd5,
     });
     const entries = await this.loadEntries(host);
+    const failedEntries = await this.loadFailedEntries(host);
     const next = { ...entries, [r.path]: entry };
+    // Successful hash clears any sentinel for this path — the file
+    // is no longer the "perma-failing" kind. Skip the clone when
+    // there's nothing to clear (the common case for fresh paths).
+    let nextFailed = failedEntries;
+    if (r.path in failedEntries) {
+      const cleared: Record<string, HashFailureEntry> = { ...failedEntries };
+      delete cleared[r.path];
+      nextFailed = cleared;
+      this.memFailedEntries.set(host, nextFailed);
+      diagLog('info', 'meta', '·', 'hash-sentinel-cleared', {
+        path: pathBasename(r.path),
+        reason: 'hash-succeeded',
+      });
+    }
     this.memCache.set(host, next);
-    await this.writeEntries(host, next);
+    await this.writeAll(host, next, nextFailed);
     return entry;
+  }
+
+  /**
+   * feat/hash-failure-sentinel — capture the file's current stat and
+   * write a sentinel into the persisted cache. The witness validates
+   * on the next connect via `doCheckCachedMtimes`: matching stat →
+   * skip the hash attempt; drifted stat → drop the sentinel and
+   * retry. A stat failure here (e.g. device dropped mid-flight)
+   * silently no-ops; the next connect retries the hash like today.
+   */
+  private async recordHashFailure(
+    client: HashClient,
+    host: string,
+    path: string,
+    err: unknown,
+  ): Promise<void> {
+    const stats = await client.statPathsWithSize([path]);
+    const fresh = stats[path];
+    // mtime === 0 from busybox means "stat couldn't open the file"
+    // (vanished, permission denied, etc.). Recording a `{size: 0,
+    // mtime: 0}` sentinel would never validate against any real
+    // future stat — pointless. Skip and let the next connect retry.
+    if (fresh === undefined || fresh.mtime === 0) return;
+    const failedEntries = await this.loadFailedEntries(host);
+    const next: Record<string, HashFailureEntry> = {
+      ...failedEntries,
+      [path]: {
+        size: fresh.size,
+        mtime: fresh.mtime,
+        failedAt: this.now().toISOString(),
+        error: err instanceof Error ? err.message : String(err),
+      },
+    };
+    this.memFailedEntries.set(host, next);
+    const entries = await this.loadEntries(host);
+    await this.writeAll(host, entries, next);
+    diagLog('info', 'meta', '·', 'hash-sentinel-recorded', {
+      path: pathBasename(path),
+      size: fresh.size,
+      mtime: fresh.mtime,
+      err: err instanceof Error ? err.message : String(err),
+    });
   }
 
   /**
@@ -983,28 +1245,70 @@ export class HashService {
   }
 
   private async loadEntries(host: string): Promise<Record<string, HashEntry>> {
-    const cached = this.memCache.get(host);
-    if (cached !== undefined) return cached;
-    const file = await readJsonOrNull<unknown>(this.cachePath(host));
-    if (file === null || !isHashCacheFile(file) || file.host !== host) {
-      const empty: Record<string, HashEntry> = {};
-      this.memCache.set(host, empty);
-      return empty;
-    }
-    const entries = { ...file.entries };
-    this.memCache.set(host, entries);
-    return entries;
+    await this.loadFromDisk(host);
+    return this.memCache.get(host)!;
   }
 
+  /**
+   * feat/hash-failure-sentinel — sibling of `loadEntries`. Both load
+   * from the same `hashes.json` via `loadFromDisk` so the two maps
+   * stay paired in memory.
+   */
+  private async loadFailedEntries(
+    host: string,
+  ): Promise<Record<string, HashFailureEntry>> {
+    await this.loadFromDisk(host);
+    return this.memFailedEntries.get(host)!;
+  }
+
+  /**
+   * Read `hashes.json` once per host and populate BOTH memCaches.
+   * Idempotent on subsequent calls (returns from memCache directly).
+   */
+  private async loadFromDisk(host: string): Promise<void> {
+    if (this.memCache.has(host) && this.memFailedEntries.has(host)) return;
+    const file = await readJsonOrNull<unknown>(this.cachePath(host));
+    if (file === null || !isHashCacheFile(file) || file.host !== host) {
+      this.memCache.set(host, {});
+      this.memFailedEntries.set(host, {});
+      return;
+    }
+    this.memCache.set(host, { ...file.entries });
+    this.memFailedEntries.set(host, { ...(file.failedEntries ?? {}) });
+  }
+
+  /**
+   * Persist `entries` to disk. `failedEntries` (the hash-failure
+   * sentinel map) is preserved from memCache — callers updating only
+   * one half don't lose the other.
+   */
   private async writeEntries(
     host: string,
     entries: Record<string, HashEntry>,
+  ): Promise<void> {
+    const failedEntries = await this.loadFailedEntries(host);
+    await this.writeAll(host, entries, failedEntries);
+  }
+
+  /**
+   * feat/hash-failure-sentinel — sibling of `writeEntries`. Persists
+   * both maps at once so a sentinel-add or sentinel-clear is atomic
+   * with the underlying entries snapshot.
+   */
+  private async writeAll(
+    host: string,
+    entries: Record<string, HashEntry>,
+    failedEntries: Record<string, HashFailureEntry>,
   ): Promise<void> {
     const data: HashCacheFile = {
       version: HASH_CACHE_SCHEMA_VERSION,
       hashStrategyVersion: HASH_STRATEGY_VERSION,
       host,
       entries,
+      // Omit the field entirely when empty to keep older app versions
+      // (which use `!isHashCacheFile` to reject unknown shapes) from
+      // tripping on a `failedEntries: {}` they don't understand.
+      ...(Object.keys(failedEntries).length > 0 ? { failedEntries } : {}),
     };
     await writeJsonAtomic(this.cachePath(host), data);
   }
@@ -1055,6 +1359,37 @@ function isHashCacheFile(v: unknown): v is HashCacheFile {
   for (const entry of Object.values(o.entries as Record<string, unknown>)) {
     if (!isHashEntry(entry)) return false;
   }
+  // feat/hash-failure-sentinel — `failedEntries` is optional. An
+  // older pre-sentinel file with the field absent passes; a sentinel
+  // map with malformed entries invalidates the whole file (safer
+  // than silently dropping bad sentinels, which would re-enter the
+  // retry-forever loop).
+  if (o.failedEntries !== undefined) {
+    if (o.failedEntries === null || typeof o.failedEntries !== 'object') {
+      return false;
+    }
+    for (const entry of Object.values(
+      o.failedEntries as Record<string, unknown>,
+    )) {
+      if (!isHashFailureEntry(entry)) return false;
+    }
+  }
+  return true;
+}
+
+function isHashFailureEntry(v: unknown): v is HashFailureEntry {
+  if (v === null || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  if (
+    !(
+      typeof o.size === 'number' &&
+      typeof o.mtime === 'number' &&
+      typeof o.failedAt === 'string'
+    )
+  ) {
+    return false;
+  }
+  if (o.error !== undefined && typeof o.error !== 'string') return false;
   return true;
 }
 

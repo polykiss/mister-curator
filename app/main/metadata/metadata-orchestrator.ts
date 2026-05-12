@@ -464,6 +464,11 @@ export class MetadataOrchestrator {
     // round-5 per-ROM isolation (so the multi-GB Collection still
     // only fails its own row).
     let mtimeMap: Map<string, HashEntry | null>;
+    // feat/hash-failure-sentinel — paths whose cached hash-failure
+    // sentinel's witness still matches the device's current stat.
+    // The per-path loop below short-circuits these so we never
+    // re-attempt a hash that just timed out last time.
+    let cachedHashFailures: ReadonlySet<string> = new Set();
     if (wholeCoreUnmappable) {
       diagLog('info', 'prefetch', '·', 'skip-hash-batch', {
         coreId,
@@ -486,11 +491,18 @@ export class MetadataOrchestrator {
           romPaths,
         );
         mtimeMap = checked.entries;
+        // Defensive default: a test double or older HashService that
+        // omits `failedPaths` is treated as "no cached failures."
+        cachedHashFailures = checked.failedPaths ?? new Set();
         const validated = [...mtimeMap.values()].filter(
           (v) => v !== null,
         ).length;
-        const needsHash = [...mtimeMap.values()].filter(
-          (v) => v === null,
+        // `needsHash` excludes paths with a valid hash-failure
+        // sentinel — those will skip the hash attempt below, so
+        // counting them as "needs hash" would over-report the
+        // walk cost the user actually pays.
+        const needsHash = [...mtimeMap.entries()].filter(
+          ([p, v]) => v === null && !cachedHashFailures.has(p),
         ).length;
         diagLog('info', 'prefetch', '·', 'mtime-batch done', {
           coreId,
@@ -504,6 +516,11 @@ export class MetadataOrchestrator {
           // file re-hash. On a MAME ROM redeploy this is what
           // turns the 10-40-minute cold path into seconds.
           validatedSample: checked.sampleCount,
+          // feat/hash-failure-sentinel — count of paths whose
+          // previously-failed hash is still witness-valid this
+          // session. The user sees these as `source=none reason=
+          // cached-hash-failed` and we skip the SSH op entirely.
+          cachedHashFailures: cachedHashFailures.size,
           needsHash,
         });
       } catch (err) {
@@ -589,6 +606,33 @@ export class MetadataOrchestrator {
           ms: Date.now() - perRomStart,
         });
         onResolved({ path, metadata, error: false });
+        resolved += 1;
+        hashSkipped += 1;
+        continue;
+      }
+
+      // feat/hash-failure-sentinel — file's hash attempt failed
+      // previously (typically the 120s SSH timeout on a multi-GB
+      // wrapper zip) and its current stat still matches the
+      // sentinel's witness. Skip the retry; treat as `source=none`
+      // with reason `cached-hash-failed`. The sentinel auto-drops
+      // on stat drift (see `doCheckCachedMtimes`), so a user
+      // replacing the offending file gets a fresh attempt next
+      // connect.
+      if (cachedHashFailures.has(path)) {
+        diagLog('info', 'prefetch', '·', 'skip-hash', {
+          coreId,
+          path: basename(path),
+          reason: 'cached-hash-failed',
+        });
+        diagLog('info', 'meta', '·', 'path-end', {
+          coreId,
+          path: basename(path),
+          source: 'none',
+          reason: 'cached-hash-failed',
+          ms: Date.now() - perRomStart,
+        });
+        onResolved({ path, metadata: null, error: false });
         resolved += 1;
         hashSkipped += 1;
         continue;
