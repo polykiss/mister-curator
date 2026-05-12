@@ -1172,4 +1172,158 @@ describe('HashService', () => {
       expect(result).toEqual({ migrated: 0, needsRehash: 1 });
     });
   });
+
+  // fix/witness-chunking — pre-fix the witness check was one SSH
+  // exec for every path in the input, producing a ~177KB script
+  // for NES (681 paths × 3 path-mentions per row). That exceeded
+  // ssh2's 32KB exec-channel send window and crashed with EPIPE
+  // before busybox saw the command. The chunking helper splits
+  // input into `batchSize`-sized SSH calls.
+  describe('statWitnesses chunking', () => {
+    function manyFixtures(count: number, baseMtime = 1700000000): {
+      paths: string[];
+      hashes: Map<string, FixtureHash>;
+    } {
+      const hashes = new Map<string, FixtureHash>();
+      const paths: string[] = [];
+      for (let i = 0; i < count; i += 1) {
+        const p = `/p/file-${String(i).padStart(4, '0')}.bin`;
+        paths.push(p);
+        // Mtimes shift by 1s per path so an off-by-one in the
+        // aggregation would surface as a wrong mtime, not just a
+        // count mismatch.
+        hashes.set(p, fix(`f${i}`, 1024, baseMtime + i));
+      }
+      return { paths, hashes };
+    }
+
+    it('checkCachedMtimes: 250-path input issues 3 SSH stat calls at default chunk size of 100', async () => {
+      const svc = new HashService(dir);
+      const { paths, hashes } = manyFixtures(250);
+      // Seed cache: a single call covering all 250 will itself
+      // chunk through the helper (3 calls), so the seed call's
+      // `statCalls` count is 3. The follow-up `checkCachedMtimes`
+      // adds 3 more, for 6 total.
+      await svc.getHash(makeClient({ hashes }), 'host-1', paths);
+
+      const client = makeClient({ hashes });
+      const result = await svc.checkCachedMtimes(client, 'host-1', paths);
+      // All entries validated (exact mtime match → cache hit per path).
+      expect(result.entries.size).toBe(250);
+      const validatedCount = [...result.entries.values()].filter(
+        (v) => v !== null,
+      ).length;
+      expect(validatedCount).toBe(250);
+      expect(result.exactCount).toBe(250);
+      // Exactly ceil(250 / 100) = 3 SSH ops for the stat phase.
+      expect(client.statCalls).toHaveLength(3);
+      expect(client.statCalls[0]).toHaveLength(100);
+      expect(client.statCalls[1]).toHaveLength(100);
+      expect(client.statCalls[2]).toHaveLength(50);
+      // Sanity: no hashes recomputed (every cached entry round-tripped).
+      expect(client.hashCalls).toHaveLength(0);
+    });
+
+    it('checkCachedMtimes: exact multiple of chunk size produces exactly that many calls', async () => {
+      const svc = new HashService(dir);
+      const { paths, hashes } = manyFixtures(200);
+      await svc.getHash(makeClient({ hashes }), 'host-1', paths);
+
+      const client = makeClient({ hashes });
+      await svc.checkCachedMtimes(client, 'host-1', paths);
+      expect(client.statCalls).toHaveLength(2);
+      expect(client.statCalls[0]).toHaveLength(100);
+      expect(client.statCalls[1]).toHaveLength(100);
+    });
+
+    it('checkCachedMtimes: aggregated mtimes preserve per-path identity across chunks', async () => {
+      // Off-by-one in the aggregation Object.assign would mis-key
+      // chunk-2 paths under chunk-1's keys or vice versa. This
+      // test pins per-path mtimes match through the chunk-merge.
+      const svc = new HashService(dir);
+      const { paths, hashes } = manyFixtures(150);
+      await svc.getHash(makeClient({ hashes }), 'host-1', paths);
+
+      const client = makeClient({ hashes });
+      const result = await svc.checkCachedMtimes(client, 'host-1', paths);
+      for (const p of paths) {
+        const entry = result.entries.get(p);
+        expect(entry).not.toBeNull();
+        expect(entry?.mtime).toBe(hashes.get(p)?.mtime);
+      }
+    });
+
+    it('checkCachedMtimes: a single chunk throwing fails the whole call (matches pre-fix posture)', async () => {
+      const svc = new HashService(dir);
+      const { paths, hashes } = manyFixtures(250);
+      await svc.getHash(makeClient({ hashes }), 'host-1', paths);
+
+      // Custom client where the second statWitnesses call throws.
+      const statCalls: string[][] = [];
+      let call = 0;
+      const client: HashClient & {
+        statCalls: string[][];
+        hashCalls: string[][];
+      } = {
+        ...makeClient({ hashes }),
+        statCalls,
+        async statWitnesses(p: readonly string[]) {
+          statCalls.push([...p]);
+          call += 1;
+          if (call === 2) throw new Error('EPIPE');
+          const out: Record<string, number> = {};
+          for (const path of p) {
+            out[path] = hashes.get(path)?.mtime ?? 0;
+          }
+          return out;
+        },
+      };
+      const result = await svc.checkCachedMtimes(client, 'host-1', paths);
+      // All paths get marked as needs-rehash on a thrown chunk —
+      // same posture as the pre-chunking single-call failure.
+      expect(result.exactCount).toBe(0);
+      expect(result.toleranceCount).toBe(0);
+      for (const p of paths) expect(result.entries.get(p)).toBeNull();
+      // Chunk 1 succeeded then chunk 2 threw → exactly 2 calls
+      // before the helper exits (no chunk 3).
+      expect(statCalls).toHaveLength(2);
+    });
+
+    it('getHash: 250-path input also chunks the witness stat call', async () => {
+      const svc = new HashService(dir);
+      const { paths, hashes } = manyFixtures(250);
+      // Cold seed → no prior cache → uses the cacheIsEmpty branch
+      // which only stats cachedPaths (none). To exercise the
+      // mixed-cached path, seed first via getHash, then re-call.
+      await svc.getHash(makeClient({ hashes }), 'host-1', paths);
+
+      const client = makeClient({ hashes });
+      const result = await svc.getHash(client, 'host-1', paths);
+      expect(result.size).toBe(250);
+      // 250 paths × all cached → 3 stat chunks, 0 re-hash chunks.
+      expect(client.statCalls).toHaveLength(3);
+      expect(client.hashCalls).toHaveLength(0);
+    });
+
+    it('empty input: zero SSH calls (chunking helper short-circuits)', async () => {
+      const svc = new HashService(dir);
+      const client = makeClient({ hashes: new Map() });
+      const result = await svc.checkCachedMtimes(client, 'host-1', []);
+      expect(result.entries.size).toBe(0);
+      expect(client.statCalls).toEqual([]);
+    });
+
+    it('NES-sized input (681 paths) drives exactly 7 chunks at default size', async () => {
+      // The exact scale the EPIPE-loop bug surfaced at on the
+      // user's MiSTer. ceil(681 / 100) = 7.
+      const svc = new HashService(dir);
+      const { paths, hashes } = manyFixtures(681);
+      await svc.getHash(makeClient({ hashes }), 'host-1', paths);
+
+      const client = makeClient({ hashes });
+      await svc.checkCachedMtimes(client, 'host-1', paths);
+      expect(client.statCalls).toHaveLength(7);
+      expect(client.statCalls[6]).toHaveLength(681 - 6 * 100); // 81
+    });
+  });
 });

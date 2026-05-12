@@ -432,18 +432,28 @@ export class HashService {
       });
     }
 
-    // Stat both cached + uncached in one SSH op so the rename-
+    // Stat both cached + uncached in chunked SSH ops so the rename-
     // recovery pass below has an mtime for each uncached path.
     // Skip the stat for uncached paths when the cache is empty —
     // there's nothing to migrate them onto, and the empty-cache
     // first-run path was the previous behavior (kept fast).
+    //
+    // fix/witness-chunking — JS-side chunking at `batchSize`.
+    // `buildWitnessScript` emits one `if [-e]; then stat ...; fi`
+    // line per path; each path appears 3× in that line (test arg,
+    // stat arg, fallback echo). For NES (681 paths × ~65-char
+    // typical absolute path) the unchunked script was ~177KB,
+    // ~5.5× over ssh2's 32KB default exec-channel packet/window.
+    // The write crashed with EPIPE in ~27ms before busybox could
+    // start executing. Chunking at 100 paths drops per-script
+    // size to ~26KB, comfortably under every layer's limit; the
+    // existing `statPathsWithSize` chunking inside
+    // `migrateV3Entries` proved the pattern at the same boundary.
     const cacheIsEmpty = Object.keys(entries).length === 0;
     const statTargets = cacheIsEmpty
       ? cachedPaths
       : [...cachedPaths, ...uncachedPaths];
-    const mtimes = statTargets.length > 0
-      ? await client.statWitnesses(statTargets)
-      : ({} as Record<string, number>);
+    const mtimes = await this.statWitnessesChunked(client, statTargets);
 
     for (const p of cachedPaths) {
       const entry = entries[p];
@@ -603,12 +613,18 @@ export class HashService {
     }
     let mtimes: Awaited<ReturnType<HashClient['statWitnesses']>>;
     try {
-      mtimes = await client.statWitnesses(statTargets);
+      // fix/witness-chunking — chunked at `batchSize` per SSH op.
+      // Single-call statWitnesses with 600+ paths blew past ssh2's
+      // 32KB exec-channel packet/window on a real device (EPIPE
+      // before the command started executing). See the same fix
+      // in `doGetHash`.
+      mtimes = await this.statWitnessesChunked(client, statTargets);
     } catch {
       // Stat batch failed (transport error, etc.) — return all paths
       // as null so the caller falls through to computeHash for each.
       // The orchestrator's per-path error handling is the right shape
-      // for this.
+      // for this. A single chunk's failure throws out of the helper
+      // and lands here, same as today.
       for (const p of paths) result.set(p, null);
       return { entries: result, exactCount: 0, toleranceCount: 0 };
     }
@@ -692,6 +708,42 @@ export class HashService {
     this.memCache.set(host, next);
     await this.writeEntries(host, next);
     return entry;
+  }
+
+  /**
+   * fix/witness-chunking — drive `client.statWitnesses` in chunks
+   * of `batchSize`. Single-call witness checks for cores like NES
+   * (681 paths) produced a ~177KB shell script (the buildWitnessScript
+   * line embeds the path 3× per row), which blew past ssh2's
+   * default 32KB exec-channel send window. The write failed with
+   * EPIPE in ~27ms — before busybox even saw the command — leaving
+   * the user in a connect → walk → die → reconnect → walk → die
+   * loop that never let NES complete.
+   *
+   * Chunking at `batchSize` (default 100) drops per-script size
+   * to ~26KB. Sequential dispatch: per-chunk SSH ops are cheap
+   * (~50-200ms on real WiFi), and a parallel split would race
+   * against `runSshOp`'s shared per-op timeout. Aggregation is a
+   * Object.assign merge into the running record; per-path absence
+   * propagates correctly (a missing key reads as `undefined`
+   * downstream, same as today).
+   *
+   * Throws on any chunk's failure — same shape as the prior single-
+   * call posture. The two callers (`doGetHash`,
+   * `doCheckCachedMtimes`) each handle the throw their own way.
+   */
+  private async statWitnessesChunked(
+    client: HashClient,
+    paths: readonly string[],
+  ): Promise<Record<string, number>> {
+    if (paths.length === 0) return {};
+    const out: Record<string, number> = {};
+    for (let i = 0; i < paths.length; i += this.batchSize) {
+      const chunk = paths.slice(i, i + this.batchSize);
+      const chunkResult = await client.statWitnesses(chunk);
+      Object.assign(out, chunkResult);
+    }
+    return out;
   }
 
   /**
