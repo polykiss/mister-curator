@@ -1681,4 +1681,208 @@ describe('HashService', () => {
       }
     });
   });
+
+  // feat/hash-failure-sentinel — files whose hash attempts time out
+  // (multi-GB Saturn translation wrapper zips, etc.) used to retry
+  // every reconnect because no record of the failure persisted.
+  // The sentinel persists `{size, mtime, failedAt}` keyed by path
+  // so the next `checkCachedMtimes` can validate the witness and
+  // return the path in `failedPaths` for the orchestrator to skip.
+  describe('hash-failure sentinel', () => {
+    it('records a sentinel on hashPaths throw and skips on the next check (stat unchanged)', async () => {
+      const svc = new HashService(dir);
+      const path = '/p/huge.zip';
+      const mtime = 1_700_000_000;
+      const size = 5_000_000_000;
+      let hashCalls = 0;
+      const client: HashClient = {
+        hashPaths: async () => {
+          hashCalls += 1;
+          throw new Error('Command timed out after 120s');
+        },
+        statWitnesses: async (paths) =>
+          Object.fromEntries(paths.map((p) => [p, mtime])),
+        statPathsWithSize: async (paths) =>
+          Object.fromEntries(paths.map((p) => [p, { size, mtime }])),
+        computeSampleMd5s: async () => ({}),
+      };
+      // First attempt: hash throws, sentinel persisted.
+      await expect(svc.computeHash(client, 'host-1', path)).rejects.toThrow(
+        /timed out/,
+      );
+      expect(hashCalls).toBe(1);
+      // Second connect: check the cache. Witness still matches so
+      // the path lands in `failedPaths` and `entries` is null.
+      const checked = await svc.checkCachedMtimes(client, 'host-1', [path]);
+      expect(checked.failedPaths.has(path)).toBe(true);
+      expect(checked.entries.get(path)).toBeNull();
+      // Crucially: NO additional hashPaths call. That's the entire
+      // point — we no longer time out forever on these files.
+      expect(hashCalls).toBe(1);
+    });
+
+    it('sentinel persists across HashService instances (on-disk round-trip)', async () => {
+      const path = '/p/huge.zip';
+      const mtime = 1_700_000_000;
+      const size = 5_000_000_000;
+      const client: HashClient = {
+        hashPaths: async () => {
+          throw new Error('timeout');
+        },
+        statWitnesses: async (paths) =>
+          Object.fromEntries(paths.map((p) => [p, mtime])),
+        statPathsWithSize: async (paths) =>
+          Object.fromEntries(paths.map((p) => [p, { size, mtime }])),
+        computeSampleMd5s: async () => ({}),
+      };
+      // First service instance: record the sentinel.
+      const svc1 = new HashService(dir);
+      await expect(svc1.computeHash(client, 'host-1', path)).rejects.toThrow();
+      // Confirm sentinel hit the disk by re-loading via a fresh
+      // service (no shared memCache).
+      const svc2 = new HashService(dir);
+      const checked = await svc2.checkCachedMtimes(client, 'host-1', [path]);
+      expect(checked.failedPaths.has(path)).toBe(true);
+    });
+
+    it('drops the sentinel and retries when the file\'s stat changes (size differs)', async () => {
+      const svc = new HashService(dir);
+      const path = '/p/huge.zip';
+      const mtimeA = 1_700_000_000;
+      const sizeA = 5_000_000_000;
+      let currentMtime = mtimeA;
+      let currentSize = sizeA;
+      let hashCalls = 0;
+      const client: HashClient = {
+        hashPaths: async () => {
+          hashCalls += 1;
+          throw new Error('timeout');
+        },
+        statWitnesses: async (paths) =>
+          Object.fromEntries(paths.map((p) => [p, currentMtime])),
+        statPathsWithSize: async (paths) =>
+          Object.fromEntries(
+            paths.map((p) => [p, { size: currentSize, mtime: currentMtime }]),
+          ),
+        computeSampleMd5s: async () => ({}),
+      };
+      // 1: hash throws, sentinel recorded with size=5GB, mtime=A.
+      await expect(svc.computeHash(client, 'host-1', path)).rejects.toThrow();
+      expect(hashCalls).toBe(1);
+      // 2: User replaces the file with a smaller one. Same mtime
+      // (defensive — even with mtime identical, a size change is a
+      // real content change and must invalidate the sentinel).
+      currentSize = 1_000_000;
+      const checked = await svc.checkCachedMtimes(client, 'host-1', [path]);
+      // Sentinel dropped — path should NOT appear in failedPaths.
+      expect(checked.failedPaths.has(path)).toBe(false);
+      // Orchestrator would now call computeHash → another attempt.
+      await expect(svc.computeHash(client, 'host-1', path)).rejects.toThrow();
+      expect(hashCalls).toBe(2);
+    });
+
+    it('drops the sentinel and retries when mtime drifts past the ±2s tolerance', async () => {
+      const svc = new HashService(dir);
+      const path = '/p/huge.zip';
+      const size = 5_000_000_000;
+      let currentMtime = 1_700_000_000;
+      let hashCalls = 0;
+      const client: HashClient = {
+        hashPaths: async () => {
+          hashCalls += 1;
+          throw new Error('timeout');
+        },
+        statWitnesses: async (paths) =>
+          Object.fromEntries(paths.map((p) => [p, currentMtime])),
+        statPathsWithSize: async (paths) =>
+          Object.fromEntries(
+            paths.map((p) => [p, { size, mtime: currentMtime }]),
+          ),
+        computeSampleMd5s: async () => ({}),
+      };
+      await expect(svc.computeHash(client, 'host-1', path)).rejects.toThrow();
+      expect(hashCalls).toBe(1);
+      // Within the ±2s window — sentinel still valid (no retry).
+      currentMtime = 1_700_000_002;
+      let checked = await svc.checkCachedMtimes(client, 'host-1', [path]);
+      expect(checked.failedPaths.has(path)).toBe(true);
+      // Past the window — sentinel drops.
+      currentMtime = 1_700_000_100;
+      checked = await svc.checkCachedMtimes(client, 'host-1', [path]);
+      expect(checked.failedPaths.has(path)).toBe(false);
+    });
+
+    it('clears the sentinel on a successful hash (no longer perma-failing)', async () => {
+      const svc = new HashService(dir);
+      const path = '/p/file.zip';
+      const mtime = 1_700_000_000;
+      const size = 1024;
+      let shouldFail = true;
+      const client: HashClient = {
+        hashPaths: async (paths) => {
+          if (shouldFail) throw new Error('timeout');
+          return paths.map((p) => ({
+            path: p,
+            md5: 'a'.repeat(32),
+            sha1: 'b'.repeat(40),
+            size,
+            diskSize: size,
+            mtime,
+          }));
+        },
+        statWitnesses: async (paths) =>
+          Object.fromEntries(paths.map((p) => [p, mtime])),
+        statPathsWithSize: async (paths) =>
+          Object.fromEntries(paths.map((p) => [p, { size, mtime }])),
+        computeSampleMd5s: async () => ({}),
+      };
+      // 1: Hash fails → sentinel recorded.
+      await expect(svc.computeHash(client, 'host-1', path)).rejects.toThrow();
+      let checked = await svc.checkCachedMtimes(client, 'host-1', [path]);
+      expect(checked.failedPaths.has(path)).toBe(true);
+      // 2: SSH issue resolves AND stat drifts (so the sentinel is
+      // dropped via the witness check above, freeing up the
+      // orchestrator to retry). Real-world this could be a user
+      // shrinking the wrapper zip.
+      shouldFail = false;
+      // Drop the sentinel by changing mtime past tolerance.
+      const driftClient = {
+        ...client,
+        statWitnesses: async (paths: readonly string[]) =>
+          Object.fromEntries(paths.map((p) => [p, 1_700_000_100])),
+        statPathsWithSize: async (paths: readonly string[]) =>
+          Object.fromEntries(
+            paths.map((p) => [p, { size, mtime: 1_700_000_100 }]),
+          ),
+      };
+      checked = await svc.checkCachedMtimes(driftClient, 'host-1', [path]);
+      expect(checked.failedPaths.has(path)).toBe(false);
+      const entry = await svc.computeHash(driftClient, 'host-1', path);
+      expect(entry?.md5).toBe('a'.repeat(32));
+      // After a successful hash, the sentinel is gone for good.
+      checked = await svc.checkCachedMtimes(driftClient, 'host-1', [path]);
+      expect(checked.failedPaths.has(path)).toBe(false);
+    });
+
+    it('records no sentinel when post-failure stat says the file is missing', async () => {
+      // If stat returns mtime=0 (vanished), recording a `{size:0,
+      // mtime:0}` sentinel would never validate against any real
+      // future stat. Skip the record; the next attempt will retry.
+      const svc = new HashService(dir);
+      const path = '/p/vanished.zip';
+      const client: HashClient = {
+        hashPaths: async () => {
+          throw new Error('timeout');
+        },
+        statWitnesses: async (paths) =>
+          Object.fromEntries(paths.map((p) => [p, 0])),
+        statPathsWithSize: async (paths) =>
+          Object.fromEntries(paths.map((p) => [p, { size: 0, mtime: 0 }])),
+        computeSampleMd5s: async () => ({}),
+      };
+      await expect(svc.computeHash(client, 'host-1', path)).rejects.toThrow();
+      const checked = await svc.checkCachedMtimes(client, 'host-1', [path]);
+      expect(checked.failedPaths.has(path)).toBe(false);
+    });
+  });
 });
