@@ -462,7 +462,7 @@ void app.whenReady().then(async () => {
       // would queue `__arcade__`, call `listRoms` which throws
       // for the non-existent `/media/fat/games/__arcade__/`
       // dir, and noise up the per-core try/catch.
-      const coreIds = cores
+      const realCoreIds = cores
         .filter((c) => c.gamesDirExists)
         .filter((c) => c.category !== 'Arcade')
         .map((c) => c.id);
@@ -472,14 +472,28 @@ void app.whenReady().then(async () => {
       // (the arcade-mra-meta cache write happens before this status
       // listener fires); if for some reason it isn't, skip — the
       // user can manually refresh later.
+      //
+      // Position: arcade goes FIRST in the queue, not last. Pre-fix
+      // it was appended (tail), which meant the engine processed
+      // every real core before reaching it. With Saturn's first-
+      // encounter wrapper-zip hash timeouts (120s × N before PR #58's
+      // sentinel kicks in), the queue took 10-20+ minutes to reach
+      // arcade on a fresh install — the user's wait window expired
+      // long before any arcade `[prefetch] → start` log fired (Phase
+      // 1 investigation of the PR-62 live trace). Arcade is the
+      // user-stated priority surface for the whole arcade parity
+      // sequence, so it owns the front of the queue. Regular cores
+      // keep their existing alphabetical/category order behind it.
+      const arcadeIds: string[] = [];
       const arcadeSnapshot = manager.getArcadePlayabilitySnapshot();
       if (arcadeSnapshot !== null) {
         const anyPlayable = arcadeSnapshot.entries.some(
           (e) =>
             arcadeSnapshot.byPath.get(e.relativePath) === 'playable',
         );
-        if (anyPlayable) coreIds.push(ARCADE_VIRTUAL_CORE_ID);
+        if (anyPlayable) arcadeIds.push(ARCADE_VIRTUAL_CORE_ID);
       }
+      const coreIds = [...arcadeIds, ...realCoreIds];
       const session = manager.getActiveSession();
       const alreadyCompleted =
         session !== null

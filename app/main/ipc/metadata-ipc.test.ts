@@ -477,3 +477,60 @@ describe('IPC bridge — searchScreenScraperByName diag logs', () => {
     expect(lines[1]).toContain('status=rate-limited');
   });
 });
+
+// feat/arcade-parity-2-metadata — the setAutoScrapeFocus IPC used to
+// early-return on `ARCADE_VIRTUAL_CORE_ID` (the synthetic Arcade
+// row predated PR #62's actual arcade pass). PR #62 wired up
+// `getArcadeMetadata`, so the engine handles the sentinel coreId via
+// the deps `scrape` dispatch — the guard at the IPC boundary is now
+// stale and was blocking the user from clicking the Arcade row to
+// pivot the queue. Guard removed; this test pins that focus events
+// for arcade reach `engine.setFocus` like any other coreId.
+describe('IPC bridge — setAutoScrapeFocus passes ARCADE_VIRTUAL_CORE_ID through', () => {
+  let stubEngine: { setFocus: ReturnType<typeof vi.fn> };
+
+  beforeEach(() => {
+    handlers.clear();
+    stubEngine = { setFocus: vi.fn() };
+    registerIpcHandlers(
+      {
+        listAllCoresWithFiles: vi.fn(),
+        listRoms: vi.fn(),
+      } as never,
+      { list: () => [] } as never,
+      {
+        getRomMetadata: vi.fn(),
+        prefetchHashes: vi.fn(),
+        prefetchMetadata: vi.fn(),
+        clearMetadataCache: vi.fn(),
+        getBoxArtLocal: vi.fn(),
+        getBoxArtBytes: vi.fn(),
+        getRomsMetadata: vi.fn(),
+        ensureMetadataDatabase: vi.fn(),
+      } as never,
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      stubEngine as never,
+      null,
+    );
+  });
+
+  it('forwards a regular-core focus to engine.setFocus', async () => {
+    const h = handlers.get(IPC_CHANNELS.setAutoScrapeFocus);
+    expect(h).toBeDefined();
+    await h!.handler({}, 'NEOGEO');
+    expect(stubEngine.setFocus).toHaveBeenCalledWith('NEOGEO');
+  });
+
+  it('forwards ARCADE_VIRTUAL_CORE_ID to engine.setFocus (previously blocked by stale PR-1.5 guard)', async () => {
+    const h = handlers.get(IPC_CHANNELS.setAutoScrapeFocus);
+    expect(h).toBeDefined();
+    await h!.handler({}, '__arcade__');
+    // The previous guard early-returned without invoking the engine.
+    // After PR-62 wired up `getArcadeMetadata`, the engine handles the
+    // sentinel just like any other coreId — pivoting it to the head of
+    // the queue and routing the scrape through `deps.scrape`.
+    expect(stubEngine.setFocus).toHaveBeenCalledWith('__arcade__');
+  });
+});

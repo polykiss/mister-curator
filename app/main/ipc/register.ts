@@ -3,10 +3,7 @@ import { promises as fs } from 'node:fs';
 import { BrowserWindow, dialog, ipcMain } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
 
-import {
-  type ArcadeMraEntry,
-  ARCADE_VIRTUAL_CORE_ID,
-} from '@shared/arcade-mra';
+import type { ArcadeMraEntry } from '@shared/arcade-mra';
 import { diagLog, makeIdGen } from '@shared/diag-log';
 import { encodeIpcError, IPC_CHANNELS } from '@shared/preload-api';
 import type {
@@ -332,15 +329,16 @@ export function registerIpcHandlers(
   // calls this on every core selection so the auto-scrape engine
   // jumps to the user's focus. No-op if the focused core is already
   // active.
+  //
+  // feat/arcade-parity-2-metadata — pre-PR-62 the synthetic Arcade
+  // row had no scrape target, so this handler early-returned for
+  // `ARCADE_VIRTUAL_CORE_ID` to keep the engine's queue clean. PR
+  // #62 wired up an actual arcade pass (deps.scrape dispatches to
+  // `getArcadeMetadata` when coreId is the arcade sentinel), so the
+  // guard is now actively wrong — it blocked the user from clicking
+  // the Arcade sidebar row to pivot the queue. Guard removed; the
+  // engine handles the sentinel coreId via the deps wiring.
   handle<[string], void>(IPC_CHANNELS.setAutoScrapeFocus, (coreId) => {
-    // feat/arcade-phase-1.5 — the synthetic Arcade row routes to
-    // ArcadeMraPane (not the auto-scrape pipeline) so a focus
-    // event for it is meaningless. Skipping at the IPC boundary
-    // keeps the engine's queue clean — pre-skip the engine would
-    // queue `__arcade__`, fail listRoms on the non-existent
-    // `/media/fat/games/__arcade__/`, and bury the failure in
-    // its per-core try/catch.
-    if (coreId === ARCADE_VIRTUAL_CORE_ID) return;
     autoScrapeEngine.setFocus(coreId);
   });
 
