@@ -508,6 +508,19 @@ function densityValueFor(core: CoreEntry): number {
  */
 export function CoreCountSummary({ core }: { readonly core: CoreEntry }): JSX.Element {
   const total = core.recursiveRomCount ?? core.romCount;
+  // feat/arcade-ux-and-ledger (PR 2/2) — for the Arcade synthetic
+  // row only, render `playable (total)` instead of the usual
+  // `total (hidden)`. The arcadePlayableCount field is undefined
+  // everywhere else AND on the Arcade row before the playability
+  // scan resolves; both fall through to the legacy display.
+  if (core.arcadePlayableCount !== undefined) {
+    return (
+      <>
+        <span className="min-w-[2.5rem] text-right">{core.arcadePlayableCount}</span>
+        <span className="text-fg-disabled">({total})</span>
+      </>
+    );
+  }
   const hidden = core.recursiveHiddenCount ?? core.hiddenCount;
   return (
     <>

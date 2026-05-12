@@ -59,6 +59,26 @@ export function ProfileList({ onEdit }: ProfileListProps): JSX.Element {
           `Re-applied ${String(result.reappliedCount)} hidden ${noun} after update.`,
         );
       }
+      // feat/arcade-ux-and-ledger (PR 2/2) — one-shot toast on
+      // the first connect that produces an auto-hide ledger. The
+      // backend only flips this field on the EMPTY→non-empty edge
+      // (not on every reconnect), so the toast doesn't re-pester
+      // after the initial cutover. The user can toggle the rule
+      // off via the Arcade pane checkbox the toast points at.
+      if (
+        result.firstConnectArcadeAutoHidden !== null &&
+        result.firstConnectArcadeAutoHidden > 0
+      ) {
+        const n = result.firstConnectArcadeAutoHidden;
+        const noun = n === 1 ? 'arcade game' : 'arcade games';
+        toast.info(
+          `Auto-hid ${String(n)} ${noun} with missing ROMs.`,
+          {
+            description:
+              'Toggle "Auto-hide missing ROMs" off in the Arcade pane to restore them.',
+          },
+        );
+      }
     } catch (err) {
       // Failure recording is handled inside `connect()` (see
       // ConnectionContext) so the inline failure card picks it up.

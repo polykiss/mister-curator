@@ -77,6 +77,21 @@ export interface CoreEntry {
    * both as "no extras".
    */
   readonly extraGamesDirNames?: readonly string[];
+  /**
+   * feat/arcade-ux-and-ledger (PR 2/2) — for the synthetic Arcade
+   * row, the count of .mras the user can actually play (the
+   * playable + no-roms-needed buckets MINUS user-hidden entries).
+   * Auto-hidden entries are NOT subtracted — they're still
+   * "playable", just intentionally held out of the firmware menu
+   * by the rule. The user can flip auto-hide off to surface them.
+   *
+   * Undefined for every other row (the format is `total (hidden)`
+   * for real cores) AND for the Arcade row on a cold connect
+   * before the playability scan resolves — the renderer falls
+   * back to the existing display on undefined so the count
+   * doesn't flash 0 mid-load.
+   */
+  readonly arcadePlayableCount?: number;
 }
 
 export interface Rom {
@@ -170,6 +185,35 @@ export interface HiddenCoreEntry {
 export interface HideLedger {
   readonly schemaVersion: 1;
   readonly hiddenCores: readonly HiddenCoreEntry[];
+  /**
+   * feat/arcade-ux-and-ledger (PR 2/2) — arcade .mra state.
+   * All three fields are OPTIONAL on the wire so a ledger written
+   * by an older client (no arcade fields) parses cleanly. Default
+   * shape on absence is provided by `EMPTY_LEDGER`.
+   */
+  /**
+   * Persisted preference: whether the auto-hide-missing-ROMs rule
+   * is currently active for this MiSTer. Defaults to `true` on a
+   * fresh ledger so the first connect after the V1 cutover auto-
+   * hides missing-ROM .mras out of the box.
+   */
+  readonly arcadeAutoHideEnabled?: boolean;
+  /**
+   * VISIBLE relative paths (no leading-dot marker) the auto-hide
+   * rule renamed into hidden state. Cleared and rewritten on every
+   * apply pass; used so a user toggling auto-hide OFF un-hides
+   * exactly the set we hid, without sweeping up dot-prefixed mras
+   * the user (or another tool) hid by hand.
+   */
+  readonly arcadeAutoHidden?: readonly string[];
+  /**
+   * VISIBLE relative paths the user explicitly chose to keep
+   * visible even though the rule flags them as missing-ROMs. A
+   * tombstone: presence in this list exempts the entry from any
+   * future auto-hide pass. Removed when the user re-hides the
+   * mra by hand (they're reversing their previous intent).
+   */
+  readonly arcadeUserShownDespiteMissing?: readonly string[];
 }
 
 /**

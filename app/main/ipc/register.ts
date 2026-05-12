@@ -372,6 +372,21 @@ export function registerIpcHandlers(
     () => manager.getArcadePlayability(),
   );
 
+  // feat/arcade-ux-and-ledger (PR 2/2) — auto-hide preference +
+  // tombstone IPCs.
+  handle<[], boolean>(IPC_CHANNELS.getArcadeAutoHideEnabled, () =>
+    manager.getArcadeAutoHideEnabled(),
+  );
+  handle<[boolean], void>(
+    IPC_CHANNELS.setArcadeAutoHideEnabled,
+    (enabled) => manager.setArcadeAutoHideEnabled(enabled),
+  );
+  handle<[string, boolean], void>(
+    IPC_CHANNELS.setArcadeUserShownDespiteMissing,
+    (relativePath, on) =>
+      manager.setArcadeUserShownDespiteMissing(relativePath, on),
+  );
+
   // PR-D1 round 2 (PR #27 round 2): pure-disk cache snapshot for the
   // optimistic-render path. RomsPane fires this on mount/click for
   // immediate row paint, then dispatches the normal validation

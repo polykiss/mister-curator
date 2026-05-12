@@ -21,9 +21,16 @@ import {
   isRealCore,
 } from '@shared/core-matching';
 import {
+  arcadeMraVisiblePath,
+  DEFAULT_ARCADE_AUTO_HIDE_ENABLED,
   EMPTY_LEDGER,
+  healArcadeLedger,
   healLedger,
   ledgerEqual,
+  withArcadeAutoHideEnabled,
+  withArcadeAutoHidden,
+  withArcadeTombstoneAdded,
+  withArcadeTombstoneRemoved,
   withCoreHidden,
   withCoreShown,
 } from '@shared/ledger';
@@ -79,6 +86,18 @@ export interface BulkCoreProgressBroadcast extends BulkCoreProgress {
 export interface ConnectResult {
   /** Number of cores re-hidden by the auto-reapply step (0 when disabled). */
   readonly reappliedCount: number;
+  /**
+   * feat/arcade-ux-and-ledger (PR 2/2) — one-shot signal that the
+   * arcade auto-hide rule transitioned this connect from "no
+   * mras auto-hidden" to "N mras auto-hidden". The renderer fires
+   * a single toast off this; subsequent connects (where the ledger
+   * already has entries) surface `null` even if the rule re-runs
+   * idempotently. Distinct from "rule produced ≥1 hide right now":
+   * the rule may apply more hides on a normal reconnect (e.g. a
+   * new missing-ROM .mra arrived); only the EMPTY→non-empty edge
+   * triggers the toast.
+   */
+  readonly firstConnectArcadeAutoHidden: number | null;
 }
 
 /**
@@ -102,14 +121,18 @@ export interface ArcadePlayabilitySnapshot {
 }
 
 /**
- * Shape returned by `getArcadePlayability` over IPC. Three flat
- * lists of `relativePath`s, mutually exclusive. PR-2 will key the
- * row badge + ledger off these.
+ * Shape returned by `getArcadePlayability` over IPC. Three
+ * mutually-exclusive `relativePath` buckets (the playability
+ * classification of every .mra) plus `autoHidden` — the visible-
+ * path form of every entry the auto-hide rule has put into hidden
+ * state, surfaced so the renderer can pick the right eye-toggle
+ * tooltip without a second round-trip.
  */
 export interface ArcadePlayabilityIpc {
   readonly playable: readonly string[];
   readonly missing: readonly string[];
   readonly noRomsNeeded: readonly string[];
+  readonly autoHidden: readonly string[];
 }
 
 /**
@@ -384,8 +407,17 @@ export class ConnectionManager {
       // in try/catch — a transient SSH glitch here shouldn't keep
       // the rest of the app from coming online. The snapshot
       // hydrates lazily on the IPC fallback path if this misses.
+      let firstConnectArcadeAutoHidden: number | null = null;
       try {
-        await this.loadArcadeData();
+        const snapshot = await this.loadArcadeData();
+        // feat/arcade-ux-and-ledger (PR 2/2) — heal stale arcade
+        // ledger entries (mras that vanished between sessions) and
+        // run the auto-hide pass against the current snapshot.
+        // Returns the empty→non-empty edge if it fired; the
+        // renderer's toast reads off ConnectResult.
+        firstConnectArcadeAutoHidden = await this.healAndApplyArcadeAutoHide(
+          snapshot,
+        );
       } catch (err) {
         diagLog('warn', 'arcade', '·', 'playability-scan failed', {
           err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
@@ -399,7 +431,7 @@ export class ConnectionManager {
         ms: Date.now() - startedAt,
         reappliedCount,
       });
-      return { reappliedCount };
+      return { reappliedCount, firstConnectArcadeAutoHidden };
     } catch (err) {
       diagLog('error', 'conn', '✗', 'connect-failed', {
         profileId,
@@ -510,6 +542,10 @@ export class ConnectionManager {
     // cache will miss on witnesses too (`_Arcade/` mtime bumped),
     // so both layers stay coherent without a write-through here.
     this.arcadePlayabilityCache = null;
+    // feat/arcade-ux-and-ledger (PR 2/2) — apply the three-state
+    // transition for a user-initiated hide/show. See
+    // `applyUserMraVisibilityToLedger` for the rules.
+    await this.applyUserMraVisibilityToLedger([{ relativePath, hidden }]);
   }
 
   /**
@@ -524,6 +560,7 @@ export class ConnectionManager {
     const result = await this.client.setBulkArcadeMraVisibility(changes);
     this.arcadeMraCache = null;
     this.arcadePlayabilityCache = null;
+    await this.applyUserMraVisibilityToLedger(changes);
     return result;
   }
 
@@ -644,7 +681,337 @@ export class ConnectionManager {
   async getArcadePlayability(): Promise<ArcadePlayabilityIpc> {
     const snapshot =
       this.arcadePlayabilityCache ?? (await this.loadArcadeData());
-    return bucketByPlayability(snapshot);
+    return {
+      ...bucketByPlayability(snapshot),
+      autoHidden: [...(this.ledgerCache.arcadeAutoHidden ?? [])],
+    };
+  }
+
+  /**
+   * feat/arcade-ux-and-ledger (PR 2/2) — return the persisted
+   * auto-hide preference for the active connection. Defaults to
+   * `DEFAULT_ARCADE_AUTO_HIDE_ENABLED` when the ledger field is
+   * absent (first connect after PR-2 ships).
+   */
+  getArcadeAutoHideEnabled(): boolean {
+    return (
+      this.ledgerCache.arcadeAutoHideEnabled ??
+      DEFAULT_ARCADE_AUTO_HIDE_ENABLED
+    );
+  }
+
+  /**
+   * feat/arcade-ux-and-ledger (PR 2/2) — flip the persisted
+   * preference and apply the rule diff.
+   *
+   *   • ON: hide every entry in `missing − tombstones − user-hidden`;
+   *     update `arcadeAutoHidden` to that set.
+   *   • OFF: un-hide every entry in `arcadeAutoHidden`; clear the
+   *     ledger field.
+   *
+   * Idempotent: setting to the same value as today is a no-op
+   * (zero SSH ops, zero ledger writes). The renderer reads the
+   * effect through the connection-event broadcast so the badge
+   * + count update without a round-trip refresh.
+   */
+  async setArcadeAutoHideEnabled(
+    enabled: boolean,
+  ): Promise<void> {
+    this.assertConnected();
+    const current = this.getArcadeAutoHideEnabled();
+    if (current === enabled) return;
+    const next = withArcadeAutoHideEnabled(this.ledgerCache, enabled);
+    await this.persistLedger(next);
+    // Apply the diff to on-disk visibility. Use the in-memory
+    // snapshot; it should be hot from connect. `loadArcadeData`
+    // gives us a fresh snapshot if not.
+    const snapshot =
+      this.arcadePlayabilityCache ?? (await this.loadArcadeData());
+    await this.applyArcadeAutoHideRule(snapshot);
+  }
+
+  /**
+   * feat/arcade-ux-and-ledger (PR 2/2) — set or clear a single
+   * tombstone (user-shown-despite-missing). Does NOT itself flip
+   * the on-disk visibility — the caller is expected to also call
+   * `setArcadeMraVisibility` if a rename is needed. Used by the
+   * renderer's eye-toggle path when promoting an auto-hidden row
+   * to "show despite missing".
+   *
+   * In practice, the renderer doesn't call this directly today:
+   * the ledger transitions are folded into `setArcadeMraVisibility`
+   * via `applyUserMraVisibilityToLedger`. This setter exists for
+   * symmetry with the other arcade IPCs and for the renderer's
+   * "exempt this row from future auto-hide" gesture in a future
+   * PR (where it would be a separate menu item, not the eye
+   * toggle).
+   */
+  async setArcadeUserShownDespiteMissing(
+    relativePath: string,
+    on: boolean,
+  ): Promise<void> {
+    this.assertConnected();
+    const visible = arcadeMraVisiblePath(relativePath);
+    const next = on
+      ? withArcadeTombstoneAdded(this.ledgerCache, visible)
+      : withArcadeTombstoneRemoved(this.ledgerCache, visible);
+    if (next === this.ledgerCache) return;
+    await this.persistLedger(next);
+  }
+
+  /**
+   * feat/arcade-ux-and-ledger (PR 2/2) — connect-time arcade
+   * ledger maintenance:
+   *   1. Self-heal: drop ledger entries pointing at .mras that no
+   *      longer exist on the device.
+   *   2. Apply the auto-hide rule against the current snapshot
+   *      (no-op if the preference is OFF).
+   *
+   * Returns the "empty → non-empty" edge count for the renderer
+   * toast: `null` if the toast shouldn't fire (already non-empty
+   * before this connect, or stayed empty); a positive number if
+   * `arcadeAutoHidden` went from empty to that many entries on
+   * this pass.
+   */
+  private async healAndApplyArcadeAutoHide(
+    snapshot: ArcadePlayabilitySnapshot,
+  ): Promise<number | null> {
+    // Self-heal first so the auto-hide application reasons against
+    // a ledger that matches the current on-device set.
+    const healed = healArcadeLedger(this.ledgerCache, snapshot.entries);
+    if (healed !== this.ledgerCache) {
+      await this.persistLedger(healed);
+    }
+    const wasEmpty =
+      (this.ledgerCache.arcadeAutoHidden ?? []).length === 0;
+    await this.applyArcadeAutoHideRule(snapshot);
+    const nowCount = (this.ledgerCache.arcadeAutoHidden ?? []).length;
+    if (wasEmpty && nowCount > 0) {
+      return nowCount;
+    }
+    return null;
+  }
+
+  /**
+   * feat/arcade-ux-and-ledger (PR 2/2) — apply the auto-hide rule
+   * against the current snapshot:
+   *
+   *   shouldBeHidden = (missing − tombstones) ∩ (NOT user-hidden)
+   *   toHide = shouldBeHidden − currently auto-hidden
+   *   toShow = currently auto-hidden − shouldBeHidden
+   *
+   * The "user-hidden" exclusion prevents the rule from chasing a
+   * mra the user has separately dot-prefixed by hand. That entry
+   * stays hidden; the ledger does NOT claim it as auto-hidden.
+   *
+   * When the preference is OFF: `shouldBeHidden = ∅`. The pass
+   * un-hides every entry in arcadeAutoHidden and clears the
+   * ledger field. Tombstones survive (they're user prefs).
+   *
+   * Both the hide and show sides go through the existing
+   * `client.setBulkArcadeMraVisibility` so the 100-per-chunk
+   * shell scripting and per-item failure reporting are reused.
+   * A bulk-rename failure logs the failed paths and continues —
+   * the ledger only records paths that successfully renamed, so
+   * partial failure self-corrects on next connect.
+   */
+  private async applyArcadeAutoHideRule(
+    snapshot: ArcadePlayabilitySnapshot,
+  ): Promise<void> {
+    const enabled = this.getArcadeAutoHideEnabled();
+    const buckets = bucketByPlayability(snapshot);
+    const tombstones = new Set(
+      this.ledgerCache.arcadeUserShownDespiteMissing ?? [],
+    );
+    // visible → current on-disk state from the snapshot.
+    interface CurrentState {
+      readonly hidden: boolean;
+      readonly currentRelPath: string;
+    }
+    const currentByVisible = new Map<string, CurrentState>();
+    for (const entry of snapshot.entries) {
+      const visible = arcadeMraVisiblePath(entry.relativePath);
+      currentByVisible.set(visible, {
+        hidden: entry.hidden,
+        currentRelPath: entry.relativePath,
+      });
+    }
+    const previousAutoHidden = new Set(this.ledgerCache.arcadeAutoHidden ?? []);
+    const shouldBeHidden = new Set<string>();
+    if (enabled) {
+      for (const missingPath of buckets.missing) {
+        // `missing` is keyed by relativePath in the snapshot —
+        // which itself can be either visible or dot-prefixed
+        // depending on the current on-disk state. Normalise.
+        const visible = arcadeMraVisiblePath(missingPath);
+        if (tombstones.has(visible)) continue;
+        const state = currentByVisible.get(visible);
+        if (state === undefined) continue;
+        // If the entry is already hidden AND we didn't auto-hide
+        // it last time, the user (or another tool) hid it
+        // manually. Don't claim it for the auto-hide ledger.
+        if (state.hidden && !previousAutoHidden.has(visible)) continue;
+        shouldBeHidden.add(visible);
+      }
+    }
+    // Hide diff: in shouldBeHidden, not currently hidden.
+    // Show diff: previously-auto-hidden, not in shouldBeHidden.
+    const toHide: { relativePath: string; hidden: true }[] = [];
+    const toShow: { relativePath: string; hidden: false }[] = [];
+    for (const visible of shouldBeHidden) {
+      const state = currentByVisible.get(visible);
+      if (state === undefined) continue;
+      if (!state.hidden) {
+        toHide.push({ relativePath: state.currentRelPath, hidden: true });
+      }
+    }
+    for (const visible of previousAutoHidden) {
+      if (shouldBeHidden.has(visible)) continue;
+      const state = currentByVisible.get(visible);
+      if (state === undefined) continue;
+      if (state.hidden) {
+        toShow.push({ relativePath: state.currentRelPath, hidden: false });
+      }
+    }
+    let hideOk = new Set<string>();
+    let showOk = new Set<string>();
+    if (toHide.length > 0) {
+      const result = await this.client.setBulkArcadeMraVisibility(toHide);
+      hideOk = new Set(result.succeeded);
+      if (result.failed.length > 0) {
+        diagLog('warn', 'arcade', '·', 'auto-hide partial-fail', {
+          attempted: toHide.length,
+          succeeded: result.succeeded.length,
+          failed: result.failed.length,
+        });
+      }
+    }
+    if (toShow.length > 0) {
+      const result = await this.client.setBulkArcadeMraVisibility(toShow);
+      showOk = new Set(result.succeeded);
+      if (result.failed.length > 0) {
+        diagLog('warn', 'arcade', '·', 'auto-show partial-fail', {
+          attempted: toShow.length,
+          succeeded: result.succeeded.length,
+          failed: result.failed.length,
+        });
+      }
+    }
+    // Compute the new ledger set — visible paths only:
+    //   • Drop any previously-auto-hidden that successfully showed.
+    //   • Add the visible-path form of every successful hide.
+    //   • Anything that failed stays where it was: previously-
+    //     auto-hidden that failed to show stays in the ledger;
+    //     a should-hide that failed to hide does NOT enter the
+    //     ledger (we never claim auto-hide on a path we couldn't
+    //     rename).
+    const next = new Set<string>(previousAutoHidden);
+    for (const change of toShow) {
+      if (showOk.has(change.relativePath)) {
+        next.delete(arcadeMraVisiblePath(change.relativePath));
+      }
+    }
+    for (const change of toHide) {
+      if (hideOk.has(change.relativePath)) {
+        next.add(arcadeMraVisiblePath(change.relativePath));
+      }
+    }
+    const nextSorted = [...next].sort();
+    const prevSorted = [...(this.ledgerCache.arcadeAutoHidden ?? [])].sort();
+    const changed =
+      nextSorted.length !== prevSorted.length ||
+      nextSorted.some((v, i) => v !== prevSorted[i]);
+    if (changed) {
+      const newLedger = withArcadeAutoHidden(this.ledgerCache, nextSorted);
+      await this.persistLedger(newLedger);
+    }
+    if (toHide.length > 0 || toShow.length > 0) {
+      diagLog('info', 'arcade', '·', 'auto-hide applied', {
+        enabled: enabled ? 'true' : 'false',
+        hidden: hideOk.size,
+        shown: showOk.size,
+        tombstones: tombstones.size,
+        ledgerSize: next.size,
+      });
+      // Any successful rename bumps _Arcade/ mtime, so the
+      // playability snapshot we computed is now stale w.r.t. the
+      // hidden-flag of those entries. Drop the in-memory copy +
+      // the on-disk cache so the next read re-walks. Cheap
+      // (top-level mras only) and the renderer triggers a fresh
+      // listArcadeMraEntries soon after anyway.
+      this.arcadePlayabilityCache = null;
+      this.arcadeMraCache = null;
+      if (this.currentHost !== null) {
+        await this.cache
+          .invalidateArcadeMraMetaCache(this.currentHost)
+          .catch(() => {
+            /* swallow */
+          });
+      }
+    }
+  }
+
+  /**
+   * feat/arcade-ux-and-ledger (PR 2/2) — apply the user-initiated
+   * hide/show ledger transitions for a batch of changes.
+   *
+   *   • If the user is HIDING: remove the visible path from
+   *     tombstones (they're reversing a prior "show despite
+   *     missing" stance) AND from arcadeAutoHidden (defensive —
+   *     a user-hide isn't an auto-hide).
+   *   • If the user is SHOWING and the path was in arcadeAutoHidden:
+   *     promote to a tombstone, drop from arcadeAutoHidden. The
+   *     row stays exempt from future auto-hide passes.
+   *   • If the user is SHOWING and the path was NOT in
+   *     arcadeAutoHidden: no ledger update. (User-hide being
+   *     undone; nothing to track.)
+   *
+   * Called from `setArcadeMraVisibility` / `setBulkArcadeMraVisibility`
+   * AFTER the on-disk rename succeeds. A partial-success bulk
+   * may have already updated the ledger for entries that did
+   * succeed; we run the ledger update against the renderer's
+   * input list (matching the existing semantics where the
+   * renderer doesn't see per-entry failure attribution for
+   * single calls). Best-effort.
+   */
+  private async applyUserMraVisibilityToLedger(
+    changes: readonly { readonly relativePath: string; readonly hidden: boolean }[],
+  ): Promise<void> {
+    let ledger = this.ledgerCache;
+    const prevAutoHidden = new Set(ledger.arcadeAutoHidden ?? []);
+    let autoHiddenChanged = false;
+    const nextAutoHidden = new Set(prevAutoHidden);
+    for (const change of changes) {
+      const visible = arcadeMraVisiblePath(change.relativePath);
+      if (change.hidden) {
+        // User hides — clear any tombstone for this row + remove
+        // from auto-hidden (we're not the ones doing it).
+        ledger = withArcadeTombstoneRemoved(ledger, visible);
+        if (nextAutoHidden.delete(visible)) autoHiddenChanged = true;
+      } else if (prevAutoHidden.has(visible)) {
+        // User shows an auto-hidden row → tombstone it.
+        ledger = withArcadeTombstoneAdded(ledger, visible);
+        nextAutoHidden.delete(visible);
+        autoHiddenChanged = true;
+      }
+    }
+    if (autoHiddenChanged) {
+      ledger = withArcadeAutoHidden(ledger, [...nextAutoHidden].sort());
+    }
+    if (ledger !== this.ledgerCache) {
+      await this.persistLedger(ledger);
+    }
+  }
+
+  /**
+   * Write a new ledger value to the on-MiSTer state.json and
+   * update the in-memory cache atomically (write first, then
+   * cache — if the write throws we keep serving the old cache).
+   */
+  private async persistLedger(next: HideLedger): Promise<void> {
+    if (ledgerEqual(this.ledgerCache, next)) return;
+    await this.client.writeHideLedger(next);
+    this.ledgerCache = next;
   }
 
   /**
@@ -1603,14 +1970,23 @@ export function buildPlayabilitySnapshot(
 
 /**
  * feat/arcade-playability-data (PR 1/2) — bucket the snapshot's
- * `byPath` map into the three flat lists the IPC surface returns.
- * Order within each bucket follows `entries` document order
- * (which mirrors the awk's `find` output order — typically
- * filesystem-natural).
+ * `byPath` map into the three flat lists used internally and
+ * surfaced (with `autoHidden` added) over IPC. Order within each
+ * bucket follows `entries` document order (mirrors the awk's
+ * `find` output order — typically filesystem-natural).
+ *
+ * Returns the three-bucket subset only; the IPC handler stitches
+ * `autoHidden` from the ledger before sending to the renderer.
  */
+export interface ArcadePlayabilityBuckets {
+  readonly playable: readonly string[];
+  readonly missing: readonly string[];
+  readonly noRomsNeeded: readonly string[];
+}
+
 export function bucketByPlayability(
   snapshot: ArcadePlayabilitySnapshot,
-): ArcadePlayabilityIpc {
+): ArcadePlayabilityBuckets {
   const playable: string[] = [];
   const missing: string[] = [];
   const noRomsNeeded: string[] = [];

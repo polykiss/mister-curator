@@ -1,16 +1,23 @@
 import { describe, expect, it } from 'vitest';
 
+import type { ArcadeMraMeta } from '@shared/arcade-mra-parse';
 import type { HiddenCoreEntry, HideLedger } from '@shared/types';
 
 import type { CoreEntry } from '@shared/types';
 
 import {
+  arcadeMraVisiblePath,
   EMPTY_LEDGER,
+  healArcadeLedger,
   healLedger,
   ledgerEqual,
   LEDGER_HEREDOC_DELIMITER,
   parseLedger,
   serializeLedger,
+  withArcadeAutoHideEnabled,
+  withArcadeAutoHidden,
+  withArcadeTombstoneAdded,
+  withArcadeTombstoneRemoved,
   withCoreHidden,
   withCoreShown,
 } from '@shared/ledger';
@@ -229,5 +236,208 @@ describe('ledgerEqual', () => {
       hiddenCores: [{ ...sampleEntry, coreId: 'OTHER' }],
     };
     expect(ledgerEqual(a, b)).toBe(false);
+  });
+
+  it('treats absent vs explicit-default arcade fields as equal', () => {
+    const a: HideLedger = { schemaVersion: 1, hiddenCores: [] };
+    const b: HideLedger = {
+      schemaVersion: 1,
+      hiddenCores: [],
+      arcadeAutoHideEnabled: true,
+      arcadeAutoHidden: [],
+      arcadeUserShownDespiteMissing: [],
+    };
+    expect(ledgerEqual(a, b)).toBe(true);
+  });
+
+  it('returns false when arcadeAutoHideEnabled differs', () => {
+    const a: HideLedger = {
+      schemaVersion: 1,
+      hiddenCores: [],
+      arcadeAutoHideEnabled: true,
+    };
+    const b: HideLedger = {
+      schemaVersion: 1,
+      hiddenCores: [],
+      arcadeAutoHideEnabled: false,
+    };
+    expect(ledgerEqual(a, b)).toBe(false);
+  });
+
+  it('returns false when arcade arrays differ', () => {
+    const a: HideLedger = {
+      schemaVersion: 1,
+      hiddenCores: [],
+      arcadeAutoHidden: ['Foo.mra'],
+    };
+    const b: HideLedger = {
+      schemaVersion: 1,
+      hiddenCores: [],
+      arcadeAutoHidden: ['Bar.mra'],
+    };
+    expect(ledgerEqual(a, b)).toBe(false);
+  });
+});
+
+// feat/arcade-ux-and-ledger (PR 2/2) — arcade-specific helpers.
+
+describe('parseLedger — arcade fields', () => {
+  it('accepts a ledger with all three arcade fields', () => {
+    const raw = JSON.stringify({
+      schemaVersion: 1,
+      hiddenCores: [],
+      arcadeAutoHideEnabled: false,
+      arcadeAutoHidden: ['Foo.mra', '_Konami/Bar.mra'],
+      arcadeUserShownDespiteMissing: ['Baz.mra'],
+    });
+    const ledger = parseLedger(raw);
+    expect(ledger.arcadeAutoHideEnabled).toBe(false);
+    expect(ledger.arcadeAutoHidden).toEqual(['Foo.mra', '_Konami/Bar.mra']);
+    expect(ledger.arcadeUserShownDespiteMissing).toEqual(['Baz.mra']);
+  });
+
+  it('parses a pre-V1 ledger (no arcade fields) cleanly with arcade fields undefined', () => {
+    const raw = JSON.stringify({ schemaVersion: 1, hiddenCores: [] });
+    const ledger = parseLedger(raw);
+    expect(ledger.arcadeAutoHideEnabled).toBeUndefined();
+    expect(ledger.arcadeAutoHidden).toBeUndefined();
+    expect(ledger.arcadeUserShownDespiteMissing).toBeUndefined();
+  });
+
+  it('falls back to EMPTY_LEDGER when arcadeAutoHideEnabled is a non-boolean', () => {
+    const raw = JSON.stringify({
+      schemaVersion: 1,
+      hiddenCores: [],
+      arcadeAutoHideEnabled: 'yes', // wrong type
+    });
+    expect(parseLedger(raw)).toBe(EMPTY_LEDGER);
+  });
+
+  it('falls back to EMPTY_LEDGER when arcadeAutoHidden contains a non-string', () => {
+    const raw = JSON.stringify({
+      schemaVersion: 1,
+      hiddenCores: [],
+      arcadeAutoHidden: ['ok.mra', 42],
+    });
+    expect(parseLedger(raw)).toBe(EMPTY_LEDGER);
+  });
+});
+
+describe('arcadeMraVisiblePath', () => {
+  it('strips a leading dot from the basename', () => {
+    expect(arcadeMraVisiblePath('.Foo.mra')).toBe('Foo.mra');
+  });
+
+  it('leaves an already-visible basename alone', () => {
+    expect(arcadeMraVisiblePath('Foo.mra')).toBe('Foo.mra');
+  });
+
+  it('only strips the dot from the basename, not parent segments', () => {
+    expect(arcadeMraVisiblePath('_Konami/.Foo.mra')).toBe('_Konami/Foo.mra');
+    expect(arcadeMraVisiblePath('_Konami/Foo.mra')).toBe('_Konami/Foo.mra');
+  });
+});
+
+describe('healArcadeLedger', () => {
+  const meta = (relativePath: string): ArcadeMraMeta => ({
+    relativePath,
+    displayName: relativePath.split('/').pop()!.replace(/^\./, ''),
+    hidden: relativePath.split('/').pop()!.startsWith('.'),
+    requiredZips: [],
+    rbf: 'r',
+  });
+
+  it('returns the same object when both arcade lists are empty / absent', () => {
+    const ledger: HideLedger = { schemaVersion: 1, hiddenCores: [] };
+    expect(healArcadeLedger(ledger, [meta('Foo.mra')])).toBe(ledger);
+  });
+
+  it('keeps entries whose visible path matches a current .mra (either form)', () => {
+    const ledger: HideLedger = {
+      schemaVersion: 1,
+      hiddenCores: [],
+      arcadeAutoHidden: ['Foo.mra'],
+      arcadeUserShownDespiteMissing: ['Bar.mra'],
+    };
+    // Foo is currently dot-prefixed (auto-hidden), Bar is visible.
+    const entries = [meta('.Foo.mra'), meta('Bar.mra')];
+    const healed = healArcadeLedger(ledger, entries);
+    expect(healed.arcadeAutoHidden).toEqual(['Foo.mra']);
+    expect(healed.arcadeUserShownDespiteMissing).toEqual(['Bar.mra']);
+  });
+
+  it('drops auto-hidden entries whose visible path no longer maps to a .mra', () => {
+    const ledger: HideLedger = {
+      schemaVersion: 1,
+      hiddenCores: [],
+      arcadeAutoHidden: ['Foo.mra', 'Gone.mra'],
+    };
+    const healed = healArcadeLedger(ledger, [meta('Foo.mra')]);
+    expect(healed.arcadeAutoHidden).toEqual(['Foo.mra']);
+  });
+
+  it('drops tombstones whose visible path no longer maps to a .mra', () => {
+    const ledger: HideLedger = {
+      schemaVersion: 1,
+      hiddenCores: [],
+      arcadeUserShownDespiteMissing: ['Stale.mra', 'Live.mra'],
+    };
+    const healed = healArcadeLedger(ledger, [meta('Live.mra')]);
+    expect(healed.arcadeUserShownDespiteMissing).toEqual(['Live.mra']);
+  });
+
+  it('returns the same object when no entries are dropped', () => {
+    const ledger: HideLedger = {
+      schemaVersion: 1,
+      hiddenCores: [],
+      arcadeAutoHidden: ['Foo.mra'],
+      arcadeUserShownDespiteMissing: ['Bar.mra'],
+    };
+    expect(
+      healArcadeLedger(ledger, [meta('Foo.mra'), meta('Bar.mra')]),
+    ).toBe(ledger);
+  });
+});
+
+describe('withArcadeAutoHideEnabled / withArcadeAutoHidden / tombstone helpers', () => {
+  const base: HideLedger = { schemaVersion: 1, hiddenCores: [] };
+
+  it('withArcadeAutoHideEnabled sets the field', () => {
+    expect(withArcadeAutoHideEnabled(base, false).arcadeAutoHideEnabled).toBe(
+      false,
+    );
+    expect(withArcadeAutoHideEnabled(base, true).arcadeAutoHideEnabled).toBe(
+      true,
+    );
+  });
+
+  it('withArcadeAutoHidden replaces the set with a fresh copy', () => {
+    const next = withArcadeAutoHidden(base, ['A.mra', 'B.mra']);
+    expect(next.arcadeAutoHidden).toEqual(['A.mra', 'B.mra']);
+    // Replacement, not append.
+    expect(
+      withArcadeAutoHidden(next, ['C.mra']).arcadeAutoHidden,
+    ).toEqual(['C.mra']);
+  });
+
+  it('withArcadeTombstoneAdded is idempotent on a duplicate', () => {
+    const once = withArcadeTombstoneAdded(base, 'Foo.mra');
+    const twice = withArcadeTombstoneAdded(once, 'Foo.mra');
+    expect(twice).toBe(once); // referential — no-op short-circuit
+    expect(once.arcadeUserShownDespiteMissing).toEqual(['Foo.mra']);
+  });
+
+  it('withArcadeTombstoneRemoved is idempotent on a missing entry', () => {
+    expect(withArcadeTombstoneRemoved(base, 'Foo.mra')).toBe(base);
+  });
+
+  it('withArcadeTombstoneRemoved drops just the named entry', () => {
+    const seeded: HideLedger = {
+      ...base,
+      arcadeUserShownDespiteMissing: ['A.mra', 'B.mra', 'C.mra'],
+    };
+    expect(
+      withArcadeTombstoneRemoved(seeded, 'B.mra').arcadeUserShownDespiteMissing,
+    ).toEqual(['A.mra', 'C.mra']);
   });
 });

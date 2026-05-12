@@ -741,6 +741,23 @@ describe('ConnectionManager — arcade playability data layer (PR 1/2)', () => {
     // Only dkong.zip exists — drives the three-bucket split below.
     await fs.writeFile(path.join(mameDir, 'dkong.zip'), 'z');
 
+    // PR 2/2: disable arcade auto-hide for the data-layer tests so
+    // the connect-time rule pass doesn't dot-prefix our seeded
+    // missing-ROM .mra and shift its bucket key. Auto-hide
+    // behavior is covered by the dedicated PR 2/2 test block
+    // below. The Fake maps `/media/fat/...` → `<rootPath>/...`,
+    // so the ledger lives directly under workDir/.mistercurator.
+    const stateDir = path.join(workDir, '.mistercurator');
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(
+      path.join(stateDir, 'state.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        hiddenCores: [],
+        arcadeAutoHideEnabled: false,
+      }),
+    );
+
     perTestCacheDir = await fs.mkdtemp(path.join(cacheDir, 'run-'));
     cache = new CacheManager(perTestCacheDir);
     manager = new ConnectionManager(client, makeStubStore(), cache);
@@ -843,5 +860,234 @@ describe('ConnectionManager — arcade playability data layer (PR 1/2)', () => {
     expect(out.playable).toEqual([]);
     expect(out.missing).toEqual([]);
     expect(out.noRomsNeeded).toEqual([]);
+  });
+});
+
+/**
+ * feat/arcade-ux-and-ledger (PR 2/2) — auto-hide rule + ledger
+ * coverage. Same fake-mister fixture as the PR-1 block; this
+ * block starts with auto-hide ENABLED (the V1 default) so the
+ * connect path applies the rule.
+ */
+describe('ConnectionManager — arcade auto-hide rule + ledger (PR 2/2)', () => {
+  let workDir: string;
+  let cacheDir: string;
+  let perTestCacheDir: string;
+  let client: FakeMisterClient;
+  let cache: CacheManager;
+  let manager: ConnectionManager;
+
+  beforeAll(async () => {
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-arcade-ux-test-'));
+    cacheDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'cm-arcade-ux-test-cache-'),
+    );
+  });
+
+  afterAll(async () => {
+    await fs.rm(workDir, { recursive: true, force: true });
+    await fs.rm(cacheDir, { recursive: true, force: true });
+  });
+
+  beforeEach(async () => {
+    client = new FakeMisterClient({
+      rootPath: workDir,
+      pristineRootPath: fixturesDir,
+      latencyMs: 0,
+    });
+    await client.reset();
+
+    const arcadeDir = path.join(workDir, '_Arcade');
+    await fs.rm(arcadeDir, { recursive: true, force: true });
+    await fs.mkdir(arcadeDir, { recursive: true });
+    // Three .mras: playable, missing, TTL.
+    await fs.writeFile(
+      path.join(arcadeDir, 'Donkey Kong.mra'),
+      '<misterromdescription><setname>dkong</setname><rbf>donkeykong</rbf><rom index="0" zip="dkong.zip"/></misterromdescription>',
+    );
+    await fs.writeFile(
+      path.join(arcadeDir, 'Missing Game.mra'),
+      '<misterromdescription><setname>missing</setname><rbf>missing</rbf><rom index="0" zip="missing.zip"/></misterromdescription>',
+    );
+    await fs.writeFile(
+      path.join(arcadeDir, 'TTL Game.mra'),
+      '<misterromdescription><setname></setname><rbf>ttl</rbf><rom index="0"/></misterromdescription>',
+    );
+
+    const mameDir = path.join(workDir, 'games', 'mame');
+    const hbmameDir = path.join(workDir, 'games', 'hbmame');
+    await fs.rm(mameDir, { recursive: true, force: true });
+    await fs.rm(hbmameDir, { recursive: true, force: true });
+    await fs.mkdir(mameDir, { recursive: true });
+    await fs.mkdir(hbmameDir, { recursive: true });
+    await fs.writeFile(path.join(mameDir, 'dkong.zip'), 'z');
+
+    // No state.json — auto-hide defaults to ENABLED on first connect.
+
+    perTestCacheDir = await fs.mkdtemp(path.join(cacheDir, 'run-'));
+    cache = new CacheManager(perTestCacheDir);
+    manager = new ConnectionManager(client, makeStubStore(), cache);
+  });
+
+  it('first connect auto-hides every missing-ROM mra and emits the toast signal', async () => {
+    const result = await manager.connect(profile.id);
+    // Toast signal carries the count of newly auto-hidden entries.
+    expect(result.firstConnectArcadeAutoHidden).toBe(1);
+
+    // On-disk: the missing mra is now dot-prefixed.
+    await expect(
+      fs.access(path.join(workDir, '_Arcade', '.Missing Game.mra')),
+    ).resolves.toBeUndefined();
+    // Playable + TTL unchanged.
+    await expect(
+      fs.access(path.join(workDir, '_Arcade', 'Donkey Kong.mra')),
+    ).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(workDir, '_Arcade', 'TTL Game.mra')),
+    ).resolves.toBeUndefined();
+
+    // Ledger reflects the auto-hidden set (visible-path form).
+    const playability = await manager.getArcadePlayability();
+    expect(playability.autoHidden).toEqual(['Missing Game.mra']);
+  });
+
+  it('second connect with the ledger already populated does NOT re-fire the toast', async () => {
+    await manager.connect(profile.id);
+    await manager.disconnect();
+    const result = await manager.connect(profile.id);
+    expect(result.firstConnectArcadeAutoHidden).toBeNull();
+  });
+
+  it('user shows an auto-hidden row → tombstone added, mra stays visible across reconnect', async () => {
+    await manager.connect(profile.id);
+    // Identify the currently-dot-prefixed missing mra.
+    await manager.setArcadeMraVisibility('.Missing Game.mra', false);
+    await expect(
+      fs.access(path.join(workDir, '_Arcade', 'Missing Game.mra')),
+    ).resolves.toBeUndefined();
+
+    // The tombstone is set; the auto-hidden ledger no longer carries it.
+    let playability = await manager.getArcadePlayability();
+    expect(playability.autoHidden).toEqual([]);
+    // Reconnect: the auto-hide pass respects the tombstone and
+    // leaves the mra visible.
+    await manager.disconnect();
+    await manager.connect(profile.id);
+    await expect(
+      fs.access(path.join(workDir, '_Arcade', 'Missing Game.mra')),
+    ).resolves.toBeUndefined();
+    playability = await manager.getArcadePlayability();
+    expect(playability.autoHidden).toEqual([]);
+  });
+
+  it('user hides a playable mra → user-hide survives reconnect + survives auto-hide toggle cycles', async () => {
+    await manager.connect(profile.id);
+    // User hides the playable mra by hand.
+    await manager.setArcadeMraVisibility('Donkey Kong.mra', true);
+    await expect(
+      fs.access(path.join(workDir, '_Arcade', '.Donkey Kong.mra')),
+    ).resolves.toBeUndefined();
+    // The auto-hide ledger should NOT claim this entry.
+    let playability = await manager.getArcadePlayability();
+    expect(playability.autoHidden).not.toContain('Donkey Kong.mra');
+
+    // Reconnect: user-hide preserved.
+    await manager.disconnect();
+    await manager.connect(profile.id);
+    await expect(
+      fs.access(path.join(workDir, '_Arcade', '.Donkey Kong.mra')),
+    ).resolves.toBeUndefined();
+
+    // Toggle auto-hide OFF → ON. User-hide unaffected (ledger never
+    // claimed it).
+    await manager.setArcadeAutoHideEnabled(false);
+    await expect(
+      fs.access(path.join(workDir, '_Arcade', '.Donkey Kong.mra')),
+    ).resolves.toBeUndefined();
+    await manager.setArcadeAutoHideEnabled(true);
+    await expect(
+      fs.access(path.join(workDir, '_Arcade', '.Donkey Kong.mra')),
+    ).resolves.toBeUndefined();
+    playability = await manager.getArcadePlayability();
+    expect(playability.autoHidden).not.toContain('Donkey Kong.mra');
+  });
+
+  it('toggle auto-hide OFF un-hides every auto-hidden mra; ON re-applies', async () => {
+    await manager.connect(profile.id);
+    await expect(
+      fs.access(path.join(workDir, '_Arcade', '.Missing Game.mra')),
+    ).resolves.toBeUndefined();
+
+    await manager.setArcadeAutoHideEnabled(false);
+    await expect(
+      fs.access(path.join(workDir, '_Arcade', 'Missing Game.mra')),
+    ).resolves.toBeUndefined();
+    let playability = await manager.getArcadePlayability();
+    expect(playability.autoHidden).toEqual([]);
+
+    await manager.setArcadeAutoHideEnabled(true);
+    await expect(
+      fs.access(path.join(workDir, '_Arcade', '.Missing Game.mra')),
+    ).resolves.toBeUndefined();
+    playability = await manager.getArcadePlayability();
+    expect(playability.autoHidden).toEqual(['Missing Game.mra']);
+  });
+
+  it('adding a missing ROM zip un-auto-hides the previously-hidden mra on reconnect', async () => {
+    await manager.connect(profile.id);
+    await expect(
+      fs.access(path.join(workDir, '_Arcade', '.Missing Game.mra')),
+    ).resolves.toBeUndefined();
+    let playability = await manager.getArcadePlayability();
+    expect(playability.autoHidden).toEqual(['Missing Game.mra']);
+
+    // Drop the previously-missing zip onto disk and bump dir mtime
+    // so the witness invalidates the playability cache.
+    await fs.writeFile(
+      path.join(workDir, 'games', 'mame', 'missing.zip'),
+      'z',
+    );
+    const future = new Date(Date.now() + 60_000);
+    await fs.utimes(path.join(workDir, 'games', 'mame'), future, future);
+    await manager.disconnect();
+
+    await manager.connect(profile.id);
+    // The mra is no longer missing → no longer auto-hidden.
+    await expect(
+      fs.access(path.join(workDir, '_Arcade', 'Missing Game.mra')),
+    ).resolves.toBeUndefined();
+    playability = await manager.getArcadePlayability();
+    expect(playability.autoHidden).toEqual([]);
+    expect(playability.playable).toContain('Missing Game.mra');
+  });
+
+  it('healArcade drops ledger entries pointing at .mras that vanished between sessions', async () => {
+    await manager.connect(profile.id);
+    let playability = await manager.getArcadePlayability();
+    expect(playability.autoHidden).toEqual(['Missing Game.mra']);
+
+    // Physically remove the auto-hidden mra (simulating a firmware
+    // update that dropped it). Bump _Arcade/ mtime explicitly so
+    // the witness comparison rejects the on-disk cache — the
+    // unlink-mtime-bump pair can fall inside `mtimesMatch`'s ±2s
+    // tolerance window otherwise.
+    await fs.unlink(path.join(workDir, '_Arcade', '.Missing Game.mra'));
+    const future = new Date(Date.now() + 60_000);
+    await fs.utimes(path.join(workDir, '_Arcade'), future, future);
+    await manager.disconnect();
+    await manager.connect(profile.id);
+    playability = await manager.getArcadePlayability();
+    expect(playability.autoHidden).toEqual([]);
+  });
+
+  it('getArcadeAutoHideEnabled defaults to true on a fresh ledger and persists writes', async () => {
+    await manager.connect(profile.id);
+    expect(manager.getArcadeAutoHideEnabled()).toBe(true);
+    await manager.setArcadeAutoHideEnabled(false);
+    expect(manager.getArcadeAutoHideEnabled()).toBe(false);
+    // Persisted across reconnect.
+    await manager.disconnect();
+    await manager.connect(profile.id);
+    expect(manager.getArcadeAutoHideEnabled()).toBe(false);
   });
 });
