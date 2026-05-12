@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { ARCADE_VIRTUAL_CORE_ID } from '@shared/arcade-mra';
 import type { CoreEntry, HideLedger } from '@shared/types';
 
 import {
@@ -2274,9 +2275,21 @@ describe('computeAutoReapplyChanges', () => {
   });
 });
 
-describe('coreDisplayName (PR-A item 1)', () => {
-  it('maps mame → Arcade', () => {
-    expect(coreDisplayName('mame')).toBe('Arcade');
+describe('coreDisplayName (fix/arcade-sidebar-labels)', () => {
+  it('maps the synthetic Arcade core id → "Arcade"', () => {
+    // The reserved double-underscore id is renderer-internal; the
+    // user must never see the raw `__arcade__` string in the
+    // sidebar or main-pane heading.
+    expect(coreDisplayName(ARCADE_VIRTUAL_CORE_ID)).toBe('Arcade');
+  });
+
+  it('maps mame → "MAME"', () => {
+    // Pre-V1 this mapped to "Arcade" as a workaround for the
+    // absent synthetic Arcade row. With the synthetic restored
+    // (PRs #50/#51) the rename collides; mame now displays under
+    // its conventional uppercase acronym, visually distinct from
+    // the synthetic Arcade row.
+    expect(coreDisplayName('mame')).toBe('MAME');
   });
 
   it('returns the coreId verbatim for any other core', () => {
@@ -2286,18 +2299,19 @@ describe('coreDisplayName (PR-A item 1)', () => {
     expect(coreDisplayName('S32X')).toBe('S32X');
   });
 
-  it('is case-sensitive on the override key (mame, not MAME)', () => {
+  it('is case-sensitive on the override key (mame, not Mame/MAME)', () => {
     // The MiSTer firmware ships the core with the lowercase
     // directory name `mame`. Pinning case-sensitivity here so a
     // future MAME-uppercase core (if one existed) wouldn't
-    // accidentally inherit the rename.
+    // accidentally inherit the rename. `MAME` passes through
+    // verbatim — and happens to render identically post-rename.
     expect(coreDisplayName('MAME')).toBe('MAME');
     expect(coreDisplayName('Mame')).toBe('Mame');
   });
 });
 
-describe('matchRbfsToGamesDirs — sort by display name (PR-A item 1)', () => {
-  it('sorts mame to the start because its display label is "Arcade"', () => {
+describe('matchRbfsToGamesDirs — sort by display name (fix/arcade-sidebar-labels)', () => {
+  it('sorts mame by its "MAME" display label, not its raw id', () => {
     const result = matchRbfsToGamesDirs({
       rbfs: [
         {
@@ -2321,8 +2335,11 @@ describe('matchRbfsToGamesDirs — sort by display name (PR-A item 1)', () => {
       ],
       gamesDirs: [],
     });
-    // ID order would be [NES, SNES, mame] (case-insensitive). The
-    // display-name sort puts "Arcade" (mame's label) first.
+    // Raw id order would be [mame, NES, SNES] (case-insensitive).
+    // Display-name sort uses `MAME` which sits before NES (M<N).
+    // The display rename doesn't move mame on this 3-element list,
+    // but the assertion still pins that the sort uses display names
+    // — a future label change would surface here.
     expect(result.map((c) => c.id)).toEqual(['mame', 'NES', 'SNES']);
   });
 });

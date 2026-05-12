@@ -218,14 +218,20 @@ describe('AutoScrapeEngine', () => {
       ]);
     });
 
-    it('uses coreDisplayName so mame surfaces as "Arcade"', async () => {
+    it('uses coreDisplayName so mame surfaces as "MAME" in progress events', async () => {
+      // fix/arcade-sidebar-labels: mame's display label was
+      // "Arcade" pre-V1 (workaround for the absent synthetic
+      // Arcade row). Post-V1 the synthetic exists, so mame's
+      // label moves to its conventional "MAME" acronym. The
+      // engine's progress events follow the same display helper
+      // every other surface uses.
       const { engine, events } = makeEngine({
         pathsByCore: { mame: ['a'] },
       });
       engine.start(['mame']);
       await flush();
       const active = events.find((e) => e.state === 'active');
-      expect(active?.state === 'active' && active.coreLabel).toBe('Arcade');
+      expect(active?.state === 'active' && active.coreLabel).toBe('MAME');
     });
 
     it('emits idle exactly once when the queue is empty', async () => {
