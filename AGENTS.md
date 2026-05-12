@@ -106,8 +106,10 @@ Update it before changing consumers.
 - Repo / package / binary: `mister-curator`
 - App data folder: resolved via Electron's `app.getPath('userData')` —
   yields `MiSTerCurator/` on each platform automatically
-- App-local cache directory: `<userData>/cache/<host>/` (PR #12). One
-  subdirectory per MiSTer host. Holds:
+- App-local cache directory: `<userData>/mister-cache/<host>/` (PR #12;
+  renamed from `cache/` to dodge a case-insensitive collision with
+  Chromium's `<userData>/Cache/`). One subdirectory per MiSTer host.
+  Holds:
   - `cores.json` — last `listAllCoresWithFiles` result + the on-device
     mtime witnesses used to validate it on next connect.
   - `roms/<coreId>.json` — last `listRoms` result(s) per core, keyed

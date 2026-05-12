@@ -17,7 +17,7 @@ export type { WitnessMtimes } from '@shared/prime-parse';
  * so a forward-incompatible upgrade silently invalidates instead of
  * corrupting.
  *
- * Cache files live at `<userData>/cache/<sanitisedHost>/`:
+ * Cache files live at `<userData>/mister-cache/<sanitisedHost>/`:
  *
  *   cores.json                — list-all-cores output + 5 witnesses
  *   roms/<sanitisedCoreId>.json
