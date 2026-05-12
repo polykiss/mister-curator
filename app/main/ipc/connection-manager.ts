@@ -323,11 +323,27 @@ export class ConnectionManager {
         profileId,
         host: profile.host,
       });
+      // feat/connecting-screen-status — emit phase label so the
+      // inline "Connecting…" UI can name the current step. The
+      // emit rides the same `connectionEvent` IPC as the elapsed
+      // ticker; the renderer's reveal-delay still applies, so a
+      // fast connect that never trips `CONNECTING_REVEAL_MS`
+      // shows nothing to the user.
+      this.emitConnectionEvent({
+        type: 'connect-phase',
+        profileId,
+        phase: 'transport',
+      });
       await this.client.connect(profile, secret);
       diagLog('info', 'conn', '·', 'transport-ready', {
         profileId,
         host: profile.host,
         ms: Date.now() - startedAt,
+      });
+      this.emitConnectionEvent({
+        type: 'connect-phase',
+        profileId,
+        phase: 'priming',
       });
       this.currentProfileId = profileId;
 
@@ -380,6 +396,17 @@ export class ConnectionManager {
       // here so we can use cached cores when the cache hits, avoiding
       // an extra listAllCoresWithFiles walk during heal.
       if (this.ledgerCache.hiddenCores.length > 0) {
+        // feat/connecting-screen-status — only emit the
+        // 'cores-walk' phase when we're about to actually walk
+        // (i.e. the cache miss path). A warm reconnect skips the
+        // SSH cost and so skips the label.
+        if (this.coresCache.length === 0) {
+          this.emitConnectionEvent({
+            type: 'connect-phase',
+            profileId,
+            phase: 'cores-walk',
+          });
+        }
         const coresForHeal =
           this.coresCache.length > 0
             ? this.coresCache
@@ -409,12 +436,41 @@ export class ConnectionManager {
       // hydrates lazily on the IPC fallback path if this misses.
       let firstConnectArcadeAutoHidden: number | null = null;
       try {
+        // feat/connecting-screen-status — `loadArcadeData` is the
+        // expensive phase on a cold cache (the awk-over-N-mras
+        // SSH pass). Always emit; a cache hit drains in <200ms
+        // and never reveals the label because the reveal-delay
+        // hasn't expired yet.
+        this.emitConnectionEvent({
+          type: 'connect-phase',
+          profileId,
+          phase: 'arcade-parse',
+        });
         const snapshot = await this.loadArcadeData();
         // feat/arcade-ux-and-ledger (PR 2/2) — heal stale arcade
         // ledger entries (mras that vanished between sessions) and
         // run the auto-hide pass against the current snapshot.
         // Returns the empty→non-empty edge if it fired; the
         // renderer's toast reads off ConnectResult.
+        //
+        // feat/connecting-screen-status — emit the 'auto-hide'
+        // phase only when the rule has work to do: auto-hide is
+        // enabled AND there are missing-ROM mras in the snapshot.
+        // The other branches (rule off, no missing) drain
+        // instantly and don't warrant a label flip.
+        const autoHideEnabled =
+          this.ledgerCache.arcadeAutoHideEnabled ??
+          DEFAULT_ARCADE_AUTO_HIDE_ENABLED;
+        const hasMissing = [...snapshot.byPath.values()].some(
+          (v) => v === 'missing',
+        );
+        if (autoHideEnabled && hasMissing) {
+          this.emitConnectionEvent({
+            type: 'connect-phase',
+            profileId,
+            phase: 'auto-hide',
+          });
+        }
         firstConnectArcadeAutoHidden = await this.healAndApplyArcadeAutoHide(
           snapshot,
         );

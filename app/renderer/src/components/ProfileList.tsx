@@ -27,6 +27,7 @@ export function ProfileList({ onEdit }: ProfileListProps): JSX.Element {
     dismissFailure,
     connectingProfileId,
     connectingElapsedMs,
+    connectingPhase,
   } = useConnection();
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -119,7 +120,7 @@ export function ProfileList({ onEdit }: ProfileListProps): JSX.Element {
         const isThisProfileConnecting =
           connectingProfileId === profile.id && status === 'connecting';
         const connectingMessage = isThisProfileConnecting
-          ? formatConnectingMessage(connectingElapsedMs)
+          ? formatConnectingMessage(connectingElapsedMs, connectingPhase)
           : null;
 
         return (

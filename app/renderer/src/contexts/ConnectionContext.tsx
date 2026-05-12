@@ -10,6 +10,7 @@ import {
 import type { JSX, ReactNode } from 'react';
 import { toast } from 'sonner';
 
+import type { ConnectPhase } from '@shared/connection';
 import type { MisterSecret } from '@shared/mister-client';
 import { MisterConnectionError } from '@shared/types';
 import type {
@@ -75,6 +76,14 @@ interface ConnectionContextValue {
    * this into `formatConnectingMessage` to decide what to display.
    */
   readonly connectingElapsedMs: number;
+  /**
+   * feat/connecting-screen-status — current sub-phase inside the
+   * `'connecting'` window, or `null` when no phase has been signalled
+   * yet (or after the connect resolves). Threaded into
+   * `formatConnectingMessage` alongside `connectingElapsedMs` so the
+   * inline indicator can name the current step.
+   */
+  readonly connectingPhase: ConnectPhase | null;
 
   /**
    * True iff the SSH transport dropped mid-session and the user has
@@ -129,6 +138,12 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
     null,
   );
   const [connectingElapsedMs, setConnectingElapsedMs] = useState<number>(0);
+  // feat/connecting-screen-status — last `connect-phase` event from
+  // the manager, scoped to the active connecting profile. Threaded
+  // into `formatConnectingMessage` to name the current step.
+  const [connectingPhase, setConnectingPhase] = useState<ConnectPhase | null>(
+    null,
+  );
   const [lostConnection, setLostConnection] = useState(false);
   const [autoRetry, setAutoRetry] = useState<AutoRetryProgress | null>(null);
   const [autoRetryFailed, setAutoRetryFailed] = useState(false);
@@ -152,6 +167,15 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
           // would otherwise repaint the wrong row.
           if (event.profileId === connectingProfileIdRef.current) {
             setConnectingElapsedMs(event.elapsedMs);
+          }
+          break;
+
+        case 'connect-phase':
+          // feat/connecting-screen-status — same stale-event guard
+          // as the elapsed ticker. Phase events from a cancelled
+          // connect must not repaint a different row's label.
+          if (event.profileId === connectingProfileIdRef.current) {
+            setConnectingPhase(event.phase);
           }
           break;
 
@@ -219,6 +243,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
       setCurrentProfileId(profileId);
       setConnectingProfileId(profileId);
       setConnectingElapsedMs(0);
+      setConnectingPhase(null);
       // Clear stale state for this profile — fresh connect resets
       // the failure card and any lost-connection banner that might be
       // hanging on from a previous session.
@@ -242,11 +267,13 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
         );
         setConnectingProfileId(null);
         setConnectingElapsedMs(0);
+        setConnectingPhase(null);
         return result;
       } catch (err) {
         setCurrentProfileId(null);
         setConnectingProfileId(null);
         setConnectingElapsedMs(0);
+        setConnectingPhase(null);
         const info = errToFailureInfo(err);
         setFailureByProfileId((prev) => {
           const next = new Map(prev);
@@ -316,6 +343,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
       dismissFailure,
       connectingProfileId,
       connectingElapsedMs,
+      connectingPhase,
       lostConnection,
       autoRetry,
       autoRetryFailed,
@@ -335,6 +363,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
       dismissFailure,
       connectingProfileId,
       connectingElapsedMs,
+      connectingPhase,
       lostConnection,
       autoRetry,
       autoRetryFailed,
