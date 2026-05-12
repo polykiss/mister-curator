@@ -73,6 +73,7 @@ import {
   buildHashScript,
   parseHashOutput,
 } from '@shared/hash-script';
+import { chunked } from '@shared/chunk';
 import {
   buildSampleScript,
   parseSampleOutput,
@@ -146,6 +147,17 @@ const SSH_HASH_OP_TIMEOUT_MS = 120_000;
  * for the regression test that asserts the chunking math.
  */
 export const BULK_ROM_RENAME_CHUNK_SIZE = 100;
+
+/**
+ * feat/sample-based-hashing — chunk size for `statWitnesses` and
+ * `computeSampleMd5s`. Each method builds a single shell script
+ * per chunk, and both grow ~linearly with path count. 100 paths
+ * keeps the script under ~26 KB (vs ssh2's 32 KB default
+ * exec-channel send window) and matches the existing
+ * `BULK_ROM_RENAME_CHUNK_SIZE` precedent. Exported for the
+ * regression tests that pin the chunking math.
+ */
+export const WITNESS_CHUNK_SIZE = 100;
 
 /**
  * SSH-level keepalive cadence. ssh2 sends an empty keepalive packet
@@ -1607,26 +1619,43 @@ export class RealMisterClient implements IMisterClient {
   async statWitnesses(paths: readonly string[]): Promise<WitnessMtimes> {
     this.assertConnected();
     if (paths.length === 0) return {};
-    const script = buildWitnessScript(paths);
-    const result = await this.runSshOp(script, () =>
-      this.ssh.execCommand(script),
+    // feat/sample-based-hashing — JS-side chunking via the shared
+    // `chunked` helper. `buildWitnessScript` embeds each path 3×
+    // per line (the `[ -e ]` test, the `stat` arg, and the
+    // fallback echo); for a 666-path mame core that's a ~177 KB
+    // script, well past ssh2's 32 KB default exec-channel send
+    // window — the EPIPE-in-27ms loop the user hit in the
+    // disconnect-cycle investigation. 100-path chunks bring each
+    // script under ~26 KB. Errors propagate from the first failing
+    // chunk; no partial-result merging on failure.
+    return chunked<string, WitnessMtimes>(
+      paths,
+      WITNESS_CHUNK_SIZE,
+      async (chunk) => {
+        const script = buildWitnessScript(chunk);
+        const result = await this.runSshOp(script, () =>
+          this.ssh.execCommand(script),
+        );
+        // A non-zero exit here is rare (the script tolerates per-path
+        // stat failures internally) but possible on full-disk / fork-fail
+        // edge cases. Throw rather than return a partial map so the
+        // caller treats this as "couldn't validate" → cache miss.
+        if (result.code !== 0) {
+          throw new Error(
+            `Failed to stat witnesses: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+          );
+        }
+        const parsed = parseWitnessOutput(result.stdout);
+        if (parsed === null) {
+          throw new Error(
+            'Witness output did not match the expected shape (likely truncated).',
+          );
+        }
+        return parsed;
+      },
+      (acc, next) => Object.assign(acc, next),
+      {},
     );
-    // A non-zero exit here is rare (the script tolerates per-path
-    // stat failures internally) but possible on full-disk / fork-fail
-    // edge cases. Throw rather than return a partial map so the
-    // caller treats this as "couldn't validate" → cache miss.
-    if (result.code !== 0) {
-      throw new Error(
-        `Failed to stat witnesses: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
-      );
-    }
-    const parsed = parseWitnessOutput(result.stdout);
-    if (parsed === null) {
-      throw new Error(
-        'Witness output did not match the expected shape (likely truncated).',
-      );
-    }
-    return parsed;
   }
 
   /**
@@ -1705,21 +1734,32 @@ export class RealMisterClient implements IMisterClient {
   ): Promise<Record<string, string>> {
     this.assertConnected();
     if (paths.length === 0) return {};
-    const script = buildSampleScript(paths);
-    // The script reads at most 128KB per path (head + tail blocks).
-    // For a typical 100-path batch that's ~12.5MB of bounded reads,
-    // dominated by SSH round-trip latency rather than I/O. Use the
-    // default per-op timeout — this is intentionally fast (no
-    // `unzip -p` streaming of full file content).
-    const result = await this.runSshOp(script, () =>
-      this.ssh.execCommand(script),
+    // feat/sample-based-hashing — JS-side chunking via the shared
+    // `chunked` helper. `buildSampleScript` builds a `set --`
+    // shell line with every path quoted; for ~666 mame paths
+    // that argv list approaches busybox's argv limit, and the
+    // sibling `statWitnesses` chunking exists for the same SSH
+    // overflow reason. 100-path chunks each read at most ~12.5 MB
+    // of bounded file content (head 64 KB + tail 64 KB per file)
+    // — dominated by RTT, not I/O.
+    return chunked<string, Record<string, string>>(
+      paths,
+      WITNESS_CHUNK_SIZE,
+      async (chunk) => {
+        const script = buildSampleScript(chunk);
+        const result = await this.runSshOp(script, () =>
+          this.ssh.execCommand(script),
+        );
+        if (result.code !== 0) {
+          throw new Error(
+            `Failed to compute sample md5s: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+          );
+        }
+        return parseSampleOutput(result.stdout);
+      },
+      (acc, next) => Object.assign(acc, next),
+      {},
     );
-    if (result.code !== 0) {
-      throw new Error(
-        `Failed to compute sample md5s: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
-      );
-    }
-    return parseSampleOutput(result.stdout);
   }
 
   private async writeFolderClassifications(

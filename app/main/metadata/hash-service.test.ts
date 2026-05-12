@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { HashService, type HashClient } from '@app/main/metadata/hash-service';
 import type { HashRecord } from '@shared/mister-client';
@@ -1522,6 +1522,163 @@ describe('HashService', () => {
       // Sample call NOT fired on the follow-up — the refreshed
       // mtime took the exact-match path.
       expect(followUpClient.sampleCalls).toEqual([]);
+    });
+
+    // feat/sample-based-hashing — close the remaining test-coverage
+    // gaps from the Phase 1 audit: (1) the sample-missing reason
+    // string (call succeeds but the device omits a path from its
+    // response) and (2) the legacy→sampleMd5 forward migration via
+    // the orchestrator's `checkCachedMtimes → null → computeHash`
+    // shape.
+    it('checkCachedMtimes: drift past tolerance, sample call resolves but omits the path → mtime-drift-sample-missing, candidate null, sampleCount unchanged', async () => {
+      const svc = new HashService(dir);
+      const seed = fix('a', 1024, 1700000000); // sampleMd5 = 'sa'.repeat(16)
+      await svc.getHash(
+        makeClient({ hashes: new Map([['/p/a', seed]]) }),
+        'host-1',
+        ['/p/a'],
+      );
+      // Drift the mtime, and make `computeSampleMd5s` resolve to an
+      // empty object — no key for /p/a. Distinct from the
+      // sample-call-throws case at line 1351: the call SUCCEEDS,
+      // but the device returned no row for this path (the file
+      // vanished mid-batch, permission denied, etc., per the
+      // contract at shared/mister-client.ts).
+      const consoleLogSpy = vi
+        .spyOn(console, 'log')
+        .mockImplementation(() => {
+          /* capture diagLog output without printing */
+        });
+      try {
+        const driftedClient = makeClient({
+          hashes: new Map(),
+          stat: new Map([['/p/a', 1700000030]]),
+          // `sampleOverride` with the path mapped to `undefined`:
+          // the mock's lookup `opts.sampleOverride.has(p)` returns
+          // true → typeof v !== 'string' → no `out[p] = …` → key
+          // absent from the resolved object.
+          sampleOverride: new Map([['/p/a', undefined]]),
+        });
+        const result = await svc.checkCachedMtimes(driftedClient, 'host-1', [
+          '/p/a',
+        ]);
+        expect(result.entries.get('/p/a')).toBeNull();
+        expect(result.sampleCount).toBe(0);
+        // The sample call DID fire — pre-fix the test at line 1351
+        // covered the throw case; this one covers the
+        // resolves-but-omits-the-path case.
+        expect(driftedClient.sampleCalls).toEqual([['/p/a']]);
+
+        // Diag-decision pin: the per-path `hash-decision` log
+        // line should emit `reason=mtime-drift-sample-missing` for
+        // this path. The diag formatter writes
+        // `[meta] · hash-decision  path=… action=stale-revalidate
+        //   reason=mtime-drift-sample-missing …`.
+        const lines = consoleLogSpy.mock.calls.map((c) =>
+          String(c[0] ?? ''),
+        );
+        const missingLine = lines.find(
+          (l) =>
+            l.startsWith('[meta] · hash-decision') &&
+            l.includes('reason=mtime-drift-sample-missing'),
+        );
+        expect(missingLine).toBeDefined();
+      } finally {
+        consoleLogSpy.mockRestore();
+      }
+    });
+
+    it('legacy entry (no sampleMd5) → checkCachedMtimes null → computeHash populates sampleMd5 on re-read', async () => {
+      // Stage a legacy v4 entry (the schema accepts a missing
+      // `sampleMd5` field — that's the pre-PR shape every existing
+      // user has on disk). The orchestrator-equivalent flow is:
+      //   1. `checkCachedMtimes` returns null for this path because
+      //      there's no sample fingerprint to validate against
+      //      (reason=mtime-drift-no-sample).
+      //   2. The orchestrator falls through to `computeHash`
+      //      (single-path), which the unified test at line 1276
+      //      pins for the `getHash` shape; this one pins the
+      //      explicit `checkCachedMtimes → computeHash` sequence
+      //      to mirror what the orchestrator's runScrapeLoop does.
+      const cacheDir = join(dir, 'host-1');
+      await fs.mkdir(cacheDir, { recursive: true });
+      await fs.writeFile(
+        join(cacheDir, 'hashes.json'),
+        JSON.stringify({
+          version: 1,
+          hashStrategyVersion: 4,
+          host: 'host-1',
+          entries: {
+            '/p/legacy.bin': {
+              md5: 'a'.repeat(32),
+              sha1: 'a'.repeat(40),
+              size: 1024,
+              diskSizeBytes: 1024,
+              mtime: 1700000000,
+              hashedAt: '2025-01-01T00:00:00.000Z',
+              // no sampleMd5 — the legacy shape this test pins
+            },
+          },
+        }),
+      );
+      const svc = new HashService(dir);
+
+      const consoleLogSpy = vi
+        .spyOn(console, 'log')
+        .mockImplementation(() => {
+          /* capture diagLog output without printing */
+        });
+      try {
+        // Step 1: checkCachedMtimes. Stat drift puts us past the
+        // ±2s tolerance; cached entry lacks sampleMd5 → no fast
+        // path → null with `reason=mtime-drift-no-sample`.
+        const checkClient = makeClient({
+          hashes: new Map(),
+          stat: new Map([['/p/legacy.bin', 1700000030]]),
+        });
+        const checkResult = await svc.checkCachedMtimes(checkClient, 'host-1', [
+          '/p/legacy.bin',
+        ]);
+        expect(checkResult.entries.get('/p/legacy.bin')).toBeNull();
+        // Sample call NOT fired (the legacy entry has no fingerprint
+        // to compare against; see the test at line 1316).
+        expect(checkClient.sampleCalls).toEqual([]);
+
+        const lines = consoleLogSpy.mock.calls.map((c) =>
+          String(c[0] ?? ''),
+        );
+        const noSampleLine = lines.find(
+          (l) =>
+            l.startsWith('[meta] · hash-decision') &&
+            l.includes('reason=mtime-drift-no-sample'),
+        );
+        expect(noSampleLine).toBeDefined();
+
+        // Step 2: orchestrator's per-path follow-up — computeHash
+        // for the same path. The fresh-hash branch fires
+        // `client.computeSampleMd5s` alongside `client.hashPaths`
+        // so the resulting persisted entry has sampleMd5 populated.
+        const computeClient = makeClient({
+          hashes: new Map([
+            ['/p/legacy.bin', fix('a', 1024, 1700000030)],
+          ]),
+        });
+        const computed = await svc.computeHash(
+          computeClient,
+          'host-1',
+          '/p/legacy.bin',
+        );
+        expect(computed?.md5).toBe('a'.repeat(32));
+        expect(computed?.sampleMd5).toBe('sa'.repeat(16));
+        // The forward migration: the on-disk cache for this entry
+        // now carries `sampleMd5`, so the next mtime drift will
+        // take the fast path instead of returning to this legacy
+        // branch.
+        const after = await svc.readCachedEntries('host-1', ['/p/legacy.bin']);
+        expect(after.get('/p/legacy.bin')?.sampleMd5).toBeDefined();
+      } finally {
+        consoleLogSpy.mockRestore();
+      }
     });
   });
 });
