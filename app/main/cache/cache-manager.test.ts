@@ -357,6 +357,56 @@ describe('witnessesMatch', () => {
       true,
     );
   });
+
+  // Phase 2 — cores cache flipped from mtime witnesses to content-
+  // hash witnesses. The comparator now branches on `typeof` to keep
+  // both flavours in one storage union. These cases pin the
+  // content-hash branch alongside the existing mtime branch above.
+  describe('content-hash flavour (Phase 2)', () => {
+    const H1 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const H2 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+
+    it('same hash on both sides → true (same .rbf set in the dir)', () => {
+      expect(witnessesMatch({ a: H1, b: H2 }, { a: H1, b: H2 })).toBe(true);
+    });
+
+    it('any per-key hash mismatch → false (one .rbf added or removed)', () => {
+      expect(witnessesMatch({ a: H1 }, { a: H2 })).toBe(false);
+    });
+
+    it('mixed cached-mtime / fresh-hash (pre-Phase-2 cores.json) → false', () => {
+      // Type mismatch is a "kind drift" — cached was written by an
+      // older code path with mtime numbers; new code emits hashes.
+      // Cache invalidates and self-heals on the next walk.
+      expect(witnessesMatch({ a: 100 }, { a: H1 })).toBe(false);
+      expect(witnessesMatch({ a: H1 }, { a: 100 })).toBe(false);
+    });
+
+    it('the `\'0\'` missing sentinel never matches anything, not even another `\'0\'`', () => {
+      // Same contract as the mtime `0` — a vanished dir is always
+      // a mismatch so we never serve stale cache for it.
+      expect(witnessesMatch({ a: '0' }, { a: '0' })).toBe(false);
+      expect(witnessesMatch({ a: '0', b: H1 }, { a: '0', b: H1 })).toBe(false);
+    });
+
+    it('empty-dir hash (md5 of empty input) matches itself', () => {
+      // Two paths that both contain zero .rbf/.mgl files produce
+      // the same well-known md5-of-empty digest. They match — the
+      // dirs are equivalent for the cores list's purposes.
+      const EMPTY_MD5 = 'd41d8cd98f00b204e9800998ecf8427e';
+      expect(
+        witnessesMatch({ a: EMPTY_MD5 }, { a: EMPTY_MD5 }),
+      ).toBe(true);
+    });
+
+    it('content-hash branch has no ±2 tolerance window (exact match required)', () => {
+      // The mtime branch widens by ±2s for FAT/exFAT rounding. The
+      // content-hash branch is strict — a 1-char digest difference
+      // means at least one file changed; that's a real invalidate.
+      const off = `${H1.slice(0, 31)}b`;
+      expect(witnessesMatch({ a: H1 }, { a: off })).toBe(false);
+    });
+  });
 });
 
 describe('CacheManager — observability hooks (PR #12 round 3)', () => {

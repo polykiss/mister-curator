@@ -28,8 +28,29 @@
  * tests, and the parser surface is testable without an SSH stack.
  */
 
-/** Map of absolute-on-device-path → mtime epoch (seconds since 1970). */
-export type WitnessMtimes = Readonly<Record<string, number>>;
+/**
+ * Map of absolute-on-device-path → witness value. Two value flavours
+ * coexist because different caches need different invalidation
+ * granularity:
+ *
+ *   number — mtime epoch (seconds since 1970). Sensitive to ANY dir
+ *     touch (filesystem updates parent mtime on add/remove/rename of
+ *     children, AND on `touch` of the dir itself). Used by the
+ *     arcade-mra-meta cache and the per-core roms caches.
+ *
+ *   string — 32-char hex content fingerprint, or the sentinel `'0'`
+ *     for missing-on-device. Stable across pointless dir touches
+ *     (downloaders / update_all bump `_Console/` mtime without
+ *     actually adding an rbf — would force a 19.7s cores walk on
+ *     every reconnect under the mtime regime). Used by the cores
+ *     cache to drop that re-walk.
+ *
+ * Comparator `witnessesMatch` branches on the typeof. A cache file
+ * written by an older app version (all numbers) compared against
+ * fresh content-hash values (strings) fails on type mismatch and
+ * self-heals into the new format on the next walk.
+ */
+export type WitnessMtimes = Readonly<Record<string, number | string>>;
 
 export interface PrimeOutput {
   /** Raw JSON string for the ledger file. Empty when missing. */
@@ -39,13 +60,11 @@ export interface PrimeOutput {
   /** Raw JSON string for the folder-classifications file. Empty when missing. */
   readonly classificationsJson: string;
   /**
-   * Mtime epoch (seconds) per witness path. Missing or absent paths
-   * appear in this map with value 0 — the parser preserves the path
-   * key so the caller can tell "I asked but it wasn't there" apart
-   * from "I never asked." `witnessesMatch` already treats 0 as a
-   * mismatch.
+   * Content-hash digest per cores-witness path: a 32-char hex md5 of
+   * the dir's .rbf/.mgl set (sorted basename+mtime, md5'd), or the
+   * `'0'` sentinel for paths that aren't directories on the device.
    */
-  readonly witnesses: WitnessMtimes;
+  readonly witnesses: Readonly<Record<string, string>>;
 }
 
 /** Sentinel labels in the prime output. ASCII only, never inside a base64 chunk. */
@@ -110,20 +129,19 @@ export function parsePrimeOutput(stdout: string): PrimeOutput | null {
     idxWitnesses,
   );
 
-  const witnesses: Record<string, number> = {};
+  // PrimeOutput.witnesses is content-hash flavour — `buildPrimeScript`
+  // emits the cores witnesses via the find/md5sum pipeline. Each value
+  // is either a 32-char hex digest or the `'0'` missing sentinel.
+  const witnesses: Record<string, string> = {};
   for (let i = idxWitnesses + 1; i < idxEnd; i += 1) {
     const line = lines[i] ?? '';
     if (line === '') continue;
-    // Format: `<mtime> <path>` — mtime is decimal digits, path is the
-    // rest. Split on the FIRST space only (paths can't contain it on
-    // a real MiSTer but let's be defensive about busybox quirks).
     const space = line.indexOf(' ');
     if (space < 0) continue;
-    const mtimeStr = line.slice(0, space);
+    const valueStr = line.slice(0, space);
     const path = line.slice(space + 1);
     if (path === '') continue;
-    const mtime = Number.parseInt(mtimeStr, 10);
-    witnesses[path] = Number.isFinite(mtime) ? mtime : 0;
+    witnesses[path] = normaliseContentHashValue(valueStr);
   }
 
   return {
@@ -198,15 +216,114 @@ export function buildPrimeScript(args: {
 
   lines.push(`echo '${LABEL_WITNESSES}'`);
   for (const p of args.coresWitnessPaths) {
-    // `stat -c '%Y %n'` emits epoch + path. Falls through to a
-    // synthetic `0 <path>` line when the path doesn't exist so the
-    // parser can tell apart "missing on device" from "I never asked."
-    lines.push(
-      `if [ -e ${shellSingleQuote(p)} ]; then stat -c '%Y %n' ${shellSingleQuote(p)} 2>/dev/null || echo "0 ${p}"; else echo "0 ${p}"; fi`,
-    );
+    // Cores cache uses CONTENT-HASH witnesses, not directory mtimes.
+    // A bulk `touch` from update_all.sh would otherwise force a
+    // 19.7s walk on every reconnect even though no .rbf/.mgl
+    // actually changed. See `buildCoresWitnessHashShellLine` for the
+    // shell shape and rationale.
+    lines.push(buildCoresWitnessHashShellLine(p));
   }
   lines.push(`echo '${LABEL_END}'`);
   return lines.join('\n');
+}
+
+/**
+ * Build the per-path shell statement for cores-witness content
+ * hashing. Emits exactly one line of the form `<hash> <path>` where
+ * `<hash>` is a 32-char hex md5 of every direct-child .rbf/.mgl
+ * file's name+mtime in `<path>`, or the sentinel `0` when the path
+ * isn't a directory.
+ *
+ * Filter details:
+ *   - `-mindepth 1 -maxdepth 1` keeps the scan to immediate children
+ *     (we don't care about per-core games subfolders here).
+ *   - `\( -type d -name '.*' -prune \)` excludes hidden subdirs so a
+ *     stray `.Scripts/` or `.cache/` doesn't pollute the digest.
+ *   - `-iname '*.rbf' -o -iname '*.mgl'` are the cores-list-load-
+ *     bearing files; everything else is noise.
+ *   - `%P %Y` is find's basename + mtime epoch, one per line.
+ *   - `sort | md5sum | cut -d' ' -f1` pins ordering and reduces to
+ *     a 32-char hex digest.
+ *
+ * Empty dirs (no rbf/mgl files) hash to md5-of-empty
+ * (`d41d8cd98f00b204e9800998ecf8427e`); two empty dirs match. The
+ * `0` sentinel for missing-on-device is rejected by `witnessesMatch`
+ * unconditionally, same contract as the mtime side.
+ */
+function buildCoresWitnessHashShellLine(path: string): string {
+  const q = shellSingleQuote(path);
+  return (
+    `if [ -d ${q} ]; then ` +
+    `printf '%s %s\\n' "$(` +
+    `find ${q} -mindepth 1 -maxdepth 1 ` +
+    `\\( -type d -name '.*' -prune \\) -o ` +
+    `\\( -type f \\( -iname '*.rbf' -o -iname '*.mgl' \\) -printf '%P %Y\\n' \\) ` +
+    `| sort | md5sum | cut -d' ' -f1)" ${q}; ` +
+    `else printf '0 %s\\n' ${q}; fi`
+  );
+}
+
+/**
+ * Build a one-shot content-hash check script for the cores witness
+ * paths. Used by write-through refreshes (after a hide/show flips a
+ * .rbf basename) and by `fetchAndCacheCores`'s post-walk witness
+ * capture. Same emit format as `buildPrimeScript`'s WITNESSES
+ * section, so `parseWitnessOutput` (or `parseContentHashOutput`)
+ * recognises it.
+ */
+export function buildContentHashScript(paths: readonly string[]): string {
+  const lines: string[] = [];
+  lines.push(`echo '${LABEL_WITNESSES}'`);
+  for (const p of paths) {
+    lines.push(buildCoresWitnessHashShellLine(p));
+  }
+  lines.push(`echo '${LABEL_END}'`);
+  return lines.join('\n');
+}
+
+/**
+ * Parse the content-hash WITNESSES-only block from `buildContentHashScript`.
+ * Returns `null` on truncation. Each value is either a 32-char hex
+ * md5 digest or the `'0'` missing sentinel — anything that doesn't
+ * match either shape coerces to `'0'` so the comparator treats it as
+ * a guaranteed miss.
+ */
+export function parseContentHashOutput(
+  stdout: string,
+): Record<string, string> | null {
+  const lines = stdout.split('\n');
+  let inSection = false;
+  const witnesses: Record<string, string> = {};
+  for (const line of lines) {
+    if (line === LABEL_WITNESSES) {
+      inSection = true;
+      continue;
+    }
+    if (line === LABEL_END) return witnesses;
+    if (!inSection) continue;
+    if (line === '') continue;
+    const space = line.indexOf(' ');
+    if (space < 0) continue;
+    const valueStr = line.slice(0, space);
+    const path = line.slice(space + 1);
+    if (path === '') continue;
+    witnesses[path] = normaliseContentHashValue(valueStr);
+  }
+  // No END marker → truncated output. Caller treats null as a miss.
+  return null;
+}
+
+/**
+ * Coerce a content-hash field into either a 32-char hex digest or
+ * the `'0'` sentinel for missing-on-device. Anything else (a stray
+ * `find` warning that leaked into the WITNESSES section, a busybox
+ * `md5sum` quirk) clamps to `'0'`: the comparator rejects `'0'`
+ * unconditionally, so a malformed line forces a cold walk rather
+ * than serving uncertain cache data.
+ */
+function normaliseContentHashValue(raw: string): string {
+  if (/^[0-9a-f]{32}$/.test(raw)) return raw;
+  return '0';
 }
 
 /**
@@ -305,7 +422,9 @@ export function buildWitnessScript(paths: readonly string[]): string {
  * Parse the `WITNESSES`-only output from `buildWitnessScript`. Same
  * delimiter pattern as the prime parser; just no file payloads.
  */
-export function parseWitnessOutput(stdout: string): WitnessMtimes | null {
+export function parseWitnessOutput(
+  stdout: string,
+): Record<string, number> | null {
   const lines = stdout.split('\n');
   let inSection = false;
   const witnesses: Record<string, number> = {};

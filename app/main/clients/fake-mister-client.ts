@@ -81,7 +81,7 @@ import type {
   RomVisibilityChange,
   SystemFileMarkChange,
 } from '@shared/mister-client';
-import type { SizeAndMtime, WitnessMtimes } from '@shared/prime-parse';
+import type { SizeAndMtime } from '@shared/prime-parse';
 
 export interface FakeMisterClientOptions {
   /** Working root that simulates `/media/fat/` on the device. */
@@ -844,12 +844,19 @@ export class FakeMisterClient implements IMisterClient {
       this.readHideLedgerRaw(),
       this.readSystemFilesMarks(),
       this.readFolderClassifications(),
-      this.statWitnesses(coresWitnessPaths),
+      // Cores cache uses CONTENT-HASH witnesses so mtime-only dir
+      // touches don't false-invalidate. The real client emits these
+      // from the WITNESSES section of `buildPrimeScript`; this fake
+      // mirrors the shape so connection-manager tests run against
+      // the same comparator contract.
+      this.computeCoresWitnessHashes(coresWitnessPaths),
     ]);
     return { ledger, marks, classifications, witnesses };
   }
 
-  async statWitnesses(paths: readonly string[]): Promise<WitnessMtimes> {
+  async statWitnesses(
+    paths: readonly string[],
+  ): Promise<Readonly<Record<string, number>>> {
     this.assertConnected();
     if (paths.length === 0) return {};
     const out: Record<string, number> = {};
@@ -867,6 +874,58 @@ export class FakeMisterClient implements IMisterClient {
         }
         throw err;
       }
+    }
+    return out;
+  }
+
+  async computeCoresWitnessHashes(
+    paths: readonly string[],
+  ): Promise<Readonly<Record<string, string>>> {
+    this.assertConnected();
+    if (paths.length === 0) return {};
+    const out: Record<string, string> = {};
+    for (const p of paths) {
+      const local = this.toLocal(p);
+      let dirents: Dirent[];
+      try {
+        dirents = await fs.readdir(local, { withFileTypes: true });
+      } catch (err) {
+        if (isNodeError(err) && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) {
+          // `'0'` is the missing-on-device sentinel — `witnessesMatch`
+          // rejects it unconditionally.
+          out[p] = '0';
+          continue;
+        }
+        throw err;
+      }
+      // Mirror the device-side `find <p> -mindepth 1 -maxdepth 1 \(
+      // -type d -name ".*" -prune \) -o \( -type f \( -iname "*.rbf"
+      // -o -iname "*.mgl" \) -printf "%P %Y\n" \) | sort | md5sum`
+      // pipeline:
+      //   - Directories of any kind are pruned (never printed).
+      //   - Regular files with .rbf or .mgl extension contribute one
+      //     `<basename> <mtime>` line.
+      //   - Lines are sorted; md5 over the joined output is the digest.
+      const lines: string[] = [];
+      for (const entry of dirents) {
+        if (entry.isDirectory()) continue;
+        if (!entry.isFile()) continue;
+        const lower = entry.name.toLowerCase();
+        if (!lower.endsWith('.rbf') && !lower.endsWith('.mgl')) continue;
+        const st = await fs.stat(path.join(local, entry.name));
+        const mtime = Math.floor(st.mtimeMs / 1000);
+        lines.push(`${entry.name} ${String(mtime)}`);
+      }
+      lines.sort();
+      const md5 = createHash('md5');
+      // md5sum is fed the find output verbatim; each line is
+      // newline-terminated, including (importantly) the last one.
+      // Empty input → md5 of empty bytes = the d41d8cd... well-known
+      // digest, matching busybox `: | md5sum`.
+      for (const line of lines) {
+        md5.update(`${line}\n`);
+      }
+      out[p] = md5.digest('hex');
     }
     return out;
   }

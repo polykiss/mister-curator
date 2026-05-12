@@ -119,17 +119,20 @@ export function sanitiseFsSegment(input: string): string {
 
 /**
  * True iff `cached` and `fresh` describe the same set of paths and
- * each path's mtime matches within the ±2-second tolerance window.
- * Path order doesn't matter; key presence does. A path missing from
- * `fresh` (mtime 0 or omitted) counts as a mismatch — the resource
- * on the device went away.
+ * each path's witness value matches. Two witness flavours coexist
+ * (see `WitnessMtimes` doc):
  *
- * fix/mtime-tolerance — pre-fix this was strict equality, which
- * forced a full cores/roms cache rebuild every reconnect to an
- * SD-rebuilt MiSTer (exFAT/FAT32 round mtimes to 2-second
- * resolution, drifting every cached witness by ≤1s). The tolerance
- * applies to non-zero values only; the 0-sentinel still mismatches
- * unconditionally per `mtimesMatch`.
+ *   number — mtime. ±2s tolerance per `mtimesMatch` (covers FAT/
+ *     exFAT 2-second rounding on SD rebuilds; `fix/mtime-tolerance`).
+ *     0 always mismatches.
+ *
+ *   string — 32-char content hash. Exact match; `'0'` (missing
+ *     sentinel) always mismatches.
+ *
+ * A `cached` entry written in one flavour and a `fresh` entry in the
+ * other (e.g. a pre-content-hash `cores.json` opened by a post-
+ * content-hash app) mismatches on the type axis and the cache
+ * self-heals on the next walk.
  */
 export function witnessesMatch(
   cached: WitnessMtimes,
@@ -142,7 +145,17 @@ export function witnessesMatch(
     const a = cached[k];
     const b = fresh[k];
     if (a === undefined || b === undefined) return false;
-    if (!mtimesMatch(a, b)) return false;
+    if (typeof a !== typeof b) return false;
+    if (typeof a === 'number') {
+      if (!mtimesMatch(a, b as number)) return false;
+    } else {
+      // Both strings: content-hash compare. `'0'` is the missing
+      // sentinel — never matches anything, not even another `'0'`.
+      const aStr = a;
+      const bStr = b as string;
+      if (aStr === '0' || bStr === '0') return false;
+      if (aStr !== bStr) return false;
+    }
   }
   return true;
 }

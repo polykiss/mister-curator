@@ -219,6 +219,27 @@ export function arcadeMraVisiblePath(relativePath: string): string {
 }
 
 /**
+ * Inverse of `arcadeMraVisiblePath`: prepend a leading dot to the
+ * basename so the path matches the on-disk hidden form. Used by the
+ * arcade auto-hide write-through to patch the cached entries[] in
+ * place after `setBulkArcadeMraVisibility` renames a .mra:
+ *
+ *   `Foo.mra`               → `.Foo.mra`
+ *   `.Foo.mra`              → `.Foo.mra`   (idempotent)
+ *   `_Konami/Foo.mra`       → `_Konami/.Foo.mra`
+ *   `_Konami/.Foo.mra`      → `_Konami/.Foo.mra` (idempotent)
+ */
+export function arcadeMraHiddenPath(relativePath: string): string {
+  const slash = relativePath.lastIndexOf('/');
+  if (slash === -1) {
+    return relativePath.startsWith('.') ? relativePath : `.${relativePath}`;
+  }
+  const dir = relativePath.slice(0, slash + 1);
+  const base = relativePath.slice(slash + 1);
+  return base.startsWith('.') ? `${dir}${base}` : `${dir}.${base}`;
+}
+
+/**
  * feat/arcade-ux-and-ledger (PR 2/2) — drop arcade ledger entries
  * whose VISIBLE relative path no longer maps to a .mra on the device.
  * Used on connect right after `parseArcadeMras` populates the
