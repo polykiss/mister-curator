@@ -103,6 +103,11 @@ export const IPC_CHANNELS = {
   listArcadeMraEntries: 'mister:listArcadeMraEntries',
   setArcadeMraVisibility: 'mister:setArcadeMraVisibility',
   setBulkArcadeMraVisibility: 'mister:setBulkArcadeMraVisibility',
+  // feat/arcade-playability-data (PR 1/2) — pre-computed
+  // playability buckets keyed by relativePath. The data layer
+  // populates these on connect; PR-2 hooks the renderer up to
+  // surface a per-row badge + auto-hide setting.
+  getArcadePlayability: 'mister:getArcadePlayability',
 } as const;
 
 /** PR #15 prefetch progress kind. Discriminator for the wire event. */
@@ -586,6 +591,15 @@ export interface MisterApi {
   setBulkArcadeMraVisibility(
     changes: readonly ArcadeMraVisibilityChangeWire[],
   ): Promise<BulkRomResult>;
+  /**
+   * feat/arcade-playability-data (PR 1/2) — fetch the playability
+   * buckets for the active connection. Hydrated on connect (the
+   * cold-walk pays ~2-3s on a fresh MiSTer; a warm reconnect with
+   * matching witnesses serves the cached snapshot in well under
+   * 50ms). The three lists are mutually exclusive and keyed by
+   * `relativePath`; PR-2's UI maps them onto the per-row badge.
+   */
+  getArcadePlayability(): Promise<ArcadePlayabilityWire>;
 }
 
 /** feat/arcade-phase-1.5 — wire shape for `.mra` entries. */
@@ -599,6 +613,18 @@ export interface ArcadeMraEntryWire {
 export interface ArcadeMraVisibilityChangeWire {
   readonly relativePath: string;
   readonly hidden: boolean;
+}
+
+/**
+ * feat/arcade-playability-data (PR 1/2) — wire shape for the
+ * playability buckets. Lists are mutually exclusive and keyed by
+ * `relativePath` (which matches `ArcadeMraEntryWire.relativePath`
+ * — same identity, two surfaces, one join key on the renderer).
+ */
+export interface ArcadePlayabilityWire {
+  readonly playable: readonly string[];
+  readonly missing: readonly string[];
+  readonly noRomsNeeded: readonly string[];
 }
 
 const VALID_CONNECTION_ERROR_CODES: ReadonlySet<ConnectionErrorCode> = new Set([

@@ -7,14 +7,19 @@ import JSZip from 'jszip';
 
 import {
   HIDEABLE_CATEGORIES,
+  MISTER_ARCADE_DIR,
+  MISTER_ARCADE_ZIP_DIRS,
   MISTER_CATEGORY_DIRS,
   MISTER_FOLDER_CLASSIFICATIONS_PATH,
-  MISTER_ARCADE_DIR,
   MISTER_GAMES_DIR,
   MISTER_LEDGER_DIR,
   MISTER_LEDGER_PATH,
   MISTER_SYSTEM_FILES_PATH,
 } from '@shared/constants';
+import {
+  parseArcadeMra,
+  type ArcadeMraMeta,
+} from '@shared/arcade-mra-parse';
 import {
   computeCoreRenames,
   isCoreFile,
@@ -340,6 +345,52 @@ export class FakeMisterClient implements IMisterClient {
       }
     }
     await walk(localRoot, '', 1);
+    return out;
+  }
+
+  async parseArcadeMras(): Promise<readonly ArcadeMraMeta[]> {
+    this.assertConnected();
+    await this.delay();
+    const localRoot = this.toLocal(MISTER_ARCADE_DIR);
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(localRoot, { withFileTypes: true });
+    } catch (err) {
+      if (isNodeError(err) && err.code === 'ENOENT') return [];
+      throw err;
+    }
+    const out: ArcadeMraMeta[] = [];
+    // Top-level only (`-maxdepth 1` equivalent). The real client's
+    // server-side awk has the same scope; .mras under `_alternatives/`
+    // and other subfolders are deferred to a follow-up.
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      if (!entry.name.toLowerCase().endsWith('.mra')) continue;
+      const raw = await fs.readFile(path.join(localRoot, entry.name), 'utf8');
+      out.push(parseArcadeMra(raw, entry.name));
+    }
+    return out;
+  }
+
+  async listArcadeZipBasenames(): Promise<readonly string[]> {
+    this.assertConnected();
+    await this.delay();
+    const out: string[] = [];
+    for (const dir of MISTER_ARCADE_ZIP_DIRS) {
+      const local = this.toLocal(dir);
+      let entries: Dirent[];
+      try {
+        entries = await fs.readdir(local, { withFileTypes: true });
+      } catch (err) {
+        if (isNodeError(err) && err.code === 'ENOENT') continue;
+        throw err;
+      }
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        if (!entry.name.toLowerCase().endsWith('.zip')) continue;
+        out.push(entry.name);
+      }
+    }
     return out;
   }
 

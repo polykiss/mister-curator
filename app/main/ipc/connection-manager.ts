@@ -4,10 +4,16 @@ import {
   type ConnectionEvent,
 } from '@shared/connection';
 import {
+  ARCADE_MRA_META_WITNESS_PATHS,
   CORES_CACHE_WITNESS_PATHS,
   MISTER_GAMES_DIR,
   romsCacheWitnessPath,
 } from '@shared/constants';
+import {
+  computePlayability,
+  type ArcadeMraMeta,
+  type Playability,
+} from '@shared/arcade-mra-parse';
 import {
   applyCoreVisibilityChange,
   computeAutoReapplyChanges,
@@ -73,6 +79,37 @@ export interface BulkCoreProgressBroadcast extends BulkCoreProgress {
 export interface ConnectResult {
   /** Number of cores re-hidden by the auto-reapply step (0 when disabled). */
   readonly reappliedCount: number;
+}
+
+/**
+ * feat/arcade-playability-data (PR 1/2) — in-memory snapshot
+ * computed from one round of `parseArcadeMras` + a
+ * `listArcadeZipBasenames` walk. Three derived sets keyed by
+ * `ArcadeMraMeta.relativePath`; the renderer-facing IPC slices
+ * these into the simple `{ playable, missing, noRomsNeeded }`
+ * shape PR-2's UI consumes.
+ *
+ * Held in the manager so the IPC handler doesn't have to do the
+ * computation per-call — the underlying data only changes when
+ * the user adds/removes a .mra or a zip (witness-checked) or
+ * forces a refresh.
+ */
+export interface ArcadePlayabilitySnapshot {
+  readonly entries: readonly ArcadeMraMeta[];
+  readonly zipBasenames: ReadonlySet<string>;
+  /** relativePath → playability classification. */
+  readonly byPath: ReadonlyMap<string, Playability>;
+}
+
+/**
+ * Shape returned by `getArcadePlayability` over IPC. Three flat
+ * lists of `relativePath`s, mutually exclusive. PR-2 will key the
+ * row badge + ledger off these.
+ */
+export interface ArcadePlayabilityIpc {
+  readonly playable: readonly string[];
+  readonly missing: readonly string[];
+  readonly noRomsNeeded: readonly string[];
 }
 
 /**
@@ -148,6 +185,21 @@ export class ConnectionManager {
    */
   private arcadeMraCache: readonly ArcadeMraEntry[] | null = null;
   /**
+   * feat/arcade-playability-data (PR 1/2) — in-memory snapshot of
+   * pre-parsed .mra metadata + zip-basename set, hydrated on
+   * connect by `loadArcadeData()`. Distinct from `arcadeMraCache`
+   * above: that one carries the raw listing the renderer's
+   * ArcadeMraPane consumes; THIS one carries the playability slice
+   * the UI in PR-2 will consume.
+   *
+   * Reset on disconnect + on explicit `loadArcadeData({
+   * forceRefresh: true })`. Survives between IPC calls for as long
+   * as the connection stays up — playability doesn't change unless
+   * the user adds/removes a .mra or a zip, both of which would
+   * trip the cache's witnesses on the next connect.
+   */
+  private arcadePlayabilityCache: ArcadePlayabilitySnapshot | null = null;
+  /**
    * Host of the active connection — used to key the on-disk cache
    * (PR #12). Captured on connect alongside `currentProfileId` so a
    * write-through after a hide/show targets the right host's cache
@@ -220,6 +272,7 @@ export class ConnectionManager {
     this.systemFilesMarksCache = EMPTY_SYSTEM_FILES_MARKS;
     this.folderClassificationsCache = EMPTY_FOLDER_CLASSIFICATIONS;
     this.arcadeMraCache = null;
+    this.arcadePlayabilityCache = null;
     this.currentHost = null;
 
     // Connecting-elapsed ticker. Fires every second while the connect
@@ -325,6 +378,20 @@ export class ConnectionManager {
         reappliedCount = await this.runAutoReapply();
       }
 
+      // feat/arcade-playability-data (PR 1/2) — pre-compute the
+      // arcade playability snapshot so PR-2's UI lands warm. Cache
+      // hit on a warm reconnect; cold walk on first connect. Wrap
+      // in try/catch — a transient SSH glitch here shouldn't keep
+      // the rest of the app from coming online. The snapshot
+      // hydrates lazily on the IPC fallback path if this misses.
+      try {
+        await this.loadArcadeData();
+      } catch (err) {
+        diagLog('warn', 'arcade', '·', 'playability-scan failed', {
+          err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+        });
+      }
+
       this.setStatus('connected');
       diagLog('info', 'conn', '←', 'connected', {
         profileId,
@@ -368,6 +435,7 @@ export class ConnectionManager {
       this.systemFilesMarksCache = EMPTY_SYSTEM_FILES_MARKS;
       this.folderClassificationsCache = EMPTY_FOLDER_CLASSIFICATIONS;
       this.arcadeMraCache = null;
+      this.arcadePlayabilityCache = null;
       this.setStatus('disconnected');
     }
   }
@@ -436,6 +504,12 @@ export class ConnectionManager {
     this.assertConnected();
     await this.client.setArcadeMraVisibility(relativePath, hidden);
     this.arcadeMraCache = null;
+    // The playability snapshot keys off `relativePath`, which flips
+    // when a .mra is hidden (`Foo.mra` ↔ `.Foo.mra`). Invalidating
+    // forces the next `loadArcadeData` to re-walk; the on-disk
+    // cache will miss on witnesses too (`_Arcade/` mtime bumped),
+    // so both layers stay coherent without a write-through here.
+    this.arcadePlayabilityCache = null;
   }
 
   /**
@@ -449,7 +523,128 @@ export class ConnectionManager {
     this.assertConnected();
     const result = await this.client.setBulkArcadeMraVisibility(changes);
     this.arcadeMraCache = null;
+    this.arcadePlayabilityCache = null;
     return result;
+  }
+
+  /**
+   * feat/arcade-playability-data (PR 1/2) — hydrate the in-memory
+   * playability snapshot. Called once per connect (after
+   * `primeConnect`, before the auto-scrape engine starts) and
+   * on-demand by `getArcadePlayability` when the snapshot is null
+   * (defensive — connect should have populated it).
+   *
+   * Cache flow:
+   *   1. `forceRefresh` → skip the cache lookup and walk the device.
+   *   2. Otherwise read the per-host `arcade-mra-meta.json` cache
+   *      file. If schema- and host-valid AND its witnesses match
+   *      the fresh ones, serve it (warm path).
+   *   3. Otherwise walk the device (`parseArcadeMras` +
+   *      `listArcadeZipBasenames` + `statWitnesses`), persist, and
+   *      hydrate the snapshot.
+   *
+   * Witnesses cover `_Arcade/` + both zip dirs (see
+   * `ARCADE_MRA_META_WITNESS_PATHS`). Any of: adding a .mra,
+   * hiding/showing a .mra (rename bumps `_Arcade/` mtime), adding
+   * or removing a zip in either dir — flips one witness and the
+   * cache misses on next connect.
+   *
+   * Emits a `[arcade] · playability-scan done` diag line per
+   * resolution (hit or miss) so the live-verify trace shows the
+   * cold/warm timings.
+   */
+  async loadArcadeData(
+    options: { readonly forceRefresh?: boolean } = {},
+  ): Promise<ArcadePlayabilitySnapshot> {
+    // Use currentHost rather than `assertConnected` for the gate.
+    // `connect()` sets currentHost the moment primeConnect succeeds
+    // (well before setStatus('connected')), so the in-connect-flow
+    // call to this method works. Disconnect clears currentHost
+    // back to null, so external IPC callers can't sneak in either.
+    const host = this.currentHost;
+    if (host === null) {
+      throw new Error('Not connected to a MiSTer.');
+    }
+    const startedAt = Date.now();
+    if (options.forceRefresh) {
+      this.arcadePlayabilityCache = null;
+      await this.cache.invalidateArcadeMraMetaCache(host).catch(() => {
+        /* swallow — cache invalidation is best-effort */
+      });
+    } else if (this.arcadePlayabilityCache !== null) {
+      // In-memory hit; no log line — this is the IPC fast-path
+      // re-entry, not a real scan.
+      return this.arcadePlayabilityCache;
+    }
+    // Stat the fresh witnesses BEFORE the cache lookup so the
+    // comparison uses the same epoch values as the eventual
+    // write-through (mirrors `fetchAndCacheCores`).
+    const witnesses = await this.client.statWitnesses(
+      ARCADE_MRA_META_WITNESS_PATHS,
+    );
+    if (!options.forceRefresh) {
+      const cached = await this.cache.getArcadeMraMetaCache(host);
+      if (cached !== null && witnessesMatch(cached.witnesses, witnesses)) {
+        this.cache.recordHit('arcade', { host });
+        const snapshot = buildPlayabilitySnapshot(
+          cached.entries,
+          cached.zipBasenames,
+        );
+        this.arcadePlayabilityCache = snapshot;
+        const buckets = bucketByPlayability(snapshot);
+        diagLog('info', 'arcade', '·', 'playability-scan done', {
+          totalMras: snapshot.entries.length,
+          playable: buckets.playable.length,
+          missing: buckets.missing.length,
+          noRomsNeeded: buckets.noRomsNeeded.length,
+          ms: Date.now() - startedAt,
+          cached: 'true',
+        });
+        return snapshot;
+      }
+      if (cached !== null) {
+        this.cache.recordStale('arcade', { host });
+        await this.cache.invalidateArcadeMraMetaCache(host).catch(() => {
+          /* swallow */
+        });
+      }
+    }
+    // Cold path — walk the device.
+    const [entries, zipBasenames] = await Promise.all([
+      this.client.parseArcadeMras(),
+      this.client.listArcadeZipBasenames(),
+    ]);
+    await this.cache
+      .setArcadeMraMetaCache(host, entries, zipBasenames, witnesses)
+      .catch(() => {
+        /* swallow — disk cache write failure shouldn't fail the scan */
+      });
+    const snapshot = buildPlayabilitySnapshot(entries, zipBasenames);
+    this.arcadePlayabilityCache = snapshot;
+    const buckets = bucketByPlayability(snapshot);
+    diagLog('info', 'arcade', '·', 'playability-scan done', {
+      totalMras: snapshot.entries.length,
+      playable: buckets.playable.length,
+      missing: buckets.missing.length,
+      noRomsNeeded: buckets.noRomsNeeded.length,
+      ms: Date.now() - startedAt,
+      cached: 'false',
+    });
+    return snapshot;
+  }
+
+  /**
+   * feat/arcade-playability-data (PR 1/2) — IPC-shaped getter.
+   * Returns the three relativePath buckets the renderer will
+   * consume in PR-2. Hydrates the snapshot on demand if it
+   * happened to be null (e.g. connect happened before this PR
+   * shipped's IPC was registered and the user kept the session
+   * open across an upgrade — defensive only).
+   */
+  async getArcadePlayability(): Promise<ArcadePlayabilityIpc> {
+    const snapshot =
+      this.arcadePlayabilityCache ?? (await this.loadArcadeData());
+    return bucketByPlayability(snapshot);
   }
 
   /**
@@ -1386,3 +1581,48 @@ export class ConnectionManager {
 
 // Re-exported for callers that want the type without importing isCoreHidden.
 export { isCoreHidden };
+
+/**
+ * feat/arcade-playability-data (PR 1/2) — build the in-memory
+ * playability snapshot from a parsed `entries` list + a flat
+ * `zipBasenames` array. Dedupes the basenames into a Set, then
+ * applies `computePlayability` once per entry. Pure — no side
+ * effects, so unit-testable independently of `ConnectionManager`.
+ */
+export function buildPlayabilitySnapshot(
+  entries: readonly ArcadeMraMeta[],
+  zipBasenames: readonly string[],
+): ArcadePlayabilitySnapshot {
+  const zipSet = new Set(zipBasenames);
+  const byPath = new Map<string, Playability>();
+  for (const entry of entries) {
+    byPath.set(entry.relativePath, computePlayability(entry, zipSet));
+  }
+  return { entries, zipBasenames: zipSet, byPath };
+}
+
+/**
+ * feat/arcade-playability-data (PR 1/2) — bucket the snapshot's
+ * `byPath` map into the three flat lists the IPC surface returns.
+ * Order within each bucket follows `entries` document order
+ * (which mirrors the awk's `find` output order — typically
+ * filesystem-natural).
+ */
+export function bucketByPlayability(
+  snapshot: ArcadePlayabilitySnapshot,
+): ArcadePlayabilityIpc {
+  const playable: string[] = [];
+  const missing: string[] = [];
+  const noRomsNeeded: string[] = [];
+  for (const entry of snapshot.entries) {
+    const classification = snapshot.byPath.get(entry.relativePath);
+    if (classification === 'playable') {
+      playable.push(entry.relativePath);
+    } else if (classification === 'missing') {
+      missing.push(entry.relativePath);
+    } else if (classification === 'no-roms-needed') {
+      noRomsNeeded.push(entry.relativePath);
+    }
+  }
+  return { playable, missing, noRomsNeeded };
+}

@@ -1099,4 +1099,172 @@ describe('FakeMisterClient', () => {
       expect(raw).toEqual([]);
     });
   });
+
+  // feat/arcade-playability-data (PR 1/2): pre-parsing of .mra heads
+  // for the playability scan. The Fake reads the on-disk .mra files
+  // and runs the shared `parseArcadeMra` over each; the contract with
+  // the Real client (which uses an on-device awk) is symmetric.
+  describe('parseArcadeMras (PR 1/2)', () => {
+    let arcadeDir: string;
+    beforeEach(async () => {
+      arcadeDir = path.join(workDir, '_Arcade');
+      await fs.rm(arcadeDir, { recursive: true, force: true });
+      await fs.mkdir(arcadeDir, { recursive: true });
+      // A single-zip mra (typical case).
+      await fs.writeFile(
+        path.join(arcadeDir, 'Donkey Kong.mra'),
+        [
+          '<misterromdescription>',
+          '  <setname>dkong</setname>',
+          '  <rbf>donkeykong</rbf>',
+          '  <rom index="0" zip="dkong.zip"><part>00</part></rom>',
+          '</misterromdescription>',
+        ].join('\n'),
+      );
+      // A pipe-fallback clone-with-parent.
+      await fs.writeFile(
+        path.join(arcadeDir, 'Galaga.mra'),
+        [
+          '<misterromdescription>',
+          '  <setname>galagamw</setname>',
+          '  <rbf>galaga</rbf>',
+          '  <rom index="1"/>',
+          '  <rom index="0" zip="galaga.zip|galagamw.zip"><part>00</part></rom>',
+          '</misterromdescription>',
+        ].join('\n'),
+      );
+      // A TTL/discrete-logic mra with no zip refs.
+      await fs.writeFile(
+        path.join(arcadeDir, 'Computer Space.mra'),
+        [
+          '<misterromdescription>',
+          '  <setname></setname>',
+          '  <rbf>computerspace</rbf>',
+          '  <rom index="0"/>',
+          '</misterromdescription>',
+        ].join('\n'),
+      );
+      // Hidden via dot-prefix.
+      await fs.writeFile(
+        path.join(arcadeDir, '.Hidden Game.mra'),
+        [
+          '<misterromdescription>',
+          '  <setname>hidden</setname>',
+          '  <rbf>hidden</rbf>',
+          '  <rom zip="hidden.zip"></rom>',
+          '</misterromdescription>',
+        ].join('\n'),
+      );
+      // _alternatives/ subfolder — must be ignored by this method
+      // (top-level only per PR 1/2 spec). Verify the boundary.
+      await fs.mkdir(path.join(arcadeDir, '_alternatives'));
+      await fs.writeFile(
+        path.join(arcadeDir, '_alternatives', 'Variant.mra'),
+        '<misterromdescription><rbf>x</rbf></misterromdescription>',
+      );
+      // Non-mra file at top level — must be ignored.
+      await fs.writeFile(path.join(arcadeDir, 'README.md'), 'unrelated');
+    });
+
+    it('extracts metadata for every top-level .mra (visible + hidden)', async () => {
+      const out = await client.parseArcadeMras();
+      const byPath = new Map(out.map((m) => [m.relativePath, m]));
+      expect(byPath.has('Donkey Kong.mra')).toBe(true);
+      expect(byPath.has('Galaga.mra')).toBe(true);
+      expect(byPath.has('Computer Space.mra')).toBe(true);
+      expect(byPath.has('.Hidden Game.mra')).toBe(true);
+    });
+
+    it('does NOT recurse into subfolders (top-level only by spec)', async () => {
+      const out = await client.parseArcadeMras();
+      expect(
+        out.find((m) => m.relativePath.includes('_alternatives')),
+      ).toBeUndefined();
+    });
+
+    it('drops non-mra files at top level', async () => {
+      const out = await client.parseArcadeMras();
+      expect(out.find((m) => m.relativePath === 'README.md')).toBeUndefined();
+    });
+
+    it('parses pipe-fallback zip lists into one block of alternatives', async () => {
+      const out = await client.parseArcadeMras();
+      const galaga = out.find((m) => m.relativePath === 'Galaga.mra');
+      expect(galaga?.requiredZips).toEqual([['galaga.zip', 'galagamw.zip']]);
+      expect(galaga?.rbf).toBe('galaga');
+      expect(galaga?.setname).toBe('galagamw');
+    });
+
+    it('returns empty requiredZips for TTL .mras with no zip attr', async () => {
+      const out = await client.parseArcadeMras();
+      const tts = out.find((m) => m.relativePath === 'Computer Space.mra');
+      expect(tts?.requiredZips).toEqual([]);
+      expect(tts?.setname).toBeUndefined();
+    });
+
+    it('preserves the leading-dot relativePath and reports hidden=true', async () => {
+      const out = await client.parseArcadeMras();
+      const hidden = out.find((m) => m.relativePath === '.Hidden Game.mra');
+      expect(hidden?.hidden).toBe(true);
+      expect(hidden?.displayName).toBe('Hidden Game.mra');
+    });
+
+    it('returns an empty list when _Arcade/ does not exist', async () => {
+      await fs.rm(arcadeDir, { recursive: true, force: true });
+      const out = await client.parseArcadeMras();
+      expect(out).toEqual([]);
+    });
+  });
+
+  describe('listArcadeZipBasenames (PR 1/2)', () => {
+    beforeEach(async () => {
+      const mameDir = path.join(workDir, 'games', 'mame');
+      const hbmameDir = path.join(workDir, 'games', 'hbmame');
+      await fs.rm(mameDir, { recursive: true, force: true });
+      await fs.rm(hbmameDir, { recursive: true, force: true });
+      await fs.mkdir(mameDir, { recursive: true });
+      await fs.mkdir(hbmameDir, { recursive: true });
+      await fs.writeFile(path.join(mameDir, 'galaga.zip'), 'z');
+      await fs.writeFile(path.join(mameDir, 'pacman.zip'), 'z');
+      // Non-zip file — must be ignored.
+      await fs.writeFile(path.join(mameDir, 'README'), 'x');
+      // Same basename across both dirs — caller dedupes via Set.
+      await fs.writeFile(path.join(hbmameDir, 'galaga.zip'), 'z');
+      await fs.writeFile(path.join(hbmameDir, 'pacmanhb.zip'), 'z');
+    });
+
+    it('returns every zip basename from both mame/ and hbmame/', async () => {
+      const out = await client.listArcadeZipBasenames();
+      // Sort for determinism — find / readdir order is filesystem-
+      // dependent so we don't pin it.
+      expect([...out].sort()).toEqual([
+        'galaga.zip',
+        'galaga.zip', // appears twice — once per dir; caller dedupes
+        'pacman.zip',
+        'pacmanhb.zip',
+      ]);
+    });
+
+    it('returns the union when only one dir exists', async () => {
+      await fs.rm(path.join(workDir, 'games', 'hbmame'), {
+        recursive: true,
+        force: true,
+      });
+      const out = await client.listArcadeZipBasenames();
+      expect([...out].sort()).toEqual(['galaga.zip', 'pacman.zip']);
+    });
+
+    it('returns an empty list when neither dir exists', async () => {
+      await fs.rm(path.join(workDir, 'games', 'mame'), {
+        recursive: true,
+        force: true,
+      });
+      await fs.rm(path.join(workDir, 'games', 'hbmame'), {
+        recursive: true,
+        force: true,
+      });
+      const out = await client.listArcadeZipBasenames();
+      expect(out).toEqual([]);
+    });
+  });
 });

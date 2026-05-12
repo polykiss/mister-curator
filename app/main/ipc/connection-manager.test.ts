@@ -660,3 +660,188 @@ describe('ConnectionManager — mid-session disconnect + auto-retry', () => {
     stub.mockRestore();
   });
 });
+
+/**
+ * feat/arcade-playability-data (PR 1/2) — orchestrator coverage for
+ * loadArcadeData + the IPC-shaped getArcadePlayability. The fake
+ * client reads .mra files off disk and lists zip basenames; the
+ * shared parser does the work, so we exercise the orchestration
+ * (cache hit / miss / witness-changed) rather than reparse-correctness
+ * (that lives in shared/arcade-mra-parse.test.ts).
+ */
+describe('ConnectionManager — arcade playability data layer (PR 1/2)', () => {
+  let workDir: string;
+  let cacheDir: string;
+  let perTestCacheDir: string;
+  let client: FakeMisterClient;
+  let cache: CacheManager;
+  let manager: ConnectionManager;
+
+  beforeAll(async () => {
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-arcade-test-'));
+    cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-arcade-test-cache-'));
+  });
+
+  afterAll(async () => {
+    await fs.rm(workDir, { recursive: true, force: true });
+    await fs.rm(cacheDir, { recursive: true, force: true });
+  });
+
+  beforeEach(async () => {
+    client = new FakeMisterClient({
+      rootPath: workDir,
+      pristineRootPath: fixturesDir,
+      latencyMs: 0,
+    });
+    await client.reset();
+    // Seed `_Arcade/` with three .mras hitting each playability bucket
+    // and a `games/mame/` zip dir matching one of them.
+    const arcadeDir = path.join(workDir, '_Arcade');
+    await fs.rm(arcadeDir, { recursive: true, force: true });
+    await fs.mkdir(arcadeDir, { recursive: true });
+    await fs.writeFile(
+      path.join(arcadeDir, 'Donkey Kong.mra'),
+      [
+        '<misterromdescription>',
+        '  <setname>dkong</setname>',
+        '  <rbf>donkeykong</rbf>',
+        '  <rom index="0" zip="dkong.zip"/>',
+        '</misterromdescription>',
+      ].join('\n'),
+    );
+    await fs.writeFile(
+      path.join(arcadeDir, 'Missing Game.mra'),
+      [
+        '<misterromdescription>',
+        '  <setname>missing</setname>',
+        '  <rbf>missing</rbf>',
+        '  <rom index="0" zip="missing.zip"/>',
+        '</misterromdescription>',
+      ].join('\n'),
+    );
+    await fs.writeFile(
+      path.join(arcadeDir, 'TTL Game.mra'),
+      [
+        '<misterromdescription>',
+        '  <setname></setname>',
+        '  <rbf>ttl</rbf>',
+        '  <rom index="0"/>',
+        '</misterromdescription>',
+      ].join('\n'),
+    );
+    const mameDir = path.join(workDir, 'games', 'mame');
+    const hbmameDir = path.join(workDir, 'games', 'hbmame');
+    await fs.rm(mameDir, { recursive: true, force: true });
+    await fs.rm(hbmameDir, { recursive: true, force: true });
+    await fs.mkdir(mameDir, { recursive: true });
+    // hbmame/ exists but empty — needed so its witness has a real
+    // mtime. `witnessesMatch` rejects mtime=0 unconditionally, so a
+    // missing zip dir would force a perpetual cache miss.
+    await fs.mkdir(hbmameDir, { recursive: true });
+    // Only dkong.zip exists — drives the three-bucket split below.
+    await fs.writeFile(path.join(mameDir, 'dkong.zip'), 'z');
+
+    perTestCacheDir = await fs.mkdtemp(path.join(cacheDir, 'run-'));
+    cache = new CacheManager(perTestCacheDir);
+    manager = new ConnectionManager(client, makeStubStore(), cache);
+  });
+
+  it('cold connect populates the snapshot + on-disk cache and buckets correctly', async () => {
+    await manager.connect(profile.id);
+    const out = await manager.getArcadePlayability();
+    expect(new Set(out.playable)).toEqual(new Set(['Donkey Kong.mra']));
+    expect(new Set(out.missing)).toEqual(new Set(['Missing Game.mra']));
+    expect(new Set(out.noRomsNeeded)).toEqual(new Set(['TTL Game.mra']));
+
+    // The on-disk cache file exists under the per-host dir.
+    const cacheFile = path.join(
+      perTestCacheDir,
+      '127.0.0.1',
+      'arcade-mra-meta.json',
+    );
+    const parsed = JSON.parse(await fs.readFile(cacheFile, 'utf-8'));
+    expect(parsed.version).toBe(1);
+    expect(parsed.host).toBe('127.0.0.1');
+    expect(parsed.entries.length).toBe(3);
+    expect(parsed.zipBasenames).toEqual(['dkong.zip']);
+  });
+
+  it('warm reconnect with matching witnesses serves the cache without re-walking', async () => {
+    await manager.connect(profile.id);
+    await manager.getArcadePlayability(); // populate cache
+    await manager.disconnect();
+
+    const parseSpy = vi.spyOn(client, 'parseArcadeMras');
+    const zipSpy = vi.spyOn(client, 'listArcadeZipBasenames');
+    await manager.connect(profile.id);
+    const out = await manager.getArcadePlayability();
+    // Same buckets as before.
+    expect(new Set(out.playable)).toEqual(new Set(['Donkey Kong.mra']));
+    expect(new Set(out.missing)).toEqual(new Set(['Missing Game.mra']));
+    expect(new Set(out.noRomsNeeded)).toEqual(new Set(['TTL Game.mra']));
+    // And critically, neither network method fired.
+    expect(parseSpy).not.toHaveBeenCalled();
+    expect(zipSpy).not.toHaveBeenCalled();
+    parseSpy.mockRestore();
+    zipSpy.mockRestore();
+  });
+
+  it('mtime change on _Arcade/ invalidates the cache and triggers a fresh walk', async () => {
+    await manager.connect(profile.id);
+    await manager.getArcadePlayability();
+    await manager.disconnect();
+
+    // Bump the _Arcade/ mtime. Sub-second resolution makes plain
+    // writes risky for the same-clock-second case; utimes is
+    // deterministic.
+    const future = new Date(Date.now() + 60_000);
+    await fs.utimes(path.join(workDir, '_Arcade'), future, future);
+
+    const parseSpy = vi.spyOn(client, 'parseArcadeMras');
+    await manager.connect(profile.id);
+    await manager.getArcadePlayability();
+    expect(parseSpy).toHaveBeenCalled();
+    parseSpy.mockRestore();
+  });
+
+  it('a new zip in games/mame/ shifts a row from missing → playable on next refresh', async () => {
+    await manager.connect(profile.id);
+    const before = await manager.getArcadePlayability();
+    expect(before.missing).toContain('Missing Game.mra');
+
+    // Drop the missing zip onto disk and bump the dir mtime so the
+    // cache witnesses notice on next connect.
+    await fs.writeFile(
+      path.join(workDir, 'games', 'mame', 'missing.zip'),
+      'z',
+    );
+    const future = new Date(Date.now() + 60_000);
+    await fs.utimes(path.join(workDir, 'games', 'mame'), future, future);
+    await manager.disconnect();
+
+    await manager.connect(profile.id);
+    const after = await manager.getArcadePlayability();
+    expect(after.playable).toContain('Missing Game.mra');
+    expect(after.missing).not.toContain('Missing Game.mra');
+  });
+
+  it('forceRefresh bypasses the in-memory + on-disk cache', async () => {
+    await manager.connect(profile.id);
+    await manager.getArcadePlayability();
+
+    const parseSpy = vi.spyOn(client, 'parseArcadeMras');
+    await manager.loadArcadeData({ forceRefresh: true });
+    expect(parseSpy).toHaveBeenCalledTimes(1);
+    parseSpy.mockRestore();
+  });
+
+  it('an empty _Arcade/ dir results in empty buckets (no scan error)', async () => {
+    await fs.rm(path.join(workDir, '_Arcade'), { recursive: true, force: true });
+    await fs.mkdir(path.join(workDir, '_Arcade'));
+    await manager.connect(profile.id);
+    const out = await manager.getArcadePlayability();
+    expect(out.playable).toEqual([]);
+    expect(out.missing).toEqual([]);
+    expect(out.noRomsNeeded).toEqual([]);
+  });
+});

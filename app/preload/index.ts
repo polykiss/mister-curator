@@ -9,6 +9,7 @@ import {
 import type {
   ArcadeMraEntryWire,
   ArcadeMraVisibilityChangeWire,
+  ArcadePlayabilityWire,
   AutoScrapeProgressEvent,
   BulkCoreProgressEvent,
   ConnectResult,
@@ -329,6 +330,11 @@ const api: MisterApi = {
       IPC_CHANNELS.setBulkArcadeMraVisibility,
       changes,
     ),
+  // feat/arcade-playability-data (PR 1/2) — playability buckets
+  // pre-computed on connect. Returned shape is the IPC wire form
+  // declared in `shared/preload-api.ts`.
+  getArcadePlayability: () =>
+    invoke<ArcadePlayabilityWire>(IPC_CHANNELS.getArcadePlayability),
 };
 
 contextBridge.exposeInMainWorld('mister', api);

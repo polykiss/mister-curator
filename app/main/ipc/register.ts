@@ -33,7 +33,10 @@ import type {
   SystemFilesMarks,
 } from '@shared/types';
 
-import type { ConnectionManager } from '@app/main/ipc/connection-manager';
+import type {
+  ArcadePlayabilityIpc,
+  ConnectionManager,
+} from '@app/main/ipc/connection-manager';
 import type { MetadataOrchestrator } from '@app/main/metadata/metadata-orchestrator';
 import { lookupScreenScraperSystemId } from '@app/main/metadata/screenscraper-system-map';
 import type { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
@@ -358,6 +361,15 @@ export function registerIpcHandlers(
     BulkRomResult
   >(IPC_CHANNELS.setBulkArcadeMraVisibility, (changes) =>
     manager.setBulkArcadeMraVisibility(changes),
+  );
+
+  // feat/arcade-playability-data (PR 1/2) — playability buckets
+  // for the active connection. The manager hydrates the snapshot
+  // on connect (cold ~2-3s, cached <50ms); this IPC is the thin
+  // pass-through PR-2's UI will consume.
+  handle<[], ArcadePlayabilityIpc>(
+    IPC_CHANNELS.getArcadePlayability,
+    () => manager.getArcadePlayability(),
   );
 
   // PR-D1 round 2 (PR #27 round 2): pure-disk cache snapshot for the
