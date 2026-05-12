@@ -498,6 +498,12 @@ export class MetadataOrchestrator {
           validated,
           validatedExact: checked.exactCount,
           validatedTolerance: checked.toleranceCount,
+          // feat/sample-based-hashing — paths whose mtime drifted
+          // past the ±2s tolerance window but were rescued by a
+          // matching sample-md5 fingerprint, avoiding the full
+          // file re-hash. On a MAME ROM redeploy this is what
+          // turns the 10-40-minute cold path into seconds.
+          validatedSample: checked.sampleCount,
           needsHash,
         });
       } catch (err) {

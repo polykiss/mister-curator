@@ -74,6 +74,10 @@ import {
   parseHashOutput,
 } from '@shared/hash-script';
 import {
+  buildSampleScript,
+  parseSampleOutput,
+} from '@shared/sample-script';
+import {
   buildPrimeScript,
   buildSizeAndMtimeScript,
   buildWitnessScript,
@@ -1694,6 +1698,28 @@ export class RealMisterClient implements IMisterClient {
       );
     }
     return parseHashOutput(result.stdout);
+  }
+
+  async computeSampleMd5s(
+    paths: readonly string[],
+  ): Promise<Record<string, string>> {
+    this.assertConnected();
+    if (paths.length === 0) return {};
+    const script = buildSampleScript(paths);
+    // The script reads at most 128KB per path (head + tail blocks).
+    // For a typical 100-path batch that's ~12.5MB of bounded reads,
+    // dominated by SSH round-trip latency rather than I/O. Use the
+    // default per-op timeout — this is intentionally fast (no
+    // `unzip -p` streaming of full file content).
+    const result = await this.runSshOp(script, () =>
+      this.ssh.execCommand(script),
+    );
+    if (result.code !== 0) {
+      throw new Error(
+        `Failed to compute sample md5s: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+      );
+    }
+    return parseSampleOutput(result.stdout);
   }
 
   private async writeFolderClassifications(

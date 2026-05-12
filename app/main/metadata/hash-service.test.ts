@@ -21,21 +21,40 @@ interface FixtureHash {
    */
   readonly diskSize?: number;
   readonly mtime: number;
+  /**
+   * feat/sample-based-hashing — sample fingerprint the mock
+   * client returns for this path. Defaults to a deterministic
+   * value derived from `${label}-sample`; tests that exercise
+   * the sample-match / sample-mismatch decision override this
+   * to control the matcher's verdict.
+   */
+  readonly sampleMd5?: string;
 }
 
 function makeClient(opts: {
   hashes: Map<string, FixtureHash>;
   stat?: Map<string, number>;
   shouldFail?: boolean;
+  /**
+   * feat/sample-based-hashing — explicit override of the
+   * `computeSampleMd5s` result. When unset the mock reads
+   * `sampleMd5` from each fixture (typical case). Use this map
+   * to model "device returns nothing for this path" (sample miss
+   * → caller should fall through to full re-hash).
+   */
+  sampleOverride?: Map<string, string | undefined>;
 }): HashClient & {
   hashCalls: string[][];
   statCalls: string[][];
+  sampleCalls: string[][];
 } {
   const hashCalls: string[][] = [];
   const statCalls: string[][] = [];
+  const sampleCalls: string[][] = [];
   return {
     hashCalls,
     statCalls,
+    sampleCalls,
     async hashPaths(paths: readonly string[]): Promise<readonly HashRecord[]> {
       hashCalls.push([...paths]);
       if (opts.shouldFail) throw new Error('SSH failure');
@@ -81,6 +100,22 @@ function makeClient(opts: {
       }
       return out;
     },
+    async computeSampleMd5s(paths: readonly string[]) {
+      sampleCalls.push([...paths]);
+      const out: Record<string, string> = {};
+      for (const p of paths) {
+        if (opts.sampleOverride !== undefined && opts.sampleOverride.has(p)) {
+          const v = opts.sampleOverride.get(p);
+          if (typeof v === 'string') out[p] = v;
+          continue;
+        }
+        const rec = opts.hashes.get(p);
+        if (rec?.sampleMd5 !== undefined) {
+          out[p] = rec.sampleMd5;
+        }
+      }
+      return out;
+    },
   };
 }
 
@@ -92,7 +127,13 @@ function fix(
 ): FixtureHash {
   const md5 = label.repeat(32).slice(0, 32);
   const sha1 = label.repeat(40).slice(0, 40);
-  return { md5, sha1, size, mtime };
+  // feat/sample-based-hashing — derive a stable sample md5 from a
+  // separate label so tests can distinguish full md5 from sample
+  // md5 by inspection. Tests that need to model "sample changed"
+  // override either `sampleMd5` on the fixture or pass an
+  // explicit `sampleOverride` map to `makeClient`.
+  const sampleMd5 = `s${label}`.repeat(32).slice(0, 32);
+  return { md5, sha1, size, mtime, sampleMd5 };
 }
 
 describe('HashService', () => {
@@ -1170,6 +1211,317 @@ describe('HashService', () => {
       });
       const result = await svc.migrateV3Entries(client, 'host-1');
       expect(result).toEqual({ migrated: 0, needsRehash: 1 });
+    });
+  });
+
+  // feat/sample-based-hashing — fast-path validation on mtime
+  // drift. The cached `sampleMd5` is a cheap fingerprint (head 64KB
+  // + tail 64KB + size hex) computed alongside the full md5. When
+  // mtime drifts past the ±2s tolerance the service checks the
+  // sample before falling back to the expensive full re-hash.
+  describe('sample-md5 fast-path on mtime drift', () => {
+    it('drift past tolerance + matching sample → cache hit, no full rehash, sampleCount=1', async () => {
+      const svc = new HashService(dir);
+      const seed = fix('a', 1024, 1700000000); // sampleMd5 = 'sa'.repeat(16)
+      await svc.getHash(
+        makeClient({ hashes: new Map([['/p/a', seed]]) }),
+        'host-1',
+        ['/p/a'],
+      );
+      // Reconnect: mtime drifted 30s (well past the ±2s tolerance).
+      // The mock returns the SAME sample fingerprint for /p/a, so
+      // the service should treat the entry as still valid.
+      const driftedClient = makeClient({
+        hashes: new Map([['/p/a', seed]]), // same content
+        stat: new Map([['/p/a', 1700000030]]),
+      });
+      const result = await svc.checkCachedMtimes(driftedClient, 'host-1', [
+        '/p/a',
+      ]);
+      expect(result.entries.get('/p/a')?.md5).toBe('a'.repeat(32));
+      expect(result.sampleCount).toBe(1);
+      expect(result.exactCount).toBe(0);
+      expect(result.toleranceCount).toBe(0);
+      // The sample call ran exactly once; the full hash call did
+      // NOT — that's the load-bearing optimisation.
+      expect(driftedClient.sampleCalls).toEqual([['/p/a']]);
+      expect(driftedClient.hashCalls).toEqual([]);
+    });
+
+    it('drift past tolerance + mismatched sample → cache miss → full rehash on getHash', async () => {
+      const svc = new HashService(dir);
+      const seed = fix('a', 1024, 1700000000); // sampleMd5 derived from 'a'
+      await svc.getHash(
+        makeClient({ hashes: new Map([['/p/a', seed]]) }),
+        'host-1',
+        ['/p/a'],
+      );
+      // Mock returns a DIFFERENT sample fingerprint via
+      // sampleOverride — the file's content (or at least its
+      // head/tail/size) changed.
+      const freshHash = fix('z', 2048, 1700000030);
+      const client = makeClient({
+        hashes: new Map([['/p/a', freshHash]]),
+        stat: new Map([['/p/a', 1700000030]]),
+        sampleOverride: new Map([['/p/a', 'd'.repeat(32)]]),
+      });
+      const result = await svc.getHash(client, 'host-1', ['/p/a']);
+      // Fresh full hash supplied by the rehash call.
+      expect(result.get('/p/a')?.md5).toBe('z'.repeat(32));
+      // Both the sample call AND the full hash call fired.
+      expect(client.sampleCalls.length).toBeGreaterThanOrEqual(1);
+      expect(client.hashCalls).toHaveLength(1);
+    });
+
+    it('legacy entry without sampleMd5 → no fast path, falls through to full rehash', async () => {
+      // Stage a legacy hash cache file on disk that lacks sampleMd5
+      // entirely (modelling a pre-PR cache).
+      const cacheDir = join(dir, 'host-1');
+      await fs.mkdir(cacheDir, { recursive: true });
+      await fs.writeFile(
+        join(cacheDir, 'hashes.json'),
+        JSON.stringify({
+          version: 1,
+          hashStrategyVersion: 4,
+          host: 'host-1',
+          entries: {
+            '/p/a': {
+              md5: 'a'.repeat(32),
+              sha1: 'a'.repeat(40),
+              size: 1024,
+              diskSizeBytes: 1024,
+              mtime: 1700000000,
+              hashedAt: '2025-01-01T00:00:00.000Z',
+              // intentionally no sampleMd5
+            },
+          },
+        }),
+      );
+      const svc = new HashService(dir);
+      const freshHash = fix('a', 1024, 1700000030);
+      const client = makeClient({
+        hashes: new Map([['/p/a', freshHash]]),
+        stat: new Map([['/p/a', 1700000030]]),
+      });
+      const result = await svc.getHash(client, 'host-1', ['/p/a']);
+      expect(result.get('/p/a')?.md5).toBe('a'.repeat(32));
+      // Legacy entry: no sample check fired; full rehash did.
+      expect(client.sampleCalls).toEqual([['/p/a']]); // populates the new entry's sampleMd5
+      expect(client.hashCalls).toHaveLength(1);
+      // After rehash the entry now carries sampleMd5.
+      const after = await svc.readCachedEntries('host-1', ['/p/a']);
+      expect(after.get('/p/a')?.sampleMd5).toBeDefined();
+    });
+
+    it('checkCachedMtimes: legacy entry → null (full rehash needed), no sample call', async () => {
+      const cacheDir = join(dir, 'host-1');
+      await fs.mkdir(cacheDir, { recursive: true });
+      await fs.writeFile(
+        join(cacheDir, 'hashes.json'),
+        JSON.stringify({
+          version: 1,
+          hashStrategyVersion: 4,
+          host: 'host-1',
+          entries: {
+            '/p/a': {
+              md5: 'a'.repeat(32),
+              sha1: 'a'.repeat(40),
+              size: 1024,
+              diskSizeBytes: 1024,
+              mtime: 1700000000,
+              hashedAt: '2025-01-01T00:00:00.000Z',
+              // no sampleMd5
+            },
+          },
+        }),
+      );
+      const svc = new HashService(dir);
+      const client = makeClient({
+        hashes: new Map(),
+        stat: new Map([['/p/a', 1700000030]]),
+      });
+      const result = await svc.checkCachedMtimes(client, 'host-1', ['/p/a']);
+      expect(result.entries.get('/p/a')).toBeNull();
+      expect(result.sampleCount).toBe(0);
+      // Legacy entry skips the sample call — there's nothing to
+      // compare against.
+      expect(client.sampleCalls).toEqual([]);
+    });
+
+    it('checkCachedMtimes: sample call throws → all candidates fall back to null', async () => {
+      const svc = new HashService(dir);
+      const seed = fix('a', 1024, 1700000000);
+      await svc.getHash(
+        makeClient({ hashes: new Map([['/p/a', seed]]) }),
+        'host-1',
+        ['/p/a'],
+      );
+      const client: HashClient & {
+        hashCalls: string[][];
+        statCalls: string[][];
+        sampleCalls: string[][];
+      } = {
+        ...makeClient({
+          hashes: new Map(),
+          stat: new Map([['/p/a', 1700000030]]),
+        }),
+        async computeSampleMd5s() {
+          throw new Error('SSH dropped mid-sample');
+        },
+      };
+      // Wrap the spy arrays so we can still inspect them.
+      client.sampleCalls = [];
+      const result = await svc.checkCachedMtimes(client, 'host-1', ['/p/a']);
+      expect(result.entries.get('/p/a')).toBeNull();
+      expect(result.sampleCount).toBe(0);
+    });
+
+    it('getHash: persists sampleMd5 alongside fresh full hash so future drift fast-paths', async () => {
+      const svc = new HashService(dir);
+      const fresh = fix('a', 1024, 1700000000);
+      const client = makeClient({ hashes: new Map([['/p/a', fresh]]) });
+      await svc.getHash(client, 'host-1', ['/p/a']);
+      const cached = await svc.readCachedEntries('host-1', ['/p/a']);
+      // The entry stored on disk + in memory carries the sample
+      // fingerprint computed alongside the full hash.
+      expect(cached.get('/p/a')?.sampleMd5).toBe('sa'.repeat(16));
+      // Both calls fired during the first compute: full hash + sample.
+      expect(client.hashCalls).toHaveLength(1);
+      expect(client.sampleCalls).toHaveLength(1);
+    });
+
+    it('small file (< 64KB) — sample handling identical (no special case in the service)', async () => {
+      const svc = new HashService(dir);
+      const tinyFresh = fix('a', 10, 1700000000);
+      const client = makeClient({ hashes: new Map([['/p/a', tinyFresh]]) });
+      await svc.getHash(client, 'host-1', ['/p/a']);
+      // Reconnect with mtime drift past tolerance + matching sample
+      // → service uses the cached full hash exactly as for a large file.
+      const driftedClient = makeClient({
+        hashes: new Map([['/p/a', tinyFresh]]),
+        stat: new Map([['/p/a', 1700000030]]),
+      });
+      const result = await svc.checkCachedMtimes(driftedClient, 'host-1', [
+        '/p/a',
+      ]);
+      expect(result.entries.get('/p/a')?.md5).toBe('a'.repeat(32));
+      expect(result.sampleCount).toBe(1);
+    });
+
+    it('mixed batch: sample-match + sample-mismatch + exact-mtime + legacy', async () => {
+      // Stage a cache with three modern entries (varying sampleMd5)
+      // and one legacy entry without sampleMd5.
+      const cacheDir = join(dir, 'host-1');
+      await fs.mkdir(cacheDir, { recursive: true });
+      await fs.writeFile(
+        join(cacheDir, 'hashes.json'),
+        JSON.stringify({
+          version: 1,
+          hashStrategyVersion: 4,
+          host: 'host-1',
+          entries: {
+            '/p/match.zip': {
+              md5: 'a'.repeat(32),
+              sha1: 'a'.repeat(40),
+              size: 100,
+              diskSizeBytes: 100,
+              mtime: 1700000000,
+              hashedAt: 'iso',
+              sampleMd5: 'm'.repeat(32),
+            },
+            '/p/mismatch.zip': {
+              md5: 'b'.repeat(32),
+              sha1: 'b'.repeat(40),
+              size: 200,
+              diskSizeBytes: 200,
+              mtime: 1700000000,
+              hashedAt: 'iso',
+              sampleMd5: 'k'.repeat(32),
+            },
+            '/p/exact.zip': {
+              md5: 'c'.repeat(32),
+              sha1: 'c'.repeat(40),
+              size: 300,
+              diskSizeBytes: 300,
+              mtime: 1700000050,
+              hashedAt: 'iso',
+              sampleMd5: 'n'.repeat(32),
+            },
+            '/p/legacy.zip': {
+              md5: 'd'.repeat(32),
+              sha1: 'd'.repeat(40),
+              size: 400,
+              diskSizeBytes: 400,
+              mtime: 1700000000,
+              hashedAt: 'iso',
+              // no sampleMd5
+            },
+          },
+        }),
+      );
+      const svc = new HashService(dir);
+      const client = makeClient({
+        hashes: new Map(),
+        stat: new Map([
+          ['/p/match.zip', 1700000030], // drift, sample matches
+          ['/p/mismatch.zip', 1700000030], // drift, sample mismatch
+          ['/p/exact.zip', 1700000050], // no drift
+          ['/p/legacy.zip', 1700000030], // drift, no sample → null
+        ]),
+        sampleOverride: new Map([
+          ['/p/match.zip', 'm'.repeat(32)], // matches cached
+          ['/p/mismatch.zip', 'OTHER'.padEnd(32, '0').slice(0, 32)],
+        ]),
+      });
+      const result = await svc.checkCachedMtimes(client, 'host-1', [
+        '/p/match.zip',
+        '/p/mismatch.zip',
+        '/p/exact.zip',
+        '/p/legacy.zip',
+      ]);
+      expect(result.entries.get('/p/match.zip')?.md5).toBe('a'.repeat(32));
+      expect(result.entries.get('/p/mismatch.zip')).toBeNull();
+      expect(result.entries.get('/p/exact.zip')?.md5).toBe('c'.repeat(32));
+      expect(result.entries.get('/p/legacy.zip')).toBeNull();
+      expect(result.exactCount).toBe(1);
+      expect(result.toleranceCount).toBe(0);
+      expect(result.sampleCount).toBe(1);
+      // The sample batch only included the two paths with cached
+      // sample fingerprints (mismatch + match). Legacy and exact
+      // are excluded from the sample call entirely.
+      expect(client.sampleCalls).toHaveLength(1);
+      expect(client.sampleCalls[0]!.sort()).toEqual(
+        ['/p/match.zip', '/p/mismatch.zip'].sort(),
+      );
+    });
+
+    it('sample-matched entry has its cached mtime refreshed (so next drift is exact)', async () => {
+      const svc = new HashService(dir);
+      const seed = fix('a', 1024, 1700000000);
+      await svc.getHash(
+        makeClient({ hashes: new Map([['/p/a', seed]]) }),
+        'host-1',
+        ['/p/a'],
+      );
+      const driftedClient = makeClient({
+        hashes: new Map([['/p/a', seed]]),
+        stat: new Map([['/p/a', 1700000030]]),
+      });
+      await svc.checkCachedMtimes(driftedClient, 'host-1', ['/p/a']);
+      // The persisted entry's mtime now matches the drifted value.
+      // A subsequent connect with the same mtime is an exact hit.
+      const followUpClient = makeClient({
+        hashes: new Map(),
+        stat: new Map([['/p/a', 1700000030]]),
+      });
+      const followUp = await svc.checkCachedMtimes(followUpClient, 'host-1', [
+        '/p/a',
+      ]);
+      expect(followUp.exactCount).toBe(1);
+      expect(followUp.sampleCount).toBe(0);
+      // Sample call NOT fired on the follow-up — the refreshed
+      // mtime took the exact-match path.
+      expect(followUpClient.sampleCalls).toEqual([]);
     });
   });
 });

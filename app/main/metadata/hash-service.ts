@@ -59,6 +59,22 @@ const DEFAULT_BATCH_SIZE = 100;
  * the wrapper's `stat -c %s` value — what the file system says the
  * file is — which differs from `size` for `.zip` archives and is
  * the right number for any "size on disk" display.
+ *
+ * feat/sample-based-hashing — `sampleMd5` is a cheap secondary
+ * fingerprint: `md5(head 64KB + tail 64KB + size as 16 hex chars)`
+ * of the WRAPPER bytes (not the extracted content). On a real
+ * MAME ROM redeploy, mtimes drift but content stays identical →
+ * full md5 still valid → recomputing it would burn 10-40 minutes
+ * for ~600 zips. The sample acts as a "did this file actually
+ * change?" check: head + (partial) tail + size catches the common
+ * case of byte-identical files re-uploaded with new mtimes.
+ *
+ * Optional on the wire so legacy entries (pre-PR) parse cleanly;
+ * absent on those, populated on the next compute path. Limitation:
+ * a file modified only in its MIDDLE bytes (not in head/tail/size)
+ * would slip past the sample. Extremely rare for ROM files in
+ * practice — the full md5 stays the authoritative source of truth,
+ * the sample is just the fast revalidation gate.
  */
 export interface HashEntry {
   readonly md5: string;
@@ -67,6 +83,7 @@ export interface HashEntry {
   readonly diskSizeBytes: number;
   readonly mtime: number;
   readonly hashedAt: string;
+  readonly sampleMd5?: string;
 }
 
 /**
@@ -81,11 +98,18 @@ export interface HashEntry {
  * how much of the warm-cache hit relied on the ±2s tolerance vs.
  * exact equality. On an SD rebuild we expect `toleranceCount` to
  * dominate; on a steady-state ext4 device they should be ~exact.
+ *
+ * feat/sample-based-hashing — `sampleCount` is the count of cache
+ * hits that fell out of the ±2s tolerance window but were rescued
+ * by a sample-md5 re-validation (cheap head+tail+size hash instead
+ * of full file md5). On a MAME ROM redeploy this is what saves the
+ * 10-40 minutes of re-hashing that pre-sample behavior incurred.
  */
 export interface CheckCachedMtimesResult {
   readonly entries: Map<string, HashEntry | null>;
   readonly exactCount: number;
   readonly toleranceCount: number;
+  readonly sampleCount: number;
 }
 
 interface HashCacheFile {
@@ -113,6 +137,25 @@ export interface HashClient {
   statPathsWithSize(
     paths: readonly string[],
   ): Promise<Record<string, SizeAndMtime>>;
+  /**
+   * feat/sample-based-hashing — cheap fingerprint of each path's
+   * WRAPPER bytes (head 64KB + tail 64KB + size as 16 hex chars
+   * piped through `md5sum`). The cache uses this to validate that
+   * a file with drifted mtime hasn't actually changed content,
+   * avoiding the 10-40 minute full re-hash on a ROM redeploy.
+   *
+   * Returns a `path → md5` map. Paths the device can't stat (the
+   * file vanished mid-batch, permission denied, etc.) are silently
+   * absent from the result so the caller treats them as a sample
+   * miss and falls through to the full re-hash path.
+   *
+   * Implementations should cap their internal batch at ~100 paths
+   * to stay under busybox argv limits; the caller chunks larger
+   * inputs accordingly.
+   */
+  computeSampleMd5s(
+    paths: readonly string[],
+  ): Promise<Record<string, string>>;
 }
 
 export interface HashServiceOptions {
@@ -209,7 +252,7 @@ export class HashService {
     paths: readonly string[],
   ): Promise<CheckCachedMtimesResult> {
     if (paths.length === 0) {
-      return { entries: new Map(), exactCount: 0, toleranceCount: 0 };
+      return { entries: new Map(), exactCount: 0, toleranceCount: 0, sampleCount: 0 };
     }
     return this.runGated(host, () =>
       this.doCheckCachedMtimes(client, host, paths),
@@ -445,6 +488,16 @@ export class HashService {
       ? await client.statWitnesses(statTargets)
       : ({} as Record<string, number>);
 
+    // feat/sample-based-hashing — collect mtime-drift candidates
+    // with cached sampleMd5 for the batched fast-path validation
+    // below. Setting `result` for these is deferred until after the
+    // sample call resolves.
+    interface GetSampleCandidate {
+      readonly path: string;
+      readonly entry: HashEntry;
+      readonly currentMtime: number;
+    }
+    const sampleCandidates: GetSampleCandidate[] = [];
     for (const p of cachedPaths) {
       const entry = entries[p];
       const current = mtimes[p];
@@ -463,21 +516,77 @@ export class HashService {
           deltaSec: exact ? undefined : Math.abs(current - entry.mtime),
         });
         result.set(p, entry);
+      } else if (
+        entry !== undefined &&
+        entry.sampleMd5 !== undefined &&
+        current !== undefined &&
+        current !== 0
+      ) {
+        sampleCandidates.push({ path: p, entry, currentMtime: current });
       } else {
-        // Either missing-on-device, or mtime drifted. Either way,
-        // re-hash. (If the file is genuinely gone the hash call
-        // will silently drop it and we'll just not return the path.)
+        // Missing-on-device, or cached entry pre-dates the sample
+        // PR — re-hash. The hashPaths step below will populate
+        // sampleMd5 for this path so a future mtime drift takes
+        // the fast path instead of returning here.
         diagLog('info', 'meta', '·', 'hash-decision', {
           path: pathBasename(p),
           action: 'stale-revalidate',
           reason:
             current === undefined || current === 0
               ? 'missing-on-device'
-              : 'mtime-drift',
+              : entry?.sampleMd5 === undefined
+                ? 'mtime-drift-no-sample'
+                : 'mtime-drift',
           cachedMtime: entry?.mtime,
           currentMtime: current,
         });
         needsHash.push(p);
+      }
+    }
+    // Batched sample compute for drifted-but-fingerprinted paths.
+    // A single SSH op for the whole batch.
+    const sampleRefreshes: { path: string; entry: HashEntry }[] = [];
+    if (sampleCandidates.length > 0) {
+      let samples: Record<string, string> = {};
+      try {
+        samples = await client.computeSampleMd5s(
+          sampleCandidates.map((c) => c.path),
+        );
+      } catch {
+        // Sample compute failed wholesale — push every candidate
+        // into the re-hash queue. The fallback matches today's
+        // pre-sample behaviour exactly.
+        for (const c of sampleCandidates) needsHash.push(c.path);
+      }
+      for (const c of sampleCandidates) {
+        const sample = samples[c.path];
+        if (sample !== undefined && sample === c.entry.sampleMd5) {
+          const refreshed: HashEntry = {
+            ...c.entry,
+            mtime: c.currentMtime,
+          };
+          result.set(c.path, refreshed);
+          sampleRefreshes.push({ path: c.path, entry: refreshed });
+          diagLog('info', 'meta', '·', 'hash-decision', {
+            path: pathBasename(c.path),
+            action: 'use-cache',
+            reason: 'mtime-drift-sample-match',
+            mtime: c.currentMtime,
+            cachedMtime: c.entry.mtime,
+          });
+        } else {
+          needsHash.push(c.path);
+          diagLog('info', 'meta', '·', 'hash-decision', {
+            path: pathBasename(c.path),
+            action: 'stale-revalidate',
+            reason:
+              sample === undefined
+                ? 'mtime-drift-sample-missing'
+                : 'mtime-drift-sample-mismatch',
+            cachedMtime: c.entry.mtime,
+            currentMtime: c.currentMtime,
+          });
+        }
       }
     }
 
@@ -507,11 +616,14 @@ export class HashService {
         oldKey: pathBasename(oldKey),
       });
     }
-    if (migrated.length > 0) {
+    if (migrated.length > 0 || sampleRefreshes.length > 0) {
       const next: Record<string, HashEntry> = { ...entries };
       for (const m of migrated) {
         delete next[m.from];
         next[m.to] = m.entry;
+      }
+      for (const r of sampleRefreshes) {
+        next[r.path] = r.entry;
       }
       this.memCache.set(host, next);
       await this.writeEntries(host, next);
@@ -541,13 +653,32 @@ export class HashService {
     // Hash uncached / stale paths in bounded chunks. We update the
     // in-memory map per chunk so a partial failure later in the
     // batch still preserves the work that succeeded earlier.
+    //
+    // feat/sample-based-hashing — every fresh full-hash chunk is
+    // paired with a sample-md5 chunk so the resulting entry carries
+    // the fingerprint that lets a later mtime drift take the fast
+    // path. One extra SSH round-trip per chunk; the sample script
+    // reads at most 128KB per file (vs the full hash's whole-file
+    // streaming), so the marginal cost is ~ms compared to the
+    // already-slow full hash.
     const next: Record<string, HashEntry> = { ...entries };
     let dirty = false;
     const nowIso = this.now().toISOString();
     for (let i = 0; i < needsHash.length; i += this.batchSize) {
       const chunk = needsHash.slice(i, i + this.batchSize);
       const records = await client.hashPaths(chunk);
+      let samples: Record<string, string> = {};
+      try {
+        samples = await client.computeSampleMd5s(
+          records.map((r) => r.path),
+        );
+      } catch {
+        // Sample compute on fresh hashes failed — write entries
+        // without sampleMd5. They'll re-hash on the next mtime
+        // drift (today's pre-PR behaviour). No data loss.
+      }
       for (const r of records) {
+        const sampleMd5 = samples[r.path];
         const entry: HashEntry = {
           md5: r.md5,
           sha1: r.sha1,
@@ -555,6 +686,7 @@ export class HashService {
           diskSizeBytes: r.diskSize,
           mtime: r.mtime,
           hashedAt: nowIso,
+          ...(sampleMd5 !== undefined ? { sampleMd5 } : {}),
         };
         result.set(r.path, entry);
         next[r.path] = entry;
@@ -564,6 +696,7 @@ export class HashService {
           md5: r.md5,
           size: r.size,
           diskSize: r.diskSize,
+          sampleMd5,
         });
       }
     }
@@ -585,8 +718,18 @@ export class HashService {
     const result = new Map<string, HashEntry | null>();
     const cachedPaths = paths.filter((p) => entries[p] !== undefined);
     const uncachedPaths = paths.filter((p) => entries[p] === undefined);
+    // Lazy clone of `entries` shared by the sample-refresh and the
+    // rename-recovery paths. Declared up top so both code paths
+    // can call `ensureMutable` without tripping the TDZ on a later
+    // `let mutatedEntries`. A `null` value here is the "no
+    // mutations yet" sentinel; we only persist when it's non-null.
+    let mutatedEntries: Record<string, HashEntry> | null = null;
+    const ensureMutable = (): Record<string, HashEntry> => {
+      if (mutatedEntries === null) mutatedEntries = { ...entries };
+      return mutatedEntries;
+    };
     if (paths.length === 0) {
-      return { entries: result, exactCount: 0, toleranceCount: 0 };
+      return { entries: result, exactCount: 0, toleranceCount: 0, sampleCount: 0 };
     }
     // feat/rename-aware-hash-cache: stat ALL paths so the rename
     // recovery (uncached paths whose mtime uniquely identifies an
@@ -599,7 +742,7 @@ export class HashService {
       for (const p of paths) {
         if (!result.has(p)) result.set(p, null);
       }
-      return { entries: result, exactCount: 0, toleranceCount: 0 };
+      return { entries: result, exactCount: 0, toleranceCount: 0, sampleCount: 0 };
     }
     let mtimes: Awaited<ReturnType<HashClient['statWitnesses']>>;
     try {
@@ -610,10 +753,20 @@ export class HashService {
       // The orchestrator's per-path error handling is the right shape
       // for this.
       for (const p of paths) result.set(p, null);
-      return { entries: result, exactCount: 0, toleranceCount: 0 };
+      return { entries: result, exactCount: 0, toleranceCount: 0, sampleCount: 0 };
     }
     let exactCount = 0;
     let toleranceCount = 0;
+    let sampleCount = 0;
+    // feat/sample-based-hashing — paths whose mtime drifted but
+    // whose cached entry carries a sampleMd5 fingerprint. Defer
+    // their final result until after the batched sample check.
+    interface SampleCandidate {
+      readonly path: string;
+      readonly entry: HashEntry;
+      readonly currentMtime: number;
+    }
+    const sampleCandidates: SampleCandidate[] = [];
     for (const p of cachedPaths) {
       const entry = entries[p];
       const current = mtimes[p];
@@ -625,10 +778,92 @@ export class HashService {
         result.set(p, entry);
         if (current === entry.mtime) exactCount += 1;
         else toleranceCount += 1;
+      } else if (
+        entry !== undefined &&
+        entry.sampleMd5 !== undefined &&
+        current !== undefined &&
+        current !== 0
+      ) {
+        // mtime drifted past the ±2s tolerance, but the cached
+        // entry has a sample fingerprint — defer the verdict to
+        // the batched sample-compute below. Setting `null` now
+        // would force a full re-hash; the sample path is the V1
+        // optimisation that avoids that on the typical ROM
+        // redeploy.
+        sampleCandidates.push({ path: p, entry, currentMtime: current });
       } else {
-        // Either missing on device or mtime drifted. Caller will
-        // re-hash (or skip if vanished).
+        // Missing-on-device, or cached entry lacks sampleMd5
+        // (legacy entry pre-sample-PR). Caller re-hashes (or
+        // skips if vanished). The full-rehash path will populate
+        // sampleMd5 on the resulting record, so this entry's
+        // next mtime drift will take the fast path.
         result.set(p, null);
+        diagLog('info', 'meta', '·', 'hash-decision', {
+          path: pathBasename(p),
+          action: 'stale-revalidate',
+          reason:
+            current === undefined || current === 0
+              ? 'missing-on-device'
+              : entry?.sampleMd5 === undefined
+                ? 'mtime-drift-no-sample'
+                : 'mtime-drift',
+          cachedMtime: entry?.mtime,
+          currentMtime: current,
+        });
+      }
+    }
+    if (sampleCandidates.length > 0) {
+      // One SSH round-trip for the whole drift batch. The
+      // device-side script reads at most 128KB per path; for
+      // ~666 mame zips this completes in seconds compared to the
+      // 10-40 minute full re-hash the old behavior incurred.
+      let samples: Record<string, string> = {};
+      try {
+        samples = await client.computeSampleMd5s(
+          sampleCandidates.map((c) => c.path),
+        );
+      } catch {
+        // Sample compute itself failed — treat every candidate
+        // as null and let the caller re-hash. Same posture as the
+        // earlier statWitnesses catch arm above.
+        for (const c of sampleCandidates) result.set(c.path, null);
+      }
+      for (const c of sampleCandidates) {
+        const sample = samples[c.path];
+        if (sample !== undefined && sample === c.entry.sampleMd5) {
+          // Sample match — file is byte-stable. Accept the cached
+          // full md5 and refresh the entry's mtime (+ sample, in
+          // case the busybox loop produced a fingerprint the
+          // pure-JS path would, eg. for a small file whose
+          // boundary aliases). The fingerprint stays the same
+          // value either way.
+          const refreshed: HashEntry = {
+            ...c.entry,
+            mtime: c.currentMtime,
+          };
+          result.set(c.path, refreshed);
+          sampleCount += 1;
+          ensureMutable()[c.path] = refreshed;
+          diagLog('info', 'meta', '·', 'hash-decision', {
+            path: pathBasename(c.path),
+            action: 'use-cache',
+            reason: 'mtime-drift-sample-match',
+            mtime: c.currentMtime,
+            cachedMtime: c.entry.mtime,
+          });
+        } else {
+          result.set(c.path, null);
+          diagLog('info', 'meta', '·', 'hash-decision', {
+            path: pathBasename(c.path),
+            action: 'stale-revalidate',
+            reason:
+              sample === undefined
+                ? 'mtime-drift-sample-missing'
+                : 'mtime-drift-sample-mismatch',
+            cachedMtime: c.entry.mtime,
+            currentMtime: c.currentMtime,
+          });
+        }
       }
     }
     // Rename recovery — same shape as `doGetHash`. See the comment
@@ -652,15 +887,17 @@ export class HashService {
       result.set(p, entry);
     }
     if (migrated.length > 0) {
-      const next: Record<string, HashEntry> = { ...entries };
+      const next = ensureMutable();
       for (const m of migrated) {
         delete next[m.from];
         next[m.to] = m.entry;
       }
-      this.memCache.set(host, next);
-      await this.writeEntries(host, next);
     }
-    return { entries: result, exactCount, toleranceCount };
+    if (mutatedEntries !== null) {
+      this.memCache.set(host, mutatedEntries);
+      await this.writeEntries(host, mutatedEntries);
+    }
+    return { entries: result, exactCount, toleranceCount, sampleCount };
   }
 
   private async doComputeHash(
@@ -673,6 +910,18 @@ export class HashService {
     // hashPaths can return multiple records on one input only when
     // the script aliases (it doesn't); take the first / only one.
     const r = records[0]!;
+    // feat/sample-based-hashing — fetch the sample fingerprint
+    // alongside the freshly-computed full hash so the resulting
+    // entry can short-circuit a future mtime drift. Best-effort —
+    // a missing sample just means the next drift will re-hash
+    // (today's pre-PR behaviour).
+    let sampleMd5: string | undefined;
+    try {
+      const samples = await client.computeSampleMd5s([r.path]);
+      sampleMd5 = samples[r.path];
+    } catch {
+      sampleMd5 = undefined;
+    }
     const entry: HashEntry = {
       md5: r.md5,
       sha1: r.sha1,
@@ -680,12 +929,14 @@ export class HashService {
       diskSizeBytes: r.diskSize,
       mtime: r.mtime,
       hashedAt: this.now().toISOString(),
+      ...(sampleMd5 !== undefined ? { sampleMd5 } : {}),
     };
     diagLog('info', 'meta', '·', 'hash-computed', {
       path: pathBasename(r.path),
       md5: r.md5,
       size: r.size,
       diskSize: r.diskSize,
+      sampleMd5,
     });
     const entries = await this.loadEntries(host);
     const next = { ...entries, [r.path]: entry };
@@ -810,14 +1061,25 @@ function isHashCacheFile(v: unknown): v is HashCacheFile {
 function isHashEntry(v: unknown): v is HashEntry {
   if (v === null || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
-  return (
-    typeof o.md5 === 'string' &&
-    typeof o.sha1 === 'string' &&
-    typeof o.size === 'number' &&
-    typeof o.diskSizeBytes === 'number' &&
-    typeof o.mtime === 'number' &&
-    typeof o.hashedAt === 'string'
-  );
+  if (
+    !(
+      typeof o.md5 === 'string' &&
+      typeof o.sha1 === 'string' &&
+      typeof o.size === 'number' &&
+      typeof o.diskSizeBytes === 'number' &&
+      typeof o.mtime === 'number' &&
+      typeof o.hashedAt === 'string'
+    )
+  ) {
+    return false;
+  }
+  // feat/sample-based-hashing — optional field. Strict-type-check
+  // when present so a malformed value (number, object) doesn't slip
+  // into the cache and confuse the sample-validation path later.
+  if (o.sampleMd5 !== undefined && typeof o.sampleMd5 !== 'string') {
+    return false;
+  }
+  return true;
 }
 
 /**

@@ -3257,6 +3257,78 @@ describe('RealMisterClient', () => {
       );
     });
   });
+
+  // feat/sample-based-hashing — companion to hashPaths. Same mock
+  // pattern; asserts on the script shape + parses the 2-field TSV.
+  describe('computeSampleMd5s (feat/sample-based-hashing)', () => {
+    it('shell-quotes paths into a `set --` script and parses path\\tmd5 rows', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      const md5a = 'a'.repeat(32);
+      const md5b = 'b'.repeat(32);
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            `/media/fat/games/mame/foo.zip\t${md5a}`,
+            `/media/fat/games/mame/bar.zip\t${md5b}`,
+          ].join('\n') + '\n',
+        ),
+      );
+      const result = await client.computeSampleMd5s([
+        '/media/fat/games/mame/foo.zip',
+        '/media/fat/games/mame/bar.zip',
+      ]);
+      expect(result).toEqual({
+        '/media/fat/games/mame/foo.zip': md5a,
+        '/media/fat/games/mame/bar.zip': md5b,
+      });
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      expect(script).toContain("set -- '/media/fat/games/mame/foo.zip'");
+      expect(script).toContain('for f in "$@"');
+      // Recipe sanity: dd reads head + tail blocks, size hex appended.
+      expect(script).toContain('dd if="$f" bs=65536 count=1');
+      expect(script).toContain('dd if="$f" bs=65536 skip=$tskip count=1');
+      expect(script).toContain("printf '%016x' \"$sz\"");
+      expect(script).toContain('md5sum');
+    });
+
+    it('skips paths that emit no row (missing / non-stat-able)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      // Only one of two requested paths returns a row — the missing
+      // path is silently absent from the result (caller treats as
+      // "couldn't sample, fall through to full re-hash").
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(`/p/present.zip\t${'a'.repeat(32)}\n`),
+      );
+      const result = await client.computeSampleMd5s([
+        '/p/present.zip',
+        '/p/missing.zip',
+      ]);
+      expect(result).toEqual({ '/p/present.zip': 'a'.repeat(32) });
+    });
+
+    it('returns {} for empty input without making an SSH call', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      const result = await client.computeSampleMd5s([]);
+      expect(result).toEqual({});
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+
+    it('throws on non-zero exit so the caller can route to "couldn\'t sample"', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockResolvedValueOnce(execFail(2, 'shell broke'));
+      await expect(
+        client.computeSampleMd5s(['/x']),
+      ).rejects.toThrow(/Failed to compute sample md5s/);
+    });
+  });
 });
 
 describe('assertSafeSegment — fix/safe-segment-ellipsis', () => {

@@ -7,6 +7,7 @@ import JSZip from 'jszip';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { FakeMisterClient } from '@app/main/clients/fake-mister-client';
+import { buildSampleInput } from '@shared/sample-script';
 import { MisterConnectionError } from '@shared/types';
 import type { CoreEntry, MisterProfile } from '@shared/types';
 import type { MisterSecret } from '@shared/mister-client';
@@ -1041,6 +1042,87 @@ describe('FakeMisterClient', () => {
         ]);
         expect(result).toHaveLength(0);
       });
+    });
+  });
+
+  // feat/sample-based-hashing — Fake mirrors the on-device dd
+  // recipe via the shared `buildSampleInput` helper. Symmetry is
+  // load-bearing: the Real client produces the same sample md5
+  // for the same wrapper bytes, so a Fake-tested cache hit will
+  // translate to a real-device cache hit at runtime.
+  describe('computeSampleMd5s', () => {
+    it('returns a 32-char hex sample for each fixture path', async () => {
+      const result = await client.computeSampleMd5s([
+        '/media/fat/games/NES/Castlevania (USA, Europe).nes',
+      ]);
+      const md5 = result['/media/fat/games/NES/Castlevania (USA, Europe).nes'];
+      expect(md5).toMatch(/^[0-9a-f]{32}$/);
+    });
+
+    it('mirrors `buildSampleInput` exactly (head + tail + sizeHex)', async () => {
+      // Construct a 200KB file with predictable contents and verify
+      // the Fake's sample matches the buildSampleInput recipe.
+      const path = '/media/fat/games/NES/predictable.nes';
+      const localDir = path.replace(/\/[^/]+$/, '');
+      await fs.mkdir(`${workDir}${localDir.slice('/media/fat'.length)}`, {
+        recursive: true,
+      });
+      const bytes = Buffer.alloc(200 * 1024);
+      for (let i = 0; i < bytes.length; i += 1) bytes[i] = (i * 13) & 0xff;
+      await fs.writeFile(
+        `${workDir}${path.slice('/media/fat'.length)}`,
+        bytes,
+      );
+
+      const result = await client.computeSampleMd5s([path]);
+
+      const expected = createHash('md5')
+        .update(buildSampleInput(bytes))
+        .digest('hex');
+      expect(result[path]).toBe(expected);
+    });
+
+    it('drops paths that do not exist (caller treats absence as a sample miss)', async () => {
+      const result = await client.computeSampleMd5s([
+        '/media/fat/games/NES/Castlevania (USA, Europe).nes',
+        '/media/fat/games/NES/__no_such_file__.nes',
+      ]);
+      expect(Object.keys(result)).toEqual([
+        '/media/fat/games/NES/Castlevania (USA, Europe).nes',
+      ]);
+    });
+
+    it('returns {} for empty input', async () => {
+      expect(await client.computeSampleMd5s([])).toEqual({});
+    });
+
+    it('throws when called before connect', async () => {
+      const disconnected = new FakeMisterClient({
+        rootPath: workDir,
+        pristineRootPath: fixturesDir,
+        latencyMs: 0,
+      });
+      await expect(
+        disconnected.computeSampleMd5s(['/x']),
+      ).rejects.toThrow();
+    });
+
+    it('a content change with same path → different sample', async () => {
+      const path = '/media/fat/games/NES/change.nes';
+      const localPath = `${workDir}${path.slice('/media/fat'.length)}`;
+      const localDir = localPath.replace(/\/[^/]+$/, '');
+      await fs.mkdir(localDir, { recursive: true });
+
+      const a = Buffer.alloc(100 * 1024, 0x01);
+      await fs.writeFile(localPath, a);
+      const first = await client.computeSampleMd5s([path]);
+
+      const b = Buffer.from(a);
+      b[b.length - 1] = 0x02; // flip last byte → tail block sees it
+      await fs.writeFile(localPath, b);
+      const second = await client.computeSampleMd5s([path]);
+
+      expect(first[path]).not.toBe(second[path]);
     });
   });
 

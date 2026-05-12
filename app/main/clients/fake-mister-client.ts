@@ -20,6 +20,7 @@ import {
   parseArcadeMra,
   type ArcadeMraMeta,
 } from '@shared/arcade-mra-parse';
+import { buildSampleInput } from '@shared/sample-script';
 import {
   computeCoreRenames,
   isCoreFile,
@@ -942,6 +943,35 @@ export class FakeMisterClient implements IMisterClient {
         diskSize: st.size,
         mtime: Math.floor(st.mtimeMs / 1000),
       });
+    }
+    return out;
+  }
+
+  async computeSampleMd5s(
+    paths: readonly string[],
+  ): Promise<Record<string, string>> {
+    this.assertConnected();
+    if (paths.length === 0) return {};
+    await this.delay();
+    const out: Record<string, string> = {};
+    for (const p of paths) {
+      const local = this.toLocal(p);
+      let st;
+      try {
+        st = await fs.stat(local);
+      } catch (err) {
+        if (isNodeError(err) && err.code === 'ENOENT') continue;
+        throw err;
+      }
+      if (!st.isFile()) continue;
+      // Mirror the device-side `dd` recipe exactly: hash the
+      // WRAPPER bytes (no `unzip -p` here — sample tracks what
+      // mtime tracks, which is the on-disk file). `buildSampleInput`
+      // reconstructs head ++ tail ++ size_hex with the same boundary
+      // logic the busybox loop produces.
+      const bytes = await fs.readFile(local);
+      const sampleInput = buildSampleInput(bytes);
+      out[p] = createHash('md5').update(sampleInput).digest('hex');
     }
     return out;
   }

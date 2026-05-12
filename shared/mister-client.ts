@@ -419,6 +419,27 @@ export interface IMisterClient {
    * captured against the wrapper, not the inner file.
    */
   hashPaths(paths: readonly string[]): Promise<readonly HashRecord[]>;
+
+  /**
+   * feat/sample-based-hashing — compute the sample-md5 fingerprint
+   * for each path. The fingerprint is
+   *   `md5(head 64KB ++ tail 64KB ++ size as 16-char hex)`
+   * over the wrapper bytes (NOT the extracted .zip content). Used
+   * by `HashService` to fast-validate cached entries whose mtimes
+   * drifted: if the sample matches the cached sample, the file is
+   * almost certainly unchanged and the cached full md5 still holds.
+   *
+   * Implementations cap their internal batch at ~100 paths to stay
+   * under busybox argv limits; the caller chunks larger inputs.
+   * Paths that vanish or can't be stat'd mid-batch are silently
+   * dropped from the result map — the caller treats absence as a
+   * sample miss.
+   *
+   * Returns a `path → 32-char-hex-md5` map. Order is not preserved.
+   */
+  computeSampleMd5s(
+    paths: readonly string[],
+  ): Promise<Record<string, string>>;
 }
 
 /**
