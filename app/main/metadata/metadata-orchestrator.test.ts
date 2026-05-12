@@ -13,6 +13,7 @@ import type {
   OpenVGDBProgressEvent,
   OpenVGDBService,
 } from '@app/main/metadata/openvgdb-service';
+import type { ArcadeMraMeta } from '@shared/arcade-mra-parse';
 import type { RomMetadata } from '@shared/metadata-types';
 
 const HASH = 'a'.repeat(32);
@@ -1447,6 +1448,69 @@ describe('MetadataOrchestrator', () => {
       // up for free.
       expect(hashService.computeHash).not.toHaveBeenCalled();
       expect(metadataService.getMetadata).toHaveBeenCalledTimes(1);
+    });
+
+    it('chunks the primary-zip stat at 100 paths per SSH op (ARG_MAX overflow fix)', async () => {
+      // PR-62 live trace fired `Argument list too long` on a 706-path
+      // single statPathsWithSize call (353 unique zips × 2 candidate
+      // dirs). Same class of bug PR #53 and PR #56 solved for witness
+      // and sample-md5; the orchestrator now reuses the shared
+      // `chunked` helper at the 100-path window.
+      //
+      // 150 .mras sharing nothing → 150 unique zips → 300 candidate
+      // paths → expect 3 SSH chunks of 100 / 100 / 100.
+      const N_MRAS = 150;
+      const entries: ArcadeMraMeta[] = [];
+      const zipBasenameSet = new Set<string>();
+      const hashEntries = new Map<string, HashEntry>();
+      for (let i = 0; i < N_MRAS; i += 1) {
+        const basename = `arcade-${String(i).padStart(3, '0')}.zip`;
+        entries.push({
+          relativePath: `Game ${String(i)}.mra`,
+          displayName: `Game ${String(i)}.mra`,
+          hidden: false,
+          requiredZips: [[basename]],
+          rbf: 'r',
+        });
+        zipBasenameSet.add(basename);
+        hashEntries.set(`/media/fat/games/mame/${basename}`, buildHashEntry(HASH));
+      }
+      const meta = buildMeta(HASH, 'Synthetic');
+      const { orchestrator } = makeOrchestrator({ hashEntries, meta });
+      const session = (orchestrator as unknown as {
+        getActiveSession: () => ActiveSession | null;
+      }).getActiveSession();
+      if (session === null) throw new Error('test setup: session null');
+      // Record one entry per call so we can assert chunk sizes after.
+      const statCallSizes: number[] = [];
+      (session.client.statPathsWithSize as ReturnType<typeof vi.fn>)
+        .mockImplementation(async (paths: readonly string[]) => {
+          statCallSizes.push(paths.length);
+          const out: Record<string, { size: number; mtime: number }> = {};
+          for (const p of paths) {
+            out[p] = p.startsWith('/media/fat/games/mame/')
+              ? { size: 1024, mtime: 100 }
+              : { size: 0, mtime: 0 };
+          }
+          return out;
+        });
+
+      await orchestrator.getArcadeMetadata(entries, zipBasenameSet);
+
+      // 300 candidate paths / 100 = exactly 3 chunks of 100. No
+      // single call exceeds the limit — that's the ARG_MAX fix.
+      expect(statCallSizes).toEqual([100, 100, 100]);
+      // The aggregate Object.assign merge must yield all 150 unique
+      // zip resolutions — one .mra-per-zip → one getMetadata per
+      // zip → 150 SS lookups total. If the chunked aggregation
+      // dropped any chunk's results, we'd see < 150 here.
+      expect(
+        (
+          (orchestrator as unknown as {
+            metadataService: { getMetadata: ReturnType<typeof vi.fn> };
+          }).metadataService.getMetadata as ReturnType<typeof vi.fn>
+        ).mock.calls.length,
+      ).toBe(N_MRAS);
     });
 
     it('emits a null-metadata event when a snapshot-listed zip stat-resolves to size=0 (race with removal)', async () => {

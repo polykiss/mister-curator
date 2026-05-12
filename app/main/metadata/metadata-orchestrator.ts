@@ -5,7 +5,20 @@ import { ARCADE_VIRTUAL_CORE_ID } from '@shared/arcade-mra';
 import type { ArcadeMraMeta } from '@shared/arcade-mra-parse';
 
 import { groupByPrimaryZipBasename } from '@app/main/services/arcade-prefetch-paths';
+import { chunked } from '@shared/chunk';
 import { MISTER_ARCADE_ZIP_DIRS } from '@shared/constants';
+import type { SizeAndMtime } from '@shared/prime-parse';
+
+/**
+ * feat/arcade-parity-2-metadata — arcade primary-zip stat chunk size.
+ * Matches the WITNESS_CHUNK_SIZE constant in `real-mister-client.ts`
+ * — every SSH-exec-argv-bounded call uses the same 100-path window
+ * (witness stat, sample-md5, content-hash). 100 paths × ~70-byte
+ * shell-quoted lines stays well under busybox's argv cap (~26 KB
+ * script) AND under the bash kernel `ARG_MAX` ceiling that bit a
+ * 706-path arcade stat in the live PR-62 verify trace.
+ */
+const ARCADE_STAT_CHUNK_SIZE = 100;
 import type {
   HashClient,
   HashEntry,
@@ -539,17 +552,27 @@ export class MetadataOrchestrator {
     // Step 1: resolve each zip basename to a real path. The snapshot
     // doesn't preserve per-dir membership (it unions mame/ + hbmame/),
     // so we stat both candidate paths and pick the one with size > 0.
-    // ONE statPathsWithSize call covers every candidate — for ~300
-    // unique zips this is ~few-hundred-ms wall on a fast LAN.
+    // Chunked at ARCADE_STAT_CHUNK_SIZE — a single 706-path stat call
+    // overflowed bash's ARG_MAX on the real MiSTer (PR-62 live trace:
+    // 353 unique zips × 2 dirs = 706 paths, kernel returned E2BIG /
+    // "Argument list too long"). Same class of bug PRs #53 and #56
+    // solved for witness + sample-md5; reuses the same `chunked`
+    // helper and 100-path window. 706 paths → 8 sequential SSH ops.
     const candidatePaths: string[] = [];
     for (const group of groups) {
       for (const dir of MISTER_ARCADE_ZIP_DIRS) {
         candidatePaths.push(`${dir}/${group.zipBasename}`);
       }
     }
-    let stats: Awaited<ReturnType<HashClient['statPathsWithSize']>>;
+    let stats: Record<string, SizeAndMtime>;
     try {
-      stats = await session.client.statPathsWithSize(candidatePaths);
+      stats = await chunked<string, Record<string, SizeAndMtime>>(
+        candidatePaths,
+        ARCADE_STAT_CHUNK_SIZE,
+        (chunk) => session.client.statPathsWithSize(chunk),
+        (acc, next) => Object.assign(acc, next),
+        {},
+      );
     } catch (err) {
       diagLog('error', 'prefetch', '✗', 'arcade-stat failed', {
         coreId: ARCADE_VIRTUAL_CORE_ID,
