@@ -1,3 +1,4 @@
+import type { ArcadeMraMeta } from '@shared/arcade-mra-parse';
 import { isRealCore } from '@shared/core-matching';
 import type { CoreEntry, HiddenCoreEntry, HideLedger } from '@shared/types';
 
@@ -13,6 +14,15 @@ import type { CoreEntry, HiddenCoreEntry, HideLedger } from '@shared/types';
 export const LEDGER_HEREDOC_DELIMITER = 'MISTERCURATOR_LEDGER_EOF';
 
 export const EMPTY_LEDGER: HideLedger = { schemaVersion: 1, hiddenCores: [] };
+
+/**
+ * feat/arcade-ux-and-ledger (PR 2/2) — default value for the
+ * arcade auto-hide-enabled preference. ON by default so a brand-
+ * new connect (or a ledger written by a pre-V1 client) auto-hides
+ * missing-ROM .mras out of the box. The user can toggle it off via
+ * the Arcade pane header at any time.
+ */
+export const DEFAULT_ARCADE_AUTO_HIDE_ENABLED = true;
 
 /**
  * Lenient parser: empty input or malformed JSON yields an empty ledger,
@@ -42,6 +52,10 @@ export function parseLedger(raw: string): HideLedger {
         `update before continuing.`,
     );
   }
+  // PR-2 arcade fields are optional on the wire — pre-V1 ledgers
+  // simply don't carry them. The parser surfaces undefined for an
+  // absent field; consumers use `EMPTY_LEDGER` defaults or the
+  // helpers below to resolve.
   return parsed;
 }
 
@@ -151,7 +165,158 @@ export function ledgerEqual(a: HideLedger, b: HideLedger): boolean {
       if (ea.rbfPaths[j] !== eb.rbfPaths[j]) return false;
     }
   }
+  if (
+    (a.arcadeAutoHideEnabled ?? DEFAULT_ARCADE_AUTO_HIDE_ENABLED) !==
+    (b.arcadeAutoHideEnabled ?? DEFAULT_ARCADE_AUTO_HIDE_ENABLED)
+  ) {
+    return false;
+  }
+  if (!stringArrayEqual(a.arcadeAutoHidden ?? [], b.arcadeAutoHidden ?? [])) {
+    return false;
+  }
+  if (
+    !stringArrayEqual(
+      a.arcadeUserShownDespiteMissing ?? [],
+      b.arcadeUserShownDespiteMissing ?? [],
+    )
+  ) {
+    return false;
+  }
   return true;
+}
+
+function stringArrayEqual(
+  a: readonly string[],
+  b: readonly string[],
+): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * feat/arcade-ux-and-ledger (PR 2/2) — strip a leading dot from the
+ * basename of a .mra relative path. The renderer + ledger track the
+ * visible (undotted) form so a hide/show cycle doesn't drift the
+ * identity. Subfolder paths preserve their parent segments.
+ *
+ *   `Foo.mra`               → `Foo.mra`
+ *   `.Foo.mra`              → `Foo.mra`
+ *   `_Konami/.Foo.mra`      → `_Konami/Foo.mra`
+ *   `_Konami/Foo.mra`       → `_Konami/Foo.mra`
+ */
+export function arcadeMraVisiblePath(relativePath: string): string {
+  const slash = relativePath.lastIndexOf('/');
+  if (slash === -1) {
+    return relativePath.startsWith('.') ? relativePath.slice(1) : relativePath;
+  }
+  const dir = relativePath.slice(0, slash + 1);
+  const base = relativePath.slice(slash + 1);
+  return base.startsWith('.') ? `${dir}${base.slice(1)}` : `${dir}${base}`;
+}
+
+/**
+ * feat/arcade-ux-and-ledger (PR 2/2) — drop arcade ledger entries
+ * whose VISIBLE relative path no longer maps to a .mra on the device.
+ * Used on connect right after `parseArcadeMras` populates the
+ * playability snapshot. Mirrors the existing `healLedger` for cores:
+ * a removed .mra in the firmware update or via user deletion
+ * shouldn't keep a tombstone or auto-hide record alive.
+ *
+ * The match is exact on visible paths — both the device entries (via
+ * `arcadeMraVisiblePath` on each ArcadeMraMeta.relativePath) and the
+ * ledger entries (already stored visible). Order-preserving;
+ * returns the same object when nothing changes so a caller can use
+ * referential equality to skip a write-through.
+ */
+export function healArcadeLedger(
+  ledger: HideLedger,
+  entries: readonly ArcadeMraMeta[],
+): HideLedger {
+  const autoHidden = ledger.arcadeAutoHidden;
+  const tombstones = ledger.arcadeUserShownDespiteMissing;
+  if (
+    (autoHidden === undefined || autoHidden.length === 0) &&
+    (tombstones === undefined || tombstones.length === 0)
+  ) {
+    return ledger;
+  }
+  const visibleOnDevice = new Set<string>();
+  for (const e of entries) {
+    visibleOnDevice.add(arcadeMraVisiblePath(e.relativePath));
+  }
+  const keepAuto = (autoHidden ?? []).filter((p) => visibleOnDevice.has(p));
+  const keepTomb = (tombstones ?? []).filter((p) => visibleOnDevice.has(p));
+  const autoChanged =
+    keepAuto.length !== (autoHidden?.length ?? 0) ||
+    !stringArrayEqual(keepAuto, autoHidden ?? []);
+  const tombChanged =
+    keepTomb.length !== (tombstones?.length ?? 0) ||
+    !stringArrayEqual(keepTomb, tombstones ?? []);
+  if (!autoChanged && !tombChanged) return ledger;
+  return {
+    ...ledger,
+    arcadeAutoHidden: keepAuto,
+    arcadeUserShownDespiteMissing: keepTomb,
+  };
+}
+
+/**
+ * Replace the auto-hidden set on a ledger with a fresh snapshot.
+ * Used by the connect-time auto-hide pass and the OFF→ON / ON→OFF
+ * toggle handlers. Visible-path entries; the caller normalises.
+ */
+export function withArcadeAutoHidden(
+  ledger: HideLedger,
+  autoHidden: readonly string[],
+): HideLedger {
+  return { ...ledger, arcadeAutoHidden: [...autoHidden] };
+}
+
+/**
+ * Add a single tombstone (user-shown-despite-missing). Idempotent;
+ * duplicates collapse so re-promoting the same row is a no-op.
+ */
+export function withArcadeTombstoneAdded(
+  ledger: HideLedger,
+  visibleRelPath: string,
+): HideLedger {
+  const current = ledger.arcadeUserShownDespiteMissing ?? [];
+  if (current.includes(visibleRelPath)) return ledger;
+  return {
+    ...ledger,
+    arcadeUserShownDespiteMissing: [...current, visibleRelPath],
+  };
+}
+
+/**
+ * Remove a tombstone. Used when the user re-hides a previously-
+ * tombstoned mra (they're reversing their previous intent).
+ * No-op when the entry isn't present.
+ */
+export function withArcadeTombstoneRemoved(
+  ledger: HideLedger,
+  visibleRelPath: string,
+): HideLedger {
+  const current = ledger.arcadeUserShownDespiteMissing ?? [];
+  if (!current.includes(visibleRelPath)) return ledger;
+  return {
+    ...ledger,
+    arcadeUserShownDespiteMissing: current.filter((p) => p !== visibleRelPath),
+  };
+}
+
+/**
+ * Flip the persisted auto-hide preference on a ledger.
+ */
+export function withArcadeAutoHideEnabled(
+  ledger: HideLedger,
+  enabled: boolean,
+): HideLedger {
+  return { ...ledger, arcadeAutoHideEnabled: enabled };
 }
 
 function isLedgerObject(v: unknown): v is HideLedger {
@@ -159,7 +324,30 @@ function isLedgerObject(v: unknown): v is HideLedger {
   const obj = v as Record<string, unknown>;
   if (typeof obj.schemaVersion !== 'number') return false;
   if (!Array.isArray(obj.hiddenCores)) return false;
-  return obj.hiddenCores.every(isHiddenCoreEntry);
+  if (!obj.hiddenCores.every(isHiddenCoreEntry)) return false;
+  // PR-2 arcade fields — optional, but if present must be the
+  // right shape. A malformed entry (wrong type) treats the whole
+  // ledger as malformed and falls back to EMPTY_LEDGER per the
+  // existing lenient-parse contract.
+  if (
+    obj.arcadeAutoHideEnabled !== undefined &&
+    typeof obj.arcadeAutoHideEnabled !== 'boolean'
+  ) {
+    return false;
+  }
+  if (obj.arcadeAutoHidden !== undefined) {
+    if (!Array.isArray(obj.arcadeAutoHidden)) return false;
+    if (!obj.arcadeAutoHidden.every((s) => typeof s === 'string')) return false;
+  }
+  if (obj.arcadeUserShownDespiteMissing !== undefined) {
+    if (!Array.isArray(obj.arcadeUserShownDespiteMissing)) return false;
+    if (
+      !obj.arcadeUserShownDespiteMissing.every((s) => typeof s === 'string')
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function isHiddenCoreEntry(v: unknown): v is HiddenCoreEntry {

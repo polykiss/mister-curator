@@ -335,6 +335,22 @@ const api: MisterApi = {
   // declared in `shared/preload-api.ts`.
   getArcadePlayability: () =>
     invoke<ArcadePlayabilityWire>(IPC_CHANNELS.getArcadePlayability),
+  // feat/arcade-ux-and-ledger (PR 2/2) — auto-hide preference +
+  // tombstone IPCs. The renderer's header checkbox calls
+  // `setArcadeAutoHideEnabled`; the eye-toggle path folds tombstone
+  // updates into `setArcadeMraVisibility` so direct callers of
+  // `setArcadeUserShownDespiteMissing` are limited to a future
+  // "exempt this row" menu item.
+  getArcadeAutoHideEnabled: () =>
+    invoke<boolean>(IPC_CHANNELS.getArcadeAutoHideEnabled),
+  setArcadeAutoHideEnabled: (enabled: boolean) =>
+    invoke<void>(IPC_CHANNELS.setArcadeAutoHideEnabled, enabled),
+  setArcadeUserShownDespiteMissing: (relativePath: string, on: boolean) =>
+    invoke<void>(
+      IPC_CHANNELS.setArcadeUserShownDespiteMissing,
+      relativePath,
+      on,
+    ),
 };
 
 contextBridge.exposeInMainWorld('mister', api);

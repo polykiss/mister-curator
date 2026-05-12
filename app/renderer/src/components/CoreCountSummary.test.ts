@@ -155,6 +155,58 @@ describe('CoreCountSummary — sidebar count format', () => {
     expect(collectText(out)).toBe('5(21)');
   });
 
+  // feat/arcade-ux-and-ledger (PR 2/2) — Arcade synthetic row
+  // switches the format to `playable (total)`.
+  describe('Arcade row — `playable (total)` format', () => {
+    it('renders `playable(total)` when arcadePlayableCount is defined', () => {
+      const out = CoreCountSummary({
+        core: core({
+          id: '__arcade__',
+          name: 'Arcade',
+          category: 'Arcade',
+          romCount: 502,
+          hiddenCount: 0,
+          recursiveRomCount: 502,
+          recursiveHiddenCount: 0,
+          arcadePlayableCount: 376,
+        }),
+      });
+      const text = collectText(out);
+      expect(text).toBe('376(502)');
+    });
+
+    it('shows zero playable as `0(N)` rather than hiding the paren', () => {
+      // Distinct from the cores row's "hidden=0 → no paren" because
+      // the Arcade format's paren conveys the denominator, not a
+      // hidden count.
+      const out = CoreCountSummary({
+        core: core({
+          id: '__arcade__',
+          category: 'Arcade',
+          recursiveRomCount: 502,
+          arcadePlayableCount: 0,
+        }),
+      });
+      expect(collectText(out)).toBe('0(502)');
+    });
+
+    it('falls back to the legacy `total (hidden)` format when arcadePlayableCount is undefined', () => {
+      // Cold-connect path before the playability scan resolves —
+      // the Arcade row carries `romCount` / `hiddenCount` but no
+      // `arcadePlayableCount`. The render must not flash a 0; it
+      // shows the old format until playability lands.
+      const out = CoreCountSummary({
+        core: core({
+          id: '__arcade__',
+          category: 'Arcade',
+          recursiveRomCount: 502,
+          recursiveHiddenCount: 12,
+        }),
+      });
+      expect(collectText(out)).toBe('502(12)');
+    });
+  });
+
   it('paren span uses the muted disabled color (visual cue carries the meaning)', () => {
     // The "hidden" word was redundant against the muted paren color.
     // Pin the paren element's class so a stylistic refactor that

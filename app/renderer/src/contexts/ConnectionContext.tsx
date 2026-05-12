@@ -46,7 +46,12 @@ interface ConnectionContextValue {
   readonly currentProfile: MisterProfile | null;
   readonly profilesLoading: boolean;
   readonly refreshProfiles: () => Promise<void>;
-  readonly connect: (profileId: string) => Promise<{ reappliedCount: number }>;
+  readonly connect: (
+    profileId: string,
+  ) => Promise<{
+    readonly reappliedCount: number;
+    readonly firstConnectArcadeAutoHidden: number | null;
+  }>;
   readonly disconnect: () => Promise<void>;
   readonly saveProfile: (profile: MisterProfile, secret: MisterSecret) => Promise<void>;
   readonly deleteProfile: (profileId: string) => Promise<void>;

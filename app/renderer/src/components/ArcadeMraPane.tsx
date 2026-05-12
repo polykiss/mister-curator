@@ -4,7 +4,11 @@ import type { JSX } from 'react';
 import { toast } from 'sonner';
 
 import type { ArcadeMraEntry } from '@shared/arcade-mra';
-import type { ArcadeMraEntryWire } from '@shared/preload-api';
+import { arcadeMraVisiblePath } from '@shared/ledger';
+import type {
+  ArcadeMraEntryWire,
+  ArcadePlayabilityWire,
+} from '@shared/preload-api';
 
 import { Button } from '@app/renderer/src/components/ui/button';
 import {
@@ -26,17 +30,16 @@ import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
  * + sort + drilling + system-file marks); this is a focused
  * listing + hide/unhide surface.
  *
- * Phase 1.5 scope:
- *   • Flat listing of every `.mra` entry the parser returns
- *     (top-level + nested via slash-joined relativePath).
- *   • Drillable subfolders deferred — every nested .mra is just
- *     a row with the subfolder shown inline in the row's path.
- *     Users get one global view they can hide-all from.
- *   • No metadata columns (no year / genre / box art) — arcade
- *     metadata (Phase 2) parses .mra XML for that.
- *   • Hide/unhide via the new `setArcadeMraVisibility` /
- *     `setBulkArcadeMraVisibility` IPCs.
- *   • "Show hidden" toggle persists per-app like the ROM pane's.
+ * PR 2/2 (feat/arcade-ux-and-ledger) layers on:
+ *   • MISSING ROMS pill per row sourced from `getArcadePlayability`.
+ *   • "Auto-hide missing ROMs" persisted checkbox in the header,
+ *     backed by the per-host ledger (default ON). Flipping it
+ *     runs the rule diff via setArcadeAutoHideEnabled.
+ *   • Three-state eye-toggle tooltip: "Hide" / "Show (you hid this)"
+ *     / "Show (auto-hidden because ROMs are missing)".
+ *   • Tombstoned-shown rows still surface the MISSING ROMS pill
+ *     (the .mra still has missing ROMs — the user chose to keep
+ *     it visible anyway).
  */
 export function ArcadeMraPane(): JSX.Element {
   const { status } = useConnection();
@@ -45,14 +48,27 @@ export function ArcadeMraPane(): JSX.Element {
   const [entries, setEntries] = useState<readonly ArcadeMraEntry[] | null>(
     null,
   );
+  const [playability, setPlayability] =
+    useState<ArcadePlayabilityWire | null>(null);
+  const [autoHideEnabled, setAutoHideEnabled] = useState<boolean | null>(null);
+  const [autoHidePending, setAutoHidePending] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingPaths, setPendingPaths] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  // PR 2/2 — default OFF so the pane visually matches what the
+  // firmware menu shows. Pre-2/2 this defaulted ON because the
+  // typical user hadn't hidden many .mras and seeing them dimmed
+  // gave a "manage everything" surface. With auto-hide ON-by-
+  // default, a typical install has 100+ hidden .mras and a
+  // showHidden=true default looks identical to no-rule-applied —
+  // confusing in live verify. The user can flip this on at any
+  // time to manage the hidden set; the storage key matches the
+  // pre-2/2 one so existing user preferences carry over.
   const [showHidden, setShowHidden] = usePersistedBool(
     'mistercurator.showHiddenArcadeMras',
-    true,
+    false,
   );
 
   const refresh = useCallback(
@@ -60,8 +76,17 @@ export function ArcadeMraPane(): JSX.Element {
       setLoading(true);
       setError(null);
       try {
-        const wire = await window.mister.listArcadeMraEntries({ forceRefresh });
+        // Fetch entries + playability in parallel. Auto-hide
+        // preference rarely changes between calls; we still
+        // refresh it here so a multi-window state change shows up.
+        const [wire, play, enabled] = await Promise.all([
+          window.mister.listArcadeMraEntries({ forceRefresh }),
+          window.mister.getArcadePlayability(),
+          window.mister.getArcadeAutoHideEnabled(),
+        ]);
         setEntries(wireToEntries(wire));
+        setPlayability(play);
+        setAutoHideEnabled(enabled);
       } catch (err) {
         const message =
           err instanceof Error ? err.message : 'Failed to load arcade entries.';
@@ -77,13 +102,43 @@ export function ArcadeMraPane(): JSX.Element {
     void refresh(false);
   }, [refresh]);
 
-  // Flat list of just `.mra` rows — subfolder kinds are
-  // navigational structure for a hierarchical view we're not
-  // building in Phase 1.5.
+  // Top-level `.mra` rows only. PR 2/2 scope is "top-level mras";
+  // nested mras (under `_alternatives/` or user-organisational
+  // subfolders) are not playability-scanned and don't carry a
+  // missing-ROM badge, so surfacing them in this listing would
+  // give a false impression that they're "fine" when in fact we
+  // never checked. Phase 3 will add a drillable view + per-row
+  // metadata for nested mras. Subfolder rows (`kind` !== 'mra')
+  // were already filtered pre-2/2 — they were navigational
+  // placeholders for a hierarchical view that hasn't been built.
   const mraRows = useMemo(() => {
     if (entries === null) return [];
-    return entries.filter((e) => e.kind === 'mra');
+    return entries.filter(
+      (e) => e.kind === 'mra' && !e.relativePath.includes('/'),
+    );
   }, [entries]);
+
+  /**
+   * relativePath → 'playable' | 'missing' | 'no-roms-needed'.
+   * Lookups in the row render path; precomputed once per refresh.
+   */
+  const playabilityByPath = useMemo(() => {
+    const map = new Map<string, 'playable' | 'missing' | 'no-roms-needed'>();
+    if (playability === null) return map;
+    for (const p of playability.playable) map.set(p, 'playable');
+    for (const p of playability.missing) map.set(p, 'missing');
+    for (const p of playability.noRomsNeeded) map.set(p, 'no-roms-needed');
+    return map;
+  }, [playability]);
+
+  /**
+   * Visible-path Set of every entry the auto-hide rule has put into
+   * hidden state. Used for the eye-toggle tooltip to differentiate
+   * "auto-hidden because of missing ROMs" from "you hid this".
+   */
+  const autoHiddenSet = useMemo(() => {
+    return new Set(playability?.autoHidden ?? []);
+  }, [playability]);
 
   const presentable = useMemo(
     () => (showHidden ? mraRows : mraRows.filter((e) => !e.hidden)),
@@ -152,6 +207,38 @@ export function ArcadeMraPane(): JSX.Element {
     }
   };
 
+  /**
+   * Toggle the persisted auto-hide preference. The main-process
+   * call also applies the rule diff (hides every missing-ROM mra
+   * on OFF→ON, restores every auto-hidden mra on ON→OFF), so we
+   * refresh the entry list + playability after a successful flip.
+   *
+   * The checkbox flips optimistically so the user sees the change
+   * land immediately even though the bulk SSH rename takes ~3-5s
+   * for a typical 100-mra diff. On failure we revert and surface
+   * the toast.
+   */
+  const onToggleAutoHide = async (next: boolean): Promise<void> => {
+    if (!canMutate || autoHideEnabled === null) return;
+    const prev = autoHideEnabled;
+    setAutoHidePending(true);
+    setAutoHideEnabled(next);
+    try {
+      await window.mister.setArcadeAutoHideEnabled(next);
+      await refresh(true);
+    } catch (err) {
+      setAutoHideEnabled(prev);
+      toast.error(
+        `Could not ${next ? 'enable' : 'disable'} auto-hide`,
+        {
+          description: err instanceof Error ? err.message : 'Unexpected error.',
+        },
+      );
+    } finally {
+      setAutoHidePending(false);
+    }
+  };
+
   return (
     <div className="flex h-full flex-col bg-canvas">
       <header className="flex flex-col gap-3 border-b border-subtle bg-chrome px-4 py-3">
@@ -193,7 +280,36 @@ export function ArcadeMraPane(): JSX.Element {
             <Eye strokeWidth={1.5} />
             Show all
           </Button>
-          <label className="ml-auto flex items-center gap-2 text-body-sm text-fg-body">
+          <label
+            className={cn(
+              'ml-auto flex items-center gap-2 text-body-sm text-fg-body',
+              (!canMutate || autoHidePending || autoHideEnabled === null) &&
+                'opacity-60',
+            )}
+            title={
+              canMutate
+                ? 'When on, .mras whose ROM zips are missing from games/mame/ + games/hbmame/ are dot-prefixed so the MiSTer arcade menu only shows what you can actually play.'
+                : 'Reconnect to change.'
+            }
+          >
+            <input
+              type="checkbox"
+              className="accent-accent"
+              checked={autoHideEnabled ?? true}
+              disabled={
+                !canMutate || autoHidePending || autoHideEnabled === null
+              }
+              onChange={(e) => void onToggleAutoHide(e.target.checked)}
+            />
+            Auto-hide missing ROMs
+            {autoHidePending ? (
+              <Loader2
+                className="ml-1 size-3.5 animate-spin text-fg-muted"
+                strokeWidth={1.5}
+              />
+            ) : null}
+          </label>
+          <label className="flex items-center gap-2 text-body-sm text-fg-body">
             <input
               type="checkbox"
               className="accent-accent"
@@ -232,6 +348,17 @@ export function ArcadeMraPane(): JSX.Element {
             <TableBody>
               {presentable.map((entry) => {
                 const isPending = pendingPaths.has(entry.relativePath);
+                const visiblePath = arcadeMraVisiblePath(entry.relativePath);
+                const isAutoHidden =
+                  entry.hidden && autoHiddenSet.has(visiblePath);
+                const classification =
+                  playabilityByPath.get(entry.relativePath) ?? null;
+                const isMissing = classification === 'missing';
+                const tooltip = entry.hidden
+                  ? isAutoHidden
+                    ? `Show ${entry.displayName} (auto-hidden because ROMs are missing)`
+                    : `Show ${entry.displayName} (you hid this)`
+                  : `Hide ${entry.displayName}`;
                 return (
                   <TableRow key={entry.relativePath}>
                     <TableCell
@@ -241,11 +368,21 @@ export function ArcadeMraPane(): JSX.Element {
                       )}
                     >
                       <span className="flex min-w-0 flex-col">
-                        <span
-                          className="truncate text-body-sm text-fg"
-                          title={entry.displayName}
-                        >
-                          {stripMraExtension(entry.displayName)}
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span
+                            className="truncate text-body-sm text-fg"
+                            title={entry.displayName}
+                          >
+                            {stripMraExtension(entry.displayName)}
+                          </span>
+                          {isMissing ? (
+                            <span
+                              className="inline-block shrink-0 rounded border border-destructive/40 bg-destructive/15 px-1 text-caption uppercase tracking-[0.06em] text-destructive"
+                              title="At least one ROM zip referenced by this .mra is not present in games/mame/ or games/hbmame/."
+                            >
+                              Missing ROMs
+                            </span>
+                          ) : null}
                         </span>
                         {entry.relativePath !== entry.displayName ? (
                           <span
@@ -263,18 +400,8 @@ export function ArcadeMraPane(): JSX.Element {
                         size="icon"
                         onClick={() => void onToggleSingle(entry)}
                         disabled={!canMutate || isPending}
-                        title={
-                          canMutate
-                            ? entry.hidden
-                              ? `Show ${entry.displayName}`
-                              : `Hide ${entry.displayName}`
-                            : 'Reconnect to make changes.'
-                        }
-                        aria-label={
-                          entry.hidden
-                            ? `Show ${entry.displayName}`
-                            : `Hide ${entry.displayName}`
-                        }
+                        title={canMutate ? tooltip : 'Reconnect to make changes.'}
+                        aria-label={tooltip}
                       >
                         {isPending ? (
                           <Loader2

@@ -19,6 +19,8 @@ import {
   countArcadeMraEntries,
   type ArcadeMraEntry,
 } from '@shared/arcade-mra';
+import { arcadeMraVisiblePath } from '@shared/ledger';
+import type { ArcadePlayabilityWire } from '@shared/preload-api';
 import { EMPTY_SYSTEM_FILES_MARKS, isMarked } from '@shared/system-files-marks';
 import type {
   CoreEntry,
@@ -73,8 +75,17 @@ export function romsKey(coreId: string, subPath = ''): string {
  */
 function synthesizeArcadeCoreEntry(
   entries: readonly ArcadeMraEntry[],
+  playability: ArcadePlayabilityWire | null,
 ): CoreEntry | null {
-  const counts = countArcadeMraEntries(entries);
+  // PR 2/2 scope is top-level mras only — match the pane listing
+  // and the playability scan's universe so the sidebar count, the
+  // pane header count, and the row badges all agree. Nested mras
+  // (under `_alternatives/` etc.) are surfaced in a Phase 3
+  // drillable view; they don't contribute to V1's counts.
+  const topLevelEntries = entries.filter(
+    (e) => e.kind !== 'mra' || !e.relativePath.includes('/'),
+  );
+  const counts = countArcadeMraEntries(topLevelEntries);
   if (counts.totalMras === 0 && counts.subfolders === 0) return null;
   return {
     id: ARCADE_VIRTUAL_CORE_ID,
@@ -87,7 +98,50 @@ function synthesizeArcadeCoreEntry(
     rbfPaths: [],
     gamesDirExists: true,
     gamesDirHidden: false,
+    // PR-2: when playability is loaded, render the count as
+    // `playable (total)` via the new field. Undefined on cold
+    // connect → CoreCountSummary falls back to the existing
+    // `total (hidden)` shape so the sidebar doesn't flash a
+    // stale 0.
+    arcadePlayableCount:
+      playability !== null
+        ? countArcadePlayable(topLevelEntries, playability)
+        : undefined,
   };
+}
+
+/**
+ * feat/arcade-ux-and-ledger (PR 2/2) — compute the "playable"
+ * count for the sidebar Arcade row:
+ *
+ *   |(playable ∪ no-roms-needed) − user-hidden|
+ *
+ * Auto-hidden mras are not subtracted: they're playable mras the
+ * rule chose to dot-prefix because their ROMs are present, and
+ * the count should reflect what the user could play if they
+ * flipped auto-hide off. User-hidden mras (hidden but not in
+ * `playability.autoHidden`) ARE subtracted — the user has
+ * actively chosen to hide them.
+ */
+function countArcadePlayable(
+  entries: readonly ArcadeMraEntry[],
+  playability: ArcadePlayabilityWire,
+): number {
+  const playableSet = new Set<string>(playability.playable);
+  const noRomsSet = new Set<string>(playability.noRomsNeeded);
+  const autoHidden = new Set<string>(playability.autoHidden);
+  let count = 0;
+  for (const e of entries) {
+    if (e.kind !== 'mra') continue;
+    const inPlayable =
+      playableSet.has(e.relativePath) || noRomsSet.has(e.relativePath);
+    if (!inPlayable) continue;
+    const visible = arcadeMraVisiblePath(e.relativePath);
+    const isUserHidden = e.hidden && !autoHidden.has(visible);
+    if (isUserHidden) continue;
+    count += 1;
+  }
+  return count;
 }
 
 interface CoresContextValue {
@@ -308,12 +362,18 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
         // counts. Best-effort: if the call fails, the cores list
         // still renders without the Arcade row (Phase 1.5 is
         // additive — its absence doesn't break other functionality).
+        //
+        // PR 2/2 also fetches playability so the sidebar count can
+        // render as `playable (total)`. Playability is allowed to
+        // fail independently — the synthesizer falls back to the
+        // `total (hidden)` format on a null playability.
         let arcadeEntry: CoreEntry | null = null;
         try {
-          const arcade = await window.mister.listArcadeMraEntries({
-            forceRefresh,
-          });
-          arcadeEntry = synthesizeArcadeCoreEntry(arcade);
+          const [arcade, playability] = await Promise.all([
+            window.mister.listArcadeMraEntries({ forceRefresh }),
+            window.mister.getArcadePlayability().catch(() => null),
+          ]);
+          arcadeEntry = synthesizeArcadeCoreEntry(arcade, playability);
         } catch {
           arcadeEntry = null;
         }

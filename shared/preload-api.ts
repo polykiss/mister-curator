@@ -108,6 +108,16 @@ export const IPC_CHANNELS = {
   // populates these on connect; PR-2 hooks the renderer up to
   // surface a per-row badge + auto-hide setting.
   getArcadePlayability: 'mister:getArcadePlayability',
+  // feat/arcade-ux-and-ledger (PR 2/2) — auto-hide preference +
+  // tombstone IPCs. The preference is persisted in the per-host
+  // ledger; the renderer toggle reads via `get` and flips via
+  // `set` (which also runs the rule diff). `setUserShown` is a
+  // direct tombstone setter for symmetry — the eye-toggle path
+  // folds tombstone updates into `setArcadeMraVisibility` so the
+  // renderer usually doesn't call this directly.
+  getArcadeAutoHideEnabled: 'mister:getArcadeAutoHideEnabled',
+  setArcadeAutoHideEnabled: 'mister:setArcadeAutoHideEnabled',
+  setArcadeUserShownDespiteMissing: 'mister:setArcadeUserShownDespiteMissing',
 } as const;
 
 /** PR #15 prefetch progress kind. Discriminator for the wire event. */
@@ -235,6 +245,14 @@ export interface PickedKeyFile {
  */
 export interface ConnectResult {
   readonly reappliedCount: number;
+  /**
+   * feat/arcade-ux-and-ledger (PR 2/2) — one-shot signal for the
+   * "auto-hid N arcade games" toast. `null` when this connect did
+   * not transition `arcadeAutoHidden` from empty to non-empty
+   * (already non-empty, stayed empty, or rule disabled); a
+   * positive integer when the transition fired this pass.
+   */
+  readonly firstConnectArcadeAutoHidden: number | null;
 }
 
 export interface MisterApi {
@@ -600,6 +618,30 @@ export interface MisterApi {
    * `relativePath`; PR-2's UI maps them onto the per-row badge.
    */
   getArcadePlayability(): Promise<ArcadePlayabilityWire>;
+  /**
+   * feat/arcade-ux-and-ledger (PR 2/2) — read the persisted
+   * auto-hide preference for the active connection. Returns
+   * `true` for a fresh ledger (default ON).
+   */
+  getArcadeAutoHideEnabled(): Promise<boolean>;
+  /**
+   * Flip the persisted preference and apply the diff:
+   *   • ON: hide every `missing − tombstones − user-hidden` mra.
+   *   • OFF: un-hide everything in `arcadeAutoHidden`.
+   * Idempotent. No-op when the persisted value already matches.
+   */
+  setArcadeAutoHideEnabled(enabled: boolean): Promise<void>;
+  /**
+   * Set or clear a single tombstone (user-shown-despite-missing).
+   * Doesn't itself flip the on-disk visibility — the eye-toggle
+   * path folds the tombstone update into `setArcadeMraVisibility`.
+   * Kept on the surface so a future "exempt this row" gesture can
+   * call it standalone.
+   */
+  setArcadeUserShownDespiteMissing(
+    relativePath: string,
+    on: boolean,
+  ): Promise<void>;
 }
 
 /** feat/arcade-phase-1.5 — wire shape for `.mra` entries. */
@@ -620,11 +662,20 @@ export interface ArcadeMraVisibilityChangeWire {
  * playability buckets. Lists are mutually exclusive and keyed by
  * `relativePath` (which matches `ArcadeMraEntryWire.relativePath`
  * — same identity, two surfaces, one join key on the renderer).
+ *
+ * PR 2/2 adds `autoHidden` (visible-path form) so the renderer
+ * can distinguish "auto-hidden because of missing ROMs" from
+ * "user hid this manually" without a second IPC round-trip. The
+ * three playability arrays carry the CURRENT relativePath (which
+ * flips with hide state), so the renderer maps each row's
+ * relativePath through `arcadeMraVisiblePath` before checking
+ * membership in `autoHidden`.
  */
 export interface ArcadePlayabilityWire {
   readonly playable: readonly string[];
   readonly missing: readonly string[];
   readonly noRomsNeeded: readonly string[];
+  readonly autoHidden: readonly string[];
 }
 
 const VALID_CONNECTION_ERROR_CODES: ReadonlySet<ConnectionErrorCode> = new Set([
