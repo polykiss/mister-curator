@@ -17,8 +17,14 @@ import { describe, expect, it } from 'vitest';
  * "Find on ScreenScraper" must NOT carry a `disabled:` key.
  */
 
+// feat/arcade-refactor-1-adapter — RomsPane.tsx is now a thin
+// wrapper that routes through ItemListPane; the actual menu-build /
+// detail-modal / cell-render logic moved to roms-adapter.tsx
+// (preserving the same code, just with a different return shape).
+// The source-string assertions stay pointed at whichever file holds
+// the implementation.
 const SOURCE = readFileSync(
-  resolve(__dirname, 'RomsPane.tsx'),
+  resolve(__dirname, 'roms-adapter.tsx'),
   'utf8',
 );
 
