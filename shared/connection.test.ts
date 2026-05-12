@@ -90,6 +90,66 @@ describe('formatConnectingMessage', () => {
   it('uses floor seconds (3 999ms still reads as 3s)', () => {
     expect(formatConnectingMessage(3_999)).toBe('Connecting… (3s)');
   });
+
+  // feat/connecting-screen-status — phase parameter swaps the
+  // "Connecting" prefix for a phase-specific label inside the
+  // reveal window. Outside the reveal window the rules are
+  // unchanged (null pre-reveal, "Still connecting…" past the
+  // escalation threshold).
+  describe('with phase parameter', () => {
+    it("renders each phase's label between reveal and still-connecting", () => {
+      expect(formatConnectingMessage(5_000, 'transport')).toBe(
+        'Opening SSH connection… (5s)',
+      );
+      expect(formatConnectingMessage(5_000, 'priming')).toBe(
+        'Reading device state… (5s)',
+      );
+      expect(formatConnectingMessage(5_000, 'cores-walk')).toBe(
+        'Walking cores… (5s)',
+      );
+      expect(formatConnectingMessage(5_000, 'arcade-parse')).toBe(
+        'Parsing arcade metadata… (5s)',
+      );
+      expect(formatConnectingMessage(5_000, 'auto-hide')).toBe(
+        'Applying hidden cores… (5s)',
+      );
+    });
+
+    it('preserves existing behavior for explicit null phase', () => {
+      // Explicit null is equivalent to omitting the argument — same
+      // generic "Connecting…" prefix.
+      expect(formatConnectingMessage(5_000, null)).toBe('Connecting… (5s)');
+      expect(formatConnectingMessage(5_000, null)).toBe(
+        formatConnectingMessage(5_000),
+      );
+    });
+
+    it('returns null pre-reveal regardless of phase', () => {
+      // Phase events fire from the manager immediately on connect
+      // start; the pre-reveal gate has to suppress them all to
+      // prevent the indicator from flashing on fast connects.
+      expect(formatConnectingMessage(0, 'transport')).toBeNull();
+      expect(
+        formatConnectingMessage(CONNECTING_REVEAL_MS - 1, 'arcade-parse'),
+      ).toBeNull();
+    });
+
+    it('still-connecting escalation replaces the phase label past STILL_CONNECTING_MS', () => {
+      // Per spec: escalation message wins so the user sees the
+      // "your MiSTer may be slow" framing even when the manager
+      // is still inside a known-slow phase.
+      expect(formatConnectingMessage(STILL_CONNECTING_MS, 'arcade-parse')).toMatch(
+        /Still connecting/,
+      );
+      expect(formatConnectingMessage(STILL_CONNECTING_MS, 'arcade-parse')).not.toMatch(
+        /Parsing arcade/,
+      );
+      expect(formatConnectingMessage(15_000, 'cores-walk')).toMatch(/may be slow/);
+      expect(formatConnectingMessage(15_000, 'cores-walk')).not.toMatch(
+        /Walking cores/,
+      );
+    });
+  });
 });
 
 describe('backoffDelayMs', () => {

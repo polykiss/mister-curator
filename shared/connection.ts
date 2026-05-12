@@ -35,16 +35,65 @@ export const STILL_CONNECTING_MS = 8_000;
 export const RECONNECT_BACKOFF_MS: readonly number[] = [1_000, 3_000, 8_000];
 
 /**
- * Returns the user-facing connecting-progress string for `elapsedMs`.
- * `null` means "render nothing" (we're inside the reveal delay).
+ * feat/connecting-screen-status — discrete phases the
+ * ConnectionManager passes through during the initial connect.
+ * Surfaces as a fine-grained label in the inline "Connecting…" UI
+ * so a slow first-time connect (60-second cold cores+arcade walk
+ * on a real device) tells the user which step is taking time.
+ *
+ * Distinct from `ConnectionStatus` (the four-state machine the
+ * status bar tracks) — these are sub-phases inside the
+ * `'connecting'` window. The phase is OPTIONAL on the rendering
+ * side: a fast connect that never lingers in any one phase long
+ * enough to exceed `CONNECTING_REVEAL_MS` shows nothing, exactly
+ * as before.
+ *
+ *   - transport     → SSH socket + auth handshake
+ *   - priming       → reading ledger / marks / classifications
+ *   - cores-walk    → cold cores walk (cache miss only; warm reconnect skips)
+ *   - arcade-parse  → mra parse + playability scan
+ *   - auto-hide     → applying the missing-ROM hide rule (conditional)
  */
-export function formatConnectingMessage(elapsedMs: number): string | null {
+export type ConnectPhase =
+  | 'transport'
+  | 'priming'
+  | 'cores-walk'
+  | 'arcade-parse'
+  | 'auto-hide';
+
+const CONNECT_PHASE_LABELS: Readonly<Record<ConnectPhase, string>> = {
+  transport: 'Opening SSH connection',
+  priming: 'Reading device state',
+  'cores-walk': 'Walking cores',
+  'arcade-parse': 'Parsing arcade metadata',
+  'auto-hide': 'Applying hidden cores',
+};
+
+/**
+ * Returns the user-facing connecting-progress string for
+ * `elapsedMs`, optionally scoped to a `phase`. `null` means
+ * "render nothing" (we're inside the reveal delay).
+ *
+ * Precedence:
+ *   1. Pre-reveal (< `CONNECTING_REVEAL_MS`) — null.
+ *   2. Past `STILL_CONNECTING_MS` — escalation message wins; the
+ *      phase label is suppressed so the user sees the "your
+ *      MiSTer may be slow" framing even if the manager is still
+ *      churning through a known-slow phase.
+ *   3. Otherwise — `"<Phase Label>… (Ns)"` when phase is set,
+ *      else the generic `"Connecting… (Ns)"`.
+ */
+export function formatConnectingMessage(
+  elapsedMs: number,
+  phase: ConnectPhase | null = null,
+): string | null {
   if (elapsedMs < CONNECTING_REVEAL_MS) return null;
-  if (elapsedMs < STILL_CONNECTING_MS) {
-    const seconds = Math.floor(elapsedMs / 1000);
-    return `Connecting… (${String(seconds)}s)`;
+  if (elapsedMs >= STILL_CONNECTING_MS) {
+    return 'Still connecting… your MiSTer may be slow to respond.';
   }
-  return 'Still connecting… your MiSTer may be slow to respond.';
+  const seconds = Math.floor(elapsedMs / 1000);
+  const prefix = phase !== null ? CONNECT_PHASE_LABELS[phase] : 'Connecting';
+  return `${prefix}… (${String(seconds)}s)`;
 }
 
 export interface ConnectionErrorContext {
@@ -92,6 +141,17 @@ export type ConnectionEvent =
       readonly type: 'connecting-elapsed';
       readonly profileId: string;
       readonly elapsedMs: number;
+    }
+  | {
+      // feat/connecting-screen-status — fired by the manager at
+      // each phase boundary inside `connect()` so the renderer's
+      // inline "Connecting…" label can name the current step. The
+      // event stream rides on the same `connectionEvent` IPC as
+      // the elapsed ticker; the renderer threads both into
+      // `formatConnectingMessage`.
+      readonly type: 'connect-phase';
+      readonly profileId: string;
+      readonly phase: ConnectPhase;
     }
   | {
       readonly type: 'auto-retry-attempt';
