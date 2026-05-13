@@ -63,18 +63,48 @@ export function makeArcadeRom(entry: ArcadeMraEntry): Rom {
  * the remaining path has no further slash. Top-level entries qualify
  * at the root (subPath = '').
  *
- * Extracted from the adapter so the drill-depth contract has a
- * unit-test seam.
+ * Phase 2 (arcade-parity-3-ui follow-up): subfolder entries are
+ * suppressed when their subtree contains zero `.mra` files. The
+ * arcade adapter only renders mra-driven rows, so a subfolder with
+ * no mras anywhere below it (the live `cores/` directory full of
+ * `.rbf` core binaries, or a user folder the user emptied) is a
+ * dead-end drill target — surfacing it as a row that opens an
+ * empty list is purely confusing. mra rows themselves are never
+ * filtered here; the user-facing hide/unhide path stays alone.
  */
 export function entriesAtDepth(
   entries: readonly ArcadeMraEntry[],
   subPath: string,
 ): readonly ArcadeMraEntry[] {
   const prefix = subPath === '' ? '' : `${subPath}/`;
-  return entries.filter((e) => {
+  const atDepth = entries.filter((e) => {
     if (!e.relativePath.startsWith(prefix)) return false;
     const rest = e.relativePath.slice(prefix.length);
     if (rest === '') return false;
     return !rest.includes('/');
   });
+  return atDepth.filter((e) => {
+    if (e.kind === 'mra') return true;
+    return subfolderHasAnyMra(entries, e.relativePath);
+  });
+}
+
+/**
+ * True iff `entries` contains at least one `kind === 'mra'` row
+ * whose relativePath sits anywhere under `folderRelPath/`. Scans
+ * the whole list rather than threading a precomputed index — for
+ * a typical `_Arcade/` (~thousands of mras, a handful of folders
+ * at each depth) the cost is negligible and keeping the function
+ * pure + indexless makes it easy to test.
+ */
+function subfolderHasAnyMra(
+  entries: readonly ArcadeMraEntry[],
+  folderRelPath: string,
+): boolean {
+  const folderPrefix = `${folderRelPath}/`;
+  for (const e of entries) {
+    if (e.kind !== 'mra') continue;
+    if (e.relativePath.startsWith(folderPrefix)) return true;
+  }
+  return false;
 }
