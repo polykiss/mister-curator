@@ -561,6 +561,13 @@ export class MetadataService {
       titleScreenUrl: game.extra.titleScreenUrl,
       screenshotUrl: game.extra.snapUrl,
       screenshotUrls,
+      // feat/detail-dialog-multi-media — three more media types the
+      // SS parser already collects into `ScreenScraperGame.extra`
+      // (box-3D, marquee, wheel→clearLogo) but the pre-v7 cache
+      // composer was dropping. Surfaced in the detail-dialog gallery.
+      box3DUrl: game.extra.box3DUrl,
+      marqueeUrl: game.extra.marqueeUrl,
+      clearLogoUrl: game.extra.clearLogoUrl,
       source: 'screenscraper',
       fetchedAt: new Date(this.now()).toISOString(),
     };
@@ -1042,14 +1049,16 @@ function isNodeError(err: unknown): err is NodeJS.ErrnoException {
 function isRomMetadata(v: unknown): v is RomMetadata {
   if (v === null || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
-  // PR-D2 (PR #29) — accept v4/v5/v6 records on read so schema bumps
-  // don't invalidate existing cache files. Writes always use the
-  // current `ROM_METADATA_SCHEMA_VERSION` (v6); older records get
-  // upgraded naturally on the next write that touches them.
+  // PR-D2 (PR #29) — accept v4/v5/v6/v7 records on read so schema
+  // bumps don't invalidate existing cache files. Writes always use
+  // the current `ROM_METADATA_SCHEMA_VERSION` (v7);
+  // feat/detail-dialog-multi-media added box3D/marquee/clearLogo on
+  // the v7 bump. Older records get upgraded naturally on the next
+  // write that touches them.
   if (
     typeof o.version !== 'number' ||
     !ROM_METADATA_SUPPORTED_SCHEMA_VERSIONS.includes(
-      o.version as 4 | 5 | 6,
+      o.version as 4 | 5 | 6 | 7,
     )
   ) {
     return false;
@@ -1060,6 +1069,16 @@ function isRomMetadata(v: unknown): v is RomMetadata {
     if (!Array.isArray(o.screenshotUrls)) return false;
     for (const url of o.screenshotUrls) {
       if (typeof url !== 'string') return false;
+    }
+  }
+  // feat/detail-dialog-multi-media — three nullable URL fields
+  // added at v7. Optional + (string | null) when present; v4-v6
+  // records don't carry them and the renderer treats absence as
+  // null (no media of this type).
+  for (const field of ['box3DUrl', 'marqueeUrl', 'clearLogoUrl'] as const) {
+    const value = o[field];
+    if (value !== undefined && value !== null && typeof value !== 'string') {
+      return false;
     }
   }
   return (

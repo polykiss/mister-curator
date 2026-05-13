@@ -98,14 +98,18 @@ export interface RomMetadata {
   /**
    * Schema version. PR-D2 (PR #29) bumped from 4 → 5 to add the
    * `userOverride` block; feat/metadata-detail-modal bumped from
-   * 5 → 6 to add `screenshotUrls`. The validator (`isRomMetadata`
-   * in `metadata-service.ts`) accepts ALL supported versions on
-   * read so existing records on disk keep parsing — no forced
-   * migration pass; new writes always use the current schema and
-   * older records get upgraded naturally on the next write that
-   * touches them.
+   * 5 → 6 to add `screenshotUrls`; feat/detail-dialog-multi-media
+   * bumped from 6 → 7 to add `box3DUrl` + `marqueeUrl` +
+   * `clearLogoUrl` (already parsed from SS into the
+   * `ScreenScraperGame.extra` shape, just no longer dropped at
+   * cache compose). The validator (`isRomMetadata` in
+   * `metadata-service.ts`) accepts ALL supported versions on read
+   * so existing records on disk keep parsing — no forced migration
+   * pass; new writes always use the current schema and older
+   * records get upgraded naturally on the next write that touches
+   * them.
    */
-  readonly version: 4 | 5 | 6;
+  readonly version: 4 | 5 | 6 | 7;
   readonly hash: string;
   readonly name: string;
   readonly system: string;
@@ -138,6 +142,26 @@ export interface RomMetadata {
    * (possibly empty).
    */
   readonly screenshotUrls?: readonly string[];
+  /**
+   * feat/detail-dialog-multi-media — additional gallery URLs the SS
+   * parser was already extracting into `ScreenScraperGame.extra` but
+   * the cache composer was discarding pre-v7. Each is independently
+   * nullable; SS frequently returns some but not all per game. The
+   * detail dialog's gallery surfaces whichever are present, falling
+   * back to a single box-art image when none are.
+   *
+   *   - `box3DUrl`     — 3D box render (SS `box-3D`)
+   *   - `marqueeUrl`   — arcade-style marquee strip (SS `marquee`)
+   *   - `clearLogoUrl` — transparent-background title logo
+   *                      (SS `wheel`)
+   *
+   * Optional so v4-v6 records still parse (`undefined` reads as
+   * "no media of this type"); v7+ writes always emit a value
+   * (null when SS didn't return one for this game).
+   */
+  readonly box3DUrl?: string | null;
+  readonly marqueeUrl?: string | null;
+  readonly clearLogoUrl?: string | null;
   readonly source: MetadataSource;
   /** ISO 8601 — when the record was written to cache. Drives TTL. */
   readonly fetchedAt: string;
@@ -248,9 +272,9 @@ export const SENTINEL_AUTHORITATIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  * a forced migration pass. Older records get upgraded naturally on
  * the next write.
  */
-export const ROM_METADATA_SCHEMA_VERSION = 6 as const;
+export const ROM_METADATA_SCHEMA_VERSION = 7 as const;
 /** Versions the cache validator will accept on read. */
-export const ROM_METADATA_SUPPORTED_SCHEMA_VERSIONS = [4, 5, 6] as const;
+export const ROM_METADATA_SUPPORTED_SCHEMA_VERSIONS = [4, 5, 6, 7] as const;
 
 /** One progress tick from a long-running prefetch. `done` is 1-based. */
 export interface PrefetchProgress {
