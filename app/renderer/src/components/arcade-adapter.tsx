@@ -445,7 +445,14 @@ export function useArcadeAdapter(): ItemListAdapter {
         </div>
       </header>
 
-      <div className="flex-1 overflow-auto">
+      {/* feat/arcade-scrollbar-gap-parity — match RomsPane + CoresPane:
+          `scroll-themed` reserves a stable scrollbar gutter and paints a
+          permanent themed bar; `pr-2.5` adds the explicit 10px right
+          padding so the rightmost cell (density + eye stack) sits well
+          clear of the scrollbar. Without these, arcade rows extended
+          to a slightly different right edge than RomsPane rows because
+          the macOS overlay scrollbar shifted them inward. */}
+      <div className="scroll-themed flex-1 overflow-auto pr-2.5">
         {loading && entries === null ? (
           <div className="space-y-1 p-4">
             {Array.from({ length: 8 }).map((_, i) => (

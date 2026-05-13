@@ -480,6 +480,21 @@ describe('arcade-adapter detail dialog (feat/arcade-parity-3-ui)', () => {
   });
 });
 
+describe('arcade-adapter scrollbar gap parity (feat/arcade-scrollbar-gap-parity)', () => {
+  it('arcade pane scroll container uses the same scroll-themed + pr-2.5 treatment as RomsPane', () => {
+    // PR #23 rounds 5/6 added `scroll-themed` (stable scrollbar gutter
+    // + themed bar) and `pr-2.5` (10px right padding so the eye column
+    // clears the scrollbar) to RomsPane + CoresPane. Arcade was
+    // shipped without either, so its right edge sat at a different
+    // pixel than ROM panes under macOS overlay scrollbars. Pin both
+    // bits of the treatment in BOTH adapters so a future regression
+    // would surface here.
+    const SCROLL_CONTAINER_RE = /scroll-themed flex-1 overflow-auto pr-2\.5/;
+    expect(ROMS_ADAPTER).toMatch(SCROLL_CONTAINER_RE);
+    expect(ARCADE_ADAPTER).toMatch(SCROLL_CONTAINER_RE);
+  });
+});
+
 describe('no inter-adapter state leakage', () => {
   it('neither adapter file declares module-level mutable state (each hook owns its state in React)', () => {
     // The "switching adapters at runtime doesn't leak state" guarantee
