@@ -108,6 +108,37 @@ export interface RomDetailDialogProps {
    * supply their own line.
    */
   readonly emptyStateBody?: string;
+  /**
+   * feat/detail-modal-nav-hide — power-curation flow: advance to
+   * the previous / next entry in the pane's CURRENT FILTERED + SORTED
+   * row list without closing the dialog. The adapter resolves the
+   * neighbour and passes the callback; at list boundaries the
+   * adapter passes `undefined` for the missing direction so the
+   * button renders disabled.
+   *
+   * Both callbacks are independent: a list of two entries leaves
+   * onPrev defined while on entry 2 and onNext undefined (etc.).
+   * When BOTH are undefined the dialog skips the navigation
+   * affordance entirely.
+   */
+  readonly onPrev?: () => void;
+  readonly onNext?: () => void;
+  /**
+   * feat/detail-modal-nav-hide — Hide/Unhide button in the dialog
+   * footer. When `hideAction` is supplied the button renders with
+   * the label derived from `currentHidden` and `onToggle` flips
+   * the entry's hide state (optimistic in the adapter; the dialog
+   * just invokes the callback). Adapters omit this prop for
+   * entries that don't support hide (e.g. missing-zip arcade
+   * rows). The adapter's `onToggle` is expected to:
+   *   • apply the hide/unhide (same path as the row's eye toggle),
+   *   • on SSH success advance to the next entry (or close),
+   *   • on SSH failure surface a toast + stay on the current entry.
+   */
+  readonly hideAction?: {
+    readonly currentHidden: boolean;
+    readonly onToggle: () => void;
+  };
 }
 
 export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
@@ -122,6 +153,9 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
     allowSearch,
     readOnly,
     emptyStateBody,
+    onPrev,
+    onNext,
+    hideAction,
   } = props;
   const defaultAllow = readOnly === true ? false : true;
   const resolvedAllowEdit = allowEdit ?? defaultAllow;
@@ -135,6 +169,9 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
         onSearch={onSearch}
         allowSearch={resolvedAllowSearch}
         bodyOverride={emptyStateBody}
+        onPrev={onPrev}
+        onNext={onNext}
+        hideAction={hideAction}
       />
     );
   }
@@ -147,6 +184,9 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
       onSearch={onSearch}
       allowEdit={resolvedAllowEdit}
       allowSearch={resolvedAllowSearch}
+      onPrev={onPrev}
+      onNext={onNext}
+      hideAction={hideAction}
     />
   );
 }
@@ -159,8 +199,22 @@ function PopulatedDetailDialog(props: {
   readonly onSearch: () => void;
   readonly allowEdit: boolean;
   readonly allowSearch: boolean;
+  readonly onPrev?: () => void;
+  readonly onNext?: () => void;
+  readonly hideAction?: RomDetailDialogProps['hideAction'];
 }): JSX.Element {
-  const { metadata, open, onOpenChange, onEdit, onSearch, allowEdit, allowSearch } = props;
+  const {
+    metadata,
+    open,
+    onOpenChange,
+    onEdit,
+    onSearch,
+    allowEdit,
+    allowSearch,
+    onPrev,
+    onNext,
+    hideAction,
+  } = props;
 
   // feat/arcade-parse-tolerance-gallery-polish — lightbox state is
   // an INDEX into the gallery's media slots (was a URL pre-PR). The
@@ -232,7 +286,17 @@ function PopulatedDetailDialog(props: {
           to `break-words` (overflow-wrap: break-word) lets the title
           wrap to two lines for the worst-case input while staying
           identical for the common case. */}
-      <DialogContent className="max-w-3xl gap-3 p-5">
+      {/* feat/detail-modal-nav-hide — modal scales to fit viewport.
+          `max-w-[85vw]` caps width at 85% of viewport (was max-w-3xl
+          = 768px fixed); `max-h-[85vh]` caps height. On a narrow
+          window the dialog shrinks instead of overflowing; on a
+          wide window there's negative space around it. The
+          scrolling overflow lives on the inner wrapper (below) so
+          the absolutely-positioned prev/next arrows stay anchored
+          to the DialogContent bounds and don't scroll with content. */}
+      <DialogContent className="flex max-h-[85vh] max-w-[85vw] flex-col p-5">
+        <PrevNextArrows onPrev={onPrev} onNext={onNext} />
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
         <DialogHeader className="min-w-0">
           <DialogTitle
             className="min-w-0 break-words pr-8"
@@ -315,6 +379,11 @@ function PopulatedDetailDialog(props: {
         </div>
 
         <div className="flex flex-wrap justify-end gap-2 pt-1">
+          {hideAction !== undefined ? (
+            <Button variant="ghost" onClick={hideAction.onToggle}>
+              {hideAction.currentHidden ? 'Unhide' : 'Hide'}
+            </Button>
+          ) : null}
           {allowEdit ? (
             <Button variant="ghost" onClick={handleEdit}>
               Edit...
@@ -329,6 +398,7 @@ function PopulatedDetailDialog(props: {
             Close
           </Button>
         </div>
+        </div>
 
         {lightboxIndex !== null && mediaSlots.length > 0 ? (
           <Lightbox
@@ -340,6 +410,53 @@ function PopulatedDetailDialog(props: {
         ) : null}
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * feat/detail-modal-nav-hide — Prev/Next arrow buttons anchored at
+ * the left/right edges of the detail dialog. The adapter passes
+ * `onPrev`/`onNext` resolved against the current pane's sorted +
+ * filtered row list; either is `undefined` at list boundaries
+ * (button renders disabled). When both are undefined the whole
+ * affordance disappears (no navigation context — e.g. the detail
+ * dialog was opened directly without a list backing it).
+ *
+ * Chrome mirrors the lightbox arrows from PR #74 / PR #75: 40px
+ * rounded button, semi-opaque canvas backplate, focus ring. The
+ * smaller size (vs. the lightbox's 48px) reflects that the
+ * detail-dialog edge is less visually loaded than a fullscreen
+ * image.
+ */
+function PrevNextArrows(props: {
+  readonly onPrev?: () => void;
+  readonly onNext?: () => void;
+}): JSX.Element | null {
+  const { onPrev, onNext } = props;
+  if (onPrev === undefined && onNext === undefined) return null;
+  const baseClass =
+    'absolute top-1/2 z-20 -translate-y-1/2 inline-flex h-10 w-10 items-center justify-center rounded-full bg-canvas/80 text-fg-body shadow-modal transition-colors hover:bg-canvas hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-canvas/80 disabled:hover:text-fg-body';
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onPrev}
+        disabled={onPrev === undefined}
+        aria-label="Previous entry"
+        className={cn(baseClass, 'left-1')}
+      >
+        <ChevronLeft className="size-5" strokeWidth={1.5} aria-hidden />
+      </button>
+      <button
+        type="button"
+        onClick={onNext}
+        disabled={onNext === undefined}
+        aria-label="Next entry"
+        className={cn(baseClass, 'right-1')}
+      >
+        <ChevronRight className="size-5" strokeWidth={1.5} aria-hidden />
+      </button>
+    </>
   );
 }
 
@@ -446,21 +563,27 @@ function MediaGallery(props: {
     // the populated primary so the dialog's vertical layout doesn't
     // shift between empty and populated states.
     return (
-      <div className="h-[28rem] w-full rounded-sm border border-subtle bg-overlay/40" />
+      <div className="h-[60vh] w-full rounded-sm border border-subtle bg-overlay/40" />
     );
   }
   return (
     <div className="flex flex-col gap-2">
       {/* feat/arcade-parse-tolerance-gallery-polish — fixed-height
-          primary container (`h-[28rem]` ≈ 448px). The <img> uses
-          object-contain inside, so a portrait box-art and a 16:9
-          screenshot both fit without distorting the surrounding
-          layout. Switching thumbnails replaces the src — the
-          container's height never changes, so nothing below reflows. */}
+          primary container. <img> uses object-contain inside so a
+          portrait box-art and a 16:9 screenshot both fit without
+          distorting the surrounding layout. Switching thumbnails
+          replaces the src — the container's height never changes,
+          so nothing below reflows.
+          feat/detail-modal-nav-hide — height moves from a fixed
+          448px (h-[28rem]) to a viewport-relative `h-[60vh]` so the
+          gallery scales with the dialog: a 700px window shows a
+          smaller image, a 1400px window shows a bigger one, always
+          maintaining the breathing room the dialog's max-h-[85vh]
+          enforces around its content. */}
       <button
         type="button"
         onClick={() => primaryUrl !== null && onEnlarge(primaryUrl)}
-        className="flex h-[28rem] w-full items-center justify-center overflow-hidden rounded-sm border border-subtle bg-overlay/40 transition-colors hover:border-emphasis focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+        className="flex h-[60vh] w-full items-center justify-center overflow-hidden rounded-sm border border-subtle bg-overlay/40 transition-colors hover:border-emphasis focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
         aria-label={`${title} primary image — click to enlarge`}
       >
         {primaryLocal !== null ? (
@@ -600,6 +723,19 @@ function Lightbox(props: {
         // invisible against arbitrary image content. Hide it and
         // render a larger, higher-contrast close button below.
         hideDefaultClose
+        // feat/detail-modal-nav-hide — click anywhere on the
+        // (transparent) DialogContent that ISN'T the image, arrows,
+        // or close button closes the lightbox. This restores the
+        // "click backdrop to dismiss" expectation users have from
+        // every other image lightbox. Radix's overlay-click handler
+        // already covers clicks OUTSIDE DialogContent (the small
+        // ring of true backdrop visible past the 96vw/96vh dialog);
+        // this handler covers the area INSIDE DialogContent that
+        // reads as backdrop visually because the dialog is
+        // transparent. The image + arrows + close button each
+        // stopPropagation on their own onClick so they don't bubble
+        // up here.
+        onClick={onClose}
       >
         {/* Radix Dialog requires a title for a11y; visually hidden
             since the user-facing label is the image itself. */}
@@ -654,9 +790,20 @@ function Lightbox(props: {
               src={localUrl}
               alt={slot?.label ?? 'Image'}
               className="h-full w-full rounded-sm object-contain"
+              // feat/detail-modal-nav-hide — clicks on the image
+              // do NOT close the lightbox. stopPropagation prevents
+              // bubbling to DialogContent's backdrop-close handler.
+              onClick={(e) => e.stopPropagation()}
             />
           ) : (
-            <div className="h-[60vh] w-[60vh] rounded-sm bg-overlay/40" />
+            <div
+              className="h-[60vh] w-[60vh] rounded-sm bg-overlay/40"
+              // Same close-suppression for the loading placeholder
+              // — the user visually identifies it as "the image
+              // area", and clicking it shouldn't bail out of the
+              // lightbox before the image even renders.
+              onClick={(e) => e.stopPropagation()}
+            />
           )}
           {hasMultiple ? (
             <button
@@ -698,6 +845,9 @@ function EmptyDetailDialog(props: {
   readonly onSearch: () => void;
   readonly allowSearch: boolean;
   readonly bodyOverride?: string;
+  readonly onPrev?: () => void;
+  readonly onNext?: () => void;
+  readonly hideAction?: RomDetailDialogProps['hideAction'];
 }): JSX.Element {
   function handleSearch(): void {
     props.onOpenChange(false);
@@ -710,7 +860,9 @@ function EmptyDetailDialog(props: {
       : "ScreenScraper hasn't matched this entry. The auto-scrape pass will retry on the next connect.");
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogContent className="max-w-3xl gap-3 p-5">
+      <DialogContent className="flex max-h-[85vh] max-w-[85vw] flex-col p-5">
+        <PrevNextArrows onPrev={props.onPrev} onNext={props.onNext} />
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
         <DialogHeader className="min-w-0">
           <DialogTitle
             className="min-w-0 break-words pr-8"
@@ -729,6 +881,11 @@ function EmptyDetailDialog(props: {
         </div>
 
         <div className="flex flex-wrap justify-end gap-2 pt-1">
+          {props.hideAction !== undefined ? (
+            <Button variant="ghost" onClick={props.hideAction.onToggle}>
+              {props.hideAction.currentHidden ? 'Unhide' : 'Hide'}
+            </Button>
+          ) : null}
           {props.allowSearch ? (
             <Button variant="primary" onClick={handleSearch}>
               Find on ScreenScraper...
@@ -740,6 +897,7 @@ function EmptyDetailDialog(props: {
           >
             Close
           </Button>
+        </div>
         </div>
       </DialogContent>
     </Dialog>

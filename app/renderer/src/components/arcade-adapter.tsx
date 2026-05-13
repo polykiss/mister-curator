@@ -319,14 +319,25 @@ export function useArcadeAdapter(): ItemListAdapter {
    *   • CoresContext.cores         hiddenCount ±1 on the synthetic
    *                                Arcade row (sidebar badge)
    */
-  const onToggleSingle = (entry: ArcadeMraEntry): void => {
-    if (!canMutate) return;
-    const next = !entry.hidden;
+  /**
+   * feat/detail-modal-nav-hide — Promise-returning core of the
+   * optimistic hide/show. The row-view eye toggle wraps this in a
+   * fire-and-forget catch + toast (`onToggleSingle` below); the
+   * detail-dialog's hide button awaits this so it can advance
+   * on success / surface a toast and stay on failure. The optimistic
+   * UI flips (entry.hidden, relativePath, metadata key, sidebar
+   * hidden-count) happen synchronously BEFORE the SSH call so the
+   * row's eye flips the instant the click lands; on rejection
+   * every flip reverts in the inverse order and the promise rejects.
+   */
+  const applyArcadeMraVisibility = (
+    entry: ArcadeMraEntry,
+    next: boolean,
+  ): Promise<void> => {
     const originalPath = entry.relativePath;
     const predictedPath = next
       ? arcadeMraHiddenPath(originalPath)
       : arcadeMraVisiblePath(originalPath);
-
     // 1. Flip the pane row.
     setEntries((prev) => {
       if (prev === null) return prev;
@@ -351,14 +362,12 @@ export function useArcadeAdapter(): ItemListAdapter {
     // 3. Nudge the sidebar Arcade row's hidden-count badge.
     adjustArcadeHiddenCount(next ? 1 : -1);
 
-    // 4. Background SSH rename. The IPC accepts either the visible
-    //    or dotted form (it strips the leading dot internally), so
-    //    passing the ORIGINAL path is safe even though we've already
-    //    flipped our local view.
-    window.mister
+    // 4. Background SSH rename. On rejection, revert every
+    //    optimistic write and re-throw so awaiting callers can
+    //    decide whether to surface a toast / skip an advance.
+    return window.mister
       .setArcadeMraVisibility(originalPath, next)
       .catch((err: unknown) => {
-        // Revert every optimistic write in the inverse order.
         adjustArcadeHiddenCount(next ? -1 : 1);
         setMetadataByMra((prev) => {
           if (!(predictedPath in prev)) return prev;
@@ -378,14 +387,27 @@ export function useArcadeAdapter(): ItemListAdapter {
               : e,
           );
         });
-        toast.error(
-          `${next ? 'Hide' : 'Show'} failed: ${entry.displayName}`,
-          {
-            description:
-              err instanceof Error ? err.message : 'Unexpected error.',
-          },
-        );
+        throw err;
       });
+  };
+
+  /**
+   * feat/pre-beta-polish-batch — optimistic single-toggle hide/show
+   * (row-view eye button). Fire-and-forget wrapper that surfaces a
+   * toast on failure.
+   */
+  const onToggleSingle = (entry: ArcadeMraEntry): void => {
+    if (!canMutate) return;
+    const next = !entry.hidden;
+    void applyArcadeMraVisibility(entry, next).catch((err: unknown) => {
+      toast.error(
+        `${next ? 'Hide' : 'Show'} failed: ${entry.displayName}`,
+        {
+          description:
+            err instanceof Error ? err.message : 'Unexpected error.',
+        },
+      );
+    });
   };
 
   const runBulk = async (target: 'hide' | 'show'): Promise<void> => {
@@ -935,43 +957,137 @@ export function useArcadeAdapter(): ItemListAdapter {
     extras: (
       <>
         {detailDialogFor !== null ? (
-          <RomDetailDialog
-            path={detailDialogFor.relativePath}
-            filename={detailDialogFor.filename}
-            metadata={metadataByMra[detailDialogFor.relativePath] ?? null}
-            open
-            onOpenChange={(open) => {
-              if (!open) setDetailDialogFor(null);
-            }}
-            onEdit={() => {
-              // feat/arcade-edit-detail-alignment — Edit Metadata is
-              // now wired into the detail dialog (was previously
-              // context-menu only). The dialog only renders the
-              // PopulatedDetailDialog when `metadata !== null`, so
-              // by the time onEdit fires we always have a record to
-              // hand to RomEditMetadataDialog.
-              const meta =
-                metadataByMra[detailDialogFor.relativePath] ?? null;
-              if (meta === null) return;
-              setEditMetadataFor({
-                relativePath: detailDialogFor.relativePath,
-                displayName: detailDialogFor.displayName,
-                metadata: meta,
+          (() => {
+            // feat/detail-modal-nav-hide — power-curation flow over
+            // the SAME `sortedRows` list (mras + subfolders the user
+            // currently sees, in their currently-applied sort order).
+            // Nav goes between MRA rows ONLY — subfolder rows aren't
+            // openable in the detail dialog so they're filtered out
+            // for navigation index math. Hide flips the current
+            // entry's visibility via the optimistic
+            // `applyArcadeMraVisibility` path; on SSH success the
+            // dialog auto-advances (or closes at the end).
+            const mraOnly = sortedRows.filter(
+              (r) => r.kind === 'mra',
+            );
+            const idx = mraOnly.findIndex(
+              (r) => r.relativePath === detailDialogFor.relativePath,
+            );
+            const openAtEntry = (target: (typeof mraOnly)[number]): void => {
+              const classification =
+                playabilityByPath.get(target.relativePath) ?? null;
+              const canManageMetadata =
+                classification === 'playable' ||
+                classification === 'no-roms-needed';
+              const meta = metadataByMra[target.relativePath] ?? null;
+              setDetailDialogFor({
+                relativePath: target.relativePath,
+                displayName: meta?.name ?? target.displayName,
+                filename: target.rom.filename,
+                canManageMetadata,
+                playability: classification,
               });
-            }}
-            onSearch={() => {
-              setSearchScreenScraperFor({
-                relativePath: detailDialogFor.relativePath,
-                displayName: detailDialogFor.displayName,
-                filename: detailDialogFor.filename,
-              });
-            }}
-            allowEdit={detailDialogFor.canManageMetadata}
-            allowSearch={detailDialogFor.canManageMetadata}
-            emptyStateBody={arcadeEmptyStateBody(
-              detailDialogFor.playability,
-            )}
-          />
+            };
+            const handlePrev = (): void => {
+              if (idx <= 0) return;
+              const prev = mraOnly[idx - 1];
+              if (prev !== undefined) openAtEntry(prev);
+            };
+            const handleNext = (): void => {
+              if (idx < 0 || idx >= mraOnly.length - 1) return;
+              const next = mraOnly[idx + 1];
+              if (next !== undefined) openAtEntry(next);
+            };
+            const advanceOrClose = (): void => {
+              if (idx >= 0 && idx < mraOnly.length - 1) {
+                const next = mraOnly[idx + 1];
+                if (next !== undefined) {
+                  openAtEntry(next);
+                  return;
+                }
+              }
+              setDetailDialogFor(null);
+            };
+            const currentEntry = idx >= 0 ? mraOnly[idx] : undefined;
+            // missing-zip arcade rows can't be hidden via the dot
+            // rename — the file IS the `.mra` but the playability
+            // checker reads its referenced zips. The eye toggle in
+            // the row view is wired anyway (hide still works on the
+            // .mra itself), so allow the dialog button too unless
+            // we're disconnected.
+            const hideAction =
+              currentEntry !== undefined && canMutate
+                ? {
+                    currentHidden: currentEntry.hidden,
+                    onToggle: () => {
+                      const next = !currentEntry.hidden;
+                      void applyArcadeMraVisibility(
+                        currentEntry,
+                        next,
+                      ).then(
+                        () => {
+                          advanceOrClose();
+                        },
+                        (err: unknown) => {
+                          toast.error(
+                            `${next ? 'Hide' : 'Show'} failed: ${currentEntry.displayName}`,
+                            {
+                              description:
+                                err instanceof Error
+                                  ? err.message
+                                  : 'Unexpected error.',
+                            },
+                          );
+                        },
+                      );
+                    },
+                  }
+                : undefined;
+            const hasPrev = idx > 0;
+            const hasNext = idx >= 0 && idx < mraOnly.length - 1;
+            return (
+              <RomDetailDialog
+                path={detailDialogFor.relativePath}
+                filename={detailDialogFor.filename}
+                metadata={metadataByMra[detailDialogFor.relativePath] ?? null}
+                open
+                onOpenChange={(open) => {
+                  if (!open) setDetailDialogFor(null);
+                }}
+                onEdit={() => {
+                  // feat/arcade-edit-detail-alignment — Edit Metadata
+                  // is now wired into the detail dialog (was
+                  // context-menu only). The dialog only renders the
+                  // PopulatedDetailDialog when `metadata !== null`,
+                  // so by the time onEdit fires we always have a
+                  // record to hand to RomEditMetadataDialog.
+                  const meta =
+                    metadataByMra[detailDialogFor.relativePath] ?? null;
+                  if (meta === null) return;
+                  setEditMetadataFor({
+                    relativePath: detailDialogFor.relativePath,
+                    displayName: detailDialogFor.displayName,
+                    metadata: meta,
+                  });
+                }}
+                onSearch={() => {
+                  setSearchScreenScraperFor({
+                    relativePath: detailDialogFor.relativePath,
+                    displayName: detailDialogFor.displayName,
+                    filename: detailDialogFor.filename,
+                  });
+                }}
+                allowEdit={detailDialogFor.canManageMetadata}
+                allowSearch={detailDialogFor.canManageMetadata}
+                emptyStateBody={arcadeEmptyStateBody(
+                  detailDialogFor.playability,
+                )}
+                onPrev={hasPrev ? handlePrev : undefined}
+                onNext={hasNext ? handleNext : undefined}
+                hideAction={hideAction}
+              />
+            );
+          })()
         ) : null}
         {searchScreenScraperFor !== null ? (
           <RomSearchScreenScraperDialog
