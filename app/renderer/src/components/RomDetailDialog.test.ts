@@ -90,8 +90,13 @@ describe('RomDetailDialog — structural contract', () => {
     // Pin button order. Edit + Find are ghost (rest-action), Close
     // is the primary (close-self) action. If someone reorders or
     // adds a fourth, the regression is loud.
+    //
+    // feat/arcade-polish-context-menu added `flex-wrap` so the row
+    // stays inside the dialog max-width on narrow viewports — the
+    // regex tolerates any extra flex utilities between `flex` and
+    // `justify-end`.
     const footerMatch = SOURCE.match(
-      /<div className="flex justify-end gap-2[\s\S]*?<\/div>/,
+      /<div className="flex [^"]*justify-end gap-2[\s\S]*?<\/div>/,
     );
     expect(footerMatch).not.toBeNull();
     const footer = footerMatch![0];
@@ -211,5 +216,61 @@ describe('RomDetailDialog — empty state (no metadata yet)', () => {
     const idx = SOURCE.indexOf('function EmptyDetailDialog');
     const empty = SOURCE.slice(idx);
     expect(empty).toMatch(/max-w-3xl/);
+  });
+});
+
+describe('RomDetailDialog — long-title overflow guard (feat/arcade-polish-context-menu)', () => {
+  it('title elements use break-words instead of truncate so long unbreakable filenames wrap inside the dialog', () => {
+    // Live bug: a 110-char zip filename made the dialog's max-w-3xl
+    // cap fight against `white-space: nowrap` (inside `truncate`),
+    // and the title's intrinsic width pushed the absolutely-
+    // positioned Close button past the visible right edge. Switching
+    // the title + filename-subhead to `break-words` keeps the
+    // content inside the dialog width — content wraps to a second
+    // line rather than overflowing horizontally.
+    //
+    // Both the populated DialogTitle and the EmptyDetailDialog title
+    // get the same treatment.
+    const titleOccurrences = SOURCE.match(
+      /<DialogTitle\s+className="[^"]*"\s+title=\{/g,
+    );
+    expect(titleOccurrences).not.toBeNull();
+    expect(titleOccurrences!.length).toBe(2);
+    for (const occ of titleOccurrences!) {
+      expect(occ).toContain('break-words');
+      // The Tailwind `truncate` shortcut sets white-space:nowrap +
+      // overflow-hidden + text-overflow:ellipsis — exactly the
+      // single-line treatment we're moving away from. Make sure
+      // it's gone from the title classes.
+      expect(occ).not.toMatch(/\btruncate\b/);
+    }
+  });
+
+  it('button rows use flex-wrap so a narrow viewport stacks them inside the dialog', () => {
+    // Pin both the populated dialog footer AND the EmptyDetailDialog
+    // footer. Without flex-wrap, a tight viewport would push the
+    // rightmost button (or the whole row) past the dialog edge —
+    // same overflow story as the title.
+    const footerMatches =
+      SOURCE.match(/<div className="flex flex-wrap justify-end gap-2[^"]*">/g) ??
+      [];
+    expect(footerMatches.length).toBe(2);
+  });
+
+  it('arcade empty-state copy reads "entry" (not the stale "manual search is coming in a follow-up")', () => {
+    // PR #64 shipped manual search; the empty-state copy now reads
+    // the same way for arcade + ROMs, with "entry" instead of "file"
+    // so the wording generalises across both surfaces. The source
+    // file uses backslash-escaped apostrophes inside the
+    // single-quoted literal, so a regex matches either spelling.
+    expect(SOURCE).toMatch(
+      /ScreenScraper hasn['\\]+t matched this entry\. Click "Find on ScreenScraper" to search manually/,
+    );
+    expect(SOURCE).not.toContain('coming in a follow-up');
+    // Pre-PR the live branch said "file" — pin the rename to
+    // "entry" so a future regression surfaces.
+    expect(SOURCE).not.toMatch(
+      /ScreenScraper hasn['\\]+t matched this file/,
+    );
   });
 });

@@ -6,9 +6,12 @@ import {
 import {
   ARCADE_MRA_META_WITNESS_PATHS,
   CORES_CACHE_WITNESS_PATHS,
+  MISTER_ARCADE_ZIP_DIRS,
   MISTER_GAMES_DIR,
   romsCacheWitnessPath,
 } from '@shared/constants';
+import { chunked } from '@shared/chunk';
+import { resolvePrimaryZipBasename } from '@app/main/services/arcade-prefetch-paths';
 import {
   computePlayability,
   type ArcadeMraMeta,
@@ -119,6 +122,17 @@ export interface ArcadePlayabilitySnapshot {
   readonly zipBasenames: ReadonlySet<string>;
   /** relativePath → playability classification. */
   readonly byPath: ReadonlyMap<string, Playability>;
+  /**
+   * feat/arcade-polish-context-menu — per-mra primary-zip size in
+   * bytes. Populated on cold connect (stat run alongside
+   * parseArcadeMras), persisted in arcade-mra-meta.json, and surfaced
+   * to the renderer via `listArcadeMraEntries` so the arcade rows
+   * can drive the same DensityBar the ROM rows use without an extra
+   * IPC. Empty for entries whose primary zip isn't present (the
+   * 'missing'/'noRomsNeeded' rows) — the renderer maps absence to 0
+   * and the bar renders empty, identical to a ROM with no size.
+   */
+  readonly primaryZipSizeByMra: ReadonlyMap<string, number>;
 }
 
 /**
@@ -576,7 +590,27 @@ export class ConnectionManager {
       return this.arcadeMraCache;
     }
     const raw = await this.client.listArcadeRawListing();
-    const entries = parseArcadeMraEntries(raw);
+    const parsed = parseArcadeMraEntries(raw);
+    // feat/arcade-polish-context-menu — overlay primary-zip size from
+    // the playability snapshot so the renderer can drive density
+    // without a second IPC. loadArcadeData is idempotent
+    // (arcadePlayabilityCache short-circuits on the second call), so
+    // surfacing snapshot data here doesn't cost an extra SSH op on
+    // the warm path. Failure to load the snapshot is non-fatal —
+    // entries still render, density bars just stay empty.
+    let sizeByPath: ReadonlyMap<string, number> | null = null;
+    try {
+      const snapshot = await this.loadArcadeData();
+      sizeByPath = snapshot.primaryZipSizeByMra;
+    } catch {
+      /* swallow — listing is independent of playability scan */
+    }
+    const entries: ArcadeMraEntry[] = parsed.map((entry) => {
+      if (sizeByPath === null) return entry;
+      const size = sizeByPath.get(entry.relativePath);
+      if (size === undefined || size <= 0) return entry;
+      return { ...entry, primaryZipSizeBytes: size };
+    });
     this.arcadeMraCache = entries;
     return entries;
   }
@@ -683,6 +717,10 @@ export class ConnectionManager {
         const snapshot = buildPlayabilitySnapshot(
           cached.entries,
           cached.zipBasenames,
+          // Legacy caches (pre feat/arcade-polish-context-menu) won't
+          // carry the size map. Empty record → 0 sizes → density bars
+          // render empty until the next force-refresh re-stats.
+          cached.primaryZipSizeByMra ?? {},
         );
         this.arcadePlayabilityCache = snapshot;
         const buckets = bucketByPlayability(snapshot);
@@ -708,12 +746,31 @@ export class ConnectionManager {
       this.client.parseArcadeMras(),
       this.client.listArcadeZipBasenames(),
     ]);
+    // feat/arcade-polish-context-menu — stat each .mra's primary zip
+    // so the renderer can drive the DensityBar without an extra IPC.
+    // Same SSH op the auto-scrape prefetch already runs; persisting
+    // the result here means the prefetch can consume from cache and
+    // a warm reconnect skips the round-trip entirely.
+    const primaryZipSizeByMra = await this.statPrimaryZipsForMras(
+      entries,
+      zipBasenames,
+    );
     await this.cache
-      .setArcadeMraMetaCache(host, entries, zipBasenames, witnesses)
+      .setArcadeMraMetaCache(
+        host,
+        entries,
+        zipBasenames,
+        witnesses,
+        primaryZipSizeByMra,
+      )
       .catch(() => {
         /* swallow — disk cache write failure shouldn't fail the scan */
       });
-    const snapshot = buildPlayabilitySnapshot(entries, zipBasenames);
+    const snapshot = buildPlayabilitySnapshot(
+      entries,
+      zipBasenames,
+      primaryZipSizeByMra,
+    );
     this.arcadePlayabilityCache = snapshot;
     const buckets = bucketByPlayability(snapshot);
     diagLog('info', 'arcade', '·', 'playability-scan done', {
@@ -843,6 +900,85 @@ export class ConnectionManager {
    * `arcadeAutoHidden` went from empty to that many entries on
    * this pass.
    */
+  /**
+   * feat/arcade-polish-context-menu — batch-stat the primary zip for
+   * every .mra, returning a relativePath → sizeBytes map. The
+   * resolution mirrors the auto-scrape prefetch's logic
+   * (`resolvePrimaryZipBasename` + try mame/ then hbmame/), so the
+   * stat results here can be reused by the prefetch when it lands
+   * later in the connect sequence.
+   *
+   * Non-mra entries and .mras without a resolvable primary zip
+   * (subfolders, TTL games like Computer Space, .mras whose required
+   * zips don't exist) are absent from the result — the renderer maps
+   * absent → 0 and the density bar renders empty.
+   *
+   * Errors during the stat are swallowed: returns an empty record so
+   * the playability scan still finishes; the renderer just sees
+   * empty density bars across the board. Same pattern the
+   * orchestrator uses inside `getArcadeMetadata`.
+   */
+  private async statPrimaryZipsForMras(
+    entries: readonly ArcadeMraMeta[],
+    zipBasenames: readonly string[],
+  ): Promise<Record<string, number>> {
+    const STAT_CHUNK_SIZE = 100;
+    const zipSet = new Set(zipBasenames);
+    // mra relativePath → primary-zip basename. Only mras that
+    // resolve a basename in `zipSet` participate; the rest stay
+    // absent in the result.
+    const primaryByMra = new Map<string, string>();
+    const wantedBasenames = new Set<string>();
+    for (const entry of entries) {
+      const basename = resolvePrimaryZipBasename(entry, zipSet);
+      if (basename === null) continue;
+      primaryByMra.set(entry.relativePath, basename);
+      wantedBasenames.add(basename);
+    }
+    if (wantedBasenames.size === 0) return {};
+    // Stat both candidate paths per unique basename — whichever dir
+    // it actually lives in wins. Same two-dir probe the cached-read
+    // path in MetadataOrchestrator uses.
+    const candidatePaths: string[] = [];
+    for (const basename of wantedBasenames) {
+      for (const dir of MISTER_ARCADE_ZIP_DIRS) {
+        candidatePaths.push(`${dir}/${basename}`);
+      }
+    }
+    let stats: Record<string, { size: number; mtime: number }>;
+    try {
+      stats = await chunked(
+        candidatePaths,
+        STAT_CHUNK_SIZE,
+        (chunk) => this.client.statPathsWithSize(chunk),
+        (acc, next) => Object.assign(acc, next),
+        {} as Record<string, { size: number; mtime: number }>,
+      );
+    } catch (err) {
+      diagLog('warn', 'arcade', '·', 'primary-zip stat failed', {
+        candidatePaths: candidatePaths.length,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return {};
+    }
+    const sizeByBasename = new Map<string, number>();
+    for (const basename of wantedBasenames) {
+      for (const dir of MISTER_ARCADE_ZIP_DIRS) {
+        const stat = stats[`${dir}/${basename}`];
+        if (stat !== undefined && stat.size > 0 && stat.mtime > 0) {
+          sizeByBasename.set(basename, stat.size);
+          break;
+        }
+      }
+    }
+    const out: Record<string, number> = {};
+    for (const [relPath, basename] of primaryByMra) {
+      const size = sizeByBasename.get(basename);
+      if (size !== undefined) out[relPath] = size;
+    }
+    return out;
+  }
+
   private async healAndApplyArcadeAutoHide(
     snapshot: ArcadePlayabilitySnapshot,
   ): Promise<number | null> {
@@ -1044,9 +1180,23 @@ export class ConnectionManager {
         return e;
       });
       const zipBasenames = [...snapshot.zipBasenames];
+      // Renaming flips the .mra's `relativePath` (visible ↔ dotted).
+      // Re-key the size map so the post-rename relativePath still
+      // surfaces its size — same zip, same size, just a different
+      // join key on the renderer.
+      const rekeyedSizes: Record<string, number> = {};
+      for (const original of snapshot.primaryZipSizeByMra.keys()) {
+        const size = snapshot.primaryZipSizeByMra.get(original) ?? 0;
+        let key = original;
+        if (renamedHidden.has(original)) key = arcadeMraHiddenPath(original);
+        else if (renamedShown.has(original))
+          key = arcadeMraVisiblePath(original);
+        rekeyedSizes[key] = size;
+      }
       this.arcadePlayabilityCache = buildPlayabilitySnapshot(
         patchedEntries,
         zipBasenames,
+        rekeyedSizes,
       );
       if (this.currentHost !== null) {
         try {
@@ -1058,6 +1208,7 @@ export class ConnectionManager {
             patchedEntries,
             zipBasenames,
             freshWitnesses,
+            rekeyedSizes,
           );
         } catch {
           // Best-effort write-through. If the re-stat or write
@@ -2088,13 +2239,20 @@ export { isCoreHidden };
 export function buildPlayabilitySnapshot(
   entries: readonly ArcadeMraMeta[],
   zipBasenames: readonly string[],
+  primaryZipSizeByMra: Readonly<Record<string, number>> = {},
 ): ArcadePlayabilitySnapshot {
   const zipSet = new Set(zipBasenames);
   const byPath = new Map<string, Playability>();
   for (const entry of entries) {
     byPath.set(entry.relativePath, computePlayability(entry, zipSet));
   }
-  return { entries, zipBasenames: zipSet, byPath };
+  const sizeMap = new Map<string, number>(Object.entries(primaryZipSizeByMra));
+  return {
+    entries,
+    zipBasenames: zipSet,
+    byPath,
+    primaryZipSizeByMra: sizeMap,
+  };
 }
 
 /**

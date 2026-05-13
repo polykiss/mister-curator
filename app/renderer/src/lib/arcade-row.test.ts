@@ -76,6 +76,33 @@ describe('makeArcadeRom', () => {
     expect(rom.filename).toBe('_Konami/TMNT.mra');
     expect(rom.displayName).toBe('TMNT');
   });
+
+  it('threads entry.primaryZipSizeBytes into rom.sizeBytes for mra rows', () => {
+    // feat/arcade-polish-context-menu — primary-zip size drives the
+    // density bar. The renderer reads from rom.sizeBytes; the
+    // wire-side ArcadeMraEntry carries the stat'd size.
+    const rom = makeArcadeRom({
+      ...mra('Metal Slug.mra'),
+      primaryZipSizeBytes: 4_500_000,
+    });
+    expect(rom.sizeBytes).toBe(4_500_000);
+  });
+
+  it('falls back to 0 when an mra has no primary-zip size (missing zip or pre-stat connect race)', () => {
+    const rom = makeArcadeRom(mra('Metal Slug.mra'));
+    expect(rom.sizeBytes).toBe(0);
+  });
+
+  it('never carries a size for subfolder rows (density bar stays empty on folders)', () => {
+    const rom = makeArcadeRom({
+      ...sub('_Konami'),
+      // Defensive: even if the wire shape somehow surfaces a size
+      // for a subfolder, we drop it — subfolders shouldn't drive
+      // the density-bar scale.
+      primaryZipSizeBytes: 999_999,
+    });
+    expect(rom.sizeBytes).toBe(0);
+  });
 });
 
 describe('entriesAtDepth', () => {

@@ -192,13 +192,26 @@ function PopulatedDetailDialog(props: {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
+      {/* feat/arcade-polish-context-menu — `max-w-3xl` already caps the
+          dialog at 48rem, but long unbreakable strings (110-char zip
+          filenames) make `truncate` (which sets `white-space: nowrap`)
+          force the inner content to demand more width than the dialog
+          allows, which on some Chromium builds visibly pushes the
+          absolutely-positioned X button past the right edge and breaks
+          the button row's positioning. Switching the title + subhead
+          to `break-words` (overflow-wrap: break-word) lets the title
+          wrap to two lines for the worst-case input while staying
+          identical for the common case. */}
       <DialogContent className="max-w-3xl gap-3 p-5">
-        <DialogHeader>
-          <DialogTitle className="pr-8 truncate" title={title}>
+        <DialogHeader className="min-w-0">
+          <DialogTitle
+            className="min-w-0 break-words pr-8"
+            title={title}
+          >
             {title}
           </DialogTitle>
           {subheadParts.length > 0 ? (
-            <p className="text-body-sm text-fg-muted truncate">
+            <p className="text-body-sm text-fg-muted break-words">
               {subheadParts.join(' · ')}
             </p>
           ) : null}
@@ -285,7 +298,7 @@ function PopulatedDetailDialog(props: {
           </section>
         ) : null}
 
-        <div className="flex justify-end gap-2 pt-1">
+        <div className="flex flex-wrap justify-end gap-2 pt-1">
           {allowEdit ? (
             <Button variant="ghost" onClick={handleEdit}>
               Edit...
@@ -435,8 +448,11 @@ function EmptyDetailDialog(props: {
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogContent className="max-w-3xl gap-3 p-5">
-        <DialogHeader>
-          <DialogTitle className="pr-8 truncate" title={props.filename}>
+        <DialogHeader className="min-w-0">
+          <DialogTitle
+            className="min-w-0 break-words pr-8"
+            title={props.filename}
+          >
             {props.filename}
           </DialogTitle>
         </DialogHeader>
@@ -447,13 +463,13 @@ function EmptyDetailDialog(props: {
             <SectionLabel>No metadata yet</SectionLabel>
             <p className="text-body-sm text-fg-body">
               {props.allowSearch
-                ? 'ScreenScraper hasn\'t matched this file. Click "Find on ScreenScraper" to search manually, or wait for the prefetch to land.'
+                ? 'ScreenScraper hasn\'t matched this entry. Click "Find on ScreenScraper" to search manually, or wait for the prefetch to land.'
                 : "ScreenScraper hasn't matched this entry. The auto-scrape pass will retry on the next connect."}
             </p>
           </div>
         </div>
 
-        <div className="flex justify-end gap-2 pt-1">
+        <div className="flex flex-wrap justify-end gap-2 pt-1">
           {props.allowSearch ? (
             <Button variant="primary" onClick={handleSearch}>
               Find on ScreenScraper...

@@ -83,6 +83,17 @@ export interface ArcadeMraMetaCacheEntry {
    * to re-walk the (large-ish) mame/ + hbmame/ dirs.
    */
   readonly zipBasenames: readonly string[];
+  /**
+   * feat/arcade-polish-context-menu — per-mra primary-zip size in
+   * bytes. Optional: legacy caches (pre this feature) won't have
+   * the field. Renderer falls back to 0 when missing, which renders
+   * the density bar empty — matches the "missing zip" path. Keys
+   * are the `.mra` relativePath (matches the keys in `entries`); the
+   * primary zip is whichever of mame/<basename> or hbmame/<basename>
+   * was stat'd successfully (same resolution rule the prefetch +
+   * batched metadata read use).
+   */
+  readonly primaryZipSizeByMra?: Readonly<Record<string, number>>;
 }
 
 /**

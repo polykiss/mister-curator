@@ -216,6 +216,7 @@ export class CacheManager {
     entries: ArcadeMraMetaCacheEntry['entries'],
     zipBasenames: readonly string[],
     witnesses: WitnessMtimes,
+    primaryZipSizeByMra?: Readonly<Record<string, number>>,
   ): Promise<void> {
     const entry: ArcadeMraMetaCacheEntry = {
       version: CACHE_SCHEMA_VERSION,
@@ -224,6 +225,9 @@ export class CacheManager {
       witnesses,
       entries,
       zipBasenames,
+      ...(primaryZipSizeByMra !== undefined
+        ? { primaryZipSizeByMra }
+        : {}),
     };
     await writeJsonAtomic(this.arcadeMraMetaCachePath(host), entry);
     this.fire('write', { surface: 'arcade', host });
@@ -562,6 +566,23 @@ function isArcadeMraMetaCacheEntry(
   }
   for (const basename of o.zipBasenames) {
     if (typeof basename !== 'string') return false;
+  }
+  // primaryZipSizeByMra is optional (legacy caches won't have it).
+  if (o.primaryZipSizeByMra !== undefined) {
+    if (
+      o.primaryZipSizeByMra === null ||
+      typeof o.primaryZipSizeByMra !== 'object'
+    ) {
+      return false;
+    }
+    // Spot-check shape — keys are strings (mra relativePaths), values
+    // are non-negative numbers. Empty record is allowed.
+    for (const [k, v] of Object.entries(
+      o.primaryZipSizeByMra as Record<string, unknown>,
+    )) {
+      if (typeof k !== 'string') return false;
+      if (typeof v !== 'number' || v < 0) return false;
+    }
   }
   return true;
 }

@@ -34,9 +34,12 @@ export function stripMraExtension(name: string): string {
  *     subfolders. The latter pins to the top of the sort via
  *     `isPinnedRow` in `rom-sort.ts`, matching RomsPane's container-
  *     folder behavior.
- *   • `sizeBytes = 0` — arcade .mras have no meaningful per-row size;
- *     DensityBar renders an empty strip and the eye toggle stays
- *     interactive.
+ *   • `sizeBytes = entry.primaryZipSizeBytes ?? 0`. feat/arcade-polish-
+ *     context-menu plumbed the primary zip's on-disk size through from
+ *     the playability scan. Mras with a stat'd primary zip drive the
+ *     DensityBar the same way ROM rows do; .mras whose primary zip is
+ *     missing/noRomsNeeded / subfolder rows get 0, rendering an empty
+ *     bar (matching how ROMs with unknown size render).
  *   • `path` is a best-effort visualisation of the on-device path;
  *     not used for navigation in this PR but populated for coherence
  *     with downstream diagnostics that log `rom.path`.
@@ -50,7 +53,7 @@ export function makeArcadeRom(entry: ArcadeMraEntry): Rom {
     coreId: ARCADE_VIRTUAL_CORE_ID,
     filename: entry.relativePath,
     displayName,
-    sizeBytes: 0,
+    sizeBytes: isMra ? (entry.primaryZipSizeBytes ?? 0) : 0,
     hidden: entry.hidden,
     path: `/media/fat/_Arcade/${entry.relativePath}`,
     kind: isMra ? 'file' : 'folder-container',

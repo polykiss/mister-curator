@@ -1,4 +1,4 @@
-import { Eye, EyeOff, Loader2 } from 'lucide-react';
+import { Eye, EyeOff, Loader2, MoreHorizontal } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 
@@ -18,6 +18,10 @@ import {
   RomYearCell,
 } from '@app/renderer/src/components/RomMetadataCells';
 import { RomDetailDialog } from '@app/renderer/src/components/RomDetailDialog';
+import {
+  RomRowMenu,
+  type RomRowMenuItem,
+} from '@app/renderer/src/components/RomRowMenu';
 import { RomSearchScreenScraperDialog } from '@app/renderer/src/components/RomSearchScreenScraperDialog';
 import { SortableHeader } from '@app/renderer/src/components/SortableHeader';
 import { Button } from '@app/renderer/src/components/ui/button';
@@ -134,6 +138,19 @@ export function useArcadeAdapter(): ItemListAdapter {
     readonly displayName: string;
     readonly filename: string;
   } | null>(null);
+  // feat/arcade-polish-context-menu — per-row more-menu anchor. The
+  // dropdown's only item is "Find on ScreenScraper..." (Edit Metadata
+  // is still v0.2 for .mras); the surface exists for visual parity
+  // with RomsPane, where the menu is the canonical per-row affordance.
+  const [menuFor, setMenuFor] = useState<{
+    readonly entry: {
+      readonly relativePath: string;
+      readonly displayName: string;
+      readonly filename: string;
+    };
+    readonly x: number;
+    readonly y: number;
+  } | null>(null);
 
   const refresh = useCallback(
     async (forceRefresh = false): Promise<void> => {
@@ -230,6 +247,18 @@ export function useArcadeAdapter(): ItemListAdapter {
     }
     return out;
   }, [enrichedPresentable, sortState]);
+
+  // feat/arcade-polish-context-menu — density-bar denominator. Max
+  // primary-zip size across the currently-visible rows (matches the
+  // RomsPane convention: per-pane peer max, not a global). Folder
+  // rows contribute 0, so they don't skew the scale.
+  const maxSizeBytes = useMemo(() => {
+    let max = 0;
+    for (const row of enrichedPresentable) {
+      if (row.rom.sizeBytes > max) max = row.rom.sizeBytes;
+    }
+    return max;
+  }, [enrichedPresentable]);
 
   const visibleCount = mraRows.filter((e) => !e.hidden).length;
   const hiddenCount = mraRows.filter((e) => e.hidden).length;
@@ -524,6 +553,11 @@ export function useArcadeAdapter(): ItemListAdapter {
                     setSortState((prev) => nextSortState(prev, k))
                   }
                 />
+                {/* MoreHorizontal column. Sits left of the
+                    density+eye stack so the per-row context-menu
+                    affordance lives at a fixed screen position
+                    matching RomsPane. */}
+                <TableHead className="w-10" aria-label="Actions" />
                 <TableHead
                   className="w-[3.25rem] p-0"
                   aria-label="Visibility"
@@ -558,13 +592,14 @@ export function useArcadeAdapter(): ItemListAdapter {
                   <TableCell className="w-16" />
                   <TableCell className="w-28" />
                   <TableCell className="w-14" />
+                  <TableCell className="w-10" />
                   <TableCell className="w-[3.25rem] p-0" />
                 </TableRow>
               ) : null}
               {enrichedPresentable.length === 0 ? (
                 <TableRow>
                   <TableCell
-                    colSpan={6}
+                    colSpan={7}
                     className="p-4 text-body-sm text-fg-muted"
                   >
                     This folder is empty.
@@ -675,6 +710,40 @@ export function useArcadeAdapter(): ItemListAdapter {
                       error={false}
                       dimmed={entry.hidden}
                     />
+                    {/* MoreHorizontal cell — single-item menu ("Find on
+                        ScreenScraper..."). Folder rows skip the menu;
+                        the row's click handler drives drill-in
+                        instead. py-0 keeps the row at h-10 (the icon
+                        button is h-8). */}
+                    {isFolder ? (
+                      <TableCell className="w-10" />
+                    ) : (
+                      <TableCell className="w-10 py-0">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          title="More actions"
+                          aria-label={`More actions for ${entry.displayName}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const r =
+                              e.currentTarget.getBoundingClientRect();
+                            setMenuFor({
+                              entry: {
+                                relativePath: entry.relativePath,
+                                displayName:
+                                  metadata?.name ?? rom.displayName,
+                                filename: rom.filename,
+                              },
+                              x: r.left,
+                              y: r.bottom,
+                            });
+                          }}
+                        >
+                          <MoreHorizontal strokeWidth={1.5} />
+                        </Button>
+                      </TableCell>
+                    )}
                     {isFolder ? (
                       <TableCell className="w-[3.25rem] p-0" />
                     ) : isPending ? (
@@ -690,7 +759,7 @@ export function useArcadeAdapter(): ItemListAdapter {
                       <RomDensityEyeCell
                         rom={rom}
                         isSystem={false}
-                        maxSizeBytes={0}
+                        maxSizeBytes={maxSizeBytes}
                         canMutate={canMutate}
                         disconnectedTooltip="Reconnect to make changes."
                         onSingleToggle={() => {
@@ -769,6 +838,25 @@ export function useArcadeAdapter(): ItemListAdapter {
             }}
           />
         ) : null}
+        {menuFor !== null
+          ? (() => {
+              const target = menuFor.entry;
+              const items: readonly RomRowMenuItem[] = [
+                {
+                  label: 'Find on ScreenScraper...',
+                  onSelect: () => setSearchScreenScraperFor(target),
+                },
+              ];
+              return (
+                <RomRowMenu
+                  x={menuFor.x}
+                  y={menuFor.y}
+                  items={items}
+                  onClose={() => setMenuFor(null)}
+                />
+              );
+            })()
+          : null}
       </>
     ),
   };

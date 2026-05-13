@@ -693,6 +693,17 @@ export interface ArcadeMraEntryWire {
   readonly displayName: string;
   readonly kind: 'mra' | 'cores-subfolder' | 'subfolder';
   readonly hidden: boolean;
+  /**
+   * feat/arcade-polish-context-menu — primary-zip size in bytes for
+   * .mra entries that have a resolvable primary zip. Drives the
+   * DensityBar in the arcade pane the same way `Rom.sizeBytes`
+   * drives it in the ROMs pane. Absent or 0 for subfolder rows AND
+   * for .mras whose primary zip is missing from games/mame/ +
+   * games/hbmame/ (the 'missing'/'noRomsNeeded' rows) — the renderer
+   * maps absent → 0 and the bar renders empty, matching how a ROM
+   * with unknown size renders.
+   */
+  readonly primaryZipSizeBytes?: number;
 }
 
 export interface ArcadeMraVisibilityChangeWire {
