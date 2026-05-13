@@ -95,6 +95,40 @@ describe('lookupScreenScraperSystemId — Microsoft cores (round 10)', () => {
   });
 });
 
+describe('lookupScreenScraperSystemId — Computer cores (feat/screenscraper-system-map-audit)', () => {
+  // Pre-audit, the entire `_Computer/` MiSTer category had zero
+  // SS mappings — a manual search for `X68000` returned empty with
+  // `reason=no-system-mapping`. This block pins each of the
+  // confirmed additions; uncertain cores (PC-88, TI-99, ChannelF,
+  // etc.) stay deliberately unmapped — see the in-file comment
+  // block for the audit shortlist.
+  it.each([
+    // The user-flagged regression case. Explicit own-test below
+    // documents the live trace.
+    ['X68000', 79],
+    ['C64', 66],
+    ['VIC20', 73],
+    ['Minimig', 64],
+    ['AtariST', 42],
+    ['Atari800', 43],
+    ['Apple-II', 86],
+    ['BBCMicro', 37],
+    ['Amstrad', 65],
+    ['ZX-Spectrum', 76],
+  ])('%s → %d', (coreId, systemId) => {
+    expect(lookupScreenScraperSystemId(coreId)).toBe(systemId);
+  });
+
+  it('X68000 specifically resolves to 79 (Sharp X68000) — pre-audit live regression', () => {
+    // Pinning the user's reported case explicitly so the trace from
+    // the diag log
+    //   [meta] · ss-manual-search-result coreId=X68000
+    //           outcome=empty reason=no-system-mapping
+    // can never re-occur silently.
+    expect(lookupScreenScraperSystemId('X68000')).toBe(79);
+  });
+});
+
 describe('lookupScreenScraperSystemId — unmapped / edge cases', () => {
   it('returns null for undefined coreId', () => {
     expect(lookupScreenScraperSystemId(undefined)).toBeNull();
@@ -128,6 +162,33 @@ describe('lookupScreenScraperSystemId — unmapped / edge cases', () => {
     // silent shape change.
     expect(lookupScreenScraperSystemId('snes')).toBeNull();
     expect(lookupScreenScraperSystemId('Nes')).toBeNull();
+  });
+
+  it('deliberately-unmapped cores stay null (audit shortlist — verify SS id before adding)', () => {
+    // feat/screenscraper-system-map-audit — these coreIds appeared
+    // on the audit's "uncertain" list. Each one needs a verified
+    // SS systemeid before it can be added. Pinning null here makes
+    // sure no one drops a guess in without also updating tests.
+    for (const coreId of [
+      'PC-88',
+      'PC-98',
+      'TI-99_4A',
+      'TI994A',
+      'ChannelF',
+      'Arcadia',
+      'PokemonMini',
+      'TomyTutor',
+      'AcornElectron',
+      'SVI318',
+      'CoCo2',
+      'ZX-81',
+      'ZX81',
+    ]) {
+      expect(
+        lookupScreenScraperSystemId(coreId),
+        `${coreId} — verify SS systemeid before mapping`,
+      ).toBeNull();
+    }
   });
 });
 

@@ -95,6 +95,22 @@ export const SCREENSCRAPER_SYSTEM_ID_BY_CORE_ID: ReadonlyMap<string, number> =
     ['WonderSwan', 45],
     ['WonderSwanColor', 46],
     ['Odyssey2', 104],
+    // ─── Computers (feat/screenscraper-system-map-audit) ────────────
+    // User-flagged gap: a manual SS search for an X68000 title
+    // returned `outcome=empty reason=no-system-mapping` because the
+    // whole `_Computer/` category had zero entries here pre-audit.
+    // The IDs below are verified against ScreenScraper's published
+    // system list (https://www.screenscraper.fr/api2/systemesListe.php).
+    ['X68000', 79], // Sharp X68000
+    ['C64', 66], // Commodore 64
+    ['VIC20', 73], // Commodore VIC-20
+    ['Minimig', 64], // Commodore Amiga (MiSTer's Amiga core is `Minimig`)
+    ['AtariST', 42], // Atari ST
+    ['Atari800', 43], // Atari 8-bit (400/800/XL/XE)
+    ['Apple-II', 86], // Apple II
+    ['BBCMicro', 37], // BBC Micro
+    ['Amstrad', 65], // Amstrad CPC
+    ['ZX-Spectrum', 76], // Sinclair ZX Spectrum
     // ─── Arcade ──────────────────────────────────────────────────────
     // PR-D1 (PR #27): mame core → ScreenScraper systemeid 75
     // (arcade). Hash lookups for arcade romsets typically miss (SS
@@ -103,6 +119,36 @@ export const SCREENSCRAPER_SYSTEM_ID_BY_CORE_ID: ReadonlyMap<string, number> =
     // jeuRecherche search → name-match scoring path.
     ['mame', 75],
   ]);
+
+/**
+ * feat/screenscraper-system-map-audit — coreIds left unmapped on
+ * purpose. Keep this list in sync with the comment block above so a
+ * future audit doesn't re-investigate already-considered cores.
+ *
+ * AO486 / hbmame / Arcade — see the "skip coreIds without a clean
+ * SS mapping" rule at the top of this file.
+ *
+ * Cores below are common on MiSTer but their SS systemeid couldn't
+ * be verified with high confidence at audit time. Each one needs a
+ * cross-check against `systemesListe.php` before adding. Leaving
+ * them unmapped is strictly better than guessing — a wrong id
+ * silently fetches metadata for the wrong system.
+ *
+ *   PC-88, PC-98          — Japanese computer split, multiple SS ids
+ *   TI-99_4A / TI994A     — Texas Instruments TI-99/4A
+ *   ChannelF              — Fairchild Channel F
+ *   Arcadia               — Emerson Arcadia 2001
+ *   PokemonMini           — Nintendo Pokémon Mini
+ *   TomyTutor             — Tomy Tutor
+ *   AcornElectron         — Acorn Electron (BBC Micro sibling)
+ *   SVI318 / SVI328       — Spectravideo
+ *   CoCo2                 — Tandy CoCo 2 / TRS-80 Color
+ *   ZX-81 / ZX81          — Sinclair ZX81
+ *
+ * If you map one, also add to the `unmapped / edge cases` /
+ * `aliases pointing at the same system` test blocks so the new
+ * coverage is pinned.
+ */
 
 /**
  * Resolve a coreId to its ScreenScraper `systemeid`, or null when
