@@ -538,6 +538,14 @@ export function useArcadeAdapter(): ItemListAdapter {
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
+                {/* feat/arcade-edit-detail-alignment — empty leading
+                    spacer column matching RomsPane's checkbox slot
+                    (`w-10 pl-4`). Arcade has no per-row bulk select
+                    in v0.1, but mirroring the slot keeps the right-
+                    edge columns aligned when both panes render
+                    side-by-side. Empty header / TableCells in the
+                    rows below preserve the grid. */}
+                <TableHead className="w-10 pl-4" />
                 <TableHead className="w-16" aria-label="Box art" />
                 <SortableHeader
                   label="Name"
@@ -603,6 +611,8 @@ export function useArcadeAdapter(): ItemListAdapter {
                   aria-label={`Back to ${backRow.parentLabel}`}
                   title={`Back to ${backRow.parentLabel}`}
                 >
+                  {/* Leading spacer matches the header. */}
+                  <TableCell className="w-10 pl-4" />
                   <BackThumbnailCell />
                   <TableCell className="max-w-0 truncate">
                     <span
@@ -622,7 +632,7 @@ export function useArcadeAdapter(): ItemListAdapter {
               {enrichedPresentable.length === 0 ? (
                 <TableRow>
                   <TableCell
-                    colSpan={7}
+                    colSpan={8}
                     className="p-4 text-body-sm text-fg-muted"
                   >
                     This folder is empty.
@@ -688,6 +698,11 @@ export function useArcadeAdapter(): ItemListAdapter {
                       isFolder ? `Open ${entry.displayName}` : undefined
                     }
                   >
+                    {/* Leading spacer matches the header / back-row;
+                        arcade has no per-row bulk select but the
+                        slot keeps right-edge columns aligned with
+                        RomsPane when both panes render side-by-side. */}
+                    <TableCell className="w-10 pl-4" />
                     <RomThumbnailCell
                       rom={rom}
                       metadata={metadata}
@@ -843,8 +858,20 @@ export function useArcadeAdapter(): ItemListAdapter {
               if (!open) setDetailDialogFor(null);
             }}
             onEdit={() => {
-              /* arcade detail dialog routes Edit through the context
-                 menu, not the button; this callback never fires. */
+              // feat/arcade-edit-detail-alignment — Edit Metadata is
+              // now wired into the detail dialog (was previously
+              // context-menu only). The dialog only renders the
+              // PopulatedDetailDialog when `metadata !== null`, so
+              // by the time onEdit fires we always have a record to
+              // hand to RomEditMetadataDialog.
+              const meta =
+                metadataByMra[detailDialogFor.relativePath] ?? null;
+              if (meta === null) return;
+              setEditMetadataFor({
+                relativePath: detailDialogFor.relativePath,
+                displayName: detailDialogFor.displayName,
+                metadata: meta,
+              });
             }}
             onSearch={() => {
               setSearchScreenScraperFor({
@@ -853,7 +880,7 @@ export function useArcadeAdapter(): ItemListAdapter {
                 filename: detailDialogFor.filename,
               });
             }}
-            allowEdit={false}
+            allowEdit={detailDialogFor.canManageMetadata}
             allowSearch={detailDialogFor.canManageMetadata}
             emptyStateBody={arcadeEmptyStateBody(
               detailDialogFor.playability,
