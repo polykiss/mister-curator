@@ -87,6 +87,7 @@ describe('autoScrapeMessageFor — PR-C (PR #26) footer-left progress', () => {
           total: 566,
           completedCoreIds: [],
           remainingCount: 0,
+          totalCoreCount: 1,
         },
         'connected',
       ),
@@ -104,6 +105,7 @@ describe('autoScrapeMessageFor — PR-C (PR #26) footer-left progress', () => {
           total: 680,
           completedCoreIds: ['NES', 'SNES', 'GBA'],
           remainingCount: 0,
+          totalCoreCount: 4,
         },
         'connected',
       ),
@@ -121,6 +123,7 @@ describe('autoScrapeMessageFor — PR-C (PR #26) footer-left progress', () => {
           total: 680,
           completedCoreIds: ['NES', 'SNES', 'GBA'],
           remainingCount: 5,
+          totalCoreCount: 9,
         },
         'connected',
       ),
@@ -138,6 +141,7 @@ describe('autoScrapeMessageFor — PR-C (PR #26) footer-left progress', () => {
           total: 25,
           completedCoreIds: [],
           remainingCount: 12,
+          totalCoreCount: 13,
         },
         'connected',
       ),
@@ -155,6 +159,7 @@ describe('autoScrapeMessageFor — PR-C (PR #26) footer-left progress', () => {
           total: 650,
           completedCoreIds: [],
           remainingCount: 0,
+          totalCoreCount: 1,
         },
         'connected',
       ),
@@ -179,6 +184,7 @@ describe('autoScrapeMessageFor — PR-C (PR #26) footer-left progress', () => {
       total: 25,
       completedCoreIds: [],
       remainingCount: 0,
+      totalCoreCount: 1,
     };
     expect(autoScrapeMessageFor(active, 'disconnected')).toBeNull();
     expect(autoScrapeMessageFor(active, 'connecting')).toBeNull();
@@ -195,6 +201,7 @@ describe('autoScrapeMessageFor — PR-C (PR #26) footer-left progress', () => {
         total: 79,
         completedCoreIds: [],
         remainingCount: 0,
+        totalCoreCount: 1,
       },
       'connected',
     );
@@ -272,6 +279,12 @@ describe('autoScrapeMessageFor — discovering state (feat/connect-progress-ui)'
     // have zero ROMs, so the engine flashes through them with no
     // `active` event (total=0 short-circuits the scrape loop). The
     // discovering state surfaces the queue walk in real time.
+    //
+    // feat/pre-beta-polish-batch — denominator now comes from
+    // `totalCoreCount` (set once at engine `start()`), not from
+    // `doneCount + 1 + remainingCount`. 4 done + 1 in-flight + 22
+    // remaining = 27 total at session start; the denominator stays
+    // 27 even after some of those 22 cores get aborted/skipped.
     expect(
       autoScrapeMessageFor(
         {
@@ -280,10 +293,70 @@ describe('autoScrapeMessageFor — discovering state (feat/connect-progress-ui)'
           coreLabel: 'PMD85',
           completedCoreIds: ['SNES', 'NES', 'Genesis', 'Atari2600'],
           remainingCount: 22,
+          totalCoreCount: 27,
         },
         'connected',
       ),
     ).toBe('Probing ROM directories: 5/27 · PMD85');
+  });
+
+  it('uses the stable totalCoreCount as the denominator (regression: live bug had it dropping 103→99→57 as the queue drained)', () => {
+    // Pre-fix the renderer computed the denominator as
+    // `completedCoreIds.length + 1 + remainingCount`. Live trace
+    // from a beta tester:
+    //   Probing ROM directories: 24/103 · ARCHIE
+    //   Probing ROM directories: 24/99  · MEMTEST
+    //   Probing ROM directories: 24/57  · Oric
+    // Numerator stuck at 24 (no cores completing) while the queue
+    // drained via the abort path → denominator collapsed. The fix
+    // adds a session-stable `totalCoreCount` set once at start().
+    //
+    // Pin the regression: three consecutive discovering events
+    // with the SAME completedCoreIds and SAME totalCoreCount but
+    // DIFFERENT remainingCount must all render the same
+    // denominator. (The remainingCount change is the engine's
+    // accurate reflection of the queue draining; the user-facing
+    // total is the original session size.)
+    const SHARED = {
+      completedCoreIds: Array.from({ length: 23 }, (_, i) => `c${String(i)}`),
+      totalCoreCount: 103,
+    };
+    expect(
+      autoScrapeMessageFor(
+        {
+          state: 'discovering',
+          coreId: 'ARCHIE',
+          coreLabel: 'ARCHIE',
+          ...SHARED,
+          remainingCount: 79,
+        },
+        'connected',
+      ),
+    ).toBe('Probing ROM directories: 24/103 · ARCHIE');
+    expect(
+      autoScrapeMessageFor(
+        {
+          state: 'discovering',
+          coreId: 'MEMTEST',
+          coreLabel: 'MEMTEST',
+          ...SHARED,
+          remainingCount: 75,
+        },
+        'connected',
+      ),
+    ).toBe('Probing ROM directories: 24/103 · MEMTEST');
+    expect(
+      autoScrapeMessageFor(
+        {
+          state: 'discovering',
+          coreId: 'Oric',
+          coreLabel: 'Oric',
+          ...SHARED,
+          remainingCount: 33,
+        },
+        'connected',
+      ),
+    ).toBe('Probing ROM directories: 24/103 · Oric');
   });
 
   it('returns null for discovering when the connection is not steady-state connected', () => {
@@ -295,6 +368,7 @@ describe('autoScrapeMessageFor — discovering state (feat/connect-progress-ui)'
           coreLabel: 'PMD85',
           completedCoreIds: [],
           remainingCount: 0,
+          totalCoreCount: 1,
         },
         'connecting',
       ),

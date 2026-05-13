@@ -233,12 +233,17 @@ export function autoScrapeMessageFor(
   // burst of silent SSH ops. X = current core's queue position,
   // Y = total cores in the original queue.
   if (event.state === 'discovering') {
+    // feat/pre-beta-polish-batch — denominator is the engine's
+    // session-stable totalCoreCount (set once at start()). Pre-fix
+    // math derived total from `doneCount + 1 + remainingCount`, which
+    // drifted DOWNWARD when shifted-but-not-completed cores (abort
+    // path) drained the queue without growing completedCoreIds: live
+    // trace showed the user "Probing ROM directories: 24/103 →
+    // 24/99 → 24/57" as the engine walked the queue. The renderer
+    // now trusts the engine's stable counter.
     const doneCount = event.completedCoreIds.length;
-    const queuedCount = event.remainingCount;
-    // current = (already done) + 1 (this core, mid-discovery).
     const current = doneCount + 1;
-    const total = doneCount + 1 + queuedCount;
-    return `Probing ROM directories: ${String(current)}/${String(total)} · ${event.coreLabel}`;
+    return `Probing ROM directories: ${String(current)}/${String(event.totalCoreCount)} · ${event.coreLabel}`;
   }
   if (event.state !== 'active') return null;
   // feat/auto-scrape-persistence: extend the footer with the

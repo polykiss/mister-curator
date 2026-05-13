@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { JSX, ReactNode } from 'react';
 
@@ -467,7 +467,15 @@ function MediaGallery(props: {
           <img
             src={primaryLocal}
             alt={`${title} primary image`}
-            className="max-h-full max-w-full object-contain"
+            // feat/pre-beta-polish-batch — the IMG fills the
+            // fixed-size container; object-contain preserves the
+            // source aspect ratio inside that box. Pre-fix the IMG
+            // used max-h-full/max-w-full, so smaller-than-container
+            // images rendered at their intrinsic size and the
+            // primary slot effectively changed size when the user
+            // swapped thumbnails between (say) a 800×600 screenshot
+            // and a 400×500 box-art.
+            className="h-full w-full object-contain"
           />
         ) : (
           <div className="h-full w-full" />
@@ -587,13 +595,45 @@ function Lightbox(props: {
       <DialogContent
         className="h-[96vh] max-w-[96vw] border-none bg-transparent p-0 shadow-none"
         aria-label={`${slot?.label ?? 'Image'} at full size`}
+        // feat/pre-beta-polish-batch — the default Dialog X is small
+        // (16px icon, muted color, no backplate) and almost
+        // invisible against arbitrary image content. Hide it and
+        // render a larger, higher-contrast close button below.
+        hideDefaultClose
       >
         {/* Radix Dialog requires a title for a11y; visually hidden
             since the user-facing label is the image itself. */}
         <DialogTitle className="sr-only">
           {slot?.label ?? 'Image'}
         </DialogTitle>
-        <div className="relative flex h-full w-full items-center justify-center">
+        {/* feat/pre-beta-polish-batch — large, high-contrast close
+            button at the top-right of the lightbox. Same size /
+            chrome as the prev/next arrows so the affordances read
+            as a set. Click bubbles to Radix's overlay handler via
+            DialogClose semantics. */}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onClose();
+          }}
+          aria-label="Close"
+          className="absolute right-4 top-4 z-20 inline-flex h-12 w-12 items-center justify-center rounded-full bg-canvas/80 text-fg-body shadow-modal transition-colors hover:bg-canvas hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <X className="size-6" strokeWidth={1.5} aria-hidden />
+        </button>
+        {/* feat/pre-beta-polish-batch — fixed-size lightbox stage:
+            90vh × 90vw, set on the wrapping div. Every image fills
+            this same box via object-contain regardless of intrinsic
+            dimensions, so cycling through a portrait box-art and a
+            landscape screenshot doesn't shrink-grow the visible
+            frame. (Pre-fix the SIZE lived on the <img> via
+            max-h-[90vh]/max-w-[90vw], which let intrinsic dimensions
+            drive the actual rendered size — smaller images rendered
+            small.) The arrow buttons are absolutely positioned
+            relative to this stage so they stay near the image edges
+            instead of the DialogContent edges. */}
+        <div className="relative flex h-[90vh] w-[90vw] items-center justify-center">
           {hasMultiple ? (
             <button
               type="button"
@@ -613,7 +653,7 @@ function Lightbox(props: {
             <img
               src={localUrl}
               alt={slot?.label ?? 'Image'}
-              className="max-h-[90vh] max-w-[90vw] rounded-sm object-contain"
+              className="h-full w-full rounded-sm object-contain"
             />
           ) : (
             <div className="h-[60vh] w-[60vh] rounded-sm bg-overlay/40" />

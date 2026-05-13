@@ -3,6 +3,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 
 import type { ArcadeMraEntry } from '@shared/arcade-mra';
+import {
+  arcadeMraHiddenPath,
+  arcadeMraVisiblePath,
+} from '@shared/ledger';
 import type { RomMetadata } from '@shared/metadata-types';
 import type {
   ArcadeMraEntryWire,
@@ -36,6 +40,7 @@ import {
   TableRow,
 } from '@app/renderer/src/components/ui/table';
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
+import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { entriesAtDepth, makeArcadeRom } from '@app/renderer/src/lib/arcade-row';
 import {
   computeBackRow,
@@ -87,6 +92,12 @@ import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
 export function useArcadeAdapter(): ItemListAdapter {
   const { status } = useConnection();
   const canMutate = status === 'connected';
+  // feat/pre-beta-polish-batch — single-toggle hide/show writes
+  // through to the sidebar Arcade row's hidden-count badge via this
+  // helper so the badge updates with the same click that flips the
+  // pane row's eye icon. (Pre-fix the badge waited for the next
+  // CoresContext refresh.)
+  const { adjustArcadeHiddenCount } = useCores();
 
   const [entries, setEntries] = useState<readonly ArcadeMraEntry[] | null>(
     null,
@@ -97,9 +108,6 @@ export function useArcadeAdapter(): ItemListAdapter {
   const [autoHidePending, setAutoHidePending] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [pendingPaths, setPendingPaths] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
   // feat/arcade-parity-2-metadata — cached ScreenScraper metadata per
   // playable `.mra`, keyed by relativePath. Populated by a cache-only
   // IPC after the entries+playability load resolves. PR C reads it
@@ -286,31 +294,98 @@ export function useArcadeAdapter(): ItemListAdapter {
   const visibleCount = mraRows.filter((e) => !e.hidden).length;
   const hiddenCount = mraRows.filter((e) => e.hidden).length;
 
-  const onToggleSingle = async (entry: ArcadeMraEntry): Promise<void> => {
+  /**
+   * feat/pre-beta-polish-batch — optimistic single-toggle hide/show.
+   *
+   * Pre-fix: click → spinner → SSH rename (~hundreds of ms) → refresh
+   * (re-list `_Arcade/` + re-parse mras + re-fetch metadata) → eye
+   * icon flips. The user perceives this as the row being unresponsive
+   * for the full SSH round-trip.
+   *
+   * Post-fix: the eye icon, the row's dimmed state, and the sidebar
+   * Arcade row's `(hiddenCount)` badge all flip on the click; the
+   * SSH rename runs in the background. If the rename rejects, every
+   * piece of optimistic state reverts and a toast surfaces the
+   * reason. No refresh on success — the optimistic state matches
+   * what a fresh listing would return.
+   *
+   * State touched (and reverted on failure):
+   *   • `entries[i].hidden`        flip
+   *   • `entries[i].relativePath`  dot-prefix add/strip via
+   *                                arcadeMraHiddenPath / Visible
+   *   • `metadataByMra` key        re-keyed so the row's metadata
+   *                                stays attached through the path
+   *                                rename
+   *   • CoresContext.cores         hiddenCount ±1 on the synthetic
+   *                                Arcade row (sidebar badge)
+   */
+  const onToggleSingle = (entry: ArcadeMraEntry): void => {
     if (!canMutate) return;
     const next = !entry.hidden;
-    setPendingPaths((prev) => {
-      const out = new Set(prev);
-      out.add(entry.relativePath);
-      return out;
-    });
-    try {
-      await window.mister.setArcadeMraVisibility(entry.relativePath, next);
-      await refresh(true);
-    } catch (err) {
-      toast.error(
-        `Could not ${next ? 'hide' : 'show'} ${entry.displayName}`,
-        {
-          description: err instanceof Error ? err.message : 'Unexpected error.',
-        },
+    const originalPath = entry.relativePath;
+    const predictedPath = next
+      ? arcadeMraHiddenPath(originalPath)
+      : arcadeMraVisiblePath(originalPath);
+
+    // 1. Flip the pane row.
+    setEntries((prev) => {
+      if (prev === null) return prev;
+      return prev.map((e) =>
+        e.relativePath === originalPath
+          ? { ...e, hidden: next, relativePath: predictedPath }
+          : e,
       );
-    } finally {
-      setPendingPaths((prev) => {
-        const out = new Set(prev);
-        out.delete(entry.relativePath);
-        return out;
+    });
+    // 2. Move the metadata under the new key so the row keeps its
+    //    box art / title across the flip.
+    setMetadataByMra((prev) => {
+      if (!(originalPath in prev)) return prev;
+      const rekeyed: Record<string, RomMetadata | null> = {};
+      for (const [key, value] of Object.entries(prev)) {
+        if (key === originalPath) continue;
+        rekeyed[key] = value;
+      }
+      rekeyed[predictedPath] = prev[originalPath] ?? null;
+      return rekeyed;
+    });
+    // 3. Nudge the sidebar Arcade row's hidden-count badge.
+    adjustArcadeHiddenCount(next ? 1 : -1);
+
+    // 4. Background SSH rename. The IPC accepts either the visible
+    //    or dotted form (it strips the leading dot internally), so
+    //    passing the ORIGINAL path is safe even though we've already
+    //    flipped our local view.
+    window.mister
+      .setArcadeMraVisibility(originalPath, next)
+      .catch((err: unknown) => {
+        // Revert every optimistic write in the inverse order.
+        adjustArcadeHiddenCount(next ? -1 : 1);
+        setMetadataByMra((prev) => {
+          if (!(predictedPath in prev)) return prev;
+          const rekeyed: Record<string, RomMetadata | null> = {};
+          for (const [key, value] of Object.entries(prev)) {
+            if (key === predictedPath) continue;
+            rekeyed[key] = value;
+          }
+          rekeyed[originalPath] = prev[predictedPath] ?? null;
+          return rekeyed;
+        });
+        setEntries((prev) => {
+          if (prev === null) return prev;
+          return prev.map((e) =>
+            e.relativePath === predictedPath
+              ? { ...e, hidden: entry.hidden, relativePath: originalPath }
+              : e,
+          );
+        });
+        toast.error(
+          `${next ? 'Hide' : 'Show'} failed: ${entry.displayName}`,
+          {
+            description:
+              err instanceof Error ? err.message : 'Unexpected error.',
+          },
+        );
       });
-    }
   };
 
   const runBulk = async (target: 'hide' | 'show'): Promise<void> => {
@@ -642,7 +717,6 @@ export function useArcadeAdapter(): ItemListAdapter {
               {sortedRows.map((entry) => {
                 const rom = entry.rom;
                 const metadata = entry.metadata;
-                const isPending = pendingPaths.has(entry.relativePath);
                 const classification =
                   playabilityByPath.get(entry.relativePath) ?? null;
                 const isMissing = classification === 'missing';
@@ -703,12 +777,35 @@ export function useArcadeAdapter(): ItemListAdapter {
                         slot keeps right-edge columns aligned with
                         RomsPane when both panes render side-by-side. */}
                     <TableCell className="w-10 pl-4" />
+                    {/* feat/pre-beta-polish-batch (F) — thumbnail
+                        mirrors the title cell's onClick. Folder rows
+                        drill (same as the parent TableRow's onClick);
+                        .mra rows open the detail dialog with the
+                        same args the title's onClick uses. */}
                     <RomThumbnailCell
                       rom={rom}
                       metadata={metadata}
                       error={false}
                       dimmed={entry.hidden}
                       rowType={rowType}
+                      onClick={
+                        isFolder
+                          ? () => setSubPath(entry.relativePath)
+                          : () =>
+                              setDetailDialogFor({
+                                relativePath: entry.relativePath,
+                                displayName:
+                                  metadata?.name ?? rom.displayName,
+                                filename: rom.filename,
+                                canManageMetadata,
+                                playability: classification,
+                              })
+                      }
+                      clickLabel={
+                        isFolder
+                          ? `Open ${entry.displayName}`
+                          : 'View details'
+                      }
                     />
                     <TableCell
                       className={cn(
@@ -802,15 +899,6 @@ export function useArcadeAdapter(): ItemListAdapter {
                     )}
                     {isFolder ? (
                       <TableCell className="w-[3.25rem] p-0" />
-                    ) : isPending ? (
-                      <TableCell className="relative w-[3.25rem] p-0">
-                        <div className="absolute inset-0 flex items-center justify-center">
-                          <Loader2
-                            className="size-4 animate-spin text-fg-muted"
-                            strokeWidth={1.5}
-                          />
-                        </div>
-                      </TableCell>
                     ) : (
                       <RomDensityEyeCell
                         rom={rom}
@@ -818,9 +906,7 @@ export function useArcadeAdapter(): ItemListAdapter {
                         maxSizeBytes={maxSizeBytes}
                         canMutate={canMutate}
                         disconnectedTooltip="Reconnect to make changes."
-                        onSingleToggle={() => {
-                          void onToggleSingle(arcadeEntry);
-                        }}
+                        onSingleToggle={() => onToggleSingle(arcadeEntry)}
                       />
                     )}
                   </TableRow>

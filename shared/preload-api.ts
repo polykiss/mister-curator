@@ -221,6 +221,12 @@ export type AutoScrapeProgressEvent =
       readonly total: number;
       readonly completedCoreIds: readonly string[];
       readonly remainingCount: number;
+      /**
+       * feat/pre-beta-polish-batch — stable session total captured
+       * at engine `start()`. See AutoScrapeEvent in
+       * `auto-scrape-engine.ts` for the rationale.
+       */
+      readonly totalCoreCount: number;
     }
   | {
       // feat/connect-progress-ui — emitted by the engine BEFORE it
@@ -237,6 +243,7 @@ export type AutoScrapeProgressEvent =
       readonly coreLabel: string;
       readonly completedCoreIds: readonly string[];
       readonly remainingCount: number;
+      readonly totalCoreCount: number;
     }
   | {
       readonly state: 'idle';

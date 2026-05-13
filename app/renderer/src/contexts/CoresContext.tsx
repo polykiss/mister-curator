@@ -223,6 +223,18 @@ interface CoresContextValue {
     classification: 'container' | 'atomic' | null,
     refreshAt?: { coreId: string; subPath: string },
   ) => Promise<void>;
+  /**
+   * feat/pre-beta-polish-batch — bump the synthetic Arcade row's
+   * hidden count by `delta` (typically +1 / -1). The arcade adapter
+   * calls this when optimistically toggling a single `.mra` so the
+   * sidebar badge ("Arcade (5)") reflects the click before the SSH
+   * rename round-trips. The adapter reverts with the inverse delta
+   * if the rename rejects.
+   *
+   * No-op when there's no Arcade row in the cores list (cold load
+   * not yet resolved, or device has no `.mra` content).
+   */
+  readonly adjustArcadeHiddenCount: (delta: number) => void;
 }
 
 const CoresContext = createContext<CoresContextValue | null>(null);
@@ -451,6 +463,31 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     setCores((prev) => {
       if (!prev) return prev;
       return prev.map((core) => (core.id === coreId ? recountCore(core, nextRoms) : core));
+    });
+  }, []);
+
+  // feat/pre-beta-polish-batch — see the public contract on
+  // CoresContextValue.adjustArcadeHiddenCount above. Adjusts both
+  // `hiddenCount` and `recursiveHiddenCount` since they're equal for
+  // the synthetic Arcade row (it has no nested cores) AND
+  // CoreCountSummary reads `recursiveHiddenCount ?? hiddenCount`.
+  // The arcadePlayableCount is intentionally not touched here:
+  // re-deriving it would require the playability set, which lives
+  // outside CoresContext; it self-heals on the next refresh.
+  const adjustArcadeHiddenCount = useCallback((delta: number) => {
+    if (delta === 0) return;
+    setCores((prev) => {
+      if (!prev) return prev;
+      return prev.map((core) =>
+        core.id === ARCADE_VIRTUAL_CORE_ID
+          ? {
+              ...core,
+              hiddenCount: core.hiddenCount + delta,
+              recursiveHiddenCount:
+                (core.recursiveHiddenCount ?? core.hiddenCount) + delta,
+            }
+          : core,
+      );
     });
   }, []);
 
@@ -932,6 +969,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       removeSystemFileMark,
       setSystemFileMarks,
       setFolderClassification,
+      adjustArcadeHiddenCount,
     }),
     [
       cores,
@@ -958,6 +996,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       removeSystemFileMark,
       setSystemFileMarks,
       setFolderClassification,
+      adjustArcadeHiddenCount,
     ],
   );
 

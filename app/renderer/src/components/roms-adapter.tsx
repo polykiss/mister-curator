@@ -1241,6 +1241,32 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
                 const metadataState = metadataByPath[metadataLookupPath];
                 const metadata = metadataState?.metadata;
                 const fetchError = metadataState?.error ?? false;
+                // feat/pre-beta-polish-batch (F) — single source of
+                // truth for what clicking the row's interactive
+                // surfaces does. Used by the thumbnail (new) AND
+                // shared in spirit with the name cell's onClick
+                // below (kept inline there to preserve the
+                // event-shape: preventDefault + ignore hidden
+                // containers).
+                const openDetail = (): void => {
+                  setDetailDialogFor({
+                    path: metadataLookupPath,
+                    displayName: metadata?.name ?? rom.displayName,
+                    filename: rom.filename,
+                  });
+                };
+                const thumbActivate =
+                  rom.kind === 'folder-container' && !rom.hidden
+                    ? (): void => onRowActivate(rom)
+                    : rom.kind === 'file' || rom.kind === 'folder-atomic'
+                      ? openDetail
+                      : undefined;
+                const thumbLabel =
+                  rom.kind === 'folder-container' && !rom.hidden
+                    ? `Open ${rom.displayName}`
+                    : rom.kind === 'file' || rom.kind === 'folder-atomic'
+                      ? 'View details'
+                      : undefined;
                 return (
                   <TableRow
                     key={rom.filename}
@@ -1278,6 +1304,8 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
                       metadata={metadata}
                       error={fetchError}
                       rowType={rowType}
+                      onClick={thumbActivate}
+                      clickLabel={thumbLabel}
                     />
                     {/* PR #25: `max-w-0` is the standard CSS trick that
                         lets a flex/auto-width table cell honor its

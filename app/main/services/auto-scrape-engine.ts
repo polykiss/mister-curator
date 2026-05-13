@@ -73,6 +73,15 @@ import { coreDisplayName } from '@shared/core-matching';
  *   - completedCoreIds: in-session done set. The renderer reads
  *     this to decorate sidebar rows.
  *   - remainingCount: queue length excluding the active core.
+ *   - totalCoreCount: feat/pre-beta-polish-batch — STABLE denominator
+ *     captured at `start()`. The pre-fix renderer math was
+ *     `completedCoreIds.length + 1 + remainingCount`, which drifted
+ *     downward when shifted-but-not-completed cores (abort path)
+ *     drained the queue without growing completedCoreIds — the user
+ *     saw the denominator step from 103 → 99 → 57 mid-session.
+ *     Carrying the original queue size on every event lets the
+ *     renderer compute `Probing ROM directories: X/Y` against a
+ *     fixed Y for the whole session.
  */
 export type AutoScrapeEvent =
   | {
@@ -85,6 +94,7 @@ export type AutoScrapeEvent =
       readonly total: number;
       readonly completedCoreIds: readonly string[];
       readonly remainingCount: number;
+      readonly totalCoreCount: number;
     }
   | {
       // feat/connect-progress-ui — emitted before `listRomPaths`
@@ -97,6 +107,7 @@ export type AutoScrapeEvent =
       readonly coreLabel: string;
       readonly completedCoreIds: readonly string[];
       readonly remainingCount: number;
+      readonly totalCoreCount: number;
     }
   | {
       readonly state: 'idle';
@@ -176,6 +187,15 @@ export class AutoScrapeEngine {
    * the renderer's "rescan all").
    */
   private completedCoreIds = new Set<string>();
+  /**
+   * feat/pre-beta-polish-batch — stable denominator for the
+   * progress footer. Set once in `start()` to the initial queue
+   * size (BEFORE any cores get shifted off). The runLoop and
+   * `getCurrentState` both stamp this onto every progress event so
+   * the renderer can render `X/total` without doing math against a
+   * shrinking queue.
+   */
+  private totalCoreCount = 0;
   private readonly listeners = new Set<AutoScrapeListener>();
   private readonly completionListeners =
     new Set<AutoScrapeCompletionListener>();
@@ -221,6 +241,7 @@ export class AutoScrapeEngine {
       remainingCount: this.queue.filter(
         (c) => !this.completedCoreIds.has(c),
       ).length,
+      totalCoreCount: this.totalCoreCount,
     };
   }
 
@@ -248,6 +269,13 @@ export class AutoScrapeEngine {
     this.completedCoreIds = new Set(
       [...alreadyCompleted].filter((c) => queueSet.has(c)),
     );
+    // feat/pre-beta-polish-batch — capture the stable session total
+    // for the progress footer. Counts every core in the original
+    // queue (including alreadyCompleted seeds) so the numerator
+    // `completedCoreIds.length + 1` reads against the same baseline
+    // a user pre-scrape view would have shown ("80/103 done, working
+    // on 81st").
+    this.totalCoreCount = coreIds.length;
     if (!this.isLoopRunning) {
       void this.runLoop();
     }
@@ -350,6 +378,7 @@ export class AutoScrapeEngine {
           remainingCount: this.queue.filter(
             (c) => !this.completedCoreIds.has(c),
           ).length,
+          totalCoreCount: this.totalCoreCount,
         });
         try {
           const targets = await this.deps.listRomPaths(coreId);
@@ -371,6 +400,7 @@ export class AutoScrapeEngine {
             remainingCount: this.queue.filter(
               (c) => !this.completedCoreIds.has(c),
             ).length,
+            totalCoreCount: this.totalCoreCount,
           });
           if (total > 0) {
             await this.deps.scrape(
@@ -388,6 +418,7 @@ export class AutoScrapeEngine {
                   remainingCount: this.queue.filter(
                     (c) => !this.completedCoreIds.has(c),
                   ).length,
+                  totalCoreCount: this.totalCoreCount,
                 });
               },
               () => this.abortFlag || this.isPaused,

@@ -428,12 +428,16 @@ describe('RomDetailDialog — gallery primary sizing (feat/arcade-parse-toleranc
     expect(SOURCE).toMatch(/h-\[28rem\] w-full rounded-sm border border-subtle bg-overlay\/40/);
   });
 
-  it('primary <img> uses object-contain (preserves aspect, fits any source)', () => {
-    // The whole point of the fixed container: any aspect ratio fits.
-    // `object-cover` would crop tall box-art; `object-fill` would
-    // stretch a wide screenshot. Both are wrong — pin object-contain.
+  it('primary <img> fills the fixed container and uses object-contain to preserve aspect', () => {
+    // feat/pre-beta-polish-batch — the IMG is now `h-full w-full`
+    // (not max-h-full / max-w-full). With max-*, an 800×600
+    // screenshot rendered at its intrinsic 800×600 inside a much
+    // larger container — switching to a portrait box-art changed
+    // the visible size of the image. h-full w-full forces the IMG
+    // element to fill the fixed h-[28rem] container; object-contain
+    // then preserves the source aspect inside that fixed frame.
     expect(SOURCE).toMatch(
-      /alt=\{`\$\{title\} primary image`\}\s+className="max-h-full max-w-full object-contain"/,
+      /alt=\{`\$\{title\} primary image`\}[\s\S]{0,1200}className="h-full w-full object-contain"/,
     );
   });
 });
@@ -485,20 +489,27 @@ describe('RomDetailDialog — lightbox navigation (feat/arcade-parse-tolerance-g
     expect(SOURCE).toMatch(/aria-label="Next image"/);
     // Icons come from lucide-react; pin the import so a future
     // icon-set swap surfaces here.
-    expect(SOURCE).toMatch(/import \{ ChevronLeft, ChevronRight \} from 'lucide-react'/);
+    // feat/pre-beta-polish-batch adds X to the lucide import for
+    // the new large close button.
+    expect(SOURCE).toMatch(
+      /import \{ ChevronLeft, ChevronRight, X \} from 'lucide-react'/,
+    );
   });
 
-  it('arrow buttons stopPropagation so a click on the arrow does not close the dialog via the backdrop', () => {
+  it('overlay-blocking buttons stopPropagation so their click does not close the dialog via the backdrop', () => {
     // Radix Dialog closes on overlay click. If the arrow's onClick
     // bubbled, the very click that navigates would also close the
-    // lightbox. e.stopPropagation() is load-bearing — pin it.
+    // lightbox. Same for the custom close button — without
+    // stopPropagation, Radix would interpret the click as a
+    // backdrop close AND our handler would fire, racing on which
+    // close path wins. e.stopPropagation() is load-bearing — pin it.
+    // feat/pre-beta-polish-batch: 2 arrows + 1 close = 3 calls.
     const lightboxIdx = SOURCE.indexOf('function Lightbox');
     expect(lightboxIdx).toBeGreaterThan(-1);
     const lightbox = SOURCE.slice(lightboxIdx);
     const stopPropCount = (lightbox.match(/e\.stopPropagation\(\)/g) ?? [])
       .length;
-    // Two arrows → two stopPropagation calls.
-    expect(stopPropCount).toBe(2);
+    expect(stopPropCount).toBe(3);
   });
 
   it('binds a document keydown listener for ArrowLeft / ArrowRight (cleans up on unmount)', () => {
@@ -521,12 +532,58 @@ describe('RomDetailDialog — lightbox navigation (feat/arcade-parse-tolerance-g
     );
   });
 
-  it('lightbox image uses object-contain at max-h-[90vh] / max-w-[90vw] (full size, no distortion)', () => {
-    // Spec: image at ~90vh/90vw with object-contain preserving
-    // aspect. Smaller and the user can't see detail; larger and the
-    // arrow buttons would overlap the image edges on narrow screens.
+  it('lightbox hides the default tiny X and renders a large, high-contrast close button (feat/pre-beta-polish-batch)', () => {
+    // The default shadcn DialogContent renders a 16px muted-color X
+    // at top-right — invisible against most box-art. The lightbox
+    // suppresses that default via `hideDefaultClose` and renders
+    // its own button with the same chrome as the prev/next arrows:
+    // 48px rounded button, semi-opaque canvas backplate, large
+    // 24px stroked icon. So all three affordances (prev, close,
+    // next) read as a coherent set.
+    expect(SOURCE).toMatch(/hideDefaultClose/);
+    expect(SOURCE).toMatch(/aria-label="Close"/);
+    // The close button shares the arrow buttons' chrome — same
+    // size (h-12 w-12), same backplate (bg-canvas/80), same focus
+    // ring. Pin it.
     expect(SOURCE).toMatch(
-      /className="max-h-\[90vh\] max-w-\[90vw\] rounded-sm object-contain"/,
+      /aria-label="Close"[\s\S]{0,400}h-12 w-12[\s\S]{0,200}rounded-full bg-canvas\/80/,
+    );
+    // The icon is the lucide X at 24px.
+    expect(SOURCE).toMatch(
+      /import \{ ChevronLeft, ChevronRight, X \} from 'lucide-react'/,
+    );
+    expect(SOURCE).toMatch(
+      /<X className="size-6" strokeWidth=\{1\.5\} aria-hidden \/>/,
+    );
+  });
+
+  it('shared DialogContent primitive accepts hideDefaultClose for the lightbox opt-out (feat/pre-beta-polish-batch)', () => {
+    const dialog = readFileSync(
+      resolve(__dirname, 'ui/dialog.tsx'),
+      'utf8',
+    );
+    // Type contract.
+    expect(dialog).toMatch(/readonly hideDefaultClose\?: boolean;/);
+    // Implementation: gate the auto-injected close on the flag.
+    expect(dialog).toMatch(
+      /\{hideDefaultClose \? null : \(\s*<DialogPrimitive\.Close/,
+    );
+  });
+
+  it('lightbox uses a fixed-size 90vh × 90vw stage; image fills it via h-full w-full + object-contain', () => {
+    // feat/pre-beta-polish-batch — the 90vh/90vw lives on the
+    // wrapping div, not the <img>. Result: every image renders into
+    // the same visual frame regardless of intrinsic dimensions, so
+    // portrait box-art and landscape screenshots no longer flip the
+    // stage size mid-cycle. (Pre-fix the size lived on max-h/max-w
+    // of the <img>, which gated the rendered size by the source's
+    // intrinsic size — a 600×450 screenshot rendered at 600×450
+    // even on a 4K screen.)
+    expect(SOURCE).toMatch(
+      /<div className="relative flex h-\[90vh\] w-\[90vw\] items-center justify-center">/,
+    );
+    expect(SOURCE).toMatch(
+      /className="h-full w-full rounded-sm object-contain"/,
     );
   });
 });
