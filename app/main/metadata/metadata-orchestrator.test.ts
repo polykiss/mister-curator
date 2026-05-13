@@ -155,6 +155,16 @@ function makeOrchestrator(opts: {
       if (m === null || m.source === 'none') return null;
       return m;
     }),
+    // feat/arcade-noromsneeded-overrides — parallel mra-keyed store
+    // for TTL/discrete-logic arcade games. Tests override per-call;
+    // the fixture default returns null (no override on file).
+    readCachedArcadeMraMetadata: vi.fn(
+      async (): Promise<RomMetadata | null> => null,
+    ),
+    bindArcadeMraOverride: vi.fn(async () => opts.meta ?? null),
+    writeArcadeMraUserOverride: vi.fn(
+      async (): Promise<RomMetadata | null> => opts.meta ?? null,
+    ),
     clearAll: vi.fn(async () => undefined),
     invalidate: vi.fn(async () => undefined),
   } as unknown as MetadataService;
@@ -1137,6 +1147,7 @@ describe('MetadataOrchestrator', () => {
           },
         ],
         zipBasenames: new Set([ZIP_BASENAME]),
+        byPath: new Map([[MRA_REL_PATH, 'playable' as const]]),
       };
       const result = await orchestrator.bindArcadeManualMetadataOverride(
         snapshot,
@@ -1160,7 +1171,7 @@ describe('MetadataOrchestrator', () => {
         bindManualOverride: typeof bindSpy;
       }).bindManualOverride = bindSpy;
       const result = await orchestrator.bindArcadeManualMetadataOverride(
-        { entries: [], zipBasenames: new Set() },
+        { entries: [], zipBasenames: new Set(), byPath: new Map() },
         'Unknown.mra',
         buildSsGame(),
       );
@@ -1194,6 +1205,7 @@ describe('MetadataOrchestrator', () => {
             },
           ],
           zipBasenames: new Set(['foo.zip']),
+          byPath: new Map([['Foo.mra', 'playable' as const]]),
         },
         'Foo.mra',
         buildSsGame(),
@@ -1249,6 +1261,7 @@ describe('MetadataOrchestrator', () => {
             },
           ],
           zipBasenames: new Set([ZIP_BASENAME]),
+          byPath: new Map([[MRA_REL_PATH, 'playable' as const]]),
         },
         MRA_REL_PATH,
         buildSsGame(9999, 'Devil Zone'),
@@ -1294,6 +1307,7 @@ describe('MetadataOrchestrator', () => {
             },
           ],
           zipBasenames: new Set([ZIP_BASENAME]),
+          byPath: new Map([[MRA_REL_PATH, 'playable' as const]]),
         },
         MRA_REL_PATH,
         { name: 'DK', tags: ['fave'] },
@@ -1302,6 +1316,108 @@ describe('MetadataOrchestrator', () => {
       const [key, override] = writeSpy.mock.calls[0] ?? ['', undefined];
       expect(key).toBe(ZIP_HASH);
       expect(override).toEqual({ name: 'DK', tags: ['fave'] });
+    });
+
+    it('bindArcadeManualMetadataOverride: routes no-roms-needed entries to the mra-keyed override store (Pong / Breakout TTL)', async () => {
+      // feat/arcade-noromsneeded-overrides — TTL / discrete-logic
+      // arcade games have no primary zip; the bind shouldn't try to
+      // resolve a zip md5 (there's nothing to resolve). It calls
+      // MetadataService.bindArcadeMraOverride keyed on the mra
+      // relativePath directly.
+      const MRA_REL_PATH = 'Pong.mra';
+      const { orchestrator, metadataService, hashService } = makeOrchestrator({
+        hashEntries: new Map(),
+      });
+      const bindArcadeSpy = vi.fn(
+        async (relPath: string) => buildMeta(`arcade-mra:${relPath}`, 'Pong'),
+      );
+      (
+        metadataService as unknown as {
+          bindArcadeMraOverride: typeof bindArcadeSpy;
+        }
+      ).bindArcadeMraOverride = bindArcadeSpy;
+      const bindHashSpy = vi.fn(async () => buildMeta('x', 'x'));
+      (
+        metadataService as unknown as {
+          bindManualOverride: typeof bindHashSpy;
+        }
+      ).bindManualOverride = bindHashSpy;
+
+      const result = await orchestrator.bindArcadeManualMetadataOverride(
+        {
+          entries: [
+            {
+              relativePath: MRA_REL_PATH,
+              // TTL game — empty requiredZips, classified as
+              // no-roms-needed by computePlayability.
+              requiredZips: [],
+              displayName: 'Pong',
+              hidden: false,
+              rbf: 'jtpong',
+            },
+          ],
+          zipBasenames: new Set(),
+          byPath: new Map([[MRA_REL_PATH, 'no-roms-needed' as const]]),
+        },
+        MRA_REL_PATH,
+        buildSsGame(1111, 'Pong'),
+      );
+
+      expect(result).not.toBeNull();
+      expect(bindArcadeSpy).toHaveBeenCalledTimes(1);
+      const [relArg, gameArg] = bindArcadeSpy.mock.calls[0] ?? ['', undefined];
+      expect(relArg).toBe(MRA_REL_PATH);
+      expect(gameArg).toMatchObject({ id: 1111, name: 'Pong' });
+      // Zero zip-md5 resolution attempts — bind path short-circuits.
+      expect(bindHashSpy).not.toHaveBeenCalled();
+      expect(hashService.computeHash).not.toHaveBeenCalled();
+    });
+
+    it('setArcadeManualMetadataOverride: routes no-roms-needed entries to the mra-keyed user-override store', async () => {
+      const MRA_REL_PATH = 'Breakout TTL.mra';
+      const { orchestrator, metadataService } = makeOrchestrator();
+      const writeArcadeSpy = vi.fn(
+        async (relPath: string) =>
+          buildMeta(`arcade-mra:${relPath}`, 'Breakout TTL'),
+      );
+      (
+        metadataService as unknown as {
+          writeArcadeMraUserOverride: typeof writeArcadeSpy;
+        }
+      ).writeArcadeMraUserOverride = writeArcadeSpy;
+      const writeHashSpy = vi.fn(async () => buildMeta('x', 'x'));
+      (
+        metadataService as unknown as {
+          writeUserOverride: typeof writeHashSpy;
+        }
+      ).writeUserOverride = writeHashSpy;
+
+      const result = await orchestrator.setArcadeManualMetadataOverride(
+        {
+          entries: [
+            {
+              relativePath: MRA_REL_PATH,
+              requiredZips: [],
+              displayName: 'Breakout TTL',
+              hidden: false,
+              rbf: 'jtbreakout',
+            },
+          ],
+          zipBasenames: new Set(),
+          byPath: new Map([[MRA_REL_PATH, 'no-roms-needed' as const]]),
+        },
+        MRA_REL_PATH,
+        { name: 'Breakout', tags: ['classic'] },
+      );
+
+      expect(result).not.toBeNull();
+      const [relArg, overrideArg] = writeArcadeSpy.mock.calls[0] ?? [
+        '',
+        undefined,
+      ];
+      expect(relArg).toBe(MRA_REL_PATH);
+      expect(overrideArg).toEqual({ name: 'Breakout', tags: ['classic'] });
+      expect(writeHashSpy).not.toHaveBeenCalled();
     });
 
     it('bindManualMetadataOverride: prefers real md5 over synthetic when a hash entry exists', async () => {
@@ -1796,21 +1912,41 @@ describe('MetadataOrchestrator', () => {
       expect(result['Donkey Kong.mra']).toBeNull();
     });
 
-    it('getCachedArcadeMetadataBatch: skips missing / no-roms-needed .mras entirely (the prefetch never touches them)', async () => {
+    it('getCachedArcadeMetadataBatch: skips missing .mras; surfaces no-roms-needed via the parallel override store', async () => {
+      // feat/arcade-noromsneeded-overrides — TTL / discrete-logic
+      // .mras have no zip to hash and route through the
+      // arcade-mra-overrides store. The batch read now consults that
+      // store for each no-roms-needed entry (returning null when no
+      // override exists, populated when one does).
       const playableMra = mra('Playable.mra', [['dkong.zip']]);
       const missingMra = mra('Missing.mra', [['lost.zip']]);
-      const noRomsNeededMra = mra('TTL.mra', []);
+      const noRomsNeededWithOverride = mra('TTL Bound.mra', []);
+      const noRomsNeededFresh = mra('TTL Fresh.mra', []);
       const meta = buildMeta(HASH, 'Playable');
-      const { orchestrator } = makeOrchestrator({
+      const overrideMeta = buildMeta('arcade-mra:ttl-bound', 'TTL Bound');
+      const { orchestrator, metadataService } = makeOrchestrator({
         hashEntries: new Map([
           ['/media/fat/games/mame/dkong.zip', buildHashEntry(HASH)],
         ]),
         meta,
       });
+      (
+        metadataService as unknown as {
+          readCachedArcadeMraMetadata: ReturnType<typeof vi.fn>;
+        }
+      ).readCachedArcadeMraMetadata.mockImplementation(
+        async (mraRel: string) =>
+          mraRel === 'TTL Bound.mra' ? overrideMeta : null,
+      );
       const result = await orchestrator.getCachedArcadeMetadataBatch(
         'host-1',
         {
-          entries: [playableMra, missingMra, noRomsNeededMra],
+          entries: [
+            playableMra,
+            missingMra,
+            noRomsNeededWithOverride,
+            noRomsNeededFresh,
+          ],
           zipBasenames: new Set(['dkong.zip']),
           byPath: new Map<
             string,
@@ -1818,15 +1954,20 @@ describe('MetadataOrchestrator', () => {
           >([
             ['Playable.mra', 'playable'],
             ['Missing.mra', 'missing'],
-            ['TTL.mra', 'no-roms-needed'],
+            ['TTL Bound.mra', 'no-roms-needed'],
+            ['TTL Fresh.mra', 'no-roms-needed'],
           ]),
         },
       );
-      // Only the playable .mra is in the output. Missing /
-      // no-roms-needed never get metadata in this PR (PR-spec
-      // explicitly defers G19 .mra-XML fallback to v0.2).
-      expect(Object.keys(result)).toEqual(['Playable.mra']);
+      // Missing.mra stays out — no zip on disk, no path to anywhere.
+      expect(result['Missing.mra']).toBeUndefined();
+      // Playable.mra resolved through the zip-md5 chain.
       expect(result['Playable.mra']?.name).toBe('Playable');
+      // TTL Bound has an override on file → returns it.
+      expect(result['TTL Bound.mra']?.name).toBe('TTL Bound');
+      // TTL Fresh has no override yet → null (renderer paints
+      // "no metadata yet" with a Find on ScreenScraper button).
+      expect(result['TTL Fresh.mra']).toBeNull();
     });
   });
 });

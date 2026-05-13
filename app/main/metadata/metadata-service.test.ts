@@ -9,7 +9,10 @@ import type {
   OpenVGDBMetadata,
   OpenVGDBService,
 } from '@app/main/metadata/openvgdb-service';
-import { MetadataService } from '@app/main/metadata/metadata-service';
+import {
+  MetadataService,
+  sanitizeArcadeMraKey,
+} from '@app/main/metadata/metadata-service';
 import {
   ScreenScraperAuthError,
   type ScreenScraperGame,
@@ -1837,6 +1840,148 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     });
   });
 
+  describe('feat/arcade-noromsneeded-overrides — parallel mra-keyed override store', () => {
+    function buildSsHit(
+      overrides: Partial<ScreenScraperGame> = {},
+    ): ScreenScraperGame {
+      return {
+        id: 7777,
+        name: 'Pong',
+        system: 'Arcade',
+        description: 'Original 1972 TTL game.',
+        developer: 'Atari',
+        publisher: 'Atari',
+        genres: ['Sports'],
+        releaseDate: '1972-11-29',
+        rating: null,
+        players: '2',
+        boxArtUrl: 'https://ss-cdn/pong.png',
+        extra: {
+          box3DUrl: null,
+          marqueeUrl: null,
+          titleScreenUrl: null,
+          snapUrl: null,
+          clearLogoUrl: null,
+          screenshots: [],
+        },
+        ...overrides,
+      };
+    }
+
+    it('bindArcadeMraOverride: writes a record under arcade-mra-overrides/<sanitized>.json', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        null,
+      );
+      const result = await svc.bindArcadeMraOverride('Pong.mra', buildSsHit());
+      // Returns the composed record.
+      expect(result.name).toBe('Pong');
+      expect(result.source).toBe('manual-override');
+      expect(result.userOverride?.jeuid).toBe('7777');
+      // Verify on-disk: arcade-mra-overrides/Pong.json (extension
+      // stripped, no slash so no flattening).
+      const overridePath = join(
+        dir,
+        'arcade-mra-overrides',
+        'Pong.json',
+      );
+      const raw = await fs.readFile(overridePath, 'utf8');
+      const parsed = JSON.parse(raw) as RomMetadata;
+      expect(parsed.name).toBe('Pong');
+      expect(parsed.source).toBe('manual-override');
+    });
+
+    it('bindArcadeMraOverride: sanitizes nested + dot-prefixed paths (override survives hide cycle)', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        null,
+      );
+      // Hidden state: filename is dot-prefixed on disk.
+      await svc.bindArcadeMraOverride(
+        '_alternatives/.Breakout TTL.mra',
+        buildSsHit({ id: 8888, name: 'Breakout TTL' }),
+      );
+      // The visible (undotted) form keys the override so a hide/show
+      // cycle keeps the override applied.
+      const overridePath = join(
+        dir,
+        'arcade-mra-overrides',
+        '_alternatives__Breakout TTL.json',
+      );
+      const raw = await fs.readFile(overridePath, 'utf8');
+      const parsed = JSON.parse(raw) as RomMetadata;
+      expect(parsed.name).toBe('Breakout TTL');
+    });
+
+    it('readCachedArcadeMraMetadata: returns the bound record after bindArcadeMraOverride', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        null,
+      );
+      await svc.bindArcadeMraOverride('Pong.mra', buildSsHit());
+      const read = await svc.readCachedArcadeMraMetadata('Pong.mra');
+      expect(read?.name).toBe('Pong');
+      expect(read?.userOverride?.jeuid).toBe('7777');
+    });
+
+    it('readCachedArcadeMraMetadata: returns null when no override exists', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        null,
+      );
+      expect(
+        await svc.readCachedArcadeMraMetadata('NeverBound.mra'),
+      ).toBeNull();
+    });
+
+    it('writeArcadeMraUserOverride: layers user edits onto an existing arcade-mra record', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        null,
+      );
+      await svc.bindArcadeMraOverride('Pong.mra', buildSsHit());
+      const updated = await svc.writeArcadeMraUserOverride('Pong.mra', {
+        name: 'Pong (Curated)',
+        tags: ['classic', 'fave'],
+      });
+      expect(updated?.userOverride?.name).toBe('Pong (Curated)');
+      expect(updated?.userOverride?.tags).toEqual(['classic', 'fave']);
+      // Round-trips on read.
+      const read = await svc.readCachedArcadeMraMetadata('Pong.mra');
+      expect(read?.userOverride?.name).toBe('Pong (Curated)');
+    });
+
+    it('writeArcadeMraUserOverride: returns null when no record exists yet (mirror of writeUserOverride)', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(
+        dir,
+        m.openVgdb,
+        m.thumbnails,
+        null,
+      );
+      const result = await svc.writeArcadeMraUserOverride(
+        'NeverBound.mra',
+        { name: 'Hello' },
+      );
+      expect(result).toBeNull();
+    });
+  });
+
   describe('feat/metadata-detail-modal — schema v6 + screenshotUrls', () => {
     function buildSsHit(
       overrides: Partial<ScreenScraperGame> = {},
@@ -2033,5 +2178,41 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       // the record didn't exist.
       expect(await svc.readCachedMetadata(HASH)).toBeNull();
     });
+  });
+});
+
+describe('sanitizeArcadeMraKey (feat/arcade-noromsneeded-overrides)', () => {
+  it('strips a trailing .mra (case-insensitive)', () => {
+    expect(sanitizeArcadeMraKey('Pong.mra')).toBe('Pong');
+    expect(sanitizeArcadeMraKey('Pong.MRA')).toBe('Pong');
+  });
+
+  it('strips the leading hide-dot from the basename so a hide/show cycle does not lose the override', () => {
+    expect(sanitizeArcadeMraKey('.Pong.mra')).toBe('Pong');
+    expect(sanitizeArcadeMraKey('_alternatives/.Breakout TTL.mra')).toBe(
+      '_alternatives__Breakout TTL',
+    );
+  });
+
+  it('flattens slashes to double-underscore so nested paths land in one filename', () => {
+    expect(sanitizeArcadeMraKey('_alternatives/Pong.mra')).toBe(
+      '_alternatives__Pong',
+    );
+    expect(sanitizeArcadeMraKey('_Konami/sub/Game.mra')).toBe(
+      '_Konami__sub__Game',
+    );
+  });
+
+  it('passes through filename-safe characters (spaces, hyphens, mid-string dots)', () => {
+    expect(sanitizeArcadeMraKey('Breakout TTL.mra')).toBe('Breakout TTL');
+    expect(sanitizeArcadeMraKey('Pong - 2P.mra')).toBe('Pong - 2P');
+    // A name with a dot mid-string keeps the dot — only the trailing
+    // .mra is stripped.
+    expect(sanitizeArcadeMraKey('Some.Game.mra')).toBe('Some.Game');
+  });
+
+  it('is deterministic + reversible (splitting on __ recovers directory segments)', () => {
+    const key = sanitizeArcadeMraKey('_alternatives/sub/Game.mra');
+    expect(key.split('__')).toEqual(['_alternatives', 'sub', 'Game']);
   });
 });

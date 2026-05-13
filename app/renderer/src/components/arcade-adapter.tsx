@@ -121,15 +121,21 @@ export function useArcadeAdapter(): ItemListAdapter {
   const [subPath, setSubPath] = useState<string>('');
   // feat/arcade-parity-3-ui — detail-dialog target. Carries the entry
   // shape needed to render the modal (relativePath drives the metadata
-  // lookup). Null when closed. `canManageMetadata` snapshots the
-  // entry's playability at click time so the dialog's Find button
-  // greys out for entries whose primary zip is missing/noRomsNeeded
-  // (nothing to bind against on the main side).
+  // lookup). Null when closed. `canManageMetadata` + `playability`
+  // snapshot the entry's classification at click time so the dialog's
+  // Find button greys out only for missing-zip rows (no-roms-needed
+  // entries are bindable through the parallel arcade-mra-overrides
+  // store), and the empty-state copy can pick the right wording.
   const [detailDialogFor, setDetailDialogFor] = useState<{
     readonly relativePath: string;
     readonly displayName: string;
     readonly filename: string;
     readonly canManageMetadata: boolean;
+    readonly playability:
+      | 'playable'
+      | 'missing'
+      | 'no-roms-needed'
+      | null;
   } | null>(null);
   // feat/arcade-manual-ss-search — Find-on-ScreenScraper modal target.
   // Opened from the detail dialog's "Find on ScreenScraper..." button.
@@ -631,12 +637,19 @@ export function useArcadeAdapter(): ItemListAdapter {
                   playabilityByPath.get(entry.relativePath) ?? null;
                 const isMissing = classification === 'missing';
                 const isFolder = entry.kind !== 'mra';
-                // feat/arcade-bind-density-edit — metadata mutations
-                // (Find on ScreenScraper / Edit Metadata) need a
-                // primary zip on disk to bind against. Missing-zip
-                // and no-roms-needed entries don't have a zip, so
-                // there's no md5 to key the cache record under.
-                const canManageMetadata = classification === 'playable';
+                // feat/arcade-noromsneeded-overrides — metadata
+                // mutations (Find on ScreenScraper / Edit Metadata)
+                // need SOME stable cache key:
+                //   • playable      → primary zip's md5 (by-hash)
+                //   • no-roms-needed→ sanitized .mra path
+                //                     (arcade-mra-overrides)
+                //   • missing       → nothing; the zip's not on disk
+                //                     and the .mra needs ROMs.
+                // Allow management for playable + no-roms-needed; grey
+                // out only the missing case.
+                const canManageMetadata =
+                  classification === 'playable' ||
+                  classification === 'no-roms-needed';
                 const hasMetadata = metadata !== null;
                 const rowType = classifyRow({ kind: 'rom', rom });
                 const arcadeEntry: ArcadeMraEntry = {
@@ -699,6 +712,7 @@ export function useArcadeAdapter(): ItemListAdapter {
                                   metadata?.name ?? rom.displayName,
                                 filename: rom.filename,
                                 canManageMetadata,
+                                playability: classification,
                               });
                             }
                       }
@@ -809,13 +823,14 @@ export function useArcadeAdapter(): ItemListAdapter {
     // entries whose ScreenScraper match hasn't landed yet (placeholder
     // box art + "No metadata yet" note).
     //
-    // feat/arcade-bind-density-edit — `allowSearch` is now derived
-    // from the entry's playability (captured at click time). Missing/
-    // noRomsNeeded entries have no primary zip to bind against, so
-    // the Find button greys out; the menu items follow the same rule.
-    // Edit stays v0.2 in the detail dialog itself (the Edit button
-    // there isn't useful without the metadata-edit dialog wired —
-    // arcade's edit lives in the context menu instead).
+    // feat/arcade-noromsneeded-overrides — `allowSearch` is derived
+    // from the entry's playability (captured at click time):
+    //   • playable / no-roms-needed → enabled (zip-md5 or mra-keyed
+    //     override store handles the bind).
+    //   • missing                   → disabled; can't bind without a
+    //                                 zip on disk.
+    // The empty-state copy branches three ways via emptyStateBody so
+    // the wording matches the actual user recourse for each state.
     extras: (
       <>
         {detailDialogFor !== null ? (
@@ -840,6 +855,9 @@ export function useArcadeAdapter(): ItemListAdapter {
             }}
             allowEdit={false}
             allowSearch={detailDialogFor.canManageMetadata}
+            emptyStateBody={arcadeEmptyStateBody(
+              detailDialogFor.playability,
+            )}
           />
         ) : null}
         {searchScreenScraperFor !== null ? (
@@ -938,6 +956,28 @@ export function useArcadeAdapter(): ItemListAdapter {
       </>
     ),
   };
+}
+
+/**
+ * feat/arcade-noromsneeded-overrides — three-tier empty-state copy
+ * for the arcade detail dialog. `undefined` means "use the dialog's
+ * default text" (i.e., the playable case, where the auto-scrape pass
+ * might still match the entry on its own).
+ */
+function arcadeEmptyStateBody(
+  playability: 'playable' | 'missing' | 'no-roms-needed' | null,
+): string | undefined {
+  if (playability === 'missing') {
+    return 'Install the ROM zip to enable metadata search.';
+  }
+  if (playability === 'no-roms-needed') {
+    // No auto-scrape recourse for these (TTL games like Pong have no
+    // zip to hash; the prefetch never reaches them). Manual search is
+    // the only path, so drop the "or wait for the prefetch to land"
+    // tail from the default copy.
+    return 'ScreenScraper hasn\'t matched this entry. Click "Find on ScreenScraper" to search manually.';
+  }
+  return undefined;
 }
 
 function wireToEntries(
