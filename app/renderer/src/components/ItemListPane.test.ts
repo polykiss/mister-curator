@@ -554,6 +554,82 @@ describe('arcade-adapter scrollbar gap parity (feat/arcade-scrollbar-gap-parity)
   });
 });
 
+describe('arcade-adapter row context menu (feat/arcade-polish-context-menu)', () => {
+  it('imports RomRowMenu and declares a menuFor anchor state', () => {
+    expect(ARCADE_ADAPTER).toMatch(
+      /from '@app\/renderer\/src\/components\/RomRowMenu'/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(
+      /\[menuFor,\s*setMenuFor\]\s*=\s*useState/,
+    );
+  });
+
+  it('renders a MoreHorizontal trigger inside each mra row', () => {
+    expect(ARCADE_ADAPTER).toMatch(/<MoreHorizontal strokeWidth=\{1\.5\}/);
+    expect(ARCADE_ADAPTER).toMatch(/title="More actions"/);
+  });
+
+  it('menu has exactly one item ("Find on ScreenScraper...") wired to the existing arcade SS search dialog', () => {
+    // v0.2 keeps Edit Metadata + Mark as system out of arcade; the
+    // SOLE item this round is the Find dispatcher. It opens the SS
+    // search dialog via `setSearchScreenScraperFor`, the same
+    // downstream path the detail-dialog Find button uses — so bind
+    // routing goes through `bindArcadeMetadataFromSearch`.
+    const itemsBlock = ARCADE_ADAPTER.match(
+      /const items: readonly RomRowMenuItem\[\] = \[[\s\S]{0,400}\];/,
+    );
+    expect(itemsBlock).not.toBeNull();
+    const body = itemsBlock![0];
+    expect(body).toContain("label: 'Find on ScreenScraper...'");
+    expect(body).toContain('setSearchScreenScraperFor(target)');
+    const labelCount = (body.match(/label:\s*'/g) ?? []).length;
+    expect(labelCount).toBe(1);
+  });
+
+  it('renders RomRowMenu in extras when an anchor is open', () => {
+    expect(ARCADE_ADAPTER).toMatch(
+      /<RomRowMenu[\s\S]{0,400}onClose=\{\(\)\s*=>\s*setMenuFor\(null\)\}/,
+    );
+  });
+});
+
+describe('arcade density driven by primary-zip size (feat/arcade-polish-context-menu)', () => {
+  it('makeArcadeRom uses entry.primaryZipSizeBytes for rom.sizeBytes on mra entries', () => {
+    const arcadeRowSrc = readFileSync(
+      resolve(__dirname, '..', 'lib', 'arcade-row.ts'),
+      'utf8',
+    );
+    expect(arcadeRowSrc).toMatch(
+      /sizeBytes:\s*isMra\s*\?\s*\(entry\.primaryZipSizeBytes\s*\?\?\s*0\)\s*:\s*0/,
+    );
+  });
+
+  it('arcade-adapter computes maxSizeBytes across visible rows and passes it to RomDensityEyeCell', () => {
+    expect(ARCADE_ADAPTER).toMatch(/const maxSizeBytes = useMemo/);
+    expect(ARCADE_ADAPTER).toMatch(
+      /<RomDensityEyeCell[\s\S]{0,400}maxSizeBytes=\{maxSizeBytes\}/,
+    );
+  });
+
+  it('ArcadeMraEntryWire carries an optional primaryZipSizeBytes field', () => {
+    const preloadApi = readFileSync(
+      resolve(__dirname, '..', '..', '..', '..', 'shared', 'preload-api.ts'),
+      'utf8',
+    );
+    expect(preloadApi).toMatch(/readonly primaryZipSizeBytes\?:\s*number/);
+  });
+
+  it('ArcadeMraMetaCacheEntry persists per-mra primary-zip sizes (optional field for legacy-cache tolerance)', () => {
+    const cacheTypesSrc = readFileSync(
+      resolve(__dirname, '..', '..', '..', '..', 'app', 'main', 'cache', 'cache-types.ts'),
+      'utf8',
+    );
+    expect(cacheTypesSrc).toMatch(
+      /primaryZipSizeByMra\?:\s*Readonly<Record<string, number>>/,
+    );
+  });
+});
+
 describe('no inter-adapter state leakage', () => {
   it('neither adapter file declares module-level mutable state (each hook owns its state in React)', () => {
     // The "switching adapters at runtime doesn't leak state" guarantee
