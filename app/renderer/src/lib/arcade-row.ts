@@ -63,48 +63,60 @@ export function makeArcadeRom(entry: ArcadeMraEntry): Rom {
  * the remaining path has no further slash. Top-level entries qualify
  * at the root (subPath = '').
  *
- * Phase 2 (arcade-parity-3-ui follow-up): subfolder entries are
- * suppressed when their subtree contains zero `.mra` files. The
- * arcade adapter only renders mra-driven rows, so a subfolder with
- * no mras anywhere below it (the live `cores/` directory full of
- * `.rbf` core binaries, or a user folder the user emptied) is a
- * dead-end drill target — surfacing it as a row that opens an
- * empty list is purely confusing. mra rows themselves are never
- * filtered here; the user-facing hide/unhide path stays alone.
+ * Visibility filter (`includeHidden`):
+ *   • Hidden mras and hidden subfolders at the current depth are
+ *     dropped when `includeHidden=false`.
+ *   • The recursive non-empty-folder check uses the SAME filter —
+ *     a subfolder whose subtree contains only hidden mras is dropped
+ *     when `includeHidden=false` so the user doesn't see a folder
+ *     that opens to an empty list. Flipping the "Show hidden" toggle
+ *     surfaces those folders again.
+ *   • mra rows themselves are still rendered/hidden by the adapter's
+ *     visibility code; the suppression here is folder-only (the
+ *     direct mras handle hide/show via the existing eye toggle path).
  */
 export function entriesAtDepth(
   entries: readonly ArcadeMraEntry[],
   subPath: string,
+  includeHidden: boolean,
 ): readonly ArcadeMraEntry[] {
   const prefix = subPath === '' ? '' : `${subPath}/`;
   const atDepth = entries.filter((e) => {
     if (!e.relativePath.startsWith(prefix)) return false;
     const rest = e.relativePath.slice(prefix.length);
     if (rest === '') return false;
-    return !rest.includes('/');
+    if (rest.includes('/')) return false;
+    if (!includeHidden && e.hidden) return false;
+    return true;
   });
   return atDepth.filter((e) => {
     if (e.kind === 'mra') return true;
-    return subfolderHasAnyMra(entries, e.relativePath);
+    return subfolderHasAnyVisibleMra(entries, e.relativePath, includeHidden);
   });
 }
 
 /**
- * True iff `entries` contains at least one `kind === 'mra'` row
- * whose relativePath sits anywhere under `folderRelPath/`. Scans
- * the whole list rather than threading a precomputed index — for
- * a typical `_Arcade/` (~thousands of mras, a handful of folders
+ * True iff `entries` contains at least one visible `kind === 'mra'`
+ * row whose relativePath sits anywhere under `folderRelPath/`.
+ * "Visible" obeys `includeHidden`: when false, hidden mras are
+ * skipped so a folder containing only hidden mras counts as empty.
+ *
+ * Scans the whole list rather than threading a precomputed index —
+ * for a typical `_Arcade/` (~thousands of mras, a handful of folders
  * at each depth) the cost is negligible and keeping the function
  * pure + indexless makes it easy to test.
  */
-function subfolderHasAnyMra(
+function subfolderHasAnyVisibleMra(
   entries: readonly ArcadeMraEntry[],
   folderRelPath: string,
+  includeHidden: boolean,
 ): boolean {
   const folderPrefix = `${folderRelPath}/`;
   for (const e of entries) {
     if (e.kind !== 'mra') continue;
-    if (e.relativePath.startsWith(folderPrefix)) return true;
+    if (!e.relativePath.startsWith(folderPrefix)) continue;
+    if (!includeHidden && e.hidden) continue;
+    return true;
   }
   return false;
 }

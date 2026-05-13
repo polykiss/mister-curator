@@ -90,7 +90,7 @@ describe('entriesAtDepth', () => {
   ];
 
   it('returns only top-level entries at the root', () => {
-    const out = entriesAtDepth(fixture, '');
+    const out = entriesAtDepth(fixture, '', true);
     // Compare as sets to keep the assertion independent of insertion
     // order (the adapter sorts these downstream via sortRoms).
     expect(new Set(out.map((e) => e.relativePath))).toEqual(
@@ -99,19 +99,19 @@ describe('entriesAtDepth', () => {
   });
 
   it('returns entries one segment below the current subPath', () => {
-    const out = entriesAtDepth(fixture, '_Konami');
+    const out = entriesAtDepth(fixture, '_Konami', true);
     expect(new Set(out.map((e) => e.relativePath))).toEqual(
       new Set(['_Konami/Contra.mra', '_Konami/TMNT.mra', '_Konami/sub']),
     );
   });
 
   it('handles two-level deep nesting', () => {
-    const out = entriesAtDepth(fixture, '_Konami/sub');
+    const out = entriesAtDepth(fixture, '_Konami/sub', true);
     expect(out.map((e) => e.relativePath)).toEqual(['_Konami/sub/deep.mra']);
   });
 
   it('returns nothing when subPath does not exist in the tree', () => {
-    expect(entriesAtDepth(fixture, 'nonsense')).toEqual([]);
+    expect(entriesAtDepth(fixture, 'nonsense', true)).toEqual([]);
   });
 });
 
@@ -126,7 +126,7 @@ describe('entriesAtDepth — empty subfolder suppression (phase 2 follow-up)', (
       mra('Galaga.mra'),
       { ...sub('cores'), kind: 'cores-subfolder' },
     ];
-    const out = entriesAtDepth(entries, '');
+    const out = entriesAtDepth(entries, '', true);
     expect(out.map((e) => e.relativePath)).toEqual(['Galaga.mra']);
   });
 
@@ -135,7 +135,7 @@ describe('entriesAtDepth — empty subfolder suppression (phase 2 follow-up)', (
       mra('Metal Slug.mra'),
       sub('_alternatives'),
     ];
-    const out = entriesAtDepth(entries, '');
+    const out = entriesAtDepth(entries, '', true);
     expect(out.map((e) => e.relativePath)).toEqual(['Metal Slug.mra']);
   });
 
@@ -144,7 +144,7 @@ describe('entriesAtDepth — empty subfolder suppression (phase 2 follow-up)', (
       sub('_Konami'),
       mra('_Konami/TMNT.mra', 'TMNT.mra'),
     ];
-    const out = entriesAtDepth(entries, '');
+    const out = entriesAtDepth(entries, '', true);
     expect(out.map((e) => e.relativePath)).toContain('_Konami');
   });
 
@@ -157,13 +157,14 @@ describe('entriesAtDepth — empty subfolder suppression (phase 2 follow-up)', (
       sub('_alternatives/Konami'),
       mra('_alternatives/Konami/deep.mra', 'deep.mra'),
     ];
-    const out = entriesAtDepth(entries, '');
+    const out = entriesAtDepth(entries, '', true);
     expect(out.map((e) => e.relativePath)).toContain('_alternatives');
   });
 
   it('handles a completely empty arcade list without throwing', () => {
-    expect(entriesAtDepth([], '')).toEqual([]);
-    expect(entriesAtDepth([], '_Konami')).toEqual([]);
+    expect(entriesAtDepth([], '', true)).toEqual([]);
+    expect(entriesAtDepth([], '_Konami', true)).toEqual([]);
+    expect(entriesAtDepth([], '', false)).toEqual([]);
   });
 
   it('never filters out .mra rows (the suppression is folder-only)', () => {
@@ -171,7 +172,7 @@ describe('entriesAtDepth — empty subfolder suppression (phase 2 follow-up)', (
       mra('Solo.mra'),
       sub('emptyFolder'),
     ];
-    const out = entriesAtDepth(entries, '');
+    const out = entriesAtDepth(entries, '', true);
     // Solo.mra has no subtree but it's an mra, not a folder — it
     // must survive the filter.
     expect(out.map((e) => e.relativePath)).toEqual(['Solo.mra']);
@@ -185,10 +186,66 @@ describe('entriesAtDepth — empty subfolder suppression (phase 2 follow-up)', (
       sub('_Konami/sub'),
       mra('_Konami/Contra.mra', 'Contra.mra'),
     ];
-    const out = entriesAtDepth(entries, '_Konami');
+    const out = entriesAtDepth(entries, '_Konami', true);
     expect(out.map((e) => e.relativePath).sort()).toEqual([
       '_Konami/Contra.mra',
     ]);
+  });
+});
+
+describe('entriesAtDepth — hidden-aware folder count (bug fix)', () => {
+  // Live bug: `_alternatives/` showed in the arcade list but drilled
+  // into empty because every mra inside is hidden. The folder-empty
+  // check now obeys the same `includeHidden` filter as the visible
+  // row list, so the two paths can't disagree.
+
+  it('hides a folder whose subtree contains only HIDDEN mras when includeHidden=false', () => {
+    const entries: readonly ArcadeMraEntry[] = [
+      mra('Galaga.mra'),
+      sub('_alternatives'),
+      { ...mra('_alternatives/altA.mra', 'altA.mra'), hidden: true },
+      { ...mra('_alternatives/altB.mra', 'altB.mra'), hidden: true },
+    ];
+    const out = entriesAtDepth(entries, '', false);
+    expect(out.map((e) => e.relativePath)).toEqual(['Galaga.mra']);
+  });
+
+  it('SHOWS the same folder when includeHidden=true (user flipped "Show hidden")', () => {
+    const entries: readonly ArcadeMraEntry[] = [
+      mra('Galaga.mra'),
+      sub('_alternatives'),
+      { ...mra('_alternatives/altA.mra', 'altA.mra'), hidden: true },
+    ];
+    const out = entriesAtDepth(entries, '', true);
+    expect(new Set(out.map((e) => e.relativePath))).toEqual(
+      new Set(['Galaga.mra', '_alternatives']),
+    );
+  });
+
+  it('keeps a folder visible when at least ONE mra below it is visible', () => {
+    const entries: readonly ArcadeMraEntry[] = [
+      sub('_alternatives'),
+      { ...mra('_alternatives/altA.mra', 'altA.mra'), hidden: true },
+      mra('_alternatives/altB.mra', 'altB.mra'),
+    ];
+    const out = entriesAtDepth(entries, '', false);
+    expect(out.map((e) => e.relativePath)).toContain('_alternatives');
+  });
+
+  it('hides hidden mras at the current depth when includeHidden=false', () => {
+    // The direct-mra-at-depth visibility filter lives in the same
+    // function now, so we don't have two separate hide passes that
+    // can drift.
+    const entries: readonly ArcadeMraEntry[] = [
+      mra('Galaga.mra'),
+      { ...mra('Hidden.mra', 'Hidden.mra'), hidden: true },
+    ];
+    expect(entriesAtDepth(entries, '', false).map((e) => e.relativePath)).toEqual([
+      'Galaga.mra',
+    ]);
+    expect(
+      new Set(entriesAtDepth(entries, '', true).map((e) => e.relativePath)),
+    ).toEqual(new Set(['Galaga.mra', 'Hidden.mra']));
   });
 });
 

@@ -297,14 +297,32 @@ describe('arcade-adapter sortable headers (feat/arcade-parity-3-ui G8)', () => {
     expect(ARCADE_ADAPTER).toMatch(/sortRoms/);
   });
 
-  it('wires SortableHeader for Name, Year, and Rating (Genre intentionally not sortable)', () => {
+  it('wires SortableHeader for all four metadata columns (Name, Year, Genre, Rating) — full RomsPane parity', () => {
+    // The earlier round shipped Genre as a plain <TableHead> on the
+    // theory that sparse arcade metadata made the sort key noise.
+    // Live use disagreed: with .mras that DO have a genre (most do
+    // after a scrape pass) the sort is the natural way to group
+    // shooters / fighters / puzzlers. Flipping it back to match
+    // RomsPane keeps the user-mental-model identical across panes.
     expect(ARCADE_ADAPTER).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="name"/);
     expect(ARCADE_ADAPTER).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="year"/);
+    expect(ARCADE_ADAPTER).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="genre"/);
     expect(ARCADE_ADAPTER).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="rating"/);
-    // Genre header is a plain <TableHead>Genre</TableHead> — sparse
-    // metadata coverage makes a sort key low value here.
-    expect(ARCADE_ADAPTER).not.toMatch(/sortKey="genre"/);
-    expect(ARCADE_ADAPTER).toMatch(/<TableHead className="w-28">Genre<\/TableHead>/);
+    // No leftover plain TableHead for Genre — would render two genre
+    // headers if both were present.
+    expect(ARCADE_ADAPTER).not.toMatch(
+      /<TableHead className="w-28">Genre<\/TableHead>/,
+    );
+  });
+
+  it('Genre header carries `normal-case` so the column label renders mixed-case instead of all-caps', () => {
+    // Live regression: the inherited `uppercase` on the base TableHead
+    // primitive made the arcade Genre column read "GENRE" in caps.
+    // RomsPane shows it mixed-case; pinning the override keeps the
+    // arcade column consistent with the live ROM-pane behavior.
+    expect(ARCADE_ADAPTER).toMatch(
+      /<SortableHeader[\s\S]{0,300}sortKey="genre"[\s\S]{0,300}className="w-28 normal-case"/,
+    );
   });
 
   it('declares a per-pane sortState defaulting to DEFAULT_SORT (not persisted)', () => {

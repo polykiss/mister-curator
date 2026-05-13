@@ -64,10 +64,8 @@ import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
  *   • Cell parity: box-art thumbnail, name + filename subline,
  *     year / genre / rating, density+eye stack. Drives the same
  *     RomMetadataCells primitives RomsPane uses.
- *   • Sortable headers for Name / Year / Rating. Genre is rendered
- *     (so the column lines up with RomsPane) but its header is not
- *     sortable — arcade metadata genre coverage is sparse enough
- *     that a sort key is mostly noise.
+ *   • Sortable headers for Name / Year / Genre / Rating — full
+ *     parity with RomsPane's four sortable columns.
  *   • Subfolder drill: per-pane `subPath` state with the same
  *     breadcrumb + synthetic back-row pattern as RomsPane. Subfolder
  *     entries (`_Konami/`, `cores/`, etc.) render as drillable folder
@@ -169,15 +167,16 @@ export function useArcadeAdapter(): ItemListAdapter {
 
   // Entries at the current drill depth. Subfolder entries (kind !==
   // 'mra') pass through as drillable rows; the back-row is rendered
-  // separately above this list.
-  const rowsAtDepth = useMemo(
-    () => (entries === null ? [] : entriesAtDepth(entries, subPath)),
-    [entries, subPath],
-  );
-
+  // separately above this list. `showHidden` is threaded into the
+  // depth filter so:
+  //   • hidden mras / subfolders at this depth disappear when off, and
+  //   • a folder whose subtree contains ONLY hidden mras (the live
+  //     `_alternatives/` case where every alt is auto-hidden) also
+  //     disappears, instead of surfacing as a row that drills into an
+  //     empty list.
   const presentable = useMemo(
-    () => (showHidden ? rowsAtDepth : rowsAtDepth.filter((e) => !e.hidden)),
-    [rowsAtDepth, showHidden],
+    () => (entries === null ? [] : entriesAtDepth(entries, subPath, showHidden)),
+    [entries, subPath, showHidden],
   );
 
   // Enrich each entry with a synthetic Rom (kind='file' for mras,
@@ -477,7 +476,15 @@ export function useArcadeAdapter(): ItemListAdapter {
                     setSortState((prev) => nextSortState(prev, k))
                   }
                 />
-                <TableHead className="w-28">Genre</TableHead>
+                <SortableHeader
+                  label="Genre"
+                  sortKey="genre"
+                  className="w-28 normal-case"
+                  sortState={sortState}
+                  onSort={(k) =>
+                    setSortState((prev) => nextSortState(prev, k))
+                  }
+                />
                 <SortableHeader
                   label="Rating"
                   sortKey="rating"
