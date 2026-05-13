@@ -168,16 +168,28 @@ describe('AutoScrapeEngine', () => {
       engine.start(['SNES']);
       await flush();
       // Expected sequence:
-      //   active SNES 0/3 (start-of-core)
+      //   discovering SNES (start-of-core, before listRomPaths resolves)
+      //   active SNES 0/3 (post-listRomPaths)
       //   active SNES 1/3
       //   active SNES 2/3
       //   active SNES 3/3
       //   idle
-      // feat/auto-scrape-persistence: events now carry
+      // feat/connect-progress-ui: a `discovering` event fires per
+      // core BEFORE listRomPaths so the renderer can show the
+      // per-core walk during the silent SSH window (especially for
+      // zero-ROM cores that never reach an `active` event).
+      // feat/auto-scrape-persistence: events carry
       // completedCoreIds + remainingCount. SNES is the only core in
       // the queue, so it transitions [] → [] active during the
       // scrape, then [SNES] in the idle event after it completes.
       expect(events).toEqual([
+        {
+          state: 'discovering',
+          coreId: 'SNES',
+          coreLabel: 'SNES',
+          completedCoreIds: [],
+          remainingCount: 0,
+        },
         {
           state: 'active',
           coreId: 'SNES',
