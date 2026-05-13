@@ -87,6 +87,23 @@ export interface RomMetadataResolvedEvent {
 }
 
 /**
+ * feat/arcade-noromsneeded-overrides — input shape the arcade manual-
+ * write paths consume. Subset of `ArcadePlayabilitySnapshot` that the
+ * orchestrator actually reads: entries (for the primary-zip
+ * resolution), zipBasenames (for `resolvePrimaryZipBasename`), and
+ * the per-path playability classification (so the bind/edit can
+ * branch noRomsNeeded → by-mra-path vs playable → by-hash).
+ */
+export interface ArcadeBindSnapshot {
+  readonly entries: readonly ArcadeMraMeta[];
+  readonly zipBasenames: ReadonlySet<string>;
+  readonly byPath: ReadonlyMap<
+    string,
+    'playable' | 'missing' | 'no-roms-needed'
+  >;
+}
+
+/**
  * Top-level metadata coordinator. The IPC handlers call this; the
  * orchestrator threads `(client, host)` from the active connection
  * through to HashService and the metadata pipeline.
@@ -367,13 +384,22 @@ export class MetadataOrchestrator {
    * the renderer surfaces a "no record yet" toast.
    */
   async bindArcadeManualMetadataOverride(
-    snapshot: {
-      readonly entries: readonly ArcadeMraMeta[];
-      readonly zipBasenames: ReadonlySet<string>;
-    },
+    snapshot: ArcadeBindSnapshot,
     mraRelativePath: string,
     game: ScreenScraperGame,
   ): Promise<RomMetadata | null> {
+    // feat/arcade-noromsneeded-overrides — TTL / discrete-logic
+    // games (Breakout TTL, Pong) have no primary zip; the by-hash
+    // store can't key them. Route those to the parallel
+    // arcade-mra-overrides path so the user can still bind manual
+    // metadata. Playable + missing entries continue through the
+    // by-hash + zip-md5 chain (unchanged).
+    if (snapshot.byPath.get(mraRelativePath) === 'no-roms-needed') {
+      return this.metadataService.bindArcadeMraOverride(
+        mraRelativePath,
+        game,
+      );
+    }
     const md5 = await this.resolveOrComputeArcadePrimaryZipMd5(
       snapshot,
       mraRelativePath,
@@ -389,18 +415,26 @@ export class MetadataOrchestrator {
    * if the zip is unhashed), but composes a writeUserOverride call
    * instead of a bind-from-search.
    *
+   * feat/arcade-noromsneeded-overrides — same branch as the bind
+   * variant: noRomsNeeded entries route to the mra-keyed override
+   * store. Edit requires an existing record either way (the dialog
+   * gates on `metadata` being non-null).
+   *
    * Returns null on the same paths as the bind variant — no snapshot
    * entry, unresolvable primary zip, or hash failure. The renderer
    * surfaces a toast and leaves the edit dialog open for retry.
    */
   async setArcadeManualMetadataOverride(
-    snapshot: {
-      readonly entries: readonly ArcadeMraMeta[];
-      readonly zipBasenames: ReadonlySet<string>;
-    },
+    snapshot: ArcadeBindSnapshot,
     mraRelativePath: string,
     override: UserMetadataOverride | undefined,
   ): Promise<RomMetadata | null> {
+    if (snapshot.byPath.get(mraRelativePath) === 'no-roms-needed') {
+      return this.metadataService.writeArcadeMraUserOverride(
+        mraRelativePath,
+        override,
+      );
+    }
     const md5 = await this.resolveOrComputeArcadePrimaryZipMd5(
       snapshot,
       mraRelativePath,
@@ -416,10 +450,7 @@ export class MetadataOrchestrator {
    * the resolved md5, or null on any unrecoverable failure.
    */
   private async resolveOrComputeArcadePrimaryZipMd5(
-    snapshot: {
-      readonly entries: readonly ArcadeMraMeta[];
-      readonly zipBasenames: ReadonlySet<string>;
-    },
+    snapshot: ArcadeBindSnapshot,
     mraRelativePath: string,
   ): Promise<string | null> {
     const session = this.getActiveSession();
@@ -532,6 +563,22 @@ export class MetadataOrchestrator {
     },
   ): Promise<Record<string, RomMetadata | null>> {
     const out: Record<string, RomMetadata | null> = {};
+
+    // feat/arcade-noromsneeded-overrides — TTL / discrete-logic games
+    // have no primary zip to hash; manual overrides land in the
+    // parallel arcade-mra-overrides store. Surface those reads first
+    // (pure-disk, no SSH) so noRomsNeeded rows paint immediately even
+    // when the playable cohort is empty.
+    const noRomsNeeded = snapshot.entries.filter(
+      (e) => snapshot.byPath.get(e.relativePath) === 'no-roms-needed',
+    );
+    for (const mra of noRomsNeeded) {
+      out[mra.relativePath] =
+        await this.metadataService.readCachedArcadeMraMetadata(
+          mra.relativePath,
+        );
+    }
+
     const playable = snapshot.entries.filter(
       (e) => snapshot.byPath.get(e.relativePath) === 'playable',
     );

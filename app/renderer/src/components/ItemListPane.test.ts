@@ -787,6 +787,117 @@ describe('RomSearchScreenScraperDialog long-title overflow (feat/arcade-bind-den
   });
 });
 
+describe('arcade noRomsNeeded overrides (feat/arcade-noromsneeded-overrides)', () => {
+  it('canManageMetadata accepts playable AND no-roms-needed (only missing is greyed)', () => {
+    // Pre-this-PR the gate was strictly classification === playable.
+    // TTL / discrete-logic games (no-roms-needed) had no path to
+    // bind metadata; this PR adds a parallel mra-keyed store so they
+    // become actionable from the same UI.
+    expect(ARCADE_ADAPTER).toMatch(
+      /classification === 'playable'\s*\|\|\s*classification === 'no-roms-needed'/,
+    );
+  });
+
+  it('detail-dialog state captures playability so the empty-state copy can branch', () => {
+    expect(ARCADE_ADAPTER).toMatch(
+      /readonly playability:\s*[\s\S]{0,200}'no-roms-needed'/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(
+      /setDetailDialogFor\(\{[\s\S]{0,400}playability:\s*classification/,
+    );
+  });
+
+  it('arcadeEmptyStateBody returns the three-tier copy by playability', () => {
+    const helperMatch = ARCADE_ADAPTER.match(
+      /function arcadeEmptyStateBody[\s\S]{0,1200}\n\}/,
+    );
+    expect(helperMatch).not.toBeNull();
+    const body = helperMatch![0];
+    expect(body).toContain('Install the ROM zip to enable metadata search.');
+    // noRomsNeeded → returned text ends at "search manually." with
+    // no "or wait for the prefetch" tail. Pin the exact returned
+    // string so a future copy change can't reintroduce the tail.
+    expect(body).toContain(
+      'Click "Find on ScreenScraper" to search manually.',
+    );
+    // The literal `return 'X';` for the no-roms-needed branch must
+    // NOT include the "or wait..." tail; checking against the
+    // RETURN statement specifically (not the surrounding comments).
+    const noRomsNeededReturn = body.match(
+      /playability === 'no-roms-needed'\)\s*\{[\s\S]*?return\s+['"`]([^'"`]+)['"`]/,
+    );
+    expect(noRomsNeededReturn).not.toBeNull();
+    expect(noRomsNeededReturn![1]).not.toContain('wait for the prefetch');
+    // Playable → return undefined (use the dialog's default copy).
+    expect(body).toMatch(/return undefined/);
+  });
+
+  it('detail dialog receives emptyStateBody from the helper', () => {
+    expect(ARCADE_ADAPTER).toMatch(
+      /emptyStateBody=\{arcadeEmptyStateBody\(\s*detailDialogFor\.playability,?\s*\)\}/,
+    );
+  });
+});
+
+describe('arcade-mra-overrides storage + routing (feat/arcade-noromsneeded-overrides)', () => {
+  const orchestratorSrc = readFileSync(
+    resolve(
+      __dirname,
+      '..',
+      '..',
+      '..',
+      '..',
+      'app',
+      'main',
+      'metadata',
+      'metadata-orchestrator.ts',
+    ),
+    'utf8',
+  );
+  const metadataServiceSrc = readFileSync(
+    resolve(
+      __dirname,
+      '..',
+      '..',
+      '..',
+      '..',
+      'app',
+      'main',
+      'metadata',
+      'metadata-service.ts',
+    ),
+    'utf8',
+  );
+
+  it('MetadataService exposes the three new arcade-mra entry points', () => {
+    expect(metadataServiceSrc).toMatch(/async bindArcadeMraOverride\(/);
+    expect(metadataServiceSrc).toMatch(/async writeArcadeMraUserOverride\(/);
+    expect(metadataServiceSrc).toMatch(/async readCachedArcadeMraMetadata\(/);
+  });
+
+  it('storage path lives under arcade-mra-overrides/ (parallel to by-hash)', () => {
+    expect(metadataServiceSrc).toMatch(
+      /join\(\s*this\.rootDir,\s*'arcade-mra-overrides'/,
+    );
+  });
+
+  it('bindArcadeManualMetadataOverride branches on no-roms-needed and routes to bindArcadeMraOverride', () => {
+    expect(orchestratorSrc).toMatch(
+      /snapshot\.byPath\.get\(mraRelativePath\) === 'no-roms-needed'[\s\S]{0,400}bindArcadeMraOverride\(/,
+    );
+  });
+
+  it('setArcadeManualMetadataOverride branches on no-roms-needed and routes to writeArcadeMraUserOverride', () => {
+    expect(orchestratorSrc).toMatch(
+      /snapshot\.byPath\.get\(mraRelativePath\) === 'no-roms-needed'[\s\S]{0,400}writeArcadeMraUserOverride\(/,
+    );
+  });
+
+  it('getCachedArcadeMetadataBatch reads no-roms-needed entries from the parallel store', () => {
+    expect(orchestratorSrc).toMatch(/readCachedArcadeMraMetadata\(/);
+  });
+});
+
 describe('no inter-adapter state leakage', () => {
   it('neither adapter file declares module-level mutable state (each hook owns its state in React)', () => {
     // The "switching adapters at runtime doesn't leak state" guarantee

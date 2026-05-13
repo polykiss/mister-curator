@@ -816,6 +816,125 @@ export class MetadataService {
   }
 
   /**
+   * feat/arcade-noromsneeded-overrides — parallel override storage
+   * for arcade `.mra` entries that have no primary zip (the ~12
+   * TTL / discrete-logic games like Breakout TTL and Pong). Those
+   * .mras have nothing to hash, so the by-hash store can't key them.
+   * We persist them under `<rootDir>/arcade-mra-overrides/<sanitized>.json`
+   * with the same `RomMetadata` shape — same readers, same JSON
+   * schema, parallel directory.
+   *
+   * Bind from SS search (analogous to `bindManualOverride`): composes
+   * the SS record, pins `userOverride.jeuid`, writes by mra path.
+   */
+  async bindArcadeMraOverride(
+    mraRelativePath: string,
+    game: ScreenScraperGame,
+  ): Promise<RomMetadata> {
+    const cached = await this.readArcadeMraOverride(mraRelativePath);
+    // Use the sanitized key as the "hash" slot in the RomMetadata
+    // record. The cache layer treats the key opaquely; downstream
+    // consumers (genre format, OpenVGDB lookup) don't depend on
+    // hash being a real md5.
+    const key = sanitizeArcadeMraKey(mraRelativePath);
+    const composed = this.composeFromScreenScraper(key, game);
+    const existingOverride =
+      cached !== null ? normalizeOverride(cached.userOverride) : undefined;
+    const mergedOverride = normalizeOverride({
+      ...existingOverride,
+      jeuid: String(game.id),
+    });
+    const updated: RomMetadata = {
+      ...composed,
+      source: 'manual-override',
+      userOverride: mergedOverride,
+      triedNameSearch: true,
+    };
+    await this.writeArcadeMraCache(mraRelativePath, updated);
+    return updated;
+  }
+
+  /**
+   * feat/arcade-noromsneeded-overrides — edit-metadata write path for
+   * no-zip arcade entries. Same semantics as `writeUserOverride`
+   * (requires an existing record to override; the dialog gates on
+   * `metadata` being non-null), routed to the mra-keyed store.
+   */
+  async writeArcadeMraUserOverride(
+    mraRelativePath: string,
+    override: UserMetadataOverride | undefined,
+  ): Promise<RomMetadata | null> {
+    const cached = await this.readArcadeMraOverride(mraRelativePath);
+    if (cached === null) return null;
+    const normalized = normalizeOverride(override);
+    const updated: RomMetadata = {
+      ...cached,
+      version: ROM_METADATA_SCHEMA_VERSION,
+      userOverride: normalized,
+    };
+    await this.writeArcadeMraCache(mraRelativePath, updated);
+    return updated;
+  }
+
+  /**
+   * feat/arcade-noromsneeded-overrides — read-side companion for the
+   * by-mra-path store. Mirrors `readCachedMetadata`: sentinel records
+   * (source='none') collapse to null so the renderer doesn't paint a
+   * "no match" row eagerly.
+   */
+  async readCachedArcadeMraMetadata(
+    mraRelativePath: string,
+  ): Promise<RomMetadata | null> {
+    const cached = await this.readArcadeMraOverride(mraRelativePath);
+    if (cached === null) return null;
+    if (cached.source === 'none') return null;
+    return cached;
+  }
+
+  private async readArcadeMraOverride(
+    mraRelativePath: string,
+  ): Promise<RomMetadata | null> {
+    const path = this.arcadeMraCachePath(mraRelativePath);
+    let raw: string;
+    try {
+      raw = await fs.readFile(path, 'utf-8');
+    } catch (err) {
+      if (isNodeError(err) && err.code === 'ENOENT') return null;
+      throw err;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    if (!isRomMetadata(parsed)) return null;
+    return parsed;
+  }
+
+  private async writeArcadeMraCache(
+    mraRelativePath: string,
+    meta: RomMetadata,
+  ): Promise<void> {
+    const path = this.arcadeMraCachePath(mraRelativePath);
+    await fs.mkdir(dirname(path), { recursive: true });
+    const tmp = `${path}.tmp`;
+    await fs.writeFile(tmp, `${JSON.stringify(meta, null, 2)}\n`, {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    await fs.rename(tmp, path);
+  }
+
+  private arcadeMraCachePath(mraRelativePath: string): string {
+    return join(
+      this.rootDir,
+      'arcade-mra-overrides',
+      `${sanitizeArcadeMraKey(mraRelativePath)}.json`,
+    );
+  }
+
+  /**
    * PR-D1 round 2 (PR #27 round 2): public read-only cache lookup
    * for the optimistic-render path. Reads from disk; never queries
    * SS / OpenVGDB; never writes. Returns null when the hash isn't
@@ -865,6 +984,46 @@ export class MetadataService {
 }
 
 // ─── helpers ────────────────────────────────────────────────────────
+
+/**
+ * feat/arcade-noromsneeded-overrides — deterministic + reversible
+ * sanitization of a `.mra` relativePath to a filesystem-safe basename.
+ *
+ *   1. Drop the leading hide dot via the existing visible-path
+ *      helper so a hide/unhide cycle doesn't lose the override.
+ *   2. Strip a trailing `.mra` (case-insensitive) — the extension
+ *      is redundant once the file lives inside
+ *      `arcade-mra-overrides/`, and dropping it keeps the on-disk
+ *      filename shorter.
+ *   3. Replace `/` with `__` so nested mra paths
+ *      (`_alternatives/Pong.mra`) flatten into a single filename.
+ *
+ * The transform is reversible without referencing the original .mra
+ * listing (split on `__` to recover the directory parts; re-append
+ * `.mra`) — easier to debug + grep through the cache dir.
+ */
+export function sanitizeArcadeMraKey(mraRelativePath: string): string {
+  // Local import to avoid a circular dep — the helper lives in
+  // `@shared/ledger` and is already a dependency of the arcade
+  // wiring elsewhere.
+  const visible = mraRelativePath.startsWith('.')
+    ? stripLeadingDotFromBasename(mraRelativePath)
+    : stripLeadingDotFromBasename(mraRelativePath);
+  const noExt = visible.toLowerCase().endsWith('.mra')
+    ? visible.slice(0, -'.mra'.length)
+    : visible;
+  return noExt.replace(/\//g, '__');
+}
+
+function stripLeadingDotFromBasename(relativePath: string): string {
+  const slash = relativePath.lastIndexOf('/');
+  if (slash === -1) {
+    return relativePath.startsWith('.') ? relativePath.slice(1) : relativePath;
+  }
+  const dir = relativePath.slice(0, slash + 1);
+  const base = relativePath.slice(slash + 1);
+  return base.startsWith('.') ? `${dir}${base.slice(1)}` : `${dir}${base}`;
+}
 
 function parseYearFromDate(text: string | null): number | null {
   if (text === null) return null;

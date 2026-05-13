@@ -98,6 +98,14 @@ export interface RomDetailDialogProps {
    * mutations from this surface" in a single flag.
    */
   readonly readOnly?: boolean;
+  /**
+   * feat/arcade-noromsneeded-overrides — override the empty-state
+   * body copy. The default text picks between "click Find" / "auto-
+   * scrape will retry" based on `allowSearch`; surfaces that need a
+   * third state (the arcade pane's missing-zip wording, for example)
+   * supply their own line.
+   */
+  readonly emptyStateBody?: string;
 }
 
 export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
@@ -111,6 +119,7 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
     allowEdit,
     allowSearch,
     readOnly,
+    emptyStateBody,
   } = props;
   const defaultAllow = readOnly === true ? false : true;
   const resolvedAllowEdit = allowEdit ?? defaultAllow;
@@ -123,6 +132,7 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
         onOpenChange={onOpenChange}
         onSearch={onSearch}
         allowSearch={resolvedAllowSearch}
+        bodyOverride={emptyStateBody}
       />
     );
   }
@@ -440,11 +450,17 @@ function EmptyDetailDialog(props: {
   readonly onOpenChange: (open: boolean) => void;
   readonly onSearch: () => void;
   readonly allowSearch: boolean;
+  readonly bodyOverride?: string;
 }): JSX.Element {
   function handleSearch(): void {
     props.onOpenChange(false);
     props.onSearch();
   }
+  const bodyText =
+    props.bodyOverride ??
+    (props.allowSearch
+      ? 'ScreenScraper hasn\'t matched this entry. Click "Find on ScreenScraper" to search manually, or wait for the prefetch to land.'
+      : "ScreenScraper hasn't matched this entry. The auto-scrape pass will retry on the next connect.");
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogContent className="max-w-3xl gap-3 p-5">
@@ -461,11 +477,7 @@ function EmptyDetailDialog(props: {
           <div className="aspect-[3/4] w-full rounded-sm border border-subtle bg-overlay/40" />
           <div className="flex min-w-0 flex-col gap-2">
             <SectionLabel>No metadata yet</SectionLabel>
-            <p className="text-body-sm text-fg-body">
-              {props.allowSearch
-                ? 'ScreenScraper hasn\'t matched this entry. Click "Find on ScreenScraper" to search manually, or wait for the prefetch to land.'
-                : "ScreenScraper hasn't matched this entry. The auto-scrape pass will retry on the next connect."}
-            </p>
+            <p className="text-body-sm text-fg-body">{bodyText}</p>
           </div>
         </div>
 
