@@ -65,15 +65,18 @@ export function makeArcadeRom(entry: ArcadeMraEntry): Rom {
  *
  * Visibility filter (`includeHidden`):
  *   • Hidden mras and hidden subfolders at the current depth are
- *     dropped when `includeHidden=false`.
- *   • The recursive non-empty-folder check uses the SAME filter —
- *     a subfolder whose subtree contains only hidden mras is dropped
- *     when `includeHidden=false` so the user doesn't see a folder
- *     that opens to an empty list. Flipping the "Show hidden" toggle
- *     surfaces those folders again.
- *   • mra rows themselves are still rendered/hidden by the adapter's
- *     visibility code; the suppression here is folder-only (the
- *     direct mras handle hide/show via the existing eye toggle path).
+ *     dropped when `includeHidden=false` (covers both user-hidden and
+ *     auto-hidden mras — both result in a dot-prefixed file, which
+ *     `parseArcadeMraEntries` translates into `entry.hidden = true`).
+ *   • The recursive non-empty-folder check applies the SAME predicate
+ *     and only descends through drill-reachable subfolder entries:
+ *     a folder is kept iff `entriesAtDepth(folder, includeHidden)`
+ *     would itself return something. This is the "two paths can't
+ *     disagree" rule: if drilling shows zero rows, the parent row
+ *     also shouldn't surface as a drill target.
+ *   • mra rows themselves are not filtered further by the adapter
+ *     after this — the eye toggle path operates on individual mras
+ *     independently of this listing.
  */
 export function entriesAtDepth(
   entries: readonly ArcadeMraEntry[],
@@ -91,32 +94,47 @@ export function entriesAtDepth(
   });
   return atDepth.filter((e) => {
     if (e.kind === 'mra') return true;
-    return subfolderHasAnyVisibleMra(entries, e.relativePath, includeHidden);
+    return subfolderHasAnyVisibleContent(entries, e.relativePath, includeHidden);
   });
 }
 
 /**
- * True iff `entries` contains at least one visible `kind === 'mra'`
- * row whose relativePath sits anywhere under `folderRelPath/`.
- * "Visible" obeys `includeHidden`: when false, hidden mras are
- * skipped so a folder containing only hidden mras counts as empty.
+ * True iff drilling into `folderRelPath` would surface at least one
+ * row under the same visibility filter the drill render applies.
  *
- * Scans the whole list rather than threading a precomputed index —
- * for a typical `_Arcade/` (~thousands of mras, a handful of folders
- * at each depth) the cost is negligible and keeping the function
- * pure + indexless makes it easy to test.
+ * Recursion mirrors what the renderer can actually reach:
+ *   • Direct-child visible mra at `folderRelPath/x.mra` → true.
+ *   • Direct-child visible subfolder at `folderRelPath/sub/` that
+ *     itself satisfies this check → true (drilling into the parent
+ *     surfaces the subfolder as a clickable row).
+ *
+ * Mras nested two levels deep without an intermediate subfolder
+ * entry (e.g. `_alternatives/X/Game.mra` when `_alternatives/X` isn't
+ * in the listing) are NOT counted — the renderer can't reach them
+ * from the parent folder, so treating their existence as "this folder
+ * has content" would resurface the bug this function is meant to
+ * fix: a row that drills into an empty list.
+ *
+ * For a typical `_Arcade/` (~thousands of mras, a handful of
+ * subfolders per level) the recursion bottoms out quickly; keeping
+ * the function pure + indexless keeps it test-friendly.
  */
-function subfolderHasAnyVisibleMra(
+function subfolderHasAnyVisibleContent(
   entries: readonly ArcadeMraEntry[],
   folderRelPath: string,
   includeHidden: boolean,
 ): boolean {
   const folderPrefix = `${folderRelPath}/`;
   for (const e of entries) {
-    if (e.kind !== 'mra') continue;
     if (!e.relativePath.startsWith(folderPrefix)) continue;
+    const rest = e.relativePath.slice(folderPrefix.length);
+    if (rest === '') continue;
+    if (rest.includes('/')) continue;
     if (!includeHidden && e.hidden) continue;
-    return true;
+    if (e.kind === 'mra') return true;
+    if (subfolderHasAnyVisibleContent(entries, e.relativePath, includeHidden)) {
+      return true;
+    }
   }
   return false;
 }

@@ -421,6 +421,65 @@ describe('CoresPane MAME/HBMame sidebar filter (feat/arcade-parity-3-ui G23)', (
   });
 });
 
+describe('arcade-adapter detail dialog (feat/arcade-parity-3-ui)', () => {
+  it('imports the shared RomDetailDialog (not a new arcade-specific clone)', () => {
+    expect(ARCADE_ADAPTER).toMatch(
+      /from '@app\/renderer\/src\/components\/RomDetailDialog'/,
+    );
+  });
+
+  it('declares detail-dialog state opened by a name-cell click', () => {
+    // The click handler hangs off the name TableCell so clicking
+    // the box-art / year / genre / rating cells doesn't trigger the
+    // modal (those cells have their own non-click semantics).
+    expect(ARCADE_ADAPTER).toMatch(
+      /\[detailDialogFor,\s*setDetailDialogFor\]\s*=\s*useState/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(/setDetailDialogFor\(\{/);
+  });
+
+  it('renders RomDetailDialog with readOnly so Edit / Find buttons are hidden', () => {
+    // Arcade detail view is read-only this round; manual SS search +
+    // edit dialogs are v0.2. The dialog hides both buttons when
+    // `readOnly` is set, leaving Close as the only action. The
+    // onEdit / onSearch callbacks stay (the dialog's TypeScript
+    // requires them) but are no-ops behind the gate.
+    expect(ARCADE_ADAPTER).toMatch(/<RomDetailDialog[\s\S]{0,800}readOnly/);
+  });
+
+  it('feeds metadata into the dialog via the existing metadataByMra map (no new IPC)', () => {
+    // Reuses the by-hash cache PR B wired up — no new fetch path,
+    // no new state slot. The dialog handles the null case for
+    // entries the prefetch hasn't matched.
+    expect(ARCADE_ADAPTER).toMatch(
+      /metadata=\{metadataByMra\[detailDialogFor\.relativePath\]\s*\?\?\s*null\}/,
+    );
+  });
+
+  it('returns the dialog via `extras` so it sits outside the pane container (modal-portal hygiene)', () => {
+    // ItemListPane composes the pane chrome with `adapter.content`
+    // inside the outer container and `adapter.extras` as a sibling.
+    // Modal portals belong in `extras` so the pane shell can
+    // restructure its container without dragging the modal tree
+    // along (see ItemListPane.test.ts above).
+    expect(ARCADE_ADAPTER).toMatch(/extras:\s*[\s\S]{0,200}<RomDetailDialog/);
+  });
+
+  it('RomDetailDialog accepts a readOnly prop (hides Edit + Find buttons)', () => {
+    const detailDialogSrc = readFileSync(
+      resolve(__dirname, 'RomDetailDialog.tsx'),
+      'utf8',
+    );
+    expect(detailDialogSrc).toMatch(/readonly readOnly\?:\s*boolean/);
+    // The button row guards both Edit and Find behind the readOnly
+    // gate; assert both are inside the gate (not the trivial case
+    // of guarding just one).
+    expect(detailDialogSrc).toMatch(
+      /readOnly\s*\?\s*null\s*:[\s\S]{0,400}Edit\.\.\.[\s\S]{0,400}Find on ScreenScraper/,
+    );
+  });
+});
+
 describe('no inter-adapter state leakage', () => {
   it('neither adapter file declares module-level mutable state (each hook owns its state in React)', () => {
     // The "switching adapters at runtime doesn't leak state" guarantee

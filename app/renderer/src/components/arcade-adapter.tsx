@@ -17,6 +17,7 @@ import {
   RomThumbnailCell,
   RomYearCell,
 } from '@app/renderer/src/components/RomMetadataCells';
+import { RomDetailDialog } from '@app/renderer/src/components/RomDetailDialog';
 import { SortableHeader } from '@app/renderer/src/components/SortableHeader';
 import { Button } from '@app/renderer/src/components/ui/button';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
@@ -112,6 +113,14 @@ export function useArcadeAdapter(): ItemListAdapter {
   // Empty string = root; slash-joined for nested folders (e.g.
   // `_Konami`, `_Konami/sub`).
   const [subPath, setSubPath] = useState<string>('');
+  // feat/arcade-parity-3-ui (G11-ish, read-only variant) — detail-
+  // dialog target. Carries the entry shape needed to render the modal
+  // (relativePath drives the metadata lookup). Null when closed.
+  const [detailDialogFor, setDetailDialogFor] = useState<{
+    readonly relativePath: string;
+    readonly displayName: string;
+    readonly filename: string;
+  } | null>(null);
 
   const refresh = useCallback(
     async (forceRefresh = false): Promise<void> => {
@@ -598,7 +607,22 @@ export function useArcadeAdapter(): ItemListAdapter {
                       className={cn(
                         'max-w-0',
                         entry.hidden && 'opacity-50 italic',
+                        !isFolder && 'cursor-pointer',
                       )}
+                      onClick={
+                        isFolder
+                          ? undefined
+                          : (e) => {
+                              e.stopPropagation();
+                              setDetailDialogFor({
+                                relativePath: entry.relativePath,
+                                displayName:
+                                  metadata?.name ?? rom.displayName,
+                                filename: rom.filename,
+                              });
+                            }
+                      }
+                      title={!isFolder ? 'View details' : undefined}
                     >
                       <div className="flex min-w-0 items-center gap-2">
                         <div className="min-w-0 flex-1">
@@ -663,6 +687,36 @@ export function useArcadeAdapter(): ItemListAdapter {
       </div>
       </>
     ),
+    // feat/arcade-parity-3-ui — read-only metadata detail modal. Opens
+    // on click of the name cell. Renders unconditionally for any open
+    // `detailDialogFor`; the dialog's empty-state branch handles
+    // entries whose ScreenScraper match hasn't landed yet (placeholder
+    // box art + "No metadata yet" note). Edit / Find on ScreenScraper
+    // hand-offs are explicit v0.2 — we pass no-op callbacks behind the
+    // `readOnly` flag, which the dialog uses to hide both buttons.
+    extras:
+      detailDialogFor !== null ? (
+        <RomDetailDialog
+          path={detailDialogFor.relativePath}
+          filename={detailDialogFor.filename}
+          metadata={metadataByMra[detailDialogFor.relativePath] ?? null}
+          open
+          onOpenChange={(open) => {
+            if (!open) setDetailDialogFor(null);
+          }}
+          onEdit={() => {
+            /* arcade detail dialog is read-only; the Edit button is
+               hidden by `readOnly`. The callback is required by the
+               shared dialog props but never fires. v0.2 wires this. */
+          }}
+          onSearch={() => {
+            /* arcade detail dialog is read-only; the Find-on-SS button
+               is hidden by `readOnly`. v0.2 ships a .mra-aware SS
+               search dialog and wires this. */
+          }}
+          readOnly
+        />
+      ) : null,
   };
 }
 

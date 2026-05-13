@@ -232,6 +232,42 @@ describe('entriesAtDepth — hidden-aware folder count (bug fix)', () => {
     expect(out.map((e) => e.relativePath)).toContain('_alternatives');
   });
 
+  it('drops a folder whose only mras live two levels deep WITHOUT a drillable intermediate subfolder', () => {
+    // Real-world `parseArcadeMraEntries` only emits TOP-LEVEL subfolder
+    // entries — nested directories don't surface as drillable rows. So
+    // a layout like `_alternatives/_alts/.alt.mra` (no entry for the
+    // intermediate `_alternatives/_alts` directory) has mras the
+    // renderer can't reach from `_alternatives/`. Counting them toward
+    // "folder has content" would resurface the bug this fix targets:
+    // the parent row appears, drilling shows nothing.
+    const entries: readonly ArcadeMraEntry[] = [
+      sub('_alternatives'),
+      // No entry for `_alternatives/HiddenSub` — matches what the
+      // real parser emits.
+      mra('_alternatives/HiddenSub/altA.mra', 'altA.mra'),
+    ];
+    const visibleAtRoot = entriesAtDepth(entries, '', false);
+    expect(visibleAtRoot.map((e) => e.relativePath)).toEqual([]);
+    // And the drill view itself: navigating into `_alternatives` would
+    // surface zero rows under the same filter, so the two paths agree.
+    const drillAlternatives = entriesAtDepth(entries, '_alternatives', false);
+    expect(drillAlternatives.map((e) => e.relativePath)).toEqual([]);
+  });
+
+  it('keeps a folder visible when an intermediate subfolder IS in the listing AND drilling through it reaches a visible mra', () => {
+    // The case where parseArcadeMraEntries (or a future variant) DOES
+    // emit a nested subfolder row: the renderer can drill through it,
+    // so deep mras DO count. Recursion only stops at the visibility
+    // filter, not at depth.
+    const entries: readonly ArcadeMraEntry[] = [
+      sub('_alternatives'),
+      sub('_alternatives/Konami'),
+      mra('_alternatives/Konami/deep.mra', 'deep.mra'),
+    ];
+    const out = entriesAtDepth(entries, '', false);
+    expect(out.map((e) => e.relativePath)).toContain('_alternatives');
+  });
+
   it('hides hidden mras at the current depth when includeHidden=false', () => {
     // The direct-mra-at-depth visibility filter lives in the same
     // function now, so we don't have two separate hide passes that
