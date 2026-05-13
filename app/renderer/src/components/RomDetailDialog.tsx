@@ -361,78 +361,101 @@ function PopulatedDetailDialog(props: {
         />
 
         {/* feat/detail-dialog-nav-layout-fix (A) — scrollable
-            content (media gallery + info stack). The button row
-            below this wrapper sits OUTSIDE the scroll so it stays
-            pinned to the bottom of the dialog regardless of how
-            tall the synopsis runs. min-h-0 unlocks the overflow
-            on the inner flex child. */}
+            content. The button row below this wrapper sits OUTSIDE
+            the scroll so it stays pinned to the bottom of the
+            dialog regardless of how tall the synopsis runs.
+            min-h-0 unlocks the overflow on the inner flex child.
+            feat/detail-dialog-two-column-layout — content INSIDE
+            the scroll splits into two columns at `md:` breakpoint
+            (~720px modal width). Pre-fix everything stacked
+            vertically: the image + thumbnails took the full width
+            and the metadata stack lived below them, which wasted
+            the wide-window real estate. Now the image / thumbs /
+            provenance live on the left ~40%; the stats grid +
+            synopsis (and tags / note when present) live on the
+            right ~60%. On narrow viewports the grid collapses to
+            a single column and the layout reads as it did before. */}
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-          {/* feat/detail-dialog-nav-layout-fix (A) — primary
-              image height drops from 60vh to 35vh. On the live
-              1200×800 screenshot the 60vh image consumed ~60% of
-              dialog height and the synopsis was clipped behind
-              the scroll-button-row overlap. 35vh leaves room for
-              synopsis + key facts above the footer without scroll
-              on the typical viewport. */}
-          <MediaGallery
-            slots={mediaSlots}
-            primaryUrl={primaryUrl ?? boxArtUrl}
-            onSelect={setPrimaryUrl}
-            onEnlarge={() => {
-              const idx = mediaSlots.findIndex(
-                (s) => s.url === (primaryUrl ?? boxArtUrl),
-              );
-              setLightboxIndex(idx >= 0 ? idx : 0);
-            }}
-            title={title}
-          />
-
-          <div className="flex flex-col gap-4 min-w-0">
-            {description !== null && description.length > 0 ? (
-              <section className="flex flex-col gap-1">
-                <SectionLabel>Synopsis</SectionLabel>
-                <p className="text-body-sm text-fg whitespace-pre-line">
-                  {description}
-                </p>
-              </section>
-            ) : null}
-
-            <section className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
-              <KeyFact label="Players" value={players} />
-              <KeyFact
-                label="Rating"
-                value={rating !== null ? formatRating(rating) : null}
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-[2fr_3fr] md:items-start">
+            {/* LEFT — visual identity of the entry: art, the
+                thumbnail strip for cycling primary, and a single-
+                line provenance footer (source · fetched-date)
+                tucked under the thumbs. */}
+            <div className="flex min-w-0 flex-col gap-2">
+              {/* feat/detail-dialog-nav-layout-fix (A) — primary
+                  image height drops from 60vh to 35vh. On the
+                  live 1200×800 screenshot the 60vh image consumed
+                  ~60% of dialog height and the synopsis was
+                  clipped behind the scroll-button-row overlap.
+                  35vh leaves room for synopsis + key facts above
+                  the footer without scroll on the typical
+                  viewport. */}
+              <MediaGallery
+                slots={mediaSlots}
+                primaryUrl={primaryUrl ?? boxArtUrl}
+                onSelect={setPrimaryUrl}
+                onEnlarge={() => {
+                  const idx = mediaSlots.findIndex(
+                    (s) => s.url === (primaryUrl ?? boxArtUrl),
+                  );
+                  setLightboxIndex(idx >= 0 ? idx : 0);
+                }}
+                title={title}
               />
-              <KeyFact label="Released" value={releaseDate} />
-              <KeyFact label="Publisher" value={publisher} />
-            </section>
+              <ProvenanceFooter metadata={metadata} />
+            </div>
 
-            {tags.length > 0 ? (
-              <section className="flex flex-col gap-1">
-                <SectionLabel>Tags</SectionLabel>
-                <div className="flex flex-wrap gap-1">
-                  {tags.map((tag) => (
-                    <span
-                      key={tag}
-                      className="rounded-sm bg-elevated px-2 py-0.5 text-caption text-fg"
-                    >
-                      {tag}
-                    </span>
-                  ))}
-                </div>
+            {/* RIGHT — text-side metadata, stats first then
+                synopsis. Tags + Note fall through here too when
+                present; they're the same metadata class as the
+                synopsis and keeping them in the right column
+                preserves the two-column rhythm on entries with
+                tag/note content. */}
+            <div className="flex min-w-0 flex-col gap-4">
+              <section className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
+                <KeyFact label="Players" value={players} />
+                <KeyFact
+                  label="Rating"
+                  value={rating !== null ? formatRating(rating) : null}
+                />
+                <KeyFact label="Released" value={releaseDate} />
+                <KeyFact label="Publisher" value={publisher} />
               </section>
-            ) : null}
 
-            {note !== null && note.length > 0 ? (
-              <section className="flex flex-col gap-1">
-                <SectionLabel>Note</SectionLabel>
-                <p className="text-body-sm text-fg-body whitespace-pre-line">
-                  {note}
-                </p>
-              </section>
-            ) : null}
+              {description !== null && description.length > 0 ? (
+                <section className="flex flex-col gap-1">
+                  <SectionLabel>Synopsis</SectionLabel>
+                  <p className="text-body-sm text-fg whitespace-pre-line">
+                    {description}
+                  </p>
+                </section>
+              ) : null}
 
-            <ProvenanceFooter metadata={metadata} />
+              {tags.length > 0 ? (
+                <section className="flex flex-col gap-1">
+                  <SectionLabel>Tags</SectionLabel>
+                  <div className="flex flex-wrap gap-1">
+                    {tags.map((tag) => (
+                      <span
+                        key={tag}
+                        className="rounded-sm bg-elevated px-2 py-0.5 text-caption text-fg"
+                      >
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+
+              {note !== null && note.length > 0 ? (
+                <section className="flex flex-col gap-1">
+                  <SectionLabel>Note</SectionLabel>
+                  <p className="text-body-sm text-fg-body whitespace-pre-line">
+                    {note}
+                  </p>
+                </section>
+              ) : null}
+            </div>
           </div>
         </div>
 
@@ -563,9 +586,17 @@ function ProvenanceFooter(props: {
 }): JSX.Element {
   const { metadata } = props;
   const date = metadata.fetchedAt.slice(0, 10);
+  // feat/detail-dialog-two-column-layout — collapse from two stacked
+  // lines to a single inline row joined by middle dots. The line
+  // lives under the thumbnail strip in the left column, so a
+  // horizontal layout fits the available width without imposing
+  // extra vertical space the column doesn't need. `flex-wrap` lets
+  // it break to two lines if the source slug ever grows past the
+  // column width.
   return (
-    <div className="flex flex-col gap-0.5 text-caption text-fg-muted">
+    <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-caption text-fg-muted">
       <span>source: {metadata.source}</span>
+      <span aria-hidden>·</span>
       <span>fetched: {date}</span>
     </div>
   );
