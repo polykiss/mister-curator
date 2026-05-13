@@ -47,14 +47,26 @@ export function CoresPane(): JSX.Element {
     'mistercurator.showHiddenCores',
     false,
   );
+  // feat/arcade-parity-3-ui (G23) — MAME/HBMame manage .zip ROMs that
+  // are mostly arcade BIOS / parent-set storage. The Arcade pane (driven
+  // by .mra files in `_Arcade/`) is the real user-facing surface; the
+  // .zip-management view is power-user territory. Off by default so the
+  // sidebar reads as one Arcade row; the toggle restores both cores for
+  // anyone who manages their MAME/HBMame zips directly.
+  const [showMameAsCores, setShowMameAsCores] = usePersistedBool(
+    'mistercurator.showMameAsCores',
+    false,
+  );
   const [bulkOpen, setBulkOpen] = useState(false);
 
   const visibleCores = useMemo(() => {
     if (!cores) return null;
-    return showHidden
+    const hiddenFiltered = showHidden
       ? cores
       : cores.filter((c) => c.category === 'Arcade' || !isCoreHidden(c));
-  }, [cores, showHidden]);
+    if (showMameAsCores) return hiddenFiltered;
+    return hiddenFiltered.filter((c) => c.id !== 'mame' && c.id !== 'hbmame');
+  }, [cores, showHidden, showMameAsCores]);
 
   const emptyHideableCores = useMemo(
     () =>
@@ -210,15 +222,29 @@ export function CoresPane(): JSX.Element {
             Unhide all ({appHiddenCores.length})
           </Button>
         </div>
-        <label className="flex items-center gap-2 text-body-sm text-fg-body">
-          <input
-            type="checkbox"
-            className="accent-accent"
-            checked={showHidden}
-            onChange={(e) => setShowHidden(e.target.checked)}
-          />
-          Show hidden
-        </label>
+        <div className="flex flex-wrap gap-4 text-body-sm text-fg-body">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              className="accent-accent"
+              checked={showHidden}
+              onChange={(e) => setShowHidden(e.target.checked)}
+            />
+            Show hidden
+          </label>
+          <label
+            className="flex items-center gap-2"
+            title="MAME / HBMame manage .zip ROMs that mostly feed the Arcade pane. Off by default so the sidebar shows one Arcade row; turn on to manage the zips directly."
+          >
+            <input
+              type="checkbox"
+              className="accent-accent"
+              checked={showMameAsCores}
+              onChange={(e) => setShowMameAsCores(e.target.checked)}
+            />
+            Show MAME / HBMame as separate cores
+          </label>
+        </div>
       </header>
 
       {renderCoreList({
