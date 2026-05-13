@@ -1084,6 +1084,11 @@ export function useArcadeAdapter(): ItemListAdapter {
                 )}
                 onPrev={hasPrev ? handlePrev : undefined}
                 onNext={hasNext ? handleNext : undefined}
+                navPosition={
+                  idx >= 0
+                    ? { current: idx + 1, total: mraOnly.length }
+                    : undefined
+                }
                 hideAction={hideAction}
               />
             );

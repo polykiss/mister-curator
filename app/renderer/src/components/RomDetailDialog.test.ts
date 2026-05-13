@@ -413,19 +413,19 @@ describe('RomDetailDialog — gallery primary sizing (feat/arcade-parse-toleranc
   // fixed-height container with `object-contain` — any aspect fits,
   // nothing below moves.
 
-  it('primary image button is a viewport-relative fixed-height container (h-[60vh]), no reflow on thumbnail swap', () => {
-    // feat/detail-modal-nav-hide — height moves from a fixed
-    // 448px (h-[28rem]) to viewport-relative `h-[60vh]` so the
-    // gallery scales with the dialog: a 700px window shows a
-    // smaller image, a 1400px window shows a bigger one. The
-    // container is still FIXED (60vh, not max-h-[60vh]), so
-    // switching thumbnails with different aspect ratios doesn't
-    // reflow anything below.
+  it('primary image button is a viewport-relative fixed-height container (h-[35vh]), no reflow on thumbnail swap', () => {
+    // feat/detail-dialog-nav-layout-fix (A) — height drops from
+    // 60vh (PR #76) to 35vh. Live screenshot showed the 60vh
+    // image consuming ~60% of dialog height and the synopsis
+    // getting clipped behind the scroll-button-row overlap. 35vh
+    // leaves room for synopsis + key facts above the now-sticky
+    // footer on a typical viewport. Still FIXED (not max-h-) so
+    // switching thumbnails doesn't reflow.
     const primaryButton = SOURCE.match(
       /<button[\s\S]*?onClick=\{\(\) => primaryUrl !== null && onEnlarge[\s\S]*?className="([^"]+)"/,
     );
     expect(primaryButton).not.toBeNull();
-    expect(primaryButton![1]).toContain('h-[60vh]');
+    expect(primaryButton![1]).toContain('h-[35vh]');
     expect(primaryButton![1]).toContain('w-full');
     // Required so a tall image stays inside the container instead of
     // pushing the layout down.
@@ -433,23 +433,67 @@ describe('RomDetailDialog — gallery primary sizing (feat/arcade-parse-toleranc
   });
 
   it('zero-media placeholder matches the populated container height (no jump between states)', () => {
-    // Pre-PR both used h-[28rem] (fixed px). Post-PR both use
-    // h-[60vh] (viewport-relative) so the placeholder scales the
-    // same way the populated container does.
-    expect(SOURCE).toMatch(/h-\[60vh\] w-full rounded-sm border border-subtle bg-overlay\/40/);
+    // feat/detail-dialog-nav-layout-fix (A) — both placeholders
+    // track each other at h-[35vh] (was 60vh in PR #76).
+    expect(SOURCE).toMatch(/h-\[35vh\] w-full rounded-sm border border-subtle bg-overlay\/40/);
   });
 
   it('primary <img> fills the fixed container and uses object-contain to preserve aspect', () => {
-    // feat/pre-beta-polish-batch — the IMG is now `h-full w-full`
+    // feat/pre-beta-polish-batch — the IMG is `h-full w-full`
     // (not max-h-full / max-w-full). With max-*, an 800×600
     // screenshot rendered at its intrinsic 800×600 inside a much
     // larger container — switching to a portrait box-art changed
     // the visible size of the image. h-full w-full forces the IMG
-    // element to fill the fixed h-[60vh] container; object-contain
+    // element to fill the fixed h-[35vh] container; object-contain
     // then preserves the source aspect inside that fixed frame.
     expect(SOURCE).toMatch(
       /alt=\{`\$\{title\} primary image`\}[\s\S]{0,1200}className="h-full w-full object-contain"/,
     );
+  });
+});
+
+describe('RomDetailDialog — sticky footer + scroll on content (feat/detail-dialog-nav-layout-fix A)', () => {
+  // Pre-fix (PR #75 + #76): the action-button row was INSIDE the
+  // scrolling content wrapper, so on a small viewport the buttons
+  // scrolled out of view as the user dragged down the synopsis.
+  // The screenshot showed the scrollbar overlapping the bottom of
+  // the Close button.
+  //
+  // Post-fix: the button row is OUTSIDE the scrolling wrapper so
+  // it stays pinned to the bottom of DialogContent. The scroll
+  // applies to ONLY the media-gallery + info-stack area.
+
+  it('action button row sits OUTSIDE the scrolling wrapper (sticky-footer effect)', () => {
+    // Pin the structural shape: the `overflow-y-auto` wrapper
+    // closes BEFORE the button row.
+    const populatedIdx = SOURCE.indexOf('function PopulatedDetailDialog');
+    const emptyIdx = SOURCE.indexOf('function EmptyDetailDialog');
+    const block = SOURCE.slice(populatedIdx, emptyIdx);
+    const overflowOpen = block.indexOf(
+      'flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto',
+    );
+    const buttonRow = block.indexOf(
+      'flex flex-wrap justify-end gap-2 border-t border-subtle pt-3',
+    );
+    expect(overflowOpen).toBeGreaterThan(-1);
+    expect(buttonRow).toBeGreaterThan(overflowOpen);
+    // And the closing </div> of the overflow wrapper comes BEFORE
+    // the button row's opening. We approximate: count `</div>`
+    // between overflowOpen and buttonRow and require ≥ 1.
+    const between = block.slice(overflowOpen, buttonRow);
+    expect(between.match(/<\/div>/g)?.length ?? 0).toBeGreaterThanOrEqual(1);
+  });
+
+  it('footer row carries a top border so it visually separates from the scrolling content', () => {
+    // The visual separation cue: without a top border, the footer
+    // looks like it could be part of the scrolling region. Pin it
+    // on both variants.
+    const populatedIdx = SOURCE.indexOf('function PopulatedDetailDialog');
+    const emptyIdx = SOURCE.indexOf('function EmptyDetailDialog');
+    const populated = SOURCE.slice(populatedIdx, emptyIdx);
+    const empty = SOURCE.slice(emptyIdx);
+    expect(populated).toMatch(/border-t border-subtle pt-3/);
+    expect(empty).toMatch(/border-t border-subtle pt-3/);
   });
 });
 
@@ -640,78 +684,121 @@ describe('RomDetailDialog — lightbox navigation (feat/arcade-parse-tolerance-g
   });
 });
 
-describe('RomDetailDialog — Prev/Next entry navigation (feat/detail-modal-nav-hide)', () => {
-  // Power-curation flow: advance to the previous / next entry in
-  // the pane's currently-filtered + sorted row list without
-  // closing the dialog. Adapter resolves neighbours; dialog
-  // renders edge-positioned arrow buttons.
+describe('RomDetailDialog — Prev/Next ROM navigation (feat/detail-dialog-nav-layout-fix B)', () => {
+  // PR #76 placed the prev/next chevrons at the dialog's left/
+  // right edges — visually indistinguishable from the lightbox's
+  // image-cycling arrows AND visible behind the lightbox overlay
+  // when it opened. The corrective fix moves the nav into a
+  // header-area strip with text-labeled buttons + position
+  // indicator, AND hides the strip while the lightbox is open.
 
   it('public RomDetailDialog accepts optional onPrev / onNext callbacks', () => {
     expect(SOURCE).toMatch(/readonly onPrev\?\: \(\) => void;/);
     expect(SOURCE).toMatch(/readonly onNext\?\: \(\) => void;/);
   });
 
-  it('a dedicated PrevNextArrows component renders the buttons at the dialog edges', () => {
-    // Edge buttons (mirroring the lightbox arrows) rather than
-    // header-inline so the dialog header / title stays focused on
-    // the entry. Both buttons share chrome via `baseClass`.
-    expect(SOURCE).toMatch(/function PrevNextArrows\(props: \{/);
-    expect(SOURCE).toMatch(/aria-label="Previous entry"/);
-    expect(SOURCE).toMatch(/aria-label="Next entry"/);
+  it('public RomDetailDialog accepts optional navPosition for the "X of Y" indicator', () => {
+    expect(SOURCE).toMatch(
+      /readonly navPosition\?\: \{\s*readonly current: number;\s*readonly total: number;\s*\};/,
+    );
   });
 
-  it('PrevNextArrows returns null when neither prev nor next is supplied (no nav context → no chrome)', () => {
+  it('header-area DetailNavStrip replaces the old edge-positioned PrevNextArrows', () => {
+    // Pre-fix: a PrevNextArrows component with absolute-positioned
+    // chevron buttons at left-1 / right-1 of DialogContent. Post-
+    // fix: DetailNavStrip — an in-flow strip with text labels.
+    expect(SOURCE).toMatch(/function DetailNavStrip\(props: \{/);
+    expect(SOURCE).not.toMatch(/function PrevNextArrows/);
+    // No more "Previous entry" / "Next entry" generic chevron
+    // aria-labels — replaced with explicit "ROM entry" wording
+    // so screen readers can distinguish them from the lightbox's
+    // image-cycling arrows (which use "Previous image" / "Next
+    // image").
+    expect(SOURCE).toMatch(/aria-label="Previous ROM entry"/);
+    expect(SOURCE).toMatch(/aria-label="Next ROM entry"/);
+    // Buttons are text-labeled in the visible UI too.
+    expect(SOURCE).toMatch(/>\s*Previous\s*</);
+    expect(SOURCE).toMatch(/>\s*Next\s*</);
+  });
+
+  it('DetailNavStrip renders a "<current> of <total>" indicator when navPosition is supplied', () => {
+    expect(SOURCE).toMatch(
+      /\{position\.current\} of \{position\.total\}/,
+    );
+  });
+
+  it('DetailNavStrip returns null when hidden flag is set (covers it for the lightbox-open case)', () => {
+    // feat/detail-dialog-nav-layout-fix D — the lightbox dialog
+    // renders OVER the detail dialog. To prevent the prev/next
+    // ROM strip from showing through, the PopulatedDetailDialog
+    // passes `hidden={lightboxIndex !== null}` and DetailNavStrip
+    // short-circuits to null. Pin the early return at the top of
+    // the component.
+    expect(SOURCE).toMatch(/if \(hidden === true\) return null;/);
+  });
+
+  it('DetailNavStrip returns null when neither prev nor next is supplied (no nav context → no strip)', () => {
     // The adapter passes undefined for both when the dialog is
-    // opened on an entry that isn't in the visible row list (the
-    // single-entry case is the most common: e.g. an arcade `.mra`
-    // surfaced from a non-list code path).
+    // opened on an entry that isn't in the visible row list (e.g.
+    // an arcade `.mra` surfaced from a non-list code path).
     expect(SOURCE).toMatch(
       /if \(onPrev === undefined && onNext === undefined\) return null;/,
     );
   });
 
-  it('arrow buttons render disabled at list boundaries (button still present, click ignored)', () => {
+  it('Previous / Next buttons render disabled at list boundaries (button still present, click ignored)', () => {
     // Per the spec: at boundaries the button stays visible but
-    // disabled, not absent. `disabled={onPrev === undefined}` (and
-    // similar for next) gives us this exact behavior — the
-    // adapter passes undefined only for the missing direction.
+    // disabled, not absent. The adapter passes undefined only for
+    // the missing direction; the button gets disabled={true}.
     expect(SOURCE).toMatch(/disabled=\{onPrev === undefined\}/);
     expect(SOURCE).toMatch(/disabled=\{onNext === undefined\}/);
-    // Visual disabled state pinned on the className.
-    expect(SOURCE).toMatch(/disabled:opacity-40/);
-    expect(SOURCE).toMatch(/disabled:cursor-not-allowed/);
   });
 
-  it('DialogContent stops scrolling on the outer container — inner wrapper handles overflow so the absolutely-positioned arrows stay anchored', () => {
-    // Pre-PR DialogContent had `overflow-y-auto` directly; that
-    // means absolute children inside scroll WITH the content as
-    // the user moves through a tall description. Post-PR
-    // DialogContent is `flex flex-col` (no overflow on itself), and
-    // an inner div wraps the scrolling content. The arrows are
-    // children of DialogContent (not the scrolling wrapper) so
-    // they stay anchored at the dialog edges.
+  it('PopulatedDetailDialog wires lightboxIndex into the strip\'s hidden flag (covers D)', () => {
     const populated = SOURCE.indexOf('function PopulatedDetailDialog');
     const empty = SOURCE.indexOf('function EmptyDetailDialog');
-    expect(populated).toBeGreaterThan(-1);
-    expect(empty).toBeGreaterThan(-1);
-    const populatedBlock = SOURCE.slice(populated, empty);
-    expect(populatedBlock).toMatch(
-      /<PrevNextArrows onPrev=\{onPrev\} onNext=\{onNext\} \/>/,
-    );
-    // Inner scrollable wrapper sits right after PrevNextArrows.
-    expect(populatedBlock).toMatch(
-      /<div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">/,
+    const block = SOURCE.slice(populated, empty);
+    expect(block).toMatch(
+      /<DetailNavStrip[\s\S]{0,200}hidden=\{lightboxIndex !== null\}/,
     );
   });
 
-  it('EmptyDetailDialog gets the same Prev/Next nav (so users can advance even on no-metadata entries)', () => {
+  it('EmptyDetailDialog gets the same DetailNavStrip (so users can advance even on no-metadata entries)', () => {
     // Users curating an unfamiliar core hit a string of no-metadata
     // entries. The dialog should let them advance without closing
-    // — same affordance as populated entries.
+    // — same affordance as populated entries. EmptyDetailDialog
+    // has no lightbox of its own, so it doesn't pass `hidden`.
     const empty = SOURCE.indexOf('function EmptyDetailDialog');
     const emptyBlock = SOURCE.slice(empty);
     expect(emptyBlock).toMatch(
-      /<PrevNextArrows onPrev=\{props\.onPrev\} onNext=\{props\.onNext\} \/>/,
+      /<DetailNavStrip[\s\S]{0,200}onPrev=\{props\.onPrev\}[\s\S]{0,200}onNext=\{props\.onNext\}/,
+    );
+  });
+});
+
+describe('RomDetailDialog — primary-image state reset on entry change (feat/detail-dialog-nav-layout-fix C)', () => {
+  // Live bug after PR #76: clicking Prev/Next updated the metadata
+  // text (synopsis, year, etc.) but the primary image stayed on
+  // the previous entry's image. The dialog's internal
+  // `primaryUrl` state was set at mount and not refreshed when
+  // `metadata` changed.
+
+  it('a useEffect resets primaryUrl when metadata.hash changes', () => {
+    // Pin the effect by its dependency array — `metadata.hash` is
+    // the stable per-record signal. Pre-fix there was no such
+    // effect; primaryUrl initialized once and lived forever.
+    expect(SOURCE).toMatch(
+      /useEffect\(\(\) => \{\s*setPrimaryUrl\(mediaSlots\[0\]\?\.url \?\? null\);[\s\S]{0,400}\}, \[metadata\.hash\]\);/,
+    );
+  });
+
+  it('the same effect also closes the lightbox so a stale image does not survive a nav step', () => {
+    // If the user opened the lightbox on entry X and then advanced
+    // the dialog to entry Y, the lightbox would still be showing
+    // X's image. Closing it on every entry change avoids the
+    // mismatch.
+    expect(SOURCE).toMatch(
+      /useEffect\(\(\) => \{[\s\S]{0,300}setLightboxIndex\(null\);/,
     );
   });
 });
@@ -814,5 +901,123 @@ describe('roms-adapter / arcade-adapter — detail-dialog nav + hide wiring (fea
     expect(ARCADE).toMatch(
       /toast\.error\(\s*`\$\{next \? 'Hide' : 'Show'\} failed: \$\{currentEntry\.displayName\}`/,
     );
+  });
+});
+
+describe('RomDetailDialog — two-column content layout (feat/detail-dialog-two-column-layout)', () => {
+  // Pre-fix the scrolling content stacked vertically: image +
+  // thumbnails first, then the synopsis / stats / tags / note stack
+  // below. On wide windows this wasted right-side real estate.
+  // Post-fix the content splits into two columns inside the same
+  // scroll wrapper:
+  //   • Left ~40%: image, thumbnail strip, source/fetched line.
+  //   • Right ~60%: stats grid, synopsis (+ tags + note when
+  //     present).
+  // The grid collapses to a single column on narrow viewports.
+
+  it('content wrapper holds a CSS grid with two columns at md+ that collapses to one column below', () => {
+    // Pin both the responsive grid AND `items-start` so the
+    // columns top-align rather than stretching to match each
+    // other's height (a wide synopsis next to a short image
+    // shouldn't make the image grow vertically).
+    expect(SOURCE).toMatch(
+      /<div className="grid grid-cols-1 gap-4 md:grid-cols-\[2fr_3fr\] md:items-start">/,
+    );
+  });
+
+  it('LEFT column contains MediaGallery (image + thumbnails) then ProvenanceFooter', () => {
+    // Pin the inner-column structure so a future "let me also put
+    // the synopsis in the left" refactor is loud. The MediaGallery
+    // component already owns the image button + thumbnail strip;
+    // we just sandwich ProvenanceFooter under it.
+    const populated = SOURCE.indexOf('function PopulatedDetailDialog');
+    const empty = SOURCE.indexOf('function EmptyDetailDialog');
+    const block = SOURCE.slice(populated, empty);
+    // Find the LEFT column wrapper (first child of the grid).
+    const leftIdx = block.indexOf(
+      '<div className="flex min-w-0 flex-col gap-2">',
+    );
+    expect(leftIdx).toBeGreaterThan(-1);
+    // Grab the next ~2000 chars (the column's body) and assert the
+    // two members are present in order.
+    const leftBlock = block.slice(leftIdx, leftIdx + 2000);
+    const galleryIdx = leftBlock.indexOf('<MediaGallery');
+    const provenanceIdx = leftBlock.indexOf('<ProvenanceFooter');
+    expect(galleryIdx).toBeGreaterThan(-1);
+    expect(provenanceIdx).toBeGreaterThan(galleryIdx);
+  });
+
+  it('RIGHT column contains the stats grid first, then the synopsis', () => {
+    // Pin the order — stats before synopsis is what the user
+    // expects to see at the top of the right column.
+    const populated = SOURCE.indexOf('function PopulatedDetailDialog');
+    const empty = SOURCE.indexOf('function EmptyDetailDialog');
+    const block = SOURCE.slice(populated, empty);
+    // The RIGHT column wrapper uses gap-4 (the stats / synopsis
+    // / tags / note stack); the LEFT uses gap-2 (image + thumbs
+    // + provenance). Distinct so a sloppy edit can't mix them.
+    const rightIdx = block.indexOf(
+      '<div className="flex min-w-0 flex-col gap-4">',
+    );
+    expect(rightIdx).toBeGreaterThan(-1);
+    const rightBlock = block.slice(rightIdx, rightIdx + 3000);
+    const statsIdx = rightBlock.indexOf('<KeyFact label="Players"');
+    const synopsisIdx = rightBlock.indexOf('<SectionLabel>Synopsis</SectionLabel>');
+    expect(statsIdx).toBeGreaterThan(-1);
+    // Synopsis present (when description is non-empty — the JSX
+    // path always contains the label string).
+    expect(synopsisIdx).toBeGreaterThan(statsIdx);
+  });
+
+  it('stats grid keeps the 2x2 → 4-across responsive shape (per spec: fall back to 2x2 when cramped)', () => {
+    // Inside the narrower right column the 4-across at sm:
+    // (640px viewport ≈ 326px column width) is borderline, but
+    // matches the spec's "fall back to 2x2 if 4-across is too
+    // cramped" intent — the row falls back to 2x2 at viewport
+    // below the sm: breakpoint.
+    expect(SOURCE).toMatch(
+      /<section className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">/,
+    );
+  });
+
+  it('ProvenanceFooter renders a single inline row joined by a middle dot (not two stacked lines)', () => {
+    // Pre-fix this rendered as a two-line flex-col under the
+    // synopsis. In the two-column layout it lives in the left
+    // column under thumbnails where vertical space is precious,
+    // so it collapses to one line. flex-wrap lets it break onto
+    // two lines naturally if the column ever gets too narrow.
+    expect(SOURCE).toMatch(
+      /<div className="flex flex-wrap gap-x-2 gap-y-0.5 text-caption text-fg-muted">/,
+    );
+    expect(SOURCE).toMatch(/<span aria-hidden>·<\/span>/);
+    // Still source-first, fetched-second.
+    expect(SOURCE).toMatch(
+      /<span>source: \{metadata\.source\}<\/span>\s*<span aria-hidden>·<\/span>\s*<span>fetched: \{date\}<\/span>/,
+    );
+  });
+
+  it('narrow-viewport breakpoint collapses both columns to a single vertical stack (grid-cols-1)', () => {
+    // The grid's default is `grid-cols-1`; the `md:grid-cols-
+    // [2fr_3fr]` override only kicks in at viewport >= 768px
+    // (Tailwind's md: breakpoint, ≈ 653px modal at 85vw — close
+    // enough to the user's "~720px modal width" guidance).
+    expect(SOURCE).toMatch(/grid grid-cols-1 gap-4 md:grid-cols-/);
+  });
+
+  it('tags + note sections live in the right column under synopsis (not in a third spanning row)', () => {
+    // The user spec listed only stats + synopsis in the right
+    // column; tags + note continue the metadata stack there since
+    // they're the same content class. Pinning their position
+    // prevents a future "let me move tags below the columns"
+    // refactor from quietly breaking the two-column rhythm.
+    const populated = SOURCE.indexOf('function PopulatedDetailDialog');
+    const empty = SOURCE.indexOf('function EmptyDetailDialog');
+    const block = SOURCE.slice(populated, empty);
+    const rightIdx = block.indexOf(
+      '<div className="flex min-w-0 flex-col gap-4">',
+    );
+    const rightBlock = block.slice(rightIdx, rightIdx + 3500);
+    expect(rightBlock).toMatch(/<SectionLabel>Tags<\/SectionLabel>/);
+    expect(rightBlock).toMatch(/<SectionLabel>Note<\/SectionLabel>/);
   });
 });

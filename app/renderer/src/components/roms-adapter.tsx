@@ -1656,6 +1656,11 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
               }}
               onPrev={hasPrev ? handlePrev : undefined}
               onNext={hasNext ? handleNext : undefined}
+              navPosition={
+                presentableRoms !== null && idx >= 0
+                  ? { current: idx + 1, total: presentableRoms.length }
+                  : undefined
+              }
               hideAction={hideAction}
             />
           );
