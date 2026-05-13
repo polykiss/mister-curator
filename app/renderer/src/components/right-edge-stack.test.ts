@@ -132,10 +132,11 @@ describe('Right-edge stack — density + eye structure (PR #11 round 5)', () => 
     // Exception: branches of the ternary that gate on a *mutually
     // exclusive* row state (system file → "read-only" copy span;
     // arcade placeholder → ARCADE_TOOLTIP span; mid-rename → loading
-    // spinner span). These never render alongside the eye Button at
+    // spinner span; feat/arcade-sidebar-alignment → arcade eye-slot
+    // spacer). These never render alongside the eye Button at
     // runtime — JSX renders one branch of the ternary, not all
     // three. Detect them by their gate text or aria-label.
-    const ALLOWED_BRANCH_MARKERS = /(read-only|ARCADE_TOOLTIP|aria-label=\{\s*isHiddenCore|role="status")/;
+    const ALLOWED_BRANCH_MARKERS = /(read-only|ARCADE_TOOLTIP|aria-label=\{\s*isHiddenCore|role="status"|data-arcade-eye-slot)/;
     for (const [name, source] of [
       ['cores pane', CORES_PANE],
       ['roms pane', ROMS_DENSITY_EYE_SOURCE],

@@ -421,6 +421,49 @@ describe('CoresPane MAME/HBMame sidebar filter (feat/arcade-parity-3-ui G23)', (
   });
 });
 
+describe('CoresPane Arcade sidebar row alignment (feat/arcade-sidebar-alignment)', () => {
+  const CORES_PANE = readFileSync(
+    resolve(__dirname, 'CoresPane.tsx'),
+    'utf8',
+  );
+
+  it('Arcade row reserves the eye-icon slot as an empty `h-8 w-8` spacer (tagged data-arcade-eye-slot) instead of rendering null', () => {
+    // The right-edge stack is `<DensityBar /> <EyeButton />` for
+    // every regular core. Pre-fix, the Arcade branch returned null
+    // where the eye button lives, so the density bar collapsed
+    // rightward by ~32px (the icon button's width), visibly mis-
+    // aligning the Arcade row's density strip with every other
+    // core's. The spacer restores the grid without adding a real
+    // eye toggle (Arcade hide is per-`.mra`, not per-core). The
+    // `data-arcade-eye-slot` attribute lets the right-edge-stack
+    // structural test recognise this as a gated mutually-exclusive
+    // branch (never renders alongside the eye Button at runtime).
+    const arcadeBranch = CORES_PANE.match(
+      /isArcade \? \([\s\S]{0,2000}?\)\s*:\s*isPending/,
+    );
+    expect(arcadeBranch).not.toBeNull();
+    const branch = arcadeBranch![0];
+    expect(branch).toMatch(/data-arcade-eye-slot/);
+    expect(branch).toMatch(/h-8 w-8/);
+    // No live `null` return for the Arcade branch — that was the
+    // regression. (Allow the literal word `null` to appear in a
+    // comment, but not as the JSX expression itself.)
+    expect(branch).not.toMatch(/\)\s*:\s*null\b/);
+  });
+
+  it('spacer width matches the loading-spinner placeholder and the eye-button footprint (column grid stays consistent)', () => {
+    // Same `h-8 w-8 shrink-0` shape the pending-rename branch uses
+    // for its loading spinner. If a future change moves to a
+    // different icon size, both branches should move together so
+    // the grid doesn't drift.
+    const pendingBranch = CORES_PANE.match(
+      /isPending \? \([\s\S]{0,1500}?\)\s*:\s*isHiddenCore/,
+    );
+    expect(pendingBranch).not.toBeNull();
+    expect(pendingBranch![0]).toMatch(/h-8 w-8 shrink-0/);
+  });
+});
+
 describe('arcade-adapter detail dialog (feat/arcade-parity-3-ui)', () => {
   it('imports the shared RomDetailDialog (not a new arcade-specific clone)', () => {
     expect(ARCADE_ADAPTER).toMatch(
