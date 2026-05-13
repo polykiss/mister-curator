@@ -1460,6 +1460,12 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
           onOpenChange={(open) => {
             if (!open) setEditMetadataFor(null);
           }}
+          onSave={(override) =>
+            window.mister.setRomMetadataOverride(
+              editMetadataFor.path,
+              override,
+            )
+          }
           onSaved={(updated) => {
             setMetadataByPath((prev) => ({
               ...prev,

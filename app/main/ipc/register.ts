@@ -446,6 +446,25 @@ export function registerIpcHandlers(
       );
     },
   );
+  // feat/arcade-bind-density-edit — arcade analogue of
+  // setRomMetadataOverride. Same snapshot-driven mra → primary-zip →
+  // md5 resolution as the bind path, then delegates to the
+  // orchestrator's edit-write helper.
+  handle<
+    [string, UserMetadataOverride | undefined],
+    RomMetadata | null
+  >(
+    IPC_CHANNELS.setArcadeMetadataOverride,
+    async (mraRelativePath, override) => {
+      const snapshot = manager.getArcadePlayabilitySnapshot();
+      if (snapshot === null) return null;
+      return metadata.setArcadeManualMetadataOverride(
+        snapshot,
+        mraRelativePath,
+        override,
+      );
+    },
+  );
 
   // PR-D2 (PR #29) — name-search for the search modal. Resolves
   // coreId → SS systemeid via the same map the auto-scrape

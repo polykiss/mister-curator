@@ -438,16 +438,18 @@ describe('arcade-adapter detail dialog (feat/arcade-parity-3-ui)', () => {
     expect(ARCADE_ADAPTER).toMatch(/setDetailDialogFor\(\{/);
   });
 
-  it('renders RomDetailDialog with allowEdit=false and allowSearch=true', () => {
-    // feat/arcade-manual-ss-search: the read-only round shipped both
-    // buttons hidden; this round wires Find-on-ScreenScraper so users
-    // can manually fix mis-matched arcade entries. Edit stays v0.2.
-    // The per-action flags replace the prior `readOnly={true}`.
+  it('renders RomDetailDialog with allowEdit=false and a per-entry allowSearch (greys out for missing-zip entries)', () => {
+    // feat/arcade-bind-density-edit: allowSearch is now bound to the
+    // entry's playability captured at click time
+    // (`detailDialogFor.canManageMetadata`). 'playable' → button
+    // enabled; 'missing'/'noRomsNeeded' → greyed out (no zip md5 to
+    // bind against). allowEdit stays false in the detail dialog —
+    // arcade's edit lives in the context menu.
     expect(ARCADE_ADAPTER).toMatch(
       /<RomDetailDialog[\s\S]{0,800}allowEdit=\{false\}/,
     );
     expect(ARCADE_ADAPTER).toMatch(
-      /<RomDetailDialog[\s\S]{0,800}allowSearch(?:\s|>|\n)/,
+      /<RomDetailDialog[\s\S]{0,800}allowSearch=\{detailDialogFor\.canManageMetadata\}/,
     );
   });
 
@@ -460,8 +462,12 @@ describe('arcade-adapter detail dialog (feat/arcade-parity-3-ui)', () => {
     expect(ARCADE_ADAPTER).toMatch(
       /from '@app\/renderer\/src\/components\/RomSearchScreenScraperDialog'/,
     );
+    // The detail dialog hands off to the SS search modal by composing
+    // its target object from `detailDialogFor` (no longer passes the
+    // whole record verbatim — extra fields like canManageMetadata
+    // shouldn't bleed into the search dialog's state).
     expect(ARCADE_ADAPTER).toMatch(
-      /setSearchScreenScraperFor\(detailDialogFor\)/,
+      /setSearchScreenScraperFor\(\{[\s\S]{0,200}relativePath:\s*detailDialogFor\.relativePath/,
     );
     expect(ARCADE_ADAPTER).toMatch(
       /onBind=\{[\s\S]{0,400}window\.mister\.bindArcadeMetadataFromSearch\(\s*searchScreenScraperFor\.relativePath,\s*game,?\s*\)/,
@@ -569,21 +575,44 @@ describe('arcade-adapter row context menu (feat/arcade-polish-context-menu)', ()
     expect(ARCADE_ADAPTER).toMatch(/title="More actions"/);
   });
 
-  it('menu has exactly one item ("Find on ScreenScraper...") wired to the existing arcade SS search dialog', () => {
-    // v0.2 keeps Edit Metadata + Mark as system out of arcade; the
-    // SOLE item this round is the Find dispatcher. It opens the SS
-    // search dialog via `setSearchScreenScraperFor`, the same
-    // downstream path the detail-dialog Find button uses — so bind
-    // routing goes through `bindArcadeMetadataFromSearch`.
+  it('menu carries exactly two items: Find on ScreenScraper... + Edit Metadata...', () => {
+    // feat/arcade-bind-density-edit: Edit Metadata joins Find on
+    // ScreenScraper now that the arcade bind path can write user
+    // overrides keyed on the primary-zip md5. Both items disable
+    // when the row's primary zip is missing (no md5 to bind / edit
+    // against); Edit further disables when no metadata record exists
+    // yet (composer needs an existing record to override).
     const itemsBlock = ARCADE_ADAPTER.match(
-      /const items: readonly RomRowMenuItem\[\] = \[[\s\S]{0,400}\];/,
+      /const items: readonly RomRowMenuItem\[\] = \[[\s\S]{0,1600}\];/,
     );
     expect(itemsBlock).not.toBeNull();
     const body = itemsBlock![0];
     expect(body).toContain("label: 'Find on ScreenScraper...'");
+    expect(body).toContain("label: 'Edit Metadata...'");
     expect(body).toContain('setSearchScreenScraperFor(target)');
+    expect(body).toContain('setEditMetadataFor({');
     const labelCount = (body.match(/label:\s*'/g) ?? []).length;
-    expect(labelCount).toBe(1);
+    expect(labelCount).toBe(2);
+  });
+
+  it('menu items grey out for missing-zip entries and (for Edit) for entries without metadata', () => {
+    // Find: disabled when canManageMetadata is false. Edit: disabled
+    // when EITHER canManageMetadata is false OR hasMetadata is false.
+    // Tooltips differentiate the two reasons so a user understands
+    // why the option is greyed. The tooltip strings live in const
+    // bindings just above the items array, so scan the wider menu
+    // IIFE body.
+    const iifeBlock = ARCADE_ADAPTER.match(
+      /menuFor !== null[\s\S]{0,3000}<RomRowMenu/,
+    );
+    expect(iifeBlock).not.toBeNull();
+    const body = iifeBlock![0];
+    expect(body).toMatch(/disabled:\s*!canSearch/);
+    expect(body).toMatch(/disabled:\s*!canEdit/);
+    expect(body).toContain('Install the ROM to enable metadata search.');
+    expect(body).toContain(
+      'No metadata yet — use Find on ScreenScraper first.',
+    );
   });
 
   it('renders RomRowMenu in extras when an anchor is open', () => {
@@ -626,6 +655,134 @@ describe('arcade density driven by primary-zip size (feat/arcade-polish-context-
     );
     expect(cacheTypesSrc).toMatch(
       /primaryZipSizeByMra\?:\s*Readonly<Record<string, number>>/,
+    );
+  });
+});
+
+describe('arcade Edit Metadata wiring (feat/arcade-bind-density-edit)', () => {
+  const preloadApi = readFileSync(
+    resolve(__dirname, '..', '..', '..', '..', 'shared', 'preload-api.ts'),
+    'utf8',
+  );
+
+  it('imports RomEditMetadataDialog into arcade-adapter', () => {
+    expect(ARCADE_ADAPTER).toMatch(
+      /from '@app\/renderer\/src\/components\/RomEditMetadataDialog'/,
+    );
+  });
+
+  it('renders RomEditMetadataDialog with arcade-shaped onSave wired to setArcadeMetadataOverride', () => {
+    // The same callback-driven shape that the SS search dialog uses
+    // — RomsPane wires `onSave` to setRomMetadataOverride, arcade
+    // wires it to setArcadeMetadataOverride. Pin the arcade callsite.
+    expect(ARCADE_ADAPTER).toMatch(
+      /<RomEditMetadataDialog[\s\S]{0,800}onSave=\{[\s\S]{0,200}window\.mister\.setArcadeMetadataOverride\(/,
+    );
+  });
+
+  it('Edit menu item opens RomEditMetadataDialog with the row metadata pre-filled', () => {
+    expect(ARCADE_ADAPTER).toMatch(
+      /setEditMetadataFor\(\{[\s\S]{0,400}metadata:\s*meta,?/,
+    );
+  });
+
+  it('declares the setArcadeMetadataOverride IPC channel + preload bridge', () => {
+    expect(preloadApi).toMatch(
+      /setArcadeMetadataOverride:\s*'mister:setArcadeMetadataOverride'/,
+    );
+    expect(preloadApi).toMatch(
+      /setArcadeMetadataOverride\([\s\S]{0,200}mraRelativePath: string,[\s\S]{0,200}override: UserMetadataOverride \| undefined,?\s*\)/,
+    );
+  });
+
+  it('RomEditMetadataDialog accepts onSave callback (no longer hard-codes the IPC)', () => {
+    const editDialogSrc = readFileSync(
+      resolve(__dirname, 'RomEditMetadataDialog.tsx'),
+      'utf8',
+    );
+    expect(editDialogSrc).toMatch(
+      /readonly onSave:\s*\(\s*override: UserMetadataOverride \| undefined,?\s*\)\s*=>\s*Promise<RomMetadata \| null>/,
+    );
+    // Pin handler bodies — both save + reset go through onSave now.
+    // (Top-of-file comments may still mention setRomMetadataOverride
+    // in the historical context section; those are fine.)
+    for (const fn of ['handleSave', 'handleReset'] as const) {
+      const match = editDialogSrc.match(
+        new RegExp(`async function ${fn}\\([^)]*\\)[^{]*\\{[\\s\\S]*?\\n {2}\\}`),
+      );
+      expect(match, `${fn} body must exist`).not.toBeNull();
+      expect(match![0]).toContain('await onSave(');
+      expect(match![0]).not.toMatch(/window\.mister\.setRomMetadataOverride\(/);
+    }
+  });
+
+  it('RomsPane still wires Edit via window.mister.setRomMetadataOverride (no regression)', () => {
+    expect(ROMS_ADAPTER).toMatch(
+      /<RomEditMetadataDialog[\s\S]{0,800}onSave=\{[\s\S]{0,200}window\.mister\.setRomMetadataOverride\(/,
+    );
+  });
+});
+
+describe('arcade manual SS bind: on-demand hash + grey-out for missing zip (feat/arcade-bind-density-edit)', () => {
+  const orchestratorSrc = readFileSync(
+    resolve(
+      __dirname,
+      '..',
+      '..',
+      '..',
+      '..',
+      'app',
+      'main',
+      'metadata',
+      'metadata-orchestrator.ts',
+    ),
+    'utf8',
+  );
+
+  it('hashes the primary zip on-demand when the hash cache misses (Devil Zone case)', () => {
+    // Pre-fix: bindArcadeManualMetadataOverride returned null when
+    // the primary zip wasn't in the hash cache (auto-scrape hadn't
+    // reached it yet). The renderer surfaced "no metadata record"
+    // and the user was stuck. The fix calls computeHash directly
+    // on the candidate zip paths when the cache lookup fails.
+    expect(orchestratorSrc).toMatch(
+      /resolveOrComputeArcadePrimaryZipMd5/,
+    );
+    expect(orchestratorSrc).toMatch(
+      /this\.hashService\.computeHash\(\s*session\.client,\s*session\.host,\s*path,?\s*\)/,
+    );
+  });
+
+  it('detail-dialog allowSearch follows canManageMetadata so missing-zip entries grey out the Find button', () => {
+    expect(ARCADE_ADAPTER).toMatch(
+      /canManageMetadata\s*=\s*classification === 'playable'/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(/allowSearch=\{detailDialogFor\.canManageMetadata\}/);
+  });
+});
+
+describe('RomSearchScreenScraperDialog long-title overflow (feat/arcade-bind-density-edit)', () => {
+  const searchDialogSrc = readFileSync(
+    resolve(__dirname, 'RomSearchScreenScraperDialog.tsx'),
+    'utf8',
+  );
+
+  it('title + description use break-words instead of truncate', () => {
+    // Same fix RomDetailDialog got in PR #66. `truncate` set
+    // white-space:nowrap; long unbreakable zip filenames forced the
+    // dialog past max-w-xl and the Close button slid past the right
+    // edge.
+    expect(searchDialogSrc).toMatch(
+      /<DialogDescription\s+className="break-words"/,
+    );
+    expect(searchDialogSrc).not.toMatch(
+      /<DialogDescription className="truncate"/,
+    );
+  });
+
+  it('the search form is flex-wrap so the Search button stays inside the dialog', () => {
+    expect(searchDialogSrc).toMatch(
+      /<form\s+className="flex flex-wrap items-center gap-2"/,
     );
   });
 });

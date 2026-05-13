@@ -18,6 +18,7 @@ import {
   RomYearCell,
 } from '@app/renderer/src/components/RomMetadataCells';
 import { RomDetailDialog } from '@app/renderer/src/components/RomDetailDialog';
+import { RomEditMetadataDialog } from '@app/renderer/src/components/RomEditMetadataDialog';
 import {
   RomRowMenu,
   type RomRowMenuItem,
@@ -120,11 +121,15 @@ export function useArcadeAdapter(): ItemListAdapter {
   const [subPath, setSubPath] = useState<string>('');
   // feat/arcade-parity-3-ui — detail-dialog target. Carries the entry
   // shape needed to render the modal (relativePath drives the metadata
-  // lookup). Null when closed.
+  // lookup). Null when closed. `canManageMetadata` snapshots the
+  // entry's playability at click time so the dialog's Find button
+  // greys out for entries whose primary zip is missing/noRomsNeeded
+  // (nothing to bind against on the main side).
   const [detailDialogFor, setDetailDialogFor] = useState<{
     readonly relativePath: string;
     readonly displayName: string;
     readonly filename: string;
+    readonly canManageMetadata: boolean;
   } | null>(null);
   // feat/arcade-manual-ss-search — Find-on-ScreenScraper modal target.
   // Opened from the detail dialog's "Find on ScreenScraper..." button.
@@ -139,17 +144,29 @@ export function useArcadeAdapter(): ItemListAdapter {
     readonly filename: string;
   } | null>(null);
   // feat/arcade-polish-context-menu — per-row more-menu anchor. The
-  // dropdown's only item is "Find on ScreenScraper..." (Edit Metadata
-  // is still v0.2 for .mras); the surface exists for visual parity
-  // with RomsPane, where the menu is the canonical per-row affordance.
+  // dropdown carries "Find on ScreenScraper..." + "Edit Metadata..."
+  // for visual parity with RomsPane. Both items are disabled when the
+  // row's primary zip isn't present (no md5 to bind/edit against);
+  // see `canManageMetadata` below.
   const [menuFor, setMenuFor] = useState<{
     readonly entry: {
       readonly relativePath: string;
       readonly displayName: string;
       readonly filename: string;
     };
+    readonly canManageMetadata: boolean;
+    readonly hasMetadata: boolean;
     readonly x: number;
     readonly y: number;
+  } | null>(null);
+  // feat/arcade-bind-density-edit — edit-metadata modal target.
+  // Carries the entry plus a snapshot of its current metadata so the
+  // dialog can render the form pre-filled. Closing setEditMetadataFor
+  // to null tears the dialog down.
+  const [editMetadataFor, setEditMetadataFor] = useState<{
+    readonly relativePath: string;
+    readonly displayName: string;
+    readonly metadata: RomMetadata;
   } | null>(null);
 
   const refresh = useCallback(
@@ -614,6 +631,13 @@ export function useArcadeAdapter(): ItemListAdapter {
                   playabilityByPath.get(entry.relativePath) ?? null;
                 const isMissing = classification === 'missing';
                 const isFolder = entry.kind !== 'mra';
+                // feat/arcade-bind-density-edit — metadata mutations
+                // (Find on ScreenScraper / Edit Metadata) need a
+                // primary zip on disk to bind against. Missing-zip
+                // and no-roms-needed entries don't have a zip, so
+                // there's no md5 to key the cache record under.
+                const canManageMetadata = classification === 'playable';
+                const hasMetadata = metadata !== null;
                 const rowType = classifyRow({ kind: 'rom', rom });
                 const arcadeEntry: ArcadeMraEntry = {
                   relativePath: entry.relativePath,
@@ -674,6 +698,7 @@ export function useArcadeAdapter(): ItemListAdapter {
                                 displayName:
                                   metadata?.name ?? rom.displayName,
                                 filename: rom.filename,
+                                canManageMetadata,
                               });
                             }
                       }
@@ -710,11 +735,11 @@ export function useArcadeAdapter(): ItemListAdapter {
                       error={false}
                       dimmed={entry.hidden}
                     />
-                    {/* MoreHorizontal cell — single-item menu ("Find on
-                        ScreenScraper..."). Folder rows skip the menu;
-                        the row's click handler drives drill-in
-                        instead. py-0 keeps the row at h-10 (the icon
-                        button is h-8). */}
+                    {/* MoreHorizontal cell — context menu with "Find
+                        on ScreenScraper..." + "Edit Metadata...".
+                        Folder rows skip the menu; the row's click
+                        handler drives drill-in instead. py-0 keeps the
+                        row at h-10 (the icon button is h-8). */}
                     {isFolder ? (
                       <TableCell className="w-10" />
                     ) : (
@@ -735,6 +760,8 @@ export function useArcadeAdapter(): ItemListAdapter {
                                   metadata?.name ?? rom.displayName,
                                 filename: rom.filename,
                               },
+                              canManageMetadata,
+                              hasMetadata,
                               x: r.left,
                               y: r.bottom,
                             });
@@ -782,12 +809,13 @@ export function useArcadeAdapter(): ItemListAdapter {
     // entries whose ScreenScraper match hasn't landed yet (placeholder
     // box art + "No metadata yet" note).
     //
-    // feat/arcade-manual-ss-search — Edit stays v0.2
-    // (`allowEdit={false}`), Find-on-ScreenScraper is wired now
-    // (`allowSearch={true}`). Clicking Find closes the detail dialog
-    // and opens the SS search modal; the search modal's `onBind`
-    // routes through the arcade-specific IPC that resolves the
-    // primary zip md5 server-side.
+    // feat/arcade-bind-density-edit — `allowSearch` is now derived
+    // from the entry's playability (captured at click time). Missing/
+    // noRomsNeeded entries have no primary zip to bind against, so
+    // the Find button greys out; the menu items follow the same rule.
+    // Edit stays v0.2 in the detail dialog itself (the Edit button
+    // there isn't useful without the metadata-edit dialog wired —
+    // arcade's edit lives in the context menu instead).
     extras: (
       <>
         {detailDialogFor !== null ? (
@@ -800,15 +828,18 @@ export function useArcadeAdapter(): ItemListAdapter {
               if (!open) setDetailDialogFor(null);
             }}
             onEdit={() => {
-              /* arcade edit-metadata dialog is v0.2; the Edit button
-                 is hidden by `allowEdit={false}`, this callback never
-                 fires. */
+              /* arcade detail dialog routes Edit through the context
+                 menu, not the button; this callback never fires. */
             }}
             onSearch={() => {
-              setSearchScreenScraperFor(detailDialogFor);
+              setSearchScreenScraperFor({
+                relativePath: detailDialogFor.relativePath,
+                displayName: detailDialogFor.displayName,
+                filename: detailDialogFor.filename,
+              });
             }}
             allowEdit={false}
-            allowSearch
+            allowSearch={detailDialogFor.canManageMetadata}
           />
         ) : null}
         {searchScreenScraperFor !== null ? (
@@ -838,13 +869,60 @@ export function useArcadeAdapter(): ItemListAdapter {
             }}
           />
         ) : null}
+        {editMetadataFor !== null ? (
+          <RomEditMetadataDialog
+            path={editMetadataFor.relativePath}
+            displayName={editMetadataFor.displayName}
+            metadata={editMetadataFor.metadata}
+            open
+            onOpenChange={(open) => {
+              if (!open) setEditMetadataFor(null);
+            }}
+            onSave={(override) =>
+              window.mister.setArcadeMetadataOverride(
+                editMetadataFor.relativePath,
+                override,
+              )
+            }
+            onSaved={() => {
+              void refresh(false);
+            }}
+          />
+        ) : null}
         {menuFor !== null
           ? (() => {
               const target = menuFor.entry;
+              const canSearch = menuFor.canManageMetadata;
+              const canEdit = menuFor.canManageMetadata && menuFor.hasMetadata;
+              const missingZipTooltip =
+                'Install the ROM to enable metadata search.';
+              const noMetadataTooltip =
+                'No metadata yet — use Find on ScreenScraper first.';
               const items: readonly RomRowMenuItem[] = [
                 {
                   label: 'Find on ScreenScraper...',
                   onSelect: () => setSearchScreenScraperFor(target),
+                  disabled: !canSearch,
+                  title: canSearch ? undefined : missingZipTooltip,
+                },
+                {
+                  label: 'Edit Metadata...',
+                  onSelect: () => {
+                    const meta =
+                      metadataByMra[target.relativePath] ?? null;
+                    if (meta === null) return;
+                    setEditMetadataFor({
+                      relativePath: target.relativePath,
+                      displayName: target.displayName,
+                      metadata: meta,
+                    });
+                  },
+                  disabled: !canEdit,
+                  title: canEdit
+                    ? undefined
+                    : menuFor.canManageMetadata
+                      ? noMetadataTooltip
+                      : missingZipTooltip,
                 },
               ];
               return (

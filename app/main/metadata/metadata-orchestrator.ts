@@ -348,15 +348,23 @@ export class MetadataOrchestrator {
    *      scrape pass uses).
    *   3. Probe `games/mame/<basename>` then `games/hbmame/<basename>`
    *      against the cached hash table; whichever has an md5 wins.
-   *   4. Call `MetadataService.bindManualOverride` keyed on that md5
+   *   4. feat/arcade-bind-density-edit — if the zip is present on
+   *      disk but isn't in the hash cache yet (auto-scrape didn't
+   *      reach it, or hashing failed silently), hash it on-demand.
+   *      One extra SSH op per bind, run only when the cache miss
+   *      forces it. The Devil Zone case: obscure arcade title that
+   *      the auto-scrape never matched, so the user reaches for
+   *      "Find on ScreenScraper" while the zip is unhashed — pre-
+   *      this-fix, the bind silently returned null.
+   *   5. Call `MetadataService.bindManualOverride` keyed on that md5
    *      so every .mra sharing the same primary zip picks up the
-   *      override on the next batched cache read (no per-mra
-   *      duplication, consistent with how the by-hash cache works).
+   *      override on the next batched cache read.
    *
-   * Returns null when the mra isn't in the snapshot, when its primary
-   * zip isn't present in either zip dir, or when the primary zip
-   * hasn't been hashed yet (the auto-scrape pass populates the hash
-   * cache on connect — a freshly-connected session might be racing).
+   * Returns null only when the mra isn't in the snapshot, its primary
+   * zip can't be resolved at all (no requiredZips, or none of the
+   * alternatives are in zipBasenames), or the on-demand hash itself
+   * failed (file vanished between snapshot and bind). In those cases
+   * the renderer surfaces a "no record yet" toast.
    */
   async bindArcadeManualMetadataOverride(
     snapshot: {
@@ -366,6 +374,54 @@ export class MetadataOrchestrator {
     mraRelativePath: string,
     game: ScreenScraperGame,
   ): Promise<RomMetadata | null> {
+    const md5 = await this.resolveOrComputeArcadePrimaryZipMd5(
+      snapshot,
+      mraRelativePath,
+    );
+    if (md5 === null) return null;
+    return this.metadataService.bindManualOverride(md5, game);
+  }
+
+  /**
+   * feat/arcade-bind-density-edit — sibling of
+   * `bindArcadeManualMetadataOverride` for the edit-metadata dialog.
+   * Same primary-zip → md5 resolution (including on-demand hashing
+   * if the zip is unhashed), but composes a writeUserOverride call
+   * instead of a bind-from-search.
+   *
+   * Returns null on the same paths as the bind variant — no snapshot
+   * entry, unresolvable primary zip, or hash failure. The renderer
+   * surfaces a toast and leaves the edit dialog open for retry.
+   */
+  async setArcadeManualMetadataOverride(
+    snapshot: {
+      readonly entries: readonly ArcadeMraMeta[];
+      readonly zipBasenames: ReadonlySet<string>;
+    },
+    mraRelativePath: string,
+    override: UserMetadataOverride | undefined,
+  ): Promise<RomMetadata | null> {
+    const md5 = await this.resolveOrComputeArcadePrimaryZipMd5(
+      snapshot,
+      mraRelativePath,
+    );
+    if (md5 === null) return null;
+    return this.metadataService.writeUserOverride(md5, override);
+  }
+
+  /**
+   * Shared resolution path for the two arcade manual-write IPCs.
+   * Walks: snapshot lookup → primary zip basename → cached md5 →
+   * on-demand hash (if cache miss but zip exists on-disk). Returns
+   * the resolved md5, or null on any unrecoverable failure.
+   */
+  private async resolveOrComputeArcadePrimaryZipMd5(
+    snapshot: {
+      readonly entries: readonly ArcadeMraMeta[];
+      readonly zipBasenames: ReadonlySet<string>;
+    },
+    mraRelativePath: string,
+  ): Promise<string | null> {
     const session = this.getActiveSession();
     if (session === null) return null;
     const mra = snapshot.entries.find(
@@ -384,7 +440,23 @@ export class MetadataOrchestrator {
     for (const path of candidatePaths) {
       const entry = hashByPath.get(path);
       if (entry !== null && entry !== undefined) {
-        return this.metadataService.bindManualOverride(entry.md5, game);
+        return entry.md5;
+      }
+    }
+    // Cache miss on both candidates — hash on demand. Try each
+    // candidate path; the first that resolves wins. computeHash
+    // returns undefined when the path doesn't exist on disk, so we
+    // probe mame/ first then fall through to hbmame/.
+    for (const path of candidatePaths) {
+      try {
+        const computed = await this.hashService.computeHash(
+          session.client,
+          session.host,
+          path,
+        );
+        if (computed !== undefined) return computed.md5;
+      } catch {
+        /* try the other candidate */
       }
     }
     return null;
