@@ -438,18 +438,29 @@ describe('arcade-adapter detail dialog (feat/arcade-parity-3-ui)', () => {
     expect(ARCADE_ADAPTER).toMatch(/setDetailDialogFor\(\{/);
   });
 
-  it('renders RomDetailDialog with allowEdit=false and a per-entry allowSearch (greys out for missing-zip entries)', () => {
-    // feat/arcade-bind-density-edit: allowSearch is now bound to the
-    // entry's playability captured at click time
-    // (`detailDialogFor.canManageMetadata`). 'playable' → button
-    // enabled; 'missing'/'noRomsNeeded' → greyed out (no zip md5 to
-    // bind against). allowEdit stays false in the detail dialog —
-    // arcade's edit lives in the context menu.
+  it('renders RomDetailDialog with per-entry allowEdit + allowSearch (both grey out for missing-zip entries)', () => {
+    // feat/arcade-edit-detail-alignment: allowEdit is now bound to
+    // the entry's playability at click time
+    // (`detailDialogFor.canManageMetadata`), matching allowSearch.
+    // Both flags greys out missing-zip rows (no zip to bind against);
+    // playable + no-roms-needed entries get both buttons in the
+    // detail dialog. Pre this PR, allowEdit was hard-coded false
+    // and Edit Metadata lived only in the context menu.
     expect(ARCADE_ADAPTER).toMatch(
-      /<RomDetailDialog[\s\S]{0,800}allowEdit=\{false\}/,
+      /<RomDetailDialog[\s\S]{0,2000}allowEdit=\{detailDialogFor\.canManageMetadata\}/,
     );
     expect(ARCADE_ADAPTER).toMatch(
-      /<RomDetailDialog[\s\S]{0,800}allowSearch=\{detailDialogFor\.canManageMetadata\}/,
+      /<RomDetailDialog[\s\S]{0,2000}allowSearch=\{detailDialogFor\.canManageMetadata\}/,
+    );
+  });
+
+  it('wires onEdit to open RomEditMetadataDialog with the current row metadata', () => {
+    // The detail-dialog's Edit handler reads metadataByMra by
+    // relativePath, then opens the edit dialog with that record. The
+    // dialog's existing onSave wiring routes through
+    // setArcadeMetadataOverride (the IPC PR #67 + #68 already wired).
+    expect(ARCADE_ADAPTER).toMatch(
+      /onEdit=\{[\s\S]{0,800}metadataByMra\[detailDialogFor\.relativePath\][\s\S]{0,400}setEditMetadataFor\(\{/,
     );
   });
 
@@ -895,6 +906,39 @@ describe('arcade-mra-overrides storage + routing (feat/arcade-noromsneeded-overr
 
   it('getCachedArcadeMetadataBatch reads no-roms-needed entries from the parallel store', () => {
     expect(orchestratorSrc).toMatch(/readCachedArcadeMraMetadata\(/);
+  });
+});
+
+describe('arcade row alignment with RomsPane (feat/arcade-edit-detail-alignment)', () => {
+  it('arcade table header starts with the same w-10 pl-4 leading slot RomsPane uses for the checkbox column', () => {
+    // RomsPane: TableHead className="w-10 pl-4" → checkbox column.
+    // Arcade has no per-row bulk select in v0.1 but mirrors the slot
+    // (empty TableHead) so the right-edge columns align when both
+    // panes render side-by-side at the same width.
+    expect(ROMS_ADAPTER).toMatch(
+      /<TableHead className="w-10 pl-4">[\s\S]{0,400}type="checkbox"/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(
+      /<TableHead className="w-10 pl-4"\s*\/>/,
+    );
+  });
+
+  it('arcade data + back rows carry the matching w-10 pl-4 leading TableCell', () => {
+    // Same spacer must appear in EVERY row variant so the column
+    // grid stays consistent: data rows + the back-row above them.
+    const cells = ARCADE_ADAPTER.match(
+      /<TableCell className="w-10 pl-4"\s*\/>/g,
+    );
+    expect(cells, 'arcade-adapter should have ≥2 leading spacers (back-row + data row)').not.toBeNull();
+    expect(cells!.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('empty-folder placeholder colSpan covers the full 8-column grid', () => {
+    // 7 → 8 after the leading spacer landed. Off-by-one here would
+    // make the "This folder is empty." cell stop short of the right
+    // edge.
+    expect(ARCADE_ADAPTER).toMatch(/colSpan=\{8\}/);
+    expect(ARCADE_ADAPTER).not.toMatch(/colSpan=\{7\}/);
   });
 });
 
