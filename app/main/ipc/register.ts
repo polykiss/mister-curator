@@ -427,6 +427,25 @@ export function registerIpcHandlers(
     (coreId, path, game) =>
       metadata.bindManualMetadataOverride(coreId, path, game),
   );
+  // feat/arcade-manual-ss-search — arcade analogue of the bind path.
+  // Pulls the cached playability snapshot from ConnectionManager (no
+  // SSH; the snapshot is already in memory after the auto-scrape pass)
+  // and delegates the zip-resolution + md5-keyed bind to the
+  // orchestrator. Returns null when no snapshot is cached yet, when
+  // the mra isn't in it, or when the primary zip hasn't been hashed —
+  // the renderer surfaces a toast in those cases so the user can retry.
+  handle<[string, ScreenScraperGame], RomMetadata | null>(
+    IPC_CHANNELS.bindArcadeMetadataFromSearch,
+    async (mraRelativePath, game) => {
+      const snapshot = manager.getArcadePlayabilitySnapshot();
+      if (snapshot === null) return null;
+      return metadata.bindArcadeManualMetadataOverride(
+        snapshot,
+        mraRelativePath,
+        game,
+      );
+    },
+  );
 
   // PR-D2 (PR #29) — name-search for the search modal. Resolves
   // coreId → SS systemeid via the same map the auto-scrape

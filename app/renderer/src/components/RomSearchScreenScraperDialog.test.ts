@@ -212,21 +212,23 @@ describe('SearchResultItem — every result is selectable (PR-D2 r2 c3)', () => 
   });
 
   it('handleUseMatch passes the picked game straight through with no eligibility check', () => {
-    // The handler MUST call bindRomMetadataFromSearch unconditionally
+    // The handler MUST call the caller-supplied `onBind` unconditionally
     // for the picked game. Pin that no early-return guards on cache
     // state or jeuid uniqueness sneak in.
+    //
+    // feat/arcade-manual-ss-search: the dialog used to call
+    // `window.mister.bindRomMetadataFromSearch` directly; the bind
+    // step now routes through an `onBind(game)` callback so different
+    // surfaces (RomsPane path-keyed, arcade primary-zip-keyed) can
+    // plug in their own cache-resolution logic. The "no eligibility
+    // check" contract still holds — just at the callback boundary.
     const handlerMatch = SOURCE.match(
       /async function handleUseMatch\([^)]*\)[^{]*\{[\s\S]*?\n {2}\}/,
     );
     expect(handlerMatch).not.toBeNull();
     const body = handlerMatch![0];
-    // The bind IPC is called immediately after setBindingId — no early
-    // returns or eligibility checks between them. Pinning by
-    // adjacent-line proximity rather than substring scanning to make
-    // the regression case ("added a check before the IPC call")
-    // obvious.
     const setBindingIdx = body.indexOf('setBindingId(game.id)');
-    const bindCallIdx = body.indexOf('window.mister.bindRomMetadataFromSearch');
+    const bindCallIdx = body.indexOf('onBind(game)');
     expect(setBindingIdx).toBeGreaterThan(-1);
     expect(bindCallIdx).toBeGreaterThan(setBindingIdx);
     // The slice between them must contain only `try {` boilerplate —
@@ -234,5 +236,25 @@ describe('SearchResultItem — every result is selectable (PR-D2 r2 c3)', () => 
     const between = body.slice(setBindingIdx, bindCallIdx);
     expect(between).not.toMatch(/\bif\b/);
     expect(between).not.toMatch(/\breturn\b/);
+  });
+
+  it('routes the bind step through a caller-supplied onBind callback (not a hard-coded IPC call)', () => {
+    // Pins the split: the dialog no longer hard-codes
+    // `bindRomMetadataFromSearch`. Both panes (RomsPane + arcade)
+    // wire their own `onBind` that picks the right cache key (path
+    // vs primary-zip md5). The dialog stays storage-agnostic.
+    expect(SOURCE).toMatch(
+      /onBind:\s*\(game:\s*ScreenScraperGame\)\s*=>\s*Promise<RomMetadata \| null>/,
+    );
+    // No live call to `window.mister.bindRomMetadataFromSearch` in
+    // the handler body. (References in doc-comments at the top of
+    // the file are fine — they explain the refactor.)
+    const handlerMatch = SOURCE.match(
+      /async function handleUseMatch\([^)]*\)[^{]*\{[\s\S]*?\n {2}\}/,
+    );
+    expect(handlerMatch).not.toBeNull();
+    expect(handlerMatch![0]).not.toMatch(
+      /window\.mister\.bindRomMetadataFromSearch/,
+    );
   });
 });

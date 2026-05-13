@@ -68,28 +68,53 @@ export interface RomDetailDialogProps {
   /**
    * Hand off to the edit-metadata modal (closes self first). The
    * Edit button is hidden in the empty state — `RomEditMetadataDialog`
-   * requires a non-null record. Also hidden when `readOnly=true`.
+   * requires a non-null record. Also hidden when `allowEdit=false`.
    */
   readonly onEdit: () => void;
   /**
    * Hand off to the Find on ScreenScraper modal (closes self first).
-   * Hidden when `readOnly=true` (arcade detail view is read-only;
-   * a manual ScreenScraper search dialog tailored to .mras is v0.2).
+   * Hidden when `allowSearch=false`.
    */
   readonly onSearch: () => void;
   /**
-   * feat/arcade-parity-3-ui — read-only mode for surfaces where the
-   * Edit / Find-on-ScreenScraper hand-offs aren't wired yet (e.g.
-   * the arcade pane). Hides both buttons; the only action left is
-   * Close. Additive — defaults to `false`, existing RomsPane wiring
-   * keeps its full button row.
+   * feat/arcade-manual-ss-search — per-action toggles for surfaces
+   * that wire only some of the hand-offs.
+   *
+   * Default to `true` so existing RomsPane callsites (which pass
+   * neither flag) keep their full Edit + Find button row unchanged.
+   * The arcade pane passes `allowEdit={false}` `allowSearch={true}`
+   * — the metadata-edit dialog isn't wired for .mras yet, but the
+   * Find-on-ScreenScraper bind path is, so arcade users can manually
+   * fix mis-matched entries from the same surface RomsPane users
+   * already know.
+   */
+  readonly allowEdit?: boolean;
+  readonly allowSearch?: boolean;
+  /**
+   * Convenience shorthand: `readOnly={true}` defaults both
+   * `allowEdit` and `allowSearch` to `false`. Explicit per-action
+   * props (`allowEdit={false}`, `allowSearch={true}`, etc.) override
+   * this default. Kept for callers that want to express "no
+   * mutations from this surface" in a single flag.
    */
   readonly readOnly?: boolean;
 }
 
 export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
-  const { filename, metadata, open, onOpenChange, onEdit, onSearch, readOnly } =
-    props;
+  const {
+    filename,
+    metadata,
+    open,
+    onOpenChange,
+    onEdit,
+    onSearch,
+    allowEdit,
+    allowSearch,
+    readOnly,
+  } = props;
+  const defaultAllow = readOnly === true ? false : true;
+  const resolvedAllowEdit = allowEdit ?? defaultAllow;
+  const resolvedAllowSearch = allowSearch ?? defaultAllow;
   if (metadata === null) {
     return (
       <EmptyDetailDialog
@@ -97,7 +122,7 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
         open={open}
         onOpenChange={onOpenChange}
         onSearch={onSearch}
-        readOnly={readOnly === true}
+        allowSearch={resolvedAllowSearch}
       />
     );
   }
@@ -108,7 +133,8 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
       onOpenChange={onOpenChange}
       onEdit={onEdit}
       onSearch={onSearch}
-      readOnly={readOnly === true}
+      allowEdit={resolvedAllowEdit}
+      allowSearch={resolvedAllowSearch}
     />
   );
 }
@@ -119,9 +145,10 @@ function PopulatedDetailDialog(props: {
   readonly onOpenChange: (open: boolean) => void;
   readonly onEdit: () => void;
   readonly onSearch: () => void;
-  readonly readOnly: boolean;
+  readonly allowEdit: boolean;
+  readonly allowSearch: boolean;
 }): JSX.Element {
-  const { metadata, open, onOpenChange, onEdit, onSearch, readOnly } = props;
+  const { metadata, open, onOpenChange, onEdit, onSearch, allowEdit, allowSearch } = props;
 
   // Lightbox state, scoped to this dialog instance. A non-null URL
   // mounts the nested Dialog; null hides it. Radix handles Esc +
@@ -259,16 +286,16 @@ function PopulatedDetailDialog(props: {
         ) : null}
 
         <div className="flex justify-end gap-2 pt-1">
-          {readOnly ? null : (
-            <>
-              <Button variant="ghost" onClick={handleEdit}>
-                Edit...
-              </Button>
-              <Button variant="ghost" onClick={handleSearch}>
-                Find on ScreenScraper...
-              </Button>
-            </>
-          )}
+          {allowEdit ? (
+            <Button variant="ghost" onClick={handleEdit}>
+              Edit...
+            </Button>
+          ) : null}
+          {allowSearch ? (
+            <Button variant="ghost" onClick={handleSearch}>
+              Find on ScreenScraper...
+            </Button>
+          ) : null}
           <Button variant="primary" onClick={() => onOpenChange(false)}>
             Close
           </Button>
@@ -399,7 +426,7 @@ function EmptyDetailDialog(props: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly onSearch: () => void;
-  readonly readOnly: boolean;
+  readonly allowSearch: boolean;
 }): JSX.Element {
   function handleSearch(): void {
     props.onOpenChange(false);
@@ -419,21 +446,21 @@ function EmptyDetailDialog(props: {
           <div className="flex min-w-0 flex-col gap-2">
             <SectionLabel>No metadata yet</SectionLabel>
             <p className="text-body-sm text-fg-body">
-              {props.readOnly
-                ? "ScreenScraper hasn't matched this entry. The auto-scrape pass will retry on the next connect; manual search is coming in a follow-up."
-                : 'ScreenScraper hasn\'t matched this file. Click "Find on ScreenScraper" to search manually, or wait for the prefetch to land.'}
+              {props.allowSearch
+                ? 'ScreenScraper hasn\'t matched this file. Click "Find on ScreenScraper" to search manually, or wait for the prefetch to land.'
+                : "ScreenScraper hasn't matched this entry. The auto-scrape pass will retry on the next connect."}
             </p>
           </div>
         </div>
 
         <div className="flex justify-end gap-2 pt-1">
-          {props.readOnly ? null : (
+          {props.allowSearch ? (
             <Button variant="primary" onClick={handleSearch}>
               Find on ScreenScraper...
             </Button>
-          )}
+          ) : null}
           <Button
-            variant={props.readOnly ? 'primary' : 'ghost'}
+            variant={props.allowSearch ? 'ghost' : 'primary'}
             onClick={() => props.onOpenChange(false)}
           >
             Close

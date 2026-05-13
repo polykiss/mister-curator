@@ -438,13 +438,48 @@ describe('arcade-adapter detail dialog (feat/arcade-parity-3-ui)', () => {
     expect(ARCADE_ADAPTER).toMatch(/setDetailDialogFor\(\{/);
   });
 
-  it('renders RomDetailDialog with readOnly so Edit / Find buttons are hidden', () => {
-    // Arcade detail view is read-only this round; manual SS search +
-    // edit dialogs are v0.2. The dialog hides both buttons when
-    // `readOnly` is set, leaving Close as the only action. The
-    // onEdit / onSearch callbacks stay (the dialog's TypeScript
-    // requires them) but are no-ops behind the gate.
-    expect(ARCADE_ADAPTER).toMatch(/<RomDetailDialog[\s\S]{0,800}readOnly/);
+  it('renders RomDetailDialog with allowEdit=false and allowSearch=true', () => {
+    // feat/arcade-manual-ss-search: the read-only round shipped both
+    // buttons hidden; this round wires Find-on-ScreenScraper so users
+    // can manually fix mis-matched arcade entries. Edit stays v0.2.
+    // The per-action flags replace the prior `readOnly={true}`.
+    expect(ARCADE_ADAPTER).toMatch(
+      /<RomDetailDialog[\s\S]{0,800}allowEdit=\{false\}/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(
+      /<RomDetailDialog[\s\S]{0,800}allowSearch(?:\s|>|\n)/,
+    );
+  });
+
+  it('wires onSearch to open RomSearchScreenScraperDialog with arcade context', () => {
+    // Detail dialog's "Find on ScreenScraper..." button closes self +
+    // calls onSearch, which opens the SS search modal pre-filled with
+    // the .mra's display name. Pin the SS-modal callsite plus the
+    // arcade-specific bind callback shape — bypassing the by-path
+    // bind in favour of the new `bindArcadeMetadataFromSearch` IPC.
+    expect(ARCADE_ADAPTER).toMatch(
+      /from '@app\/renderer\/src\/components\/RomSearchScreenScraperDialog'/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(
+      /setSearchScreenScraperFor\(detailDialogFor\)/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(
+      /onBind=\{[\s\S]{0,400}window\.mister\.bindArcadeMetadataFromSearch\(\s*searchScreenScraperFor\.relativePath,\s*game,?\s*\)/,
+    );
+    // The SS modal's coreId argument must be 'mame' so SS searches
+    // systemId=75 — the same id the auto-scrape pass uses.
+    expect(ARCADE_ADAPTER).toMatch(
+      /<RomSearchScreenScraperDialog[\s\S]{0,400}coreId="mame"/,
+    );
+  });
+
+  it('refreshes the arcade list after a successful manual-bind so siblings sharing the primary zip see the new metadata', () => {
+    // The bind writes by primary-zip md5, so every .mra mapped to the
+    // same zip surfaces the new record on the next batch read. The
+    // adapter triggers that read by calling refresh() from onSaved.
+    expect(ARCADE_ADAPTER).toMatch(
+      /onSaved=\{[\s\S]{0,600}refresh\(false\)/,
+    );
   });
 
   it('feeds metadata into the dialog via the existing metadataByMra map (no new IPC)', () => {
@@ -465,18 +500,42 @@ describe('arcade-adapter detail dialog (feat/arcade-parity-3-ui)', () => {
     expect(ARCADE_ADAPTER).toMatch(/extras:\s*[\s\S]{0,200}<RomDetailDialog/);
   });
 
-  it('RomDetailDialog accepts a readOnly prop (hides Edit + Find buttons)', () => {
+  it('RomDetailDialog exposes per-action allowEdit / allowSearch flags (plus readOnly convenience)', () => {
     const detailDialogSrc = readFileSync(
       resolve(__dirname, 'RomDetailDialog.tsx'),
       'utf8',
     );
+    // Per-action flags drive the buttons. RomsPane callsites pass
+    // neither and inherit the `true` default → both buttons appear.
+    // Arcade passes allowEdit={false} and allowSearch={true}.
+    expect(detailDialogSrc).toMatch(/readonly allowEdit\?:\s*boolean/);
+    expect(detailDialogSrc).toMatch(/readonly allowSearch\?:\s*boolean/);
+    // readOnly convenience stays (back-compat) but is layered as a
+    // default for both flags rather than a direct gate.
     expect(detailDialogSrc).toMatch(/readonly readOnly\?:\s*boolean/);
-    // The button row guards both Edit and Find behind the readOnly
-    // gate; assert both are inside the gate (not the trivial case
-    // of guarding just one).
+    // The Edit + Find buttons are guarded by their own flags now —
+    // pin that each is rendered conditionally on its own flag.
     expect(detailDialogSrc).toMatch(
-      /readOnly\s*\?\s*null\s*:[\s\S]{0,400}Edit\.\.\.[\s\S]{0,400}Find on ScreenScraper/,
+      /\{allowEdit\s*\?[\s\S]{0,200}Edit\.\.\./,
     );
+    expect(detailDialogSrc).toMatch(
+      /\{allowSearch\s*\?[\s\S]{0,300}Find on ScreenScraper/,
+    );
+  });
+
+  it('RomDetailDialog defaults both allow flags to true when readOnly is undefined (RomsPane preserves its full button row)', () => {
+    const detailDialogSrc = readFileSync(
+      resolve(__dirname, 'RomDetailDialog.tsx'),
+      'utf8',
+    );
+    // The default-resolution helper: `readOnly === true ? false : true`
+    // means an absent readOnly → default true → both buttons visible.
+    // Explicit per-action props override.
+    expect(detailDialogSrc).toMatch(
+      /defaultAllow\s*=\s*readOnly\s*===\s*true\s*\?\s*false\s*:\s*true/,
+    );
+    expect(detailDialogSrc).toMatch(/allowEdit\s*\?\?\s*defaultAllow/);
+    expect(detailDialogSrc).toMatch(/allowSearch\s*\?\?\s*defaultAllow/);
   });
 });
 
