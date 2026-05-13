@@ -1168,12 +1168,12 @@ describe('MetadataOrchestrator', () => {
       expect(bindSpy).not.toHaveBeenCalled();
     });
 
-    it('bindArcadeManualMetadataOverride: returns null when the primary zip is not present in either zip dir', async () => {
-      // The mra references a zip that no candidate path holds a hash
-      // for — both `games/mame/foo.zip` and `games/hbmame/foo.zip`
-      // miss. Returning null lets the renderer surface a "wait for
-      // the prefetch to land" toast rather than silently writing a
-      // synthetic key the batch reader will never find.
+    it('bindArcadeManualMetadataOverride: returns null when the primary zip cannot be hashed even after on-demand retry', async () => {
+      // Both candidate paths miss the hash cache AND on-demand
+      // `computeHash` returns undefined (file doesn't exist on disk).
+      // Returning null lets the renderer surface a toast rather than
+      // silently writing a synthetic key the batch reader will never
+      // find.
       const { orchestrator, metadataService } = makeOrchestrator({
         hashEntries: new Map(),
       });
@@ -1200,6 +1200,108 @@ describe('MetadataOrchestrator', () => {
       );
       expect(result).toBeNull();
       expect(bindSpy).not.toHaveBeenCalled();
+    });
+
+    it('bindArcadeManualMetadataOverride: hashes the primary zip on-demand when the cache misses (Devil Zone case)', async () => {
+      // The auto-scrape never reached Devil Zone, so the primary
+      // zip's md5 isn't in the hash cache. Pre-fix this returned
+      // null; now we call computeHash directly on the candidate
+      // path. The fixture's computeHash returns the entry when the
+      // path is in `hashEntries` — that simulates "the zip exists
+      // on disk and hashing succeeded".
+      const ZIP_BASENAME = 'devilz.zip';
+      const ZIP_PATH = `/media/fat/games/mame/${ZIP_BASENAME}`;
+      const ZIP_HASH = 'd'.repeat(32);
+      const MRA_REL_PATH = 'Devil Zone.mra';
+      // `hashEntries` map drives BOTH cached lookups AND the on-
+      // demand computeHash result in the fixture. We want the
+      // cached lookup to MISS (no entry under the normalised cache
+      // key path) but computeHash to RESOLVE. The fixture's
+      // readCachedEntries uses the same `hashEntries` map, so to
+      // simulate "cached miss but computeHash succeeds" we wire the
+      // entries differently for each spy.
+      const { orchestrator, hashService, metadataService } = makeOrchestrator({
+        hashEntries: new Map(),
+      });
+      (hashService.computeHash as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_client: unknown, _host: string, path: string) => {
+          if (path === ZIP_PATH) return buildHashEntry(ZIP_HASH);
+          return undefined;
+        },
+      );
+      const bindSpy = vi.fn(
+        async (key: string) => buildMeta(key, 'Devil Zone'),
+      );
+      (metadataService as unknown as {
+        bindManualOverride: typeof bindSpy;
+      }).bindManualOverride = bindSpy;
+
+      const result = await orchestrator.bindArcadeManualMetadataOverride(
+        {
+          entries: [
+            {
+              relativePath: MRA_REL_PATH,
+              requiredZips: [[ZIP_BASENAME]],
+              displayName: 'Devil Zone',
+              hidden: false,
+              rbf: 'jtdevilz',
+              setname: 'devilz',
+            },
+          ],
+          zipBasenames: new Set([ZIP_BASENAME]),
+        },
+        MRA_REL_PATH,
+        buildSsGame(9999, 'Devil Zone'),
+      );
+
+      expect(result).not.toBeNull();
+      // computeHash was called for the mame/ candidate (and would
+      // fall through to hbmame/ only if mame/ returned undefined).
+      expect(hashService.computeHash).toHaveBeenCalled();
+      // The bind uses the on-demand md5, not the synthetic key.
+      const [key] = bindSpy.mock.calls[0] ?? [''];
+      expect(key).toBe(ZIP_HASH);
+    });
+
+    it('setArcadeManualMetadataOverride: writes user override under the primary-zip md5', async () => {
+      // Mirror of the bind test but for the edit-metadata path:
+      // setArcadeManualMetadataOverride resolves the same
+      // mra → primary-zip → md5 chain and routes to
+      // MetadataService.writeUserOverride.
+      const ZIP_BASENAME = 'dkong.zip';
+      const ZIP_PATH = `/media/fat/games/mame/${ZIP_BASENAME}`;
+      const ZIP_HASH = 'a'.repeat(32);
+      const MRA_REL_PATH = 'Donkey Kong.mra';
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map([[ZIP_PATH, buildHashEntry(ZIP_HASH)]]),
+      });
+      const writeSpy = vi.fn(
+        async (key: string) => buildMeta(key, 'Donkey Kong'),
+      );
+      (metadataService as unknown as {
+        writeUserOverride: typeof writeSpy;
+      }).writeUserOverride = writeSpy;
+      const result = await orchestrator.setArcadeManualMetadataOverride(
+        {
+          entries: [
+            {
+              relativePath: MRA_REL_PATH,
+              requiredZips: [[ZIP_BASENAME]],
+              displayName: 'Donkey Kong',
+              hidden: false,
+              rbf: 'jtdkong',
+              setname: 'dkong',
+            },
+          ],
+          zipBasenames: new Set([ZIP_BASENAME]),
+        },
+        MRA_REL_PATH,
+        { name: 'DK', tags: ['fave'] },
+      );
+      expect(result).not.toBeNull();
+      const [key, override] = writeSpy.mock.calls[0] ?? ['', undefined];
+      expect(key).toBe(ZIP_HASH);
+      expect(override).toEqual({ name: 'DK', tags: ['fave'] });
     });
 
     it('bindManualMetadataOverride: prefers real md5 over synthetic when a hash entry exists', async () => {

@@ -43,21 +43,44 @@ import {
  * retry or cancel.
  */
 export interface RomEditMetadataDialogProps {
-  /** The ROM's on-device path — primary key for the cache write. */
+  /**
+   * The ROM's on-device path. Pre feat/arcade-bind-density-edit this
+   * was the cache key the dialog handed to `setRomMetadataOverride`
+   * directly; the bind step is now caller-supplied via `onSave`, so
+   * `path` is purely context (kept on the props for callers that
+   * still pass it through their state).
+   */
   readonly path: string;
   /** Display name for the dialog title (truncates if long). */
   readonly displayName: string;
   /**
    * The current cache record. Required — the modal can't open if
-   * there's nothing to edit. Caller (RomsPane) gates on this.
+   * there's nothing to edit. Caller (RomsPane / arcade adapter)
+   * gates on this.
    */
   readonly metadata: RomMetadata;
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   /**
+   * feat/arcade-bind-density-edit — caller-supplied save step.
+   * RomsPane wires this to `window.mister.setRomMetadataOverride`
+   * keyed on `path`; the arcade adapter wires it to
+   * `setArcadeMetadataOverride` keyed on the .mra's relativePath
+   * (the main-side handler resolves to the primary zip's md5).
+   * Pass `undefined` to clear the override (Reset button).
+   *
+   * Returns the updated record, or `null` if no cache record exists
+   * (the dialog already gates on `metadata` so this is mostly a
+   * defensive return value — toast surfaces the failure).
+   */
+  readonly onSave: (
+    override: UserMetadataOverride | undefined,
+  ) => Promise<RomMetadata | null>;
+  /**
    * Called with the updated record after a successful save (or
-   * Reset). Caller updates its local `metadataByPath` so the row
-   * re-renders without a separate fetch.
+   * Reset). Caller updates its local `metadataByPath` (RomsPane) or
+   * triggers a refresh (arcade) so the row re-renders without a
+   * separate fetch.
    */
   readonly onSaved: (updated: RomMetadata) => void;
 }
@@ -65,7 +88,7 @@ export interface RomEditMetadataDialogProps {
 export function RomEditMetadataDialog(
   props: RomEditMetadataDialogProps,
 ): JSX.Element {
-  const { path, displayName, metadata, open, onOpenChange, onSaved } = props;
+  const { displayName, metadata, open, onOpenChange, onSave, onSaved } = props;
 
   // Form state. Initialized from the merged display values so a row
   // with userOverride.name='X' opens showing 'X' in the field.
@@ -102,7 +125,7 @@ export function RomEditMetadataDialog(
         tagsText,
         note,
       });
-      const updated = await window.mister.setRomMetadataOverride(path, override);
+      const updated = await onSave(override);
       if (updated === null) {
         toast.error(
           'Couldn\'t save — no metadata record for this row yet. Wait for the prefetch to land and try again.',
@@ -122,7 +145,7 @@ export function RomEditMetadataDialog(
   async function handleReset(): Promise<void> {
     setSaving(true);
     try {
-      const updated = await window.mister.setRomMetadataOverride(path, undefined);
+      const updated = await onSave(undefined);
       if (updated === null) {
         toast.error('Couldn\'t reset — no metadata record for this row.');
       } else {

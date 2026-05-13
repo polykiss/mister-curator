@@ -151,16 +151,30 @@ export function RomSearchScreenScraperDialog(
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
+      {/* feat/arcade-bind-density-edit — same long-title treatment as
+          RomDetailDialog (PR #66). `max-w-xl` already caps the
+          dialog, but `truncate` on the description set
+          white-space:nowrap, so a long unbreakable zip filename was
+          forcing the inner content to demand more width than the
+          dialog allows and the absolutely-positioned X button slid
+          past the right edge. `break-words` lets the description
+          wrap to a second line for the worst-case input while staying
+          identical for the common case. */}
       <DialogContent className="max-w-xl">
-        <DialogHeader>
-          <DialogTitle>Find on ScreenScraper</DialogTitle>
-          <DialogDescription className="truncate" title={`${filename} · ${coreLabel}`}>
+        <DialogHeader className="min-w-0">
+          <DialogTitle className="min-w-0 break-words pr-8">
+            Find on ScreenScraper
+          </DialogTitle>
+          <DialogDescription
+            className="break-words"
+            title={`${filename} · ${coreLabel}`}
+          >
             {filename} · {coreLabel}
           </DialogDescription>
         </DialogHeader>
 
         <form
-          className="flex gap-2"
+          className="flex flex-wrap items-center gap-2"
           onSubmit={(e) => {
             e.preventDefault();
             void handleSearch();
@@ -168,7 +182,7 @@ export function RomSearchScreenScraperDialog(
         >
           <input
             type="text"
-            className="flex-1 rounded border border-default bg-canvas px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+            className="min-w-0 flex-1 rounded border border-default bg-canvas px-2 py-1 text-body-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             placeholder="Game name"
@@ -243,7 +257,9 @@ function SearchResultItem(props: {
         <div className="h-20 w-20 shrink-0 rounded-sm bg-overlay/40" />
       )}
       <div className="flex min-w-0 flex-1 flex-col gap-1">
-        <div className="text-body-sm font-medium text-fg">{game.name}</div>
+        <div className="break-words text-body-sm font-medium text-fg">
+          {game.name}
+        </div>
         <div className="text-caption text-fg-muted">
           {[game.system, game.releaseDate?.slice(0, 4)]
             .filter((s): s is string => s !== null && s !== undefined && s !== '')

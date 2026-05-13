@@ -282,6 +282,15 @@ const api: MisterApi = {
       mraRelativePath,
       game,
     ),
+  setArcadeMetadataOverride: (
+    mraRelativePath: string,
+    override: UserMetadataOverride | undefined,
+  ) =>
+    invoke<RomMetadata | null>(
+      IPC_CHANNELS.setArcadeMetadataOverride,
+      mraRelativePath,
+      override,
+    ),
   searchScreenScraperByName: (coreId: string, searchTerm: string) =>
     invoke<readonly ScreenScraperGame[]>(
       IPC_CHANNELS.searchScreenScraperByName,

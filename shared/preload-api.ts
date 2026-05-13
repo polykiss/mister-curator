@@ -85,6 +85,11 @@ export const IPC_CHANNELS = {
   // manual override against that md5 (so every .mra sharing the
   // same primary zip picks up the override on the next cache read).
   bindArcadeMetadataFromSearch: 'mister:bindArcadeMetadataFromSearch',
+  // feat/arcade-bind-density-edit — arcade analogue of
+  // setRomMetadataOverride. Same mra → primary-zip → md5 resolution
+  // as the bind path; writes user-edited fields onto the cache record
+  // keyed by the primary zip's md5.
+  setArcadeMetadataOverride: 'mister:setArcadeMetadataOverride',
   // PR-D2 (PR #29) — name-search invoked from the renderer's
   // search modal. Same SS endpoint the auto-scrape pipeline uses,
   // exposed directly so the UI can drive it interactively.
@@ -563,13 +568,35 @@ export interface MisterApi {
    *
    * Returns null when the mra isn't in the current snapshot, when its
    * primary zip can't be resolved (no candidate exists in
-   * games/mame/ or games/hbmame/), or when the primary zip hasn't
-   * been hashed yet (the auto-scrape pass populates the hash cache
-   * on connect — a freshly-connected session might be racing).
+   * games/mame/ or games/hbmame/), or when on-demand hashing of the
+   * primary zip itself fails (file vanished between snapshot and
+   * bind).
+   *
+   * feat/arcade-bind-density-edit — the unhashed-zip case used to
+   * return null (Devil Zone bug); on-demand hashing now folds into
+   * the resolution path so the bind succeeds even when the auto-
+   * scrape hasn't reached the entry's primary zip.
    */
   bindArcadeMetadataFromSearch(
     mraRelativePath: string,
     game: ScreenScraperGame,
+  ): Promise<RomMetadata | null>;
+  /**
+   * feat/arcade-bind-density-edit — arcade analogue of
+   * `setRomMetadataOverride`. Same primary-zip → md5 resolution as
+   * the bind path (including on-demand hashing if the zip isn't
+   * cached); writes user-edited fields onto the cache record
+   * keyed by the zip's md5. Pass `undefined` to clear the override.
+   *
+   * Returns null when the mra isn't in the current snapshot, when
+   * its primary zip can't be resolved, when on-demand hashing
+   * fails, or when there's no existing cache record to apply the
+   * edit to (the edit dialog should already gate on this — the
+   * renderer can't render the form without `metadata`).
+   */
+  setArcadeMetadataOverride(
+    mraRelativePath: string,
+    override: UserMetadataOverride | undefined,
   ): Promise<RomMetadata | null>;
   /**
    * PR-D2 (PR #29) — name-search for the search modal. Returns SS

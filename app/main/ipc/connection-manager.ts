@@ -714,13 +714,43 @@ export class ConnectionManager {
       const cached = await this.cache.getArcadeMraMetaCache(host);
       if (cached !== null && witnessesMatch(cached.witnesses, witnesses)) {
         this.cache.recordHit('arcade', { host });
+        // feat/arcade-bind-density-edit — self-heal the primary-zip
+        // size map for caches written before this feature shipped (or
+        // for caches where the stat call failed during the cold
+        // path). Without this, the warm reconnect after upgrade keeps
+        // serving an empty size map → density bars render grey
+        // forever. The stat is cheap (one chunked SSH op) and only
+        // fires when the cached map is missing or empty.
+        let sizeMap = cached.primaryZipSizeByMra;
+        if (sizeMap === undefined || Object.keys(sizeMap).length === 0) {
+          const freshSizes = await this.statPrimaryZipsForMras(
+            cached.entries,
+            cached.zipBasenames,
+          );
+          if (Object.keys(freshSizes).length > 0) {
+            sizeMap = freshSizes;
+            // Write-through so subsequent reconnects skip the stat.
+            await this.cache
+              .setArcadeMraMetaCache(
+                host,
+                cached.entries,
+                cached.zipBasenames,
+                cached.witnesses,
+                freshSizes,
+              )
+              .catch(() => {
+                /* swallow — cache rewrite is best-effort */
+              });
+            diagLog('info', 'arcade', '·', 'size-map back-filled', {
+              host,
+              entries: Object.keys(freshSizes).length,
+            });
+          }
+        }
         const snapshot = buildPlayabilitySnapshot(
           cached.entries,
           cached.zipBasenames,
-          // Legacy caches (pre feat/arcade-polish-context-menu) won't
-          // carry the size map. Empty record → 0 sizes → density bars
-          // render empty until the next force-refresh re-stats.
-          cached.primaryZipSizeByMra ?? {},
+          sizeMap ?? {},
         );
         this.arcadePlayabilityCache = snapshot;
         const buckets = bucketByPlayability(snapshot);
@@ -729,6 +759,7 @@ export class ConnectionManager {
           playable: buckets.playable.length,
           missing: buckets.missing.length,
           noRomsNeeded: buckets.noRomsNeeded.length,
+          sizedEntries: snapshot.primaryZipSizeByMra.size,
           ms: Date.now() - startedAt,
           cached: 'true',
         });
@@ -778,6 +809,7 @@ export class ConnectionManager {
       playable: buckets.playable.length,
       missing: buckets.missing.length,
       noRomsNeeded: buckets.noRomsNeeded.length,
+      sizedEntries: snapshot.primaryZipSizeByMra.size,
       ms: Date.now() - startedAt,
       cached: 'false',
     });
