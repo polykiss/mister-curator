@@ -446,10 +446,21 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                 // is now navigable (clicking surfaces the .mra
                 // listing for hide/unhide). Hide is per-`.mra`,
                 // not per-row, so no eye icon at this level.
-                // Pre-Phase-1.5 this branch rendered "read-only"
-                // because the row WAS dead; that label was the
-                // load-bearing UX misfeature this PR retires.
-                null
+                //
+                // feat/arcade-sidebar-alignment — reserve the eye-
+                // icon slot's footprint (`h-8 w-8`) as an inert
+                // spacer instead of rendering `null`. Without the
+                // placeholder, the density bar sat ~32px to the
+                // right of where it sits on every other core row,
+                // visibly mis-aligning the Arcade strip in the
+                // sidebar. Same width as the `Button size="icon"`
+                // + loading-spinner span so the column grid stays
+                // identical across all row variants.
+                <span
+                  aria-hidden
+                  data-arcade-eye-slot
+                  className="block h-8 w-8 shrink-0 self-center"
+                />
               ) : isPending ? (
                 // Inline indicator while the SSH rename is on the
                 // wire (Round 5 Issue 4). Replaces the eye icon at
