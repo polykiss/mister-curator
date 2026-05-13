@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import type { ReactElement } from 'react';
 
 import { describe, expect, it } from 'vitest';
@@ -323,15 +326,21 @@ describe('shouldShowFilenameSubline (feat/filename-in-listings)', () => {
     ).toBe(false);
   });
 
-  it('hides for folder-atomic even if title differs from filename (defensive)', () => {
-    // Folders never show the filename subline regardless of the
-    // displayName/filename relationship.
+  it('SHOWS for folder-atomic when title differs from filename (feat/pre-beta-polish-batch G)', () => {
+    // Pre-PR atomic folders never showed the filename subline —
+    // the folder name was rendered as the title and showing it
+    // again was duplicate noise. Post-PR atomic folders WITH
+    // metadata get the same on-disk-basename subline file rows
+    // get, so the user can see the folder name when SS gave the
+    // row a different display name. The display==filename gate
+    // still suppresses the subline when the title degenerates to
+    // the basename (no metadata yet).
     expect(
       shouldShowFilenameSubline(
-        { kind: 'folder-atomic', filename: 'old-name' },
-        'New Display Name',
+        { kind: 'folder-atomic', filename: 'CarrotParty' },
+        'Carrot Party Disk Magazine',
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 });
 
@@ -432,7 +441,10 @@ describe('RomNameInner — filename subline rendering (feat/filename-in-listings
     expect(truncates[0]?.children).toBe('Foo.zip');
   });
 
-  it('omits the filename subline for atomic folders', () => {
+  it('omits the filename subline for atomic folders when no metadata (title == filename fallback)', () => {
+    // Without metadata the title degenerates to the folder
+    // basename, so the subline would be a duplicate. The gate
+    // still suppresses it.
     const result = RomNameInner({
       rom: makeRom({
         kind: 'folder-atomic',
@@ -447,4 +459,185 @@ describe('RomNameInner — filename subline rendering (feat/filename-in-listings
     expect(truncates).toHaveLength(1);
     expect(truncates[0]?.children).toBe('Carrot Party Disk Magazine');
   });
+
+  it('renders folder-name subline AND folder badge for atomic folders with resolved metadata (G + H)', () => {
+    // feat/pre-beta-polish-batch — atomic folders now mirror file
+    // rows: when the displayed title (from metadata) differs from
+    // the on-disk basename, the basename appears as a muted
+    // subline. The folder badge that used to live overlaid on the
+    // thumbnail (lost against busy box-art) moves inline next to
+    // this subline. Pin both behaviors in one render so the badge
+    // and the subline can't drift apart later.
+    const result = RomNameInner({
+      rom: makeRom({
+        kind: 'folder-atomic',
+        filename: 'CarrotParty',
+        displayName: 'CarrotParty',
+      }),
+      dimmed: false,
+      metadata: {
+        version: 7,
+        hash: 'b'.repeat(32),
+        // Pretend metadata gave the folder a real game title.
+        name: 'Carrot Party Disk Magazine',
+        system: 'X68000',
+        year: 1994,
+        publisher: null,
+        developer: null,
+        genre: null,
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: null,
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        screenshotUrls: [],
+        box3DUrl: null,
+        marqueeUrl: null,
+        clearLogoUrl: null,
+        source: 'screenscraper',
+        fetchedAt: '2026-05-13T00:00:00.000Z',
+      },
+      error: false,
+    }) as ReactElement<{ readonly children?: unknown }>;
+    const truncates = findAllTruncateSpans(result);
+    // Title + folder-name subline.
+    expect(truncates).toHaveLength(2);
+    expect(truncates[0]?.children).toBe('Carrot Party Disk Magazine');
+    expect(truncates[1]?.children).toBe('CarrotParty');
+    expect(truncates[1]?.className).toContain('text-fg-muted');
+    expect(truncates[1]?.className).toContain('text-caption');
+    // The folder badge — render output is a lucide FolderIcon
+    // (svg). Find it by walking the React tree for an element
+    // whose `aria-label` is "folder".
+    function findFolderBadge(node: unknown): boolean {
+      if (node === null || typeof node !== 'object') return false;
+      const props = (node as ReactElement<{ readonly children?: unknown }>)
+        .props as { readonly 'aria-label'?: string; readonly children?: unknown };
+      if (props['aria-label'] === 'folder') return true;
+      const childArr = Array.isArray(props.children)
+        ? (props.children as unknown[])
+        : props.children !== undefined
+          ? [props.children]
+          : [];
+      for (const c of childArr) {
+        if (findFolderBadge(c)) return true;
+      }
+      return false;
+    }
+    expect(findFolderBadge(result)).toBe(true);
+  });
+
+  it('plain file rows DO NOT get the folder badge (sanity)', () => {
+    // The badge is folder-specific — pin that we don't accidentally
+    // start rendering it for every row with a subline.
+    const result = RomNameInner({
+      rom: makeRom({
+        kind: 'file',
+        filename: 'mslug.zip',
+        displayName: 'mslug.zip',
+      }),
+      dimmed: false,
+      metadata: {
+        version: 7,
+        hash: 'c'.repeat(32),
+        name: 'Metal Slug',
+        system: 'NEOGEO',
+        year: null,
+        publisher: null,
+        developer: null,
+        genre: null,
+        description: null,
+        players: null,
+        rating: null,
+        releaseDate: null,
+        boxArtUrl: null,
+        titleScreenUrl: null,
+        screenshotUrl: null,
+        screenshotUrls: [],
+        box3DUrl: null,
+        marqueeUrl: null,
+        clearLogoUrl: null,
+        source: 'screenscraper',
+        fetchedAt: '2026-05-13T00:00:00.000Z',
+      },
+      error: false,
+    }) as ReactElement<{ readonly children?: unknown }>;
+    function findFolderBadge(node: unknown): boolean {
+      if (node === null || typeof node !== 'object') return false;
+      const props = (node as ReactElement<{ readonly children?: unknown }>)
+        .props as { readonly 'aria-label'?: string; readonly children?: unknown };
+      if (props['aria-label'] === 'folder') return true;
+      const childArr = Array.isArray(props.children)
+        ? (props.children as unknown[])
+        : props.children !== undefined
+          ? [props.children]
+          : [];
+      for (const c of childArr) {
+        if (findFolderBadge(c)) return true;
+      }
+      return false;
+    }
+    expect(findFolderBadge(result)).toBe(false);
+  });
+});
+
+describe('RomThumbnailCell — clickable thumbnail (feat/pre-beta-polish-batch F)', () => {
+  // Note: RomThumbnailCell calls `useBoxArt` (which calls
+  // useState), so it can't be invoked as a plain function the way
+  // RomNameInner is — React's hook dispatcher is null outside a
+  // render. The structural contract for the new `onClick` /
+  // `clickLabel` props is pinned via source-string scan instead.
+
+  const SOURCE = readFileSync(
+    resolve(__dirname, 'RomMetadataCells.tsx'),
+    'utf8',
+  );
+
+  it('declares optional onClick + clickLabel props (backward-compatible default)', () => {
+    expect(SOURCE).toMatch(/readonly onClick\?\: \(\) => void;/);
+    expect(SOURCE).toMatch(/readonly clickLabel\?\: string;/);
+  });
+
+  it('cell className adds cursor-pointer only when onClick is set', () => {
+    expect(SOURCE).toMatch(
+      /onClick !== undefined && 'cursor-pointer'/,
+    );
+  });
+
+  it('cell wires role=button + tabIndex=0 + title/aria-label from clickLabel when onClick is set', () => {
+    expect(SOURCE).toMatch(/role: 'button' as const,/);
+    expect(SOURCE).toMatch(/tabIndex: 0,/);
+    expect(SOURCE).toMatch(/title: clickLabel,/);
+    expect(SOURCE).toMatch(/'aria-label': clickLabel,/);
+  });
+
+  it('cell onClick stopPropagation so the click does NOT bubble to a parent TableRow handler', () => {
+    // Critical: the arcade-adapter wires the TableRow itself to a
+    // folder-drill onClick. If the thumbnail onClick bubbled, a
+    // click on a folder's thumbnail would fire BOTH the drill
+    // (from the row) and the open-detail (from the thumbnail).
+    expect(SOURCE).toMatch(
+      /onClick: \(e: ReactMouseEvent\) => \{\s*e\.stopPropagation\(\);\s*onClick\(\);/,
+    );
+  });
+
+  it('Enter / Space keys also activate the cell (keyboard a11y for non-button-element click handler)', () => {
+    expect(SOURCE).toMatch(
+      /onKeyDown:\s*\(e: ReactKeyboardEvent\) => \{[\s\S]{0,200}e\.key === 'Enter' \|\| e\.key === ' '[\s\S]{0,200}onClick\(\)/,
+    );
+  });
+
+  it('single-game-folder no longer renders the absolute-positioned badge overlay (H — moved to subtitle)', () => {
+    // Pre-PR the single-game-folder rowType rendered a small
+    // FolderIcon badge `absolute bottom-0 right-0` on top of the
+    // tile. It was lost against busy box-art, so we moved it
+    // inline with the folder-name subline. Pin the absence of the
+    // overlay so a future "let me also add it back to the
+    // thumbnail" change is loud.
+    expect(SOURCE).not.toContain('absolute bottom-0 right-0');
+    expect(SOURCE).not.toContain('aria-label="single-game folder"');
+  });
+
 });

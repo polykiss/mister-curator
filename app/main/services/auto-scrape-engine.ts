@@ -73,6 +73,15 @@ import { coreDisplayName } from '@shared/core-matching';
  *   - completedCoreIds: in-session done set. The renderer reads
  *     this to decorate sidebar rows.
  *   - remainingCount: queue length excluding the active core.
+ *   - totalCoreCount: feat/pre-beta-polish-batch — STABLE denominator
+ *     captured at `start()`. The pre-fix renderer math was
+ *     `completedCoreIds.length + 1 + remainingCount`, which drifted
+ *     downward when shifted-but-not-completed cores (abort path)
+ *     drained the queue without growing completedCoreIds — the user
+ *     saw the denominator step from 103 → 99 → 57 mid-session.
+ *     Carrying the original queue size on every event lets the
+ *     renderer compute `Probing ROM directories: X/Y` against a
+ *     fixed Y for the whole session.
  */
 export type AutoScrapeEvent =
   | {
@@ -85,6 +94,16 @@ export type AutoScrapeEvent =
       readonly total: number;
       readonly completedCoreIds: readonly string[];
       readonly remainingCount: number;
+      readonly totalCoreCount: number;
+      /**
+       * feat/detail-modal-nav-hide — count of cores the runLoop has
+       * finished iterating in this session BEFORE this event. The
+       * renderer adds +1 (for the in-flight core) to render the
+       * footer numerator. Increments for every iteration regardless
+       * of outcome (success, abort, error) so the numerator never
+       * stalls on a queue that's actually advancing.
+       */
+      readonly processedCoreCount: number;
     }
   | {
       // feat/connect-progress-ui — emitted before `listRomPaths`
@@ -97,6 +116,8 @@ export type AutoScrapeEvent =
       readonly coreLabel: string;
       readonly completedCoreIds: readonly string[];
       readonly remainingCount: number;
+      readonly totalCoreCount: number;
+      readonly processedCoreCount: number;
     }
   | {
       readonly state: 'idle';
@@ -176,6 +197,34 @@ export class AutoScrapeEngine {
    * the renderer's "rescan all").
    */
   private completedCoreIds = new Set<string>();
+  /**
+   * feat/pre-beta-polish-batch — stable denominator for the
+   * progress footer. Set once in `start()` to the initial queue
+   * size (BEFORE any cores get shifted off). The runLoop and
+   * `getCurrentState` both stamp this onto every progress event so
+   * the renderer can render `X/total` without doing math against a
+   * shrinking queue.
+   */
+  private totalCoreCount = 0;
+  /**
+   * feat/detail-modal-nav-hide — monotonically-increasing count
+   * of cores the runLoop has finished iterating in this session,
+   * incremented for EVERY iteration regardless of outcome:
+   *   • skip (already in completedCoreIds): +1
+   *   • discover + scrape OK (scrapeCompleted): +1
+   *   • discover + abort (focus pivot or pause): +1
+   *   • discover + per-core error: +1
+   *
+   * The renderer reads this to render the footer numerator. Pre-fix
+   * the numerator was `completedCoreIds.length + 1`, which collapsed
+   * when aborts dominated — completedCoreIds only grew on
+   * scrapeCompleted, so the live trace showed "9/114 · APPLE-I",
+   * "9/114 · C64", "9/114 · Lynx48" while the engine actually
+   * advanced through three cores. processedCoreCount captures the
+   * "we've finished iterating on N cores" signal users want for the
+   * footer regardless of how each iteration terminated.
+   */
+  private processedCoreCount = 0;
   private readonly listeners = new Set<AutoScrapeListener>();
   private readonly completionListeners =
     new Set<AutoScrapeCompletionListener>();
@@ -221,6 +270,8 @@ export class AutoScrapeEngine {
       remainingCount: this.queue.filter(
         (c) => !this.completedCoreIds.has(c),
       ).length,
+      totalCoreCount: this.totalCoreCount,
+      processedCoreCount: this.processedCoreCount,
     };
   }
 
@@ -248,6 +299,17 @@ export class AutoScrapeEngine {
     this.completedCoreIds = new Set(
       [...alreadyCompleted].filter((c) => queueSet.has(c)),
     );
+    // feat/pre-beta-polish-batch — capture the stable session total
+    // for the progress footer. Counts every core in the original
+    // queue (including alreadyCompleted seeds) so the numerator
+    // `completedCoreIds.length + 1` reads against the same baseline
+    // a user pre-scrape view would have shown ("80/103 done, working
+    // on 81st").
+    this.totalCoreCount = coreIds.length;
+    // feat/detail-modal-nav-hide — reset the per-session "cores
+    // iterated" counter. The runLoop bumps this after every queue
+    // iteration regardless of outcome (see field-level comment).
+    this.processedCoreCount = 0;
     if (!this.isLoopRunning) {
       void this.runLoop();
     }
@@ -331,6 +393,10 @@ export class AutoScrapeEngine {
         // successful scrape this session. Continues to the next
         // queue entry without firing any active/scrape events.
         if (this.completedCoreIds.has(coreId)) {
+          // feat/detail-modal-nav-hide — silently-skipped cores
+          // still count toward "we've iterated past N cores" for
+          // the renderer's footer numerator.
+          this.processedCoreCount += 1;
           continue;
         }
         this.currentCoreId = coreId;
@@ -350,6 +416,12 @@ export class AutoScrapeEngine {
           remainingCount: this.queue.filter(
             (c) => !this.completedCoreIds.has(c),
           ).length,
+          totalCoreCount: this.totalCoreCount,
+          // feat/detail-modal-nav-hide — at discovering time the
+          // value represents cores already fully iterated; the
+          // renderer adds +1 for the in-flight core to get the
+          // displayed numerator. See field comment for the why.
+          processedCoreCount: this.processedCoreCount,
         });
         try {
           const targets = await this.deps.listRomPaths(coreId);
@@ -357,6 +429,13 @@ export class AutoScrapeEngine {
           // re-check the abort flag here so we don't paint a stale
           // "active" event for a core the user just navigated away from.
           if (this.abortFlag || this.isPaused) {
+            // The iteration is ending without scrapeCompleted —
+            // still bump processedCoreCount so the footer numerator
+            // advances. The `continue` jumps past the
+            // finally-style increment at the bottom of the loop
+            // body, so we have to bump here.
+            this.processedCoreCount += 1;
+            this.currentCoreId = null;
             continue;
           }
           const total = targets.paths.length;
@@ -371,6 +450,8 @@ export class AutoScrapeEngine {
             remainingCount: this.queue.filter(
               (c) => !this.completedCoreIds.has(c),
             ).length,
+            totalCoreCount: this.totalCoreCount,
+            processedCoreCount: this.processedCoreCount,
           });
           if (total > 0) {
             await this.deps.scrape(
@@ -388,6 +469,8 @@ export class AutoScrapeEngine {
                   remainingCount: this.queue.filter(
                     (c) => !this.completedCoreIds.has(c),
                   ).length,
+                  totalCoreCount: this.totalCoreCount,
+                  processedCoreCount: this.processedCoreCount,
                 });
               },
               () => this.abortFlag || this.isPaused,
@@ -416,6 +499,13 @@ export class AutoScrapeEngine {
             }
           }
         }
+        // feat/detail-modal-nav-hide — every iteration that
+        // reached here (scrapeCompleted, aborted-post-active, or
+        // errored mid-scrape) counts toward "we've iterated past
+        // N cores" for the renderer's footer numerator. The two
+        // earlier `continue`-paths above each handle their own
+        // increment.
+        this.processedCoreCount += 1;
       }
       this.emit({
         state: 'idle',

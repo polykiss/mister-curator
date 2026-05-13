@@ -33,10 +33,28 @@ export const DialogOverlay = forwardRef<
   );
 });
 
+/**
+ * feat/pre-beta-polish-batch — additional props on `DialogContent`.
+ *
+ *   • `hideDefaultClose` — suppress the auto-injected top-right X.
+ *     The lightbox uses this so it can render its own larger,
+ *     higher-contrast close button on top of arbitrary images
+ *     (the default X — muted, 16px, no backplate — is nearly
+ *     invisible against most box-art).
+ */
+type DialogContentProps = ComponentPropsWithoutRef<
+  typeof DialogPrimitive.Content
+> & {
+  readonly hideDefaultClose?: boolean;
+};
+
 export const DialogContent = forwardRef<
   ElementRef<typeof DialogPrimitive.Content>,
-  ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
->(function DialogContent({ className, children, ...props }, ref) {
+  DialogContentProps
+>(function DialogContent(
+  { className, children, hideDefaultClose, ...props },
+  ref,
+) {
   return (
     <DialogPortal>
       <DialogOverlay />
@@ -49,13 +67,15 @@ export const DialogContent = forwardRef<
         {...props}
       >
         {children}
-        <DialogPrimitive.Close
-          aria-label="Close"
-          className="absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded text-fg-muted transition-colors hover:bg-elevated hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:pointer-events-none"
-        >
-          <X className="h-4 w-4" strokeWidth={1.5} />
-          <span className="sr-only">Close</span>
-        </DialogPrimitive.Close>
+        {hideDefaultClose ? null : (
+          <DialogPrimitive.Close
+            aria-label="Close"
+            className="absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded text-fg-muted transition-colors hover:bg-elevated hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:pointer-events-none"
+          >
+            <X className="h-4 w-4" strokeWidth={1.5} />
+            <span className="sr-only">Close</span>
+          </DialogPrimitive.Close>
+        )}
       </DialogPrimitive.Content>
     </DialogPortal>
   );

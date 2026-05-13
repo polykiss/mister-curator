@@ -30,6 +30,8 @@ function active(overrides: {
     total: overrides.total,
     completedCoreIds: overrides.completedCoreIds ?? [],
     remainingCount: 0,
+    totalCoreCount: (overrides.completedCoreIds?.length ?? 0) + 1,
+    processedCoreCount: overrides.completedCoreIds?.length ?? 0,
   };
 }
 

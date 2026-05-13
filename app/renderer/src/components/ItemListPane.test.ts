@@ -557,7 +557,12 @@ describe('arcade-adapter detail dialog (feat/arcade-parity-3-ui)', () => {
     // Modal portals belong in `extras` so the pane shell can
     // restructure its container without dragging the modal tree
     // along (see ItemListPane.test.ts above).
-    expect(ARCADE_ADAPTER).toMatch(/extras:\s*[\s\S]{0,200}<RomDetailDialog/);
+    //
+    // feat/detail-modal-nav-hide wraps the dialog instantiation in
+    // an IIFE that computes the prev/next/hide callbacks against
+    // the current sorted list, so the slack between `extras:` and
+    // `<RomDetailDialog` is now several KB. Bump the regex window.
+    expect(ARCADE_ADAPTER).toMatch(/extras:\s*[\s\S]{0,5000}<RomDetailDialog/);
   });
 
   it('RomDetailDialog exposes per-action allowEdit / allowSearch flags (plus readOnly convenience)', () => {

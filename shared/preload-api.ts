@@ -221,6 +221,19 @@ export type AutoScrapeProgressEvent =
       readonly total: number;
       readonly completedCoreIds: readonly string[];
       readonly remainingCount: number;
+      /**
+       * feat/pre-beta-polish-batch — stable session total captured
+       * at engine `start()`. See AutoScrapeEvent in
+       * `auto-scrape-engine.ts` for the rationale.
+       */
+      readonly totalCoreCount: number;
+      /**
+       * feat/detail-modal-nav-hide — cores fully iterated this
+       * session BEFORE this event. Renderer adds +1 for the
+       * in-flight core to render the footer numerator. Increments
+       * on every loop iteration regardless of outcome.
+       */
+      readonly processedCoreCount: number;
     }
   | {
       // feat/connect-progress-ui — emitted by the engine BEFORE it
@@ -237,6 +250,8 @@ export type AutoScrapeProgressEvent =
       readonly coreLabel: string;
       readonly completedCoreIds: readonly string[];
       readonly remainingCount: number;
+      readonly totalCoreCount: number;
+      readonly processedCoreCount: number;
     }
   | {
       readonly state: 'idle';

@@ -3,11 +3,19 @@ import {
   CornerUpLeft,
   Eye,
   EyeOff,
+  // feat/pre-beta-polish-batch (H): the folder marker used to be a
+  // thumbnail overlay (lost against busy box-art). It moves into
+  // the name-cell subtitle below — same icon, new home.
   Folder as FolderIcon,
   FolderOpen,
   ImageOff,
 } from 'lucide-react';
-import type { JSX, ReactNode } from 'react';
+import type {
+  JSX,
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  ReactNode,
+} from 'react';
 
 import type { RomMetadata } from '@shared/metadata-types';
 import type { Rom } from '@shared/types';
@@ -96,18 +104,60 @@ export interface RomMetadataCellProps {
  *                             row has no `Rom`).
  */
 export function RomThumbnailCell(
-  props: RomMetadataCellProps & { readonly rowType: RowType },
+  props: RomMetadataCellProps & {
+    readonly rowType: RowType;
+    /**
+     * feat/pre-beta-polish-batch — optional onClick wires the
+     * thumbnail to the same activation the title cell exposes (open
+     * detail dialog for files / atomic folders, drill for container
+     * folders). When supplied, the cell renders with `cursor-pointer`
+     * and the call-through `aria-label` / `title` from `clickLabel`.
+     * Pre-fix only the title was clickable; the user reported the
+     * art tile felt like it should be too — it's the strongest
+     * affordance on the row.
+     */
+    readonly onClick?: () => void;
+    readonly clickLabel?: string;
+  },
 ): JSX.Element {
-  const { metadata, error, rowType } = props;
+  const { metadata, error, rowType, onClick, clickLabel } = props;
   const loading = metadata === undefined && !error;
   // Hooks must run unconditionally — call useBoxArt regardless of
   // rowType. Folder-container rows hand it `null` (no metadata =
   // no box art URL) so it's a no-op.
   const boxArtObjectUrl = useBoxArt(metadata?.boxArtUrl ?? null);
+  // Shared className contract for the wrapping cell. `relative` is
+  // only needed for the `single-game-folder` badge overlay, but
+  // keeping it everywhere lets the parent class string stay one
+  // line. Cursor + hover-emphasis surface only when there's an
+  // onClick — a non-interactive cell shouldn't hint clickability.
+  const cellClassName = cn(
+    'w-16 p-1',
+    onClick !== undefined && 'cursor-pointer',
+  );
+  const cellInteractiveProps =
+    onClick !== undefined
+      ? {
+          onClick: (e: ReactMouseEvent) => {
+            e.stopPropagation();
+            onClick();
+          },
+          role: 'button' as const,
+          tabIndex: 0,
+          title: clickLabel,
+          'aria-label': clickLabel,
+          onKeyDown: (e: ReactKeyboardEvent) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onClick();
+            }
+          },
+        }
+      : {};
 
   if (rowType === 'explorable-folder') {
     return (
-      <TableCell className="w-16 p-1">
+      <TableCell className={cellClassName} {...cellInteractiveProps}>
         <FolderTile icon="open" ariaLabel={`Folder: ${props.rom.displayName}`} />
       </TableCell>
     );
@@ -160,27 +210,25 @@ export function RomThumbnailCell(
   );
 
   if (rowType === 'single-game-folder') {
+    // feat/pre-beta-polish-batch (H): the folder-marker badge that
+    // used to live overlaid on the thumbnail moved into the
+    // name-cell subtitle (next to the folder-name subline) where it
+    // reads against the canvas instead of arbitrary box-art. The
+    // thumbnail itself is now the same shape as a regular game
+    // tile, with no overlay glyph.
     return (
-      <TableCell className="w-16 p-1">
-        <div className="relative inline-block">
-          {baseTile}
-          {/* Bottom-right corner badge. ~12px square, semi-transparent
-              dark backplate so it reads against both art and the
-              ImageOff fallback. The Folder icon hints "this is a
-              folder wrapper around the game". */}
-          <span
-            className="pointer-events-none absolute bottom-0 right-0 flex size-3.5 items-center justify-center rounded-tl-sm rounded-br-sm bg-bg/80 text-fg-muted"
-            aria-label="single-game folder"
-          >
-            <FolderIcon className="size-2.5" strokeWidth={1.75} aria-hidden />
-          </span>
-        </div>
+      <TableCell className={cellClassName} {...cellInteractiveProps}>
+        {baseTile}
       </TableCell>
     );
   }
 
   // 'game'
-  return <TableCell className="w-16 p-1">{baseTile}</TableCell>;
+  return (
+    <TableCell className={cellClassName} {...cellInteractiveProps}>
+      {baseTile}
+    </TableCell>
+  );
 }
 
 /**
@@ -294,11 +342,26 @@ export function RomNameInner(
           {displayName}
         </span>
         {showFilename ? (
-          <span
-            className="truncate text-caption text-fg-muted"
-            title={rom.filename}
-          >
-            {rom.filename}
+          <span className="flex min-w-0 items-center gap-1">
+            {/* feat/pre-beta-polish-batch (H): the folder-marker
+                used to live as an overlay on the thumbnail
+                (lost against busy box-art). It moves inline with
+                the folder-name subline where it sits against the
+                row background and reads clearly. Same icon,
+                smaller footprint. Skipped for plain file rows. */}
+            {rom.kind === 'folder-atomic' ? (
+              <FolderIcon
+                className="size-3 shrink-0 text-fg-muted"
+                strokeWidth={1.75}
+                aria-label="folder"
+              />
+            ) : null}
+            <span
+              className="truncate text-caption text-fg-muted"
+              title={rom.filename}
+            >
+              {rom.filename}
+            </span>
           </span>
         ) : null}
       </span>
@@ -310,16 +373,23 @@ export function RomNameInner(
 /**
  * feat/filename-in-listings: filename-subline gate. Exported so the
  * test file can pin the contract directly without rendering JSX.
+ *
+ * feat/pre-beta-polish-batch (G): atomic folders now ALSO show the
+ * folder basename as a subline when their displayName differs from
+ * the basename (i.e. metadata gave us a real game name distinct
+ * from `_SomeFolder`). Container folders still skip — they're
+ * drillable, the folder name IS the heading. The subline is gated
+ * by the same display-vs-filename diff used for file rows: when
+ * the title degenerates to the basename (no metadata yet), the
+ * subline would duplicate the title and is suppressed.
  */
 export function shouldShowFilenameSubline(
   rom: { readonly kind: Rom['kind']; readonly filename: string },
   displayName: string,
 ): boolean {
-  // Folder rows never show a filename subline. Atomic folders
-  // already surface the folder name as the title; container
-  // folders are drillable and don't have a meaningful filename
-  // beyond the folder name itself.
-  if (rom.kind !== 'file') return false;
+  // Container folders skip — drill-in is the action; the folder
+  // name IS the heading.
+  if (rom.kind === 'folder-container') return false;
   // Skip when the title is identical to the filename — happens when
   // there's no metadata yet and `displayName` falls back to the
   // on-disk name. Surfacing both would be duplicate noise.

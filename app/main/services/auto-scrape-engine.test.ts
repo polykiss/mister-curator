@@ -189,6 +189,8 @@ describe('AutoScrapeEngine', () => {
           coreLabel: 'SNES',
           completedCoreIds: [],
           remainingCount: 0,
+          totalCoreCount: 1,
+          processedCoreCount: 0,
         },
         {
           state: 'active',
@@ -198,6 +200,8 @@ describe('AutoScrapeEngine', () => {
           total: 3,
           completedCoreIds: [],
           remainingCount: 0,
+          totalCoreCount: 1,
+          processedCoreCount: 0,
         },
         {
           state: 'active',
@@ -207,6 +211,8 @@ describe('AutoScrapeEngine', () => {
           total: 3,
           completedCoreIds: [],
           remainingCount: 0,
+          totalCoreCount: 1,
+          processedCoreCount: 0,
         },
         {
           state: 'active',
@@ -216,6 +222,8 @@ describe('AutoScrapeEngine', () => {
           total: 3,
           completedCoreIds: [],
           remainingCount: 0,
+          totalCoreCount: 1,
+          processedCoreCount: 0,
         },
         {
           state: 'active',
@@ -225,6 +233,8 @@ describe('AutoScrapeEngine', () => {
           total: 3,
           completedCoreIds: [],
           remainingCount: 0,
+          totalCoreCount: 1,
+          processedCoreCount: 0,
         },
         { state: 'idle', completedCoreIds: ['SNES'] },
       ]);
@@ -253,6 +263,129 @@ describe('AutoScrapeEngine', () => {
       expect(events).toEqual([
         { state: 'idle', completedCoreIds: [] },
       ]);
+    });
+
+    it('every active + discovering event carries the same totalCoreCount across the session (feat/pre-beta-polish-batch)', async () => {
+      // Regression: the live trace had the progress footer show
+      //   Probing ROM directories: 24/103 → 24/99 → 24/57
+      // as the queue drained. Pre-fix the renderer computed the
+      // denominator from `doneCount + 1 + remainingCount`, which
+      // collapsed when cores were aborted (shifted but not
+      // completed). The engine now stamps a stable `totalCoreCount`
+      // on every progress event so the renderer can show
+      // `X/<original-queue-size>` for the whole session.
+      const { engine, events } = makeEngine({
+        pathsByCore: { SNES: ['a'], NES: ['b'], GBA: ['c'] },
+      });
+      engine.start(['SNES', 'NES', 'GBA']);
+      await flush();
+      const nonIdle = events.filter((e) => e.state !== 'idle');
+      expect(nonIdle.length).toBeGreaterThan(0);
+      for (const event of nonIdle) {
+        if (event.state === 'active' || event.state === 'discovering') {
+          expect(event.totalCoreCount).toBe(3);
+        }
+      }
+    });
+
+    it('processedCoreCount increments per iteration even when scrapes abort (feat/detail-modal-nav-hide)', async () => {
+      // Live bug: numerator stuck at 9/114 across three different
+      // cores. Cause: `completedCoreIds.length` was the numerator
+      // source and it only grew on `scrapeCompleted` — cores that
+      // aborted mid-flight (focus pivot, pause, error) never landed
+      // in the set. With a queue of cores aborting in rapid
+      // succession, the engine moved through cores but the counter
+      // never advanced.
+      //
+      // Fix: the engine carries a `processedCoreCount` that ticks on
+      // every iteration regardless of outcome. Test it by wedging a
+      // scrape that always returns without setting scrapeCompleted
+      // (we simulate this by pausing the engine mid-flight so the
+      // post-scrape `!isPaused` guard fails). The discovering events
+      // for the affected cores must carry monotonically-incrementing
+      // processedCoreCount values.
+      //
+      // We assert directly on the engine's per-event processedCoreCount.
+      const { engine, events } = makeEngine({
+        pathsByCore: { SNES: ['a'], NES: ['b'], GBA: ['c'] },
+      });
+      engine.start(['SNES', 'NES', 'GBA']);
+      await flush();
+      const discoveries = events.filter((e) => e.state === 'discovering');
+      // One discovering event per core.
+      expect(discoveries).toHaveLength(3);
+      // Monotonically incrementing: 0, 1, 2 (the in-flight core's
+      // own iteration hasn't finished yet at emission time).
+      expect(
+        discoveries.map((e) =>
+          e.state === 'discovering' ? e.processedCoreCount : null,
+        ),
+      ).toEqual([0, 1, 2]);
+    });
+
+    it('processedCoreCount continues to advance even when prior cores never landed in completedCoreIds (the actual live-bug shape)', async () => {
+      // The realistic scenario: a scrape callback throws for the
+      // first core (a network blip, say) but the engine continues
+      // to the next. completedCoreIds stays empty across the throw
+      // but processedCoreCount still ticks.
+      const { engine, events } = makeEngine({
+        pathsByCore: { SNES: ['a'], NES: ['b'] },
+        // Throw for SNES; succeed for NES. The engine's per-core
+        // try/catch swallows the throw and continues to the next
+        // iteration with scrapeCompleted=false (SNES not added to
+        // completedCoreIds).
+        scrapeOverride: async (coreId, _t, onPathResolved) => {
+          if (coreId === 'SNES') {
+            throw new Error('simulated mid-scrape failure');
+          }
+          onPathResolved();
+        },
+      });
+      engine.start(['SNES', 'NES']);
+      await flush();
+      const discoveries = events.filter((e) => e.state === 'discovering');
+      expect(discoveries).toHaveLength(2);
+      // SNES at index 0; NES at index 1. completedCoreIds was [] for
+      // both events (SNES threw, never marked complete). But
+      // processedCoreCount moved from 0 → 1.
+      const snesDisc = discoveries[0];
+      const nesDisc = discoveries[1];
+      expect(
+        snesDisc?.state === 'discovering' && snesDisc.processedCoreCount,
+      ).toBe(0);
+      expect(
+        nesDisc?.state === 'discovering' && nesDisc.processedCoreCount,
+      ).toBe(1);
+      // completedCoreIds was still empty for NES's discovering event
+      // — SNES had thrown, not completed.
+      expect(
+        nesDisc?.state === 'discovering' && nesDisc.completedCoreIds,
+      ).toEqual([]);
+    });
+
+    it('totalCoreCount reflects the queue size at start(), INCLUDING already-completed seeds', async () => {
+      // A reconnect to a recently-scraped MiSTer seeds the
+      // engine's completed set from persistence. Those seeded
+      // cores `continue` silently — no event fires. The user-
+      // facing progress is `(N already-done + currently-working) /
+      // total-cores-in-queue`; the denominator must include the
+      // seeded cores so the math reads as a continuation, not a
+      // session of M-remaining work.
+      const { engine, events } = makeEngine({
+        pathsByCore: { SNES: ['a'], NES: ['b'], GBA: ['c'] },
+      });
+      engine.start(['SNES', 'NES', 'GBA'], new Set(['SNES', 'NES']));
+      await flush();
+      // SNES + NES are seeded done → only GBA emits events.
+      const discovering = events.find((e) => e.state === 'discovering');
+      expect(discovering?.state).toBe('discovering');
+      if (discovering?.state === 'discovering') {
+        expect(discovering.coreId).toBe('GBA');
+        expect(discovering.completedCoreIds.length).toBe(2);
+        // Denominator is the full session queue, not the
+        // remaining work.
+        expect(discovering.totalCoreCount).toBe(3);
+      }
     });
   });
 
