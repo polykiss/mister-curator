@@ -203,3 +203,101 @@ describe('autoScrapeMessageFor — PR-C (PR #26) footer-left progress', () => {
     expect(message).not.toContain('%');
   });
 });
+
+describe('idleMessageFor — connect-phase surfacing (feat/connect-progress-ui)', () => {
+  it('renders the phase label + elapsed seconds during connecting once past the reveal delay', () => {
+    // formatConnectingMessage returns null while elapsed < 3s (the
+    // reveal delay); the footer falls back to the generic copy
+    // there. Past 3s it returns the phase-aware string.
+    expect(
+      idleMessageFor('connecting', {
+        lostConnection: false,
+        autoRetry: null,
+        autoRetryFailed: false,
+        connectingElapsedMs: 4_500,
+        connectingPhase: 'priming',
+      }),
+    ).toBe('Reading device state… (4s)');
+    expect(
+      idleMessageFor('connecting', {
+        lostConnection: false,
+        autoRetry: null,
+        autoRetryFailed: false,
+        connectingElapsedMs: 5_000,
+        connectingPhase: 'arcade-parse',
+      }),
+    ).toBe('Parsing arcade metadata… (5s)');
+  });
+
+  it('falls back to the generic "Connecting…" string during the reveal delay (< 3s)', () => {
+    // Pre-reveal formatConnectingMessage returns null; the footer
+    // still needs to say SOMETHING, so the connecting branch
+    // returns the static fallback string. Without this fallback the
+    // footer would render an empty line for the first 3 seconds.
+    expect(
+      idleMessageFor('connecting', {
+        lostConnection: false,
+        autoRetry: null,
+        autoRetryFailed: false,
+        connectingElapsedMs: 1_500,
+        connectingPhase: 'transport',
+      }),
+    ).toBe('Connecting…');
+  });
+
+  it('preserves pre-feat-connect-progress-ui call shape (no resilience args = generic copy)', () => {
+    // Existing callsites passed no resilience second-arg at all and
+    // got 'Connecting…'. That behaviour stays — the new fields
+    // are optional, default to elapsed=0 / phase=null which falls
+    // through the reveal-delay branch.
+    expect(idleMessageFor('connecting')).toBe('Connecting…');
+  });
+
+  it('escalation message past 8s overrides the phase label (your-MiSTer-may-be-slow framing)', () => {
+    expect(
+      idleMessageFor('connecting', {
+        lostConnection: false,
+        autoRetry: null,
+        autoRetryFailed: false,
+        connectingElapsedMs: 9_000,
+        connectingPhase: 'cores-walk',
+      }),
+    ).toBe('Still connecting… your MiSTer may be slow to respond.');
+  });
+});
+
+describe('autoScrapeMessageFor — discovering state (feat/connect-progress-ui)', () => {
+  it('formats discovering with X/Y core position so the per-core walk shows even on zero-ROM cores', () => {
+    // The user's "60+ silent SSH probes" observation: most cores
+    // have zero ROMs, so the engine flashes through them with no
+    // `active` event (total=0 short-circuits the scrape loop). The
+    // discovering state surfaces the queue walk in real time.
+    expect(
+      autoScrapeMessageFor(
+        {
+          state: 'discovering',
+          coreId: 'PMD85',
+          coreLabel: 'PMD85',
+          completedCoreIds: ['SNES', 'NES', 'Genesis', 'Atari2600'],
+          remainingCount: 22,
+        },
+        'connected',
+      ),
+    ).toBe('Probing ROM directories: 5/27 · PMD85');
+  });
+
+  it('returns null for discovering when the connection is not steady-state connected', () => {
+    expect(
+      autoScrapeMessageFor(
+        {
+          state: 'discovering',
+          coreId: 'PMD85',
+          coreLabel: 'PMD85',
+          completedCoreIds: [],
+          remainingCount: 0,
+        },
+        'connecting',
+      ),
+    ).toBeNull();
+  });
+});

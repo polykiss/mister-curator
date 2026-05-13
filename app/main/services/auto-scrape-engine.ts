@@ -87,6 +87,18 @@ export type AutoScrapeEvent =
       readonly remainingCount: number;
     }
   | {
+      // feat/connect-progress-ui — emitted before `listRomPaths`
+      // resolves so the footer surfaces the per-core walk during the
+      // silent ~hundreds-of-milliseconds SSH window. Cores with zero
+      // ROMs never reach the `'active'` branch (`total === 0` early-
+      // exits), so without this state the queue walk is invisible.
+      readonly state: 'discovering';
+      readonly coreId: string;
+      readonly coreLabel: string;
+      readonly completedCoreIds: readonly string[];
+      readonly remainingCount: number;
+    }
+  | {
       readonly state: 'idle';
       readonly completedCoreIds: readonly string[];
     };
@@ -324,6 +336,21 @@ export class AutoScrapeEngine {
         this.currentCoreId = coreId;
         this.abortFlag = false;
         let scrapeCompleted = false;
+        // feat/connect-progress-ui — emit `discovering` BEFORE the
+        // listRomPaths SSH op so the renderer surfaces the per-core
+        // walk in real time, including for cores with zero ROMs that
+        // never reach the `active` branch (their `total === 0`
+        // early-exits the scrape loop). Without this event, the queue
+        // walk reads as a silent burst of SSH ops in the trace.
+        this.emit({
+          state: 'discovering',
+          coreId,
+          coreLabel: coreDisplayName(coreId),
+          completedCoreIds: [...this.completedCoreIds],
+          remainingCount: this.queue.filter(
+            (c) => !this.completedCoreIds.has(c),
+          ).length,
+        });
         try {
           const targets = await this.deps.listRomPaths(coreId);
           // The path-list resolution itself can race with a setFocus —

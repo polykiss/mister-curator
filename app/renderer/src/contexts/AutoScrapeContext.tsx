@@ -85,10 +85,16 @@ export function useCoreScrapeProgress(coreId: string): number {
 /**
  * Progress of the currently-scraping core, or null when the engine
  * is idle. Powers the StatusBar footer indicator.
+ *
+ * feat/connect-progress-ui — also returns 0 (cold blue dot) for the
+ * `discovering` state so the indicator stays visible during the
+ * per-core listRomPaths walk. Without this branch the dot would
+ * flicker on/off as the engine moved between discovery and scraping.
  */
 export function useActiveScrapeProgress(): number | null {
   const event = useContext(AutoScrapeContext);
-  if (event.state !== 'active') return null;
+  if (event.state === 'idle') return null;
+  if (event.state === 'discovering') return 0;
   if (event.total <= 0) return 0;
   return Math.max(0, Math.min(1, event.done / event.total));
 }

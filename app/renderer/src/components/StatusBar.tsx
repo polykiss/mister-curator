@@ -1,6 +1,10 @@
 import { Loader2 } from 'lucide-react';
 import type { JSX } from 'react';
 
+import {
+  formatConnectingMessage,
+  type ConnectPhase,
+} from '@shared/connection';
 import type { AutoScrapeProgressEvent } from '@shared/preload-api';
 import type { ConnectionStatus } from '@shared/types';
 
@@ -32,8 +36,14 @@ import { cn } from '@app/renderer/src/lib/cn';
  */
 export function StatusBar(): JSX.Element {
   const { current, currentProgress } = useOperationStatus();
-  const { status, lostConnection, autoRetry, autoRetryFailed } =
-    useConnection();
+  const {
+    status,
+    lostConnection,
+    autoRetry,
+    autoRetryFailed,
+    connectingElapsedMs,
+    connectingPhase,
+  } = useConnection();
   const autoScrape = useAutoScrapeProgress();
   const autoScrapeProgress = useActiveScrapeProgress();
 
@@ -42,10 +52,18 @@ export function StatusBar(): JSX.Element {
   // auto-scrape engine's progress (if any). The active-state
   // string is `<core display label> · <done>/<total>` per the
   // spec — no "ROMs" word, no percentage, no padding.
+  //
+  // feat/connect-progress-ui — the connecting branch now consumes
+  // the phase + elapsed pair the connection context already tracks
+  // (used to power the per-row inline indicator on ProfileList) so
+  // the footer surfaces "Reading device state… (4s)" / "Parsing
+  // arcade metadata… (9s)" instead of a static "Connecting…".
   const idleMessage = idleMessageFor(status, {
     lostConnection,
     autoRetry,
     autoRetryFailed,
+    connectingElapsedMs,
+    connectingPhase,
   });
   const autoScrapeMessage = autoScrapeMessageFor(autoScrape, status);
   const baseMessage = current ?? autoScrapeMessage ?? idleMessage;
@@ -154,6 +172,8 @@ export function idleMessageFor(
     readonly lostConnection: boolean;
     readonly autoRetry: AutoRetryProgress | null;
     readonly autoRetryFailed: boolean;
+    readonly connectingElapsedMs?: number;
+    readonly connectingPhase?: ConnectPhase | null;
   } = { lostConnection: false, autoRetry: null, autoRetryFailed: false },
 ): string {
   if (resilience.autoRetry !== null) {
@@ -169,8 +189,16 @@ export function idleMessageFor(
   switch (status) {
     case 'connected':
       return '';
-    case 'connecting':
-      return 'Connecting…';
+    case 'connecting': {
+      // feat/connect-progress-ui — surface the connect-phase label +
+      // elapsed seconds when available. `formatConnectingMessage`
+      // honours the reveal-delay (<3s returns null → fall back to
+      // the generic copy so the footer still says something) and
+      // the "still connecting" escalation past 8s.
+      const elapsed = resilience.connectingElapsedMs ?? 0;
+      const phase = resilience.connectingPhase ?? null;
+      return formatConnectingMessage(elapsed, phase) ?? 'Connecting…';
+    }
     case 'error':
       return 'Connection error';
     case 'disconnected':
@@ -197,8 +225,22 @@ export function autoScrapeMessageFor(
   event: AutoScrapeProgressEvent,
   status: ConnectionStatus,
 ): string | null {
-  if (event.state !== 'active') return null;
   if (status !== 'connected') return null;
+  // feat/connect-progress-ui — `discovering` is the per-core SSH
+  // walk window (the engine called listRomPaths and is waiting on
+  // the device). Surface it as a "Probing ROM directories: X/Y"
+  // line so the queue walk reads as visible progress instead of a
+  // burst of silent SSH ops. X = current core's queue position,
+  // Y = total cores in the original queue.
+  if (event.state === 'discovering') {
+    const doneCount = event.completedCoreIds.length;
+    const queuedCount = event.remainingCount;
+    // current = (already done) + 1 (this core, mid-discovery).
+    const current = doneCount + 1;
+    const total = doneCount + 1 + queuedCount;
+    return `Probing ROM directories: ${String(current)}/${String(total)} · ${event.coreLabel}`;
+  }
+  if (event.state !== 'active') return null;
   // feat/auto-scrape-persistence: extend the footer with the
   // session completion counts so the user sees the FULL picture,
   // not just the current core. Tail segments drop when their

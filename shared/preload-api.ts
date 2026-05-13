@@ -223,6 +223,22 @@ export type AutoScrapeProgressEvent =
       readonly remainingCount: number;
     }
   | {
+      // feat/connect-progress-ui — emitted by the engine BEFORE it
+      // resolves a core's ROM list. The per-core `listRomPaths` SSH
+      // op (a `find` over the core's games dir) is the silent
+      // ~hundreds-of-milliseconds window the user sees as "60+ silent
+      // SSH probes" during startup — most cores have zero ROMs and
+      // drain through with no `'active'` event because `total === 0`.
+      // The `'discovering'` event surfaces THAT window so the footer
+      // shows "Probing ROM directories: X/Y" while the engine walks
+      // the queue, even on cores that never enter the hashing path.
+      readonly state: 'discovering';
+      readonly coreId: string;
+      readonly coreLabel: string;
+      readonly completedCoreIds: readonly string[];
+      readonly remainingCount: number;
+    }
+  | {
       readonly state: 'idle';
       readonly completedCoreIds: readonly string[];
     };
