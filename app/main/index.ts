@@ -26,6 +26,9 @@ import { MetadataService } from '@app/main/metadata/metadata-service';
 import { OpenVGDBService } from '@app/main/metadata/openvgdb-service';
 import { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
 import { AutoScrapeEngine } from '@app/main/services/auto-scrape-engine';
+import { groupByPrimaryZipBasename } from '@app/main/services/arcade-prefetch-paths';
+import { ARCADE_VIRTUAL_CORE_ID } from '@shared/arcade-mra';
+import { MISTER_ARCADE_ZIP_DIRS } from '@shared/constants';
 import { ScrapeStateStore } from '@app/main/services/scrape-state';
 import { ProfileStore } from '@app/main/storage/profile-store';
 
@@ -282,9 +285,57 @@ void app.whenReady().then(async () => {
     // footer. The new wrapper does an SSH find for the whole core
     // tree and returns absolute paths, so the engine queues
     // exactly the files the sidebar count promised.
-    listRomPaths: async (coreId) =>
-      manager.listAllRomPathsForCore(coreId),
+    listRomPaths: async (coreId) => {
+      // feat/arcade-parity-2-metadata — arcade pass. ARCADE_VIRTUAL_CORE_ID
+      // is the engine sentinel for the synthetic Arcade row.
+      // listRomPaths returns one pseudo-path per UNIQUE primary zip
+      // (deduped across .mras — parent + clone usually share a zip);
+      // the orchestrator's getArcadeMetadata emits one event per
+      // group so the engine's done/total ticking is accurate.
+      if (coreId === ARCADE_VIRTUAL_CORE_ID) {
+        const snapshot = manager.getArcadePlayabilitySnapshot();
+        if (snapshot === null) {
+          return { paths: [], atomicFolderPaths: new Set() };
+        }
+        const playable = snapshot.entries.filter(
+          (e) => snapshot.byPath.get(e.relativePath) === 'playable',
+        );
+        const groups = groupByPrimaryZipBasename(
+          playable,
+          snapshot.zipBasenames,
+        );
+        // Pseudo-paths for accounting only — the actual zip path
+        // resolves inside getArcadeMetadata via statPathsWithSize
+        // (snapshot's zipBasenames union doesn't preserve per-dir
+        // membership). Pick the first MAME dir for the synthesised
+        // string; the engine matches events by COUNT, not path.
+        const paths = groups.map(
+          (g) => `${MISTER_ARCADE_ZIP_DIRS[0]}/${g.zipBasename}`,
+        );
+        return { paths, atomicFolderPaths: new Set() };
+      }
+      return manager.listAllRomPathsForCore(coreId);
+    },
     scrape: async (coreId, targets, onPathResolved, shouldAbort) => {
+      // feat/arcade-parity-2-metadata — arcade pass dispatches to
+      // getArcadeMetadata, which builds .mra-derived SS hints
+      // (displayName + setname) rather than the path-derived hints
+      // getRomsMetadata uses. Same `onPathResolved` signature so the
+      // engine's progress ticking is uniform across coreIds.
+      if (coreId === ARCADE_VIRTUAL_CORE_ID) {
+        const snapshot = manager.getArcadePlayabilitySnapshot();
+        if (snapshot === null) return;
+        const playable = snapshot.entries.filter(
+          (e) => snapshot.byPath.get(e.relativePath) === 'playable',
+        );
+        await metadataOrchestrator.getArcadeMetadata(
+          playable,
+          snapshot.zipBasenames,
+          () => onPathResolved(),
+          shouldAbort,
+        );
+        return;
+      }
       // feat/atomic-folder-consistency: forward `atomicFolderPaths`
       // so the orchestrator routes those paths' name-search through
       // the parent folder name (the strongest hint when the disk
@@ -411,10 +462,38 @@ void app.whenReady().then(async () => {
       // would queue `__arcade__`, call `listRoms` which throws
       // for the non-existent `/media/fat/games/__arcade__/`
       // dir, and noise up the per-core try/catch.
-      const coreIds = cores
+      const realCoreIds = cores
         .filter((c) => c.gamesDirExists)
         .filter((c) => c.category !== 'Arcade')
         .map((c) => c.id);
+      // feat/arcade-parity-2-metadata — queue the arcade pass when
+      // there's a playability snapshot with at least one playable
+      // entry. The snapshot is hot from connect's loadArcadeData
+      // (the arcade-mra-meta cache write happens before this status
+      // listener fires); if for some reason it isn't, skip — the
+      // user can manually refresh later.
+      //
+      // Position: arcade goes FIRST in the queue, not last. Pre-fix
+      // it was appended (tail), which meant the engine processed
+      // every real core before reaching it. With Saturn's first-
+      // encounter wrapper-zip hash timeouts (120s × N before PR #58's
+      // sentinel kicks in), the queue took 10-20+ minutes to reach
+      // arcade on a fresh install — the user's wait window expired
+      // long before any arcade `[prefetch] → start` log fired (Phase
+      // 1 investigation of the PR-62 live trace). Arcade is the
+      // user-stated priority surface for the whole arcade parity
+      // sequence, so it owns the front of the queue. Regular cores
+      // keep their existing alphabetical/category order behind it.
+      const arcadeIds: string[] = [];
+      const arcadeSnapshot = manager.getArcadePlayabilitySnapshot();
+      if (arcadeSnapshot !== null) {
+        const anyPlayable = arcadeSnapshot.entries.some(
+          (e) =>
+            arcadeSnapshot.byPath.get(e.relativePath) === 'playable',
+        );
+        if (anyPlayable) arcadeIds.push(ARCADE_VIRTUAL_CORE_ID);
+      }
+      const coreIds = [...arcadeIds, ...realCoreIds];
       const session = manager.getActiveSession();
       const alreadyCompleted =
         session !== null

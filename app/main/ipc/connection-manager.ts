@@ -771,6 +771,19 @@ export class ConnectionManager {
    * effect through the connection-event broadcast so the badge
    * + count update without a round-trip refresh.
    */
+  /**
+   * feat/arcade-parity-2-metadata — synchronous accessor for the
+   * in-memory playability snapshot the auto-scrape engine consumes
+   * when queuing the arcade pass. Returns the cached snapshot if
+   * `loadArcadeData` has populated it on this session's connect
+   * flow, or `null` when the cache is cold (e.g. the user opened
+   * a profile that never reached the arcade flow). Cold-cache
+   * callers should `await loadArcadeData()` instead.
+   */
+  getArcadePlayabilitySnapshot(): ArcadePlayabilitySnapshot | null {
+    return this.arcadePlayabilityCache;
+  }
+
   async setArcadeAutoHideEnabled(
     enabled: boolean,
   ): Promise<void> {

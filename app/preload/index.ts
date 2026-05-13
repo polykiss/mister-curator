@@ -351,6 +351,10 @@ const api: MisterApi = {
       relativePath,
       on,
     ),
+  getArcadeMetadataBatch: () =>
+    invoke<Record<string, RomMetadata | null>>(
+      IPC_CHANNELS.getArcadeMetadataBatch,
+    ),
 };
 
 contextBridge.exposeInMainWorld('mister', api);

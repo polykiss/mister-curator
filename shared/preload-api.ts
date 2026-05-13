@@ -118,6 +118,13 @@ export const IPC_CHANNELS = {
   getArcadeAutoHideEnabled: 'mister:getArcadeAutoHideEnabled',
   setArcadeAutoHideEnabled: 'mister:setArcadeAutoHideEnabled',
   setArcadeUserShownDespiteMissing: 'mister:setArcadeUserShownDespiteMissing',
+  // feat/arcade-parity-2-metadata — cache-only read of ScreenScraper
+  // metadata for every playable .mra. The auto-scrape engine
+  // populates the cache in the background (via getArcadeMetadata);
+  // this IPC just reads back whatever's there, keyed by
+  // mraRelativePath. Entries with no cached record (zip not yet
+  // hashed, or SS lookup hasn't completed) map to null.
+  getArcadeMetadataBatch: 'mister:getArcadeMetadataBatch',
 } as const;
 
 /** PR #15 prefetch progress kind. Discriminator for the wire event. */
@@ -642,6 +649,15 @@ export interface MisterApi {
     relativePath: string,
     on: boolean,
   ): Promise<void>;
+  /**
+   * feat/arcade-parity-2-metadata — cache-only read of ScreenScraper
+   * metadata for every playable `.mra`. Keyed by `relativePath`;
+   * values are `null` when the metadata hasn't been populated yet
+   * (the zip's md5 isn't in the hash cache OR the SS lookup hasn't
+   * landed for that hash). Does NOT trigger SS calls or hashing —
+   * the auto-scrape engine handles population in the background.
+   */
+  getArcadeMetadataBatch(): Promise<Record<string, RomMetadata | null>>;
 }
 
 /** feat/arcade-phase-1.5 — wire shape for `.mra` entries. */

@@ -13,6 +13,7 @@ import type {
   OpenVGDBProgressEvent,
   OpenVGDBService,
 } from '@app/main/metadata/openvgdb-service';
+import type { ArcadeMraMeta } from '@shared/arcade-mra-parse';
 import type { RomMetadata } from '@shared/metadata-types';
 
 const HASH = 'a'.repeat(32);
@@ -1244,6 +1245,388 @@ describe('MetadataOrchestrator', () => {
         unmappablePath,
       ]);
       expect(result[unmappablePath]?.name).toBe('mame placeholder');
+    });
+  });
+
+  // feat/arcade-parity-2-metadata — the arcade prefetch pass and the
+  // adapter-side cached read. Three properties pinned here:
+  //   (i)   dedupe at the orchestrator level (one MetadataService
+  //         call per UNIQUE zip, even when N .mras share it)
+  //   (ii)  the SS hint passed to MetadataService carries systemId=75
+  //         AND the .mra-derived filename (NOT the zip's basename)
+  //   (iii) the cached-read path returns the same metadata record for
+  //         every .mra that shares a zip
+  describe('getArcadeMetadata / getCachedArcadeMetadataBatch (feat/arcade-parity-2-metadata)', () => {
+    function mra(
+      relativePath: string,
+      requiredZips: readonly (readonly string[])[],
+      setname?: string,
+    ): import('@shared/arcade-mra-parse').ArcadeMraMeta {
+      return {
+        relativePath,
+        displayName: relativePath.split('/').pop()!,
+        hidden: false,
+        requiredZips,
+        rbf: 'r',
+        setname,
+      };
+    }
+
+    it('dedupes by primary zip — two .mras sharing dkong.zip → one MetadataService.getMetadata call', async () => {
+      const parent = mra('Donkey Kong.mra', [['dkong.zip']]);
+      const clone = mra('Donkey Kong (US).mra', [
+        ['dkongus.zip', 'dkong.zip'],
+      ]);
+      const meta = buildMeta(HASH, 'Donkey Kong');
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map([
+          ['/media/fat/games/mame/dkong.zip', buildHashEntry(HASH, 2048, 100)],
+        ]),
+        meta,
+      });
+      // Override statPathsWithSize on the mocked client so the
+      // arcade resolution step finds dkong.zip in mame/.
+      const session = (orchestrator as unknown as {
+        getActiveSession: () => ActiveSession | null;
+      }).getActiveSession();
+      if (session === null) throw new Error('test setup: session null');
+      (session.client.statPathsWithSize as ReturnType<typeof vi.fn>)
+        .mockImplementation(async (paths: readonly string[]) => {
+          const out: Record<string, { size: number; mtime: number }> = {};
+          for (const p of paths) {
+            out[p] =
+              p === '/media/fat/games/mame/dkong.zip'
+                ? { size: 2048, mtime: 100 }
+                : { size: 0, mtime: 0 };
+          }
+          return out;
+        });
+
+      const events: RomMetadataResolvedEvent[] = [];
+      await orchestrator.getArcadeMetadata(
+        [parent, clone],
+        new Set(['dkong.zip']),
+        (event) => events.push(event),
+      );
+
+      // Exactly ONE SS lookup despite two .mras. The dedupe is the
+      // load-bearing optimisation here — on a real MiSTer ~300 unique
+      // zips back ~600 .mras.
+      expect(metadataService.getMetadata).toHaveBeenCalledTimes(1);
+      // Exactly ONE event emitted (one per unique zip, NOT per .mra).
+      // The adapter-side IPC fans out metadata to all .mras sharing a
+      // zip via `getCachedArcadeMetadataBatch`.
+      expect(events).toHaveLength(1);
+      expect(events[0]?.metadata?.name).toBe('Donkey Kong');
+    });
+
+    it('passes systemId=75 + .mra-derived filename hint to MetadataService.getMetadata', async () => {
+      // The .mra's setname (`dkong`) is folded into the synthesised
+      // filename `'Donkey Kong (dkong).mra'` so extractNameHints emits
+      // BOTH a paren-shortname and a filename-stem hint to the SS
+      // name-search fallback. Path-derived hints would give us
+      // `'dkong.zip'` → terrible search term.
+      const entry = mra('Donkey Kong.mra', [['dkong.zip']], 'dkong');
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map([
+          ['/media/fat/games/mame/dkong.zip', buildHashEntry(HASH)],
+        ]),
+        meta: buildMeta(HASH, 'Donkey Kong'),
+      });
+      const session = (orchestrator as unknown as {
+        getActiveSession: () => ActiveSession | null;
+      }).getActiveSession();
+      if (session === null) throw new Error('test setup: session null');
+      (session.client.statPathsWithSize as ReturnType<typeof vi.fn>)
+        .mockImplementation(async (paths: readonly string[]) => {
+          const out: Record<string, { size: number; mtime: number }> = {};
+          for (const p of paths) {
+            out[p] =
+              p === '/media/fat/games/mame/dkong.zip'
+                ? { size: 1024, mtime: 100 }
+                : { size: 0, mtime: 0 };
+          }
+          return out;
+        });
+
+      await orchestrator.getArcadeMetadata(
+        [entry],
+        new Set(['dkong.zip']),
+      );
+
+      expect(metadataService.getMetadata).toHaveBeenCalledTimes(1);
+      const call = (metadataService.getMetadata as ReturnType<typeof vi.fn>)
+        .mock.calls[0];
+      // arg[0]: hash (md5 of the resolved zip).
+      expect(call?.[0]).toBe(HASH);
+      // arg[1]: MetadataHint — filename is the synthesised .mra name,
+      // NOT the zip's basename. parentFolder is `_Arcade`.
+      expect(call?.[1]).toEqual({
+        filename: 'Donkey Kong (dkong).mra',
+        parentFolder: '_Arcade',
+        parentFolderIsAtomic: false,
+      });
+      // arg[2]: ScreenScraperHint — systemId is 75 (MAME / arcade) AND
+      // romName carries the .mra displayName (the human-readable form).
+      expect(call?.[2]).toMatchObject({
+        systemId: 75,
+        md5: HASH,
+        romName: 'Donkey Kong.mra',
+      });
+    });
+
+    it('falls back to displayName-only filename when the .mra has no setname', async () => {
+      const entry = mra('Galaga.mra', [['galaga.zip']]); // no setname
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map([
+          ['/media/fat/games/mame/galaga.zip', buildHashEntry(HASH)],
+        ]),
+        meta: buildMeta(HASH, 'Galaga'),
+      });
+      const session = (orchestrator as unknown as {
+        getActiveSession: () => ActiveSession | null;
+      }).getActiveSession();
+      if (session === null) throw new Error('test setup: session null');
+      (session.client.statPathsWithSize as ReturnType<typeof vi.fn>)
+        .mockImplementation(async (paths: readonly string[]) => {
+          const out: Record<string, { size: number; mtime: number }> = {};
+          for (const p of paths) {
+            out[p] =
+              p === '/media/fat/games/mame/galaga.zip'
+                ? { size: 1024, mtime: 100 }
+                : { size: 0, mtime: 0 };
+          }
+          return out;
+        });
+      await orchestrator.getArcadeMetadata([entry], new Set(['galaga.zip']));
+      const call = (metadataService.getMetadata as ReturnType<typeof vi.fn>)
+        .mock.calls[0];
+      // No `(setname)` paren in the synthesised filename — falls back
+      // to the displayName as-is.
+      expect((call?.[1] as { filename: string }).filename).toBe('Galaga.mra');
+    });
+
+    it('reuses the existing MetadataService cache (hash already populated by ROM prefetch)', async () => {
+      // The MetadataService cache is keyed by md5 (32-char hex) and is
+      // NOT partitioned by system. A hash a ROM prefetch wrote (e.g.
+      // a previous browse of the MAME core's dkong.zip) is reused as-is
+      // when arcade's getArcadeMetadata calls getMetadata with the
+      // same md5 — getMetadata returns the cached record without
+      // re-querying SS. The orchestrator can't observe that directly
+      // (the cache lookup is inside MetadataService); we instead pin
+      // the orchestrator-level contract: same md5 input → same record
+      // returned, no extra hash compute.
+      const entry = mra('Donkey Kong.mra', [['dkong.zip']]);
+      const meta = buildMeta(HASH, 'Donkey Kong');
+      const { orchestrator, hashService, metadataService } = makeOrchestrator(
+        {
+          hashEntries: new Map([
+            ['/media/fat/games/mame/dkong.zip', buildHashEntry(HASH)],
+          ]),
+          meta,
+        },
+      );
+      const session = (orchestrator as unknown as {
+        getActiveSession: () => ActiveSession | null;
+      }).getActiveSession();
+      if (session === null) throw new Error('test setup: session null');
+      (session.client.statPathsWithSize as ReturnType<typeof vi.fn>)
+        .mockImplementation(async (paths: readonly string[]) => {
+          const out: Record<string, { size: number; mtime: number }> = {};
+          for (const p of paths) {
+            out[p] =
+              p === '/media/fat/games/mame/dkong.zip'
+                ? { size: 1024, mtime: 100 }
+                : { size: 0, mtime: 0 };
+          }
+          return out;
+        });
+      await orchestrator.getArcadeMetadata([entry], new Set(['dkong.zip']));
+      // Hash compute did NOT fire — `checkCachedMtimes` returned the
+      // cached entry → cache hit path. This is the cross-pipeline
+      // reuse property: ROM prefetch warmed the cache; arcade picks it
+      // up for free.
+      expect(hashService.computeHash).not.toHaveBeenCalled();
+      expect(metadataService.getMetadata).toHaveBeenCalledTimes(1);
+    });
+
+    it('chunks the primary-zip stat at 100 paths per SSH op (ARG_MAX overflow fix)', async () => {
+      // PR-62 live trace fired `Argument list too long` on a 706-path
+      // single statPathsWithSize call (353 unique zips × 2 candidate
+      // dirs). Same class of bug PR #53 and PR #56 solved for witness
+      // and sample-md5; the orchestrator now reuses the shared
+      // `chunked` helper at the 100-path window.
+      //
+      // 150 .mras sharing nothing → 150 unique zips → 300 candidate
+      // paths → expect 3 SSH chunks of 100 / 100 / 100.
+      const N_MRAS = 150;
+      const entries: ArcadeMraMeta[] = [];
+      const zipBasenameSet = new Set<string>();
+      const hashEntries = new Map<string, HashEntry>();
+      for (let i = 0; i < N_MRAS; i += 1) {
+        const basename = `arcade-${String(i).padStart(3, '0')}.zip`;
+        entries.push({
+          relativePath: `Game ${String(i)}.mra`,
+          displayName: `Game ${String(i)}.mra`,
+          hidden: false,
+          requiredZips: [[basename]],
+          rbf: 'r',
+        });
+        zipBasenameSet.add(basename);
+        hashEntries.set(`/media/fat/games/mame/${basename}`, buildHashEntry(HASH));
+      }
+      const meta = buildMeta(HASH, 'Synthetic');
+      const { orchestrator } = makeOrchestrator({ hashEntries, meta });
+      const session = (orchestrator as unknown as {
+        getActiveSession: () => ActiveSession | null;
+      }).getActiveSession();
+      if (session === null) throw new Error('test setup: session null');
+      // Record one entry per call so we can assert chunk sizes after.
+      const statCallSizes: number[] = [];
+      (session.client.statPathsWithSize as ReturnType<typeof vi.fn>)
+        .mockImplementation(async (paths: readonly string[]) => {
+          statCallSizes.push(paths.length);
+          const out: Record<string, { size: number; mtime: number }> = {};
+          for (const p of paths) {
+            out[p] = p.startsWith('/media/fat/games/mame/')
+              ? { size: 1024, mtime: 100 }
+              : { size: 0, mtime: 0 };
+          }
+          return out;
+        });
+
+      await orchestrator.getArcadeMetadata(entries, zipBasenameSet);
+
+      // 300 candidate paths / 100 = exactly 3 chunks of 100. No
+      // single call exceeds the limit — that's the ARG_MAX fix.
+      expect(statCallSizes).toEqual([100, 100, 100]);
+      // The aggregate Object.assign merge must yield all 150 unique
+      // zip resolutions — one .mra-per-zip → one getMetadata per
+      // zip → 150 SS lookups total. If the chunked aggregation
+      // dropped any chunk's results, we'd see < 150 here.
+      expect(
+        (
+          (orchestrator as unknown as {
+            metadataService: { getMetadata: ReturnType<typeof vi.fn> };
+          }).metadataService.getMetadata as ReturnType<typeof vi.fn>
+        ).mock.calls.length,
+      ).toBe(N_MRAS);
+    });
+
+    it('emits a null-metadata event when a snapshot-listed zip stat-resolves to size=0 (race with removal)', async () => {
+      // The snapshot may say `dkong.zip` is in zipBasenames, but
+      // between snapshot capture and prefetch the user removes the
+      // zip. Stat returns size=0. The orchestrator emits one event
+      // with metadata=null so the engine's done/total ticking stays
+      // accurate (one event per listRomPaths entry).
+      const entry = mra('Donkey Kong.mra', [['dkong.zip']]);
+      const { orchestrator } = makeOrchestrator({
+        hashEntries: new Map(),
+        meta: null,
+      });
+      const session = (orchestrator as unknown as {
+        getActiveSession: () => ActiveSession | null;
+      }).getActiveSession();
+      if (session === null) throw new Error('test setup: session null');
+      (session.client.statPathsWithSize as ReturnType<typeof vi.fn>)
+        .mockImplementation(async (paths: readonly string[]) => {
+          const out: Record<string, { size: number; mtime: number }> = {};
+          for (const p of paths) out[p] = { size: 0, mtime: 0 };
+          return out;
+        });
+      const events: RomMetadataResolvedEvent[] = [];
+      await orchestrator.getArcadeMetadata(
+        [entry],
+        new Set(['dkong.zip']),
+        (event) => events.push(event),
+      );
+      expect(events).toHaveLength(1);
+      expect(events[0]?.metadata).toBeNull();
+      expect(events[0]?.error).toBe(false);
+    });
+
+    it('getCachedArcadeMetadataBatch: fans the same SS record across all .mras sharing a zip', async () => {
+      // Two .mras → same primary zip → same md5 → same RomMetadata.
+      // The adapter-side IPC must paint identical metadata on every
+      // row that maps to a shared zip.
+      const parent = mra('Donkey Kong.mra', [['dkong.zip']]);
+      const clone = mra('Donkey Kong (US).mra', [['dkong.zip']]);
+      const meta = buildMeta(HASH, 'Donkey Kong');
+      const { orchestrator } = makeOrchestrator({
+        hashEntries: new Map([
+          ['/media/fat/games/mame/dkong.zip', buildHashEntry(HASH)],
+        ]),
+        meta,
+      });
+      const result = await orchestrator.getCachedArcadeMetadataBatch(
+        'host-1',
+        {
+          entries: [parent, clone],
+          zipBasenames: new Set(['dkong.zip']),
+          byPath: new Map([
+            ['Donkey Kong.mra', 'playable' as const],
+            ['Donkey Kong (US).mra', 'playable' as const],
+          ]),
+        },
+      );
+      expect(result['Donkey Kong.mra']?.name).toBe('Donkey Kong');
+      expect(result['Donkey Kong (US).mra']?.name).toBe('Donkey Kong');
+      // Same record reference — the metadata cache is shared, not
+      // copied per .mra.
+      expect(result['Donkey Kong.mra']).toBe(result['Donkey Kong (US).mra']);
+    });
+
+    it('getCachedArcadeMetadataBatch: returns null for a playable .mra whose zip is not in the hash cache yet', async () => {
+      // Prefetch hasn't run yet for this zip → hashCache empty →
+      // can't look up metadata → null. The adapter shape sees null
+      // and (in PR C) renders the row without metadata cells.
+      const entry = mra('Donkey Kong.mra', [['dkong.zip']]);
+      const { orchestrator } = makeOrchestrator({
+        hashEntries: new Map(), // empty — no zip hashed yet
+        meta: null,
+      });
+      const result = await orchestrator.getCachedArcadeMetadataBatch(
+        'host-1',
+        {
+          entries: [entry],
+          zipBasenames: new Set(['dkong.zip']),
+          byPath: new Map([['Donkey Kong.mra', 'playable' as const]]),
+        },
+      );
+      expect(result['Donkey Kong.mra']).toBeNull();
+    });
+
+    it('getCachedArcadeMetadataBatch: skips missing / no-roms-needed .mras entirely (the prefetch never touches them)', async () => {
+      const playableMra = mra('Playable.mra', [['dkong.zip']]);
+      const missingMra = mra('Missing.mra', [['lost.zip']]);
+      const noRomsNeededMra = mra('TTL.mra', []);
+      const meta = buildMeta(HASH, 'Playable');
+      const { orchestrator } = makeOrchestrator({
+        hashEntries: new Map([
+          ['/media/fat/games/mame/dkong.zip', buildHashEntry(HASH)],
+        ]),
+        meta,
+      });
+      const result = await orchestrator.getCachedArcadeMetadataBatch(
+        'host-1',
+        {
+          entries: [playableMra, missingMra, noRomsNeededMra],
+          zipBasenames: new Set(['dkong.zip']),
+          byPath: new Map<
+            string,
+            'playable' | 'missing' | 'no-roms-needed'
+          >([
+            ['Playable.mra', 'playable'],
+            ['Missing.mra', 'missing'],
+            ['TTL.mra', 'no-roms-needed'],
+          ]),
+        },
+      );
+      // Only the playable .mra is in the output. Missing /
+      // no-roms-needed never get metadata in this PR (PR-spec
+      // explicitly defers G19 .mra-XML fallback to v0.2).
+      expect(Object.keys(result)).toEqual(['Playable.mra']);
+      expect(result['Playable.mra']?.name).toBe('Playable');
     });
   });
 });

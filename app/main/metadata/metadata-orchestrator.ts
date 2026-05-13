@@ -1,6 +1,24 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
+import { ARCADE_VIRTUAL_CORE_ID } from '@shared/arcade-mra';
+import type { ArcadeMraMeta } from '@shared/arcade-mra-parse';
+
+import { groupByPrimaryZipBasename } from '@app/main/services/arcade-prefetch-paths';
+import { chunked } from '@shared/chunk';
+import { MISTER_ARCADE_ZIP_DIRS } from '@shared/constants';
+import type { SizeAndMtime } from '@shared/prime-parse';
+
+/**
+ * feat/arcade-parity-2-metadata — arcade primary-zip stat chunk size.
+ * Matches the WITNESS_CHUNK_SIZE constant in `real-mister-client.ts`
+ * — every SSH-exec-argv-bounded call uses the same 100-path window
+ * (witness stat, sample-md5, content-hash). 100 paths × ~70-byte
+ * shell-quoted lines stays well under busybox's argv cap (~26 KB
+ * script) AND under the bash kernel `ARG_MAX` ceiling that bit a
+ * 706-path arcade stat in the live PR-62 verify trace.
+ */
+const ARCADE_STAT_CHUNK_SIZE = 100;
 import type {
   HashClient,
   HashEntry,
@@ -352,6 +370,405 @@ export class MetadataOrchestrator {
       out[p] = await this.metadataService.readCachedMetadata(syntheticKey);
     }
     return out;
+  }
+
+  /**
+   * feat/arcade-parity-2-metadata — cache-only batched read of
+   * arcade ScreenScraper metadata, keyed by `.mra` relativePath.
+   * Pure disk reads — no SSH, no SS network calls. The
+   * auto-scrape engine populates the cache in the background via
+   * `getArcadeMetadata`; this method reads back whatever's there.
+   *
+   * Resolution chain per `.mra`:
+   *   1. Compute primary zip basename via `groupByPrimaryZipBasename`.
+   *   2. Check `<userData>/mister-cache/<host>/hashes.json` for both
+   *      candidate paths (mame/ then hbmame/). Whichever has a
+   *      cached HashEntry wins.
+   *   3. Read `<userData>/metadata/by-hash/<md5>.json` for the
+   *      resolved md5.
+   *
+   * Any step yielding nothing → `null` in the result map (the row
+   * shows pre-metadata state). Multiple `.mras` sharing a zip all
+   * map to the same `RomMetadata` record — the shared
+   * `MetadataService` cache is keyed by md5, not by .mra.
+   */
+  async getCachedArcadeMetadataBatch(
+    host: string,
+    snapshot: {
+      readonly entries: readonly ArcadeMraMeta[];
+      readonly zipBasenames: ReadonlySet<string>;
+      readonly byPath: ReadonlyMap<
+        string,
+        'playable' | 'missing' | 'no-roms-needed'
+      >;
+    },
+  ): Promise<Record<string, RomMetadata | null>> {
+    const out: Record<string, RomMetadata | null> = {};
+    const playable = snapshot.entries.filter(
+      (e) => snapshot.byPath.get(e.relativePath) === 'playable',
+    );
+    if (playable.length === 0) return out;
+    const groups = groupByPrimaryZipBasename(playable, snapshot.zipBasenames);
+
+    // Batch-read every candidate path's HashEntry in one disk pass
+    // (HashService.readCachedEntries opens hashes.json once and
+    // looks up each path). Two candidates per group (mame/ +
+    // hbmame/) — most won't exist but the lookup is fast.
+    const candidatePaths: string[] = [];
+    for (const g of groups) {
+      for (const dir of MISTER_ARCADE_ZIP_DIRS) {
+        candidatePaths.push(`${dir}/${g.zipBasename}`);
+      }
+    }
+    const hashByPath = await this.hashService.readCachedEntries(
+      host,
+      candidatePaths,
+    );
+
+    // For each group: find the candidate path with a cached HashEntry,
+    // read metadata by its md5, fan out to every .mra in the group.
+    for (const group of groups) {
+      let md5: string | null = null;
+      for (const dir of MISTER_ARCADE_ZIP_DIRS) {
+        const entry = hashByPath.get(`${dir}/${group.zipBasename}`);
+        if (entry !== null && entry !== undefined) {
+          md5 = entry.md5;
+          break;
+        }
+      }
+      const metadata =
+        md5 === null
+          ? null
+          : await this.metadataService.readCachedMetadata(md5);
+      // Fan out across every .mra in the group — they share the
+      // same SS record by virtue of sharing a zip md5.
+      for (const mra of group.mras) {
+        out[mra.relativePath] = metadata;
+      }
+    }
+    // Playable .mras whose primary zip couldn't be grouped (e.g.
+    // requiredZips empty after the playability filter — shouldn't
+    // happen but defensive) appear in `out` as undefined; coerce to
+    // null so the wire shape stays consistent.
+    for (const mra of playable) {
+      if (!(mra.relativePath in out)) out[mra.relativePath] = null;
+    }
+    return out;
+  }
+
+  /**
+   * feat/arcade-parity-2-metadata — arcade prefetch pass. Like
+   * `getRomsMetadata` but with two structural differences:
+   *
+   * 1. Each "path" is a primary zip (`/media/fat/games/mame/<zip>`
+   *    or `/media/fat/games/hbmame/<zip>`). Multiple `.mras` can
+   *    share a primary zip; the deduper (`groupByPrimaryZipBasename`)
+   *    collapses them so we hash + look up SS once per unique zip.
+   * 2. SS hints come from the `.mra` context, NOT the zip path.
+   *    The zip path's basename is `'dkong.zip'` — SS's name-search
+   *    on the setname matches poorly; the `.mra`'s displayName
+   *    (`'Donkey Kong'`) and setname (`'dkong'`) are the right
+   *    inputs to `jeuRecherche.php`. We synthesize a filename
+   *    `'Donkey Kong (dkong).mra'` so the existing `extractNameHints`
+   *    yields both the filename-stem AND the paren-shortname hints
+   *    without touching `MetadataService`'s shape.
+   *
+   * Events fire with `path = zipPath` (the unique zip), shape-
+   * compatible with `RomMetadataResolvedEvent` so the same engine
+   * progress UI ticks through arcade and ROM prefetches uniformly.
+   * The renderer / adapter reads cached metadata by zip md5 later
+   * (via `getArcadeMetadataBatch` IPC) — N `.mras` sharing one zip
+   * all resolve to the same `RomMetadata` record on disk.
+   *
+   * Hard-codes `systemId = 75` (ScreenScraper's mame / arcade
+   * system id) — the wiring layer's `SystemIdResolver` is bypassed
+   * for arcade entries because the resolver is keyed on coreId, and
+   * the arcade pass uses `ARCADE_VIRTUAL_CORE_ID` which doesn't map
+   * to a core file the resolver would recognise.
+   */
+  async getArcadeMetadata(
+    playableEntries: readonly ArcadeMraMeta[],
+    zipBasenames: ReadonlySet<string>,
+    onResolved?: (event: RomMetadataResolvedEvent) => void,
+    shouldAbort?: () => boolean,
+  ): Promise<void> {
+    // Reuse the in-flight gate keyed on the arcade virtual coreId so a
+    // duplicate call (e.g. engine retry + manual refresh) coalesces
+    // into a single scrape loop. Same shape as `getRomsMetadata`'s
+    // gate at line ~371 below.
+    const inflight = this.inflightByCoreId.get(ARCADE_VIRTUAL_CORE_ID);
+    if (inflight !== undefined) {
+      diagLog('info', 'prefetch', '·', 'gate-coalesce', {
+        coreId: ARCADE_VIRTUAL_CORE_ID,
+        playable: playableEntries.length,
+      });
+      if (onResolved !== undefined) inflight.callbacks.add(onResolved);
+      try {
+        await inflight.promise;
+      } finally {
+        if (onResolved !== undefined) inflight.callbacks.delete(onResolved);
+      }
+      return;
+    }
+    const callbacks = new Set<(event: RomMetadataResolvedEvent) => void>();
+    if (onResolved !== undefined) callbacks.add(onResolved);
+    const fanOut = (event: RomMetadataResolvedEvent): void => {
+      for (const cb of callbacks) cb(event);
+    };
+    const promise = this.runArcadeScrapeLoop(
+      playableEntries,
+      zipBasenames,
+      fanOut,
+      shouldAbort,
+    ).finally(() => {
+      this.inflightByCoreId.delete(ARCADE_VIRTUAL_CORE_ID);
+    });
+    this.inflightByCoreId.set(ARCADE_VIRTUAL_CORE_ID, { promise, callbacks });
+    return promise;
+  }
+
+  private async runArcadeScrapeLoop(
+    playableEntries: readonly ArcadeMraMeta[],
+    zipBasenames: ReadonlySet<string>,
+    onResolved: (event: RomMetadataResolvedEvent) => void,
+    shouldAbort?: () => boolean,
+  ): Promise<void> {
+    const groups = groupByPrimaryZipBasename(playableEntries, zipBasenames);
+    if (groups.length === 0) return;
+    const startWall = Date.now();
+    diagLog('info', 'prefetch', '→', 'start', {
+      coreId: ARCADE_VIRTUAL_CORE_ID,
+      mras: playableEntries.length,
+      uniqueZips: groups.length,
+    });
+    const session = this.getActiveSession();
+    if (session === null) {
+      diagLog('warn', 'prefetch', '·', 'no-session', {
+        coreId: ARCADE_VIRTUAL_CORE_ID,
+      });
+      return;
+    }
+
+    // Step 1: resolve each zip basename to a real path. The snapshot
+    // doesn't preserve per-dir membership (it unions mame/ + hbmame/),
+    // so we stat both candidate paths and pick the one with size > 0.
+    // Chunked at ARCADE_STAT_CHUNK_SIZE — a single 706-path stat call
+    // overflowed bash's ARG_MAX on the real MiSTer (PR-62 live trace:
+    // 353 unique zips × 2 dirs = 706 paths, kernel returned E2BIG /
+    // "Argument list too long"). Same class of bug PRs #53 and #56
+    // solved for witness + sample-md5; reuses the same `chunked`
+    // helper and 100-path window. 706 paths → 8 sequential SSH ops.
+    const candidatePaths: string[] = [];
+    for (const group of groups) {
+      for (const dir of MISTER_ARCADE_ZIP_DIRS) {
+        candidatePaths.push(`${dir}/${group.zipBasename}`);
+      }
+    }
+    let stats: Record<string, SizeAndMtime>;
+    try {
+      stats = await chunked<string, Record<string, SizeAndMtime>>(
+        candidatePaths,
+        ARCADE_STAT_CHUNK_SIZE,
+        (chunk) => session.client.statPathsWithSize(chunk),
+        (acc, next) => Object.assign(acc, next),
+        {},
+      );
+    } catch (err) {
+      diagLog('error', 'prefetch', '✗', 'arcade-stat failed', {
+        coreId: ARCADE_VIRTUAL_CORE_ID,
+        candidatePaths: candidatePaths.length,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    interface ResolvedGroup {
+      readonly zipPath: string;
+      readonly primaryMra: ArcadeMraMeta;
+    }
+    const resolved: ResolvedGroup[] = [];
+    for (const group of groups) {
+      let zipPath: string | null = null;
+      for (const dir of MISTER_ARCADE_ZIP_DIRS) {
+        const candidate = `${dir}/${group.zipBasename}`;
+        const stat = stats[candidate];
+        if (stat !== undefined && stat.size > 0 && stat.mtime > 0) {
+          zipPath = candidate;
+          break;
+        }
+      }
+      if (zipPath === null) {
+        // Snapshot said the basename existed in the union, but neither
+        // candidate path stat'd. Race with a zip removal between the
+        // snapshot build and now. Emit a null event for this group so
+        // the engine's progress counter (driven by `onResolved`
+        // invocations vs `paths.length` from `listRomPaths`) keeps
+        // ticking — the engine sees one event per playable group.
+        // Synthesize a path from the first dir for the event payload;
+        // the value doesn't have to match a real path since the
+        // engine matches by event count, not path identity.
+        onResolved({
+          path: `${MISTER_ARCADE_ZIP_DIRS[0]}/${group.zipBasename}`,
+          metadata: null,
+          error: false,
+        });
+        continue;
+      }
+      // The first .mra in the bucket (sorted by relativePath) is the
+      // canonical name source. All .mras in the bucket share the same
+      // zip md5 → same SS metadata; any displayName works for the
+      // search, but determinism matters for log + cache reproducibility.
+      resolved.push({ zipPath, primaryMra: group.mras[0]! });
+    }
+    if (resolved.length === 0) {
+      diagLog('warn', 'prefetch', '·', 'arcade-no-resolved-zips', {
+        coreId: ARCADE_VIRTUAL_CORE_ID,
+        snapshotPlayable: playableEntries.length,
+      });
+      return;
+    }
+
+    // Step 2: batched mtime + hash-failure-sentinel check across the
+    // deduped zip paths. Same pattern as `runScrapeLoop`'s round-9
+    // batched check — one SSH op instead of N per-path stats.
+    const zipPaths = resolved.map((r) => r.zipPath);
+    let mtimeMap: Map<string, HashEntry | null>;
+    let cachedHashFailures: ReadonlySet<string>;
+    try {
+      const checked = await this.hashService.checkCachedMtimes(
+        session.client,
+        session.host,
+        zipPaths,
+      );
+      mtimeMap = checked.entries;
+      cachedHashFailures = checked.failedPaths ?? new Set();
+    } catch (err) {
+      diagLog('error', 'prefetch', '✗', 'arcade-mtime-batch failed', {
+        coreId: ARCADE_VIRTUAL_CORE_ID,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      mtimeMap = new Map(zipPaths.map((p) => [p, null]));
+      cachedHashFailures = new Set();
+    }
+
+    // Step 3: per-zip loop. Hash if needed, then call MetadataService
+    // with `.mra`-derived hints.
+    let resolvedCount = 0;
+    let errorCount = 0;
+    let hashSkipped = 0;
+    for (const group of resolved) {
+      if (shouldAbort?.()) {
+        diagLog('info', 'prefetch', '·', 'aborted', {
+          coreId: ARCADE_VIRTUAL_CORE_ID,
+          remaining: resolved.length - resolvedCount - errorCount,
+        });
+        break;
+      }
+      const { zipPath, primaryMra } = group;
+      const perZipStart = Date.now();
+      diagLog('info', 'meta', '·', 'path-start', {
+        coreId: ARCADE_VIRTUAL_CORE_ID,
+        path: basename(zipPath),
+      });
+      if (cachedHashFailures.has(zipPath)) {
+        diagLog('info', 'prefetch', '·', 'skip-hash', {
+          coreId: ARCADE_VIRTUAL_CORE_ID,
+          path: basename(zipPath),
+          reason: 'cached-hash-failed',
+        });
+        onResolved({ path: zipPath, metadata: null, error: false });
+        hashSkipped += 1;
+        resolvedCount += 1;
+        continue;
+      }
+      let entry: HashEntry | undefined;
+      const cachedEntry = mtimeMap.get(zipPath);
+      if (cachedEntry !== null && cachedEntry !== undefined) {
+        entry = cachedEntry;
+      } else {
+        try {
+          entry = await this.hashService.computeHash(
+            session.client,
+            session.host,
+            zipPath,
+          );
+        } catch (err) {
+          diagLog('error', 'prefetch', '✗', 'hash failed', {
+            coreId: ARCADE_VIRTUAL_CORE_ID,
+            path: basename(zipPath),
+            ms: Date.now() - perZipStart,
+            err: err instanceof Error ? err.message : String(err),
+          });
+          onResolved({ path: zipPath, metadata: null, error: true });
+          errorCount += 1;
+          continue;
+        }
+      }
+      if (entry === undefined) {
+        // hashPaths dropped the row (vanished mid-flight).
+        onResolved({ path: zipPath, metadata: null, error: false });
+        resolvedCount += 1;
+        continue;
+      }
+
+      // Build the .mra-derived hint. Synthesizing
+      // `'<displayName> (<setname>).mra'` makes `extractNameHints`
+      // emit BOTH the paren-shortname (setname) and the filename-
+      // stem (displayName) — two name-search hints from one
+      // call without touching MetadataService.
+      const setnameForHint = primaryMra.setname?.trim();
+      const baseNameForHint = primaryMra.displayName.endsWith('.mra')
+        ? primaryMra.displayName.slice(0, -'.mra'.length)
+        : primaryMra.displayName;
+      const filenameForHint =
+        setnameForHint !== undefined && setnameForHint !== ''
+          ? `${baseNameForHint} (${setnameForHint}).mra`
+          : primaryMra.displayName;
+      const ssHint = {
+        systemId: 75,
+        md5: entry.md5,
+        sha1: entry.sha1,
+        crc32: undefined,
+        romName: primaryMra.displayName,
+        romSize: entry.size,
+      };
+      const hint: MetadataHint = {
+        filename: filenameForHint,
+        parentFolder: '_Arcade',
+        parentFolderIsAtomic: false,
+      };
+      try {
+        const metadata = await this.metadataService.getMetadata(
+          entry.md5,
+          hint,
+          ssHint,
+        );
+        diagLog('info', 'meta', '·', 'path-end', {
+          coreId: ARCADE_VIRTUAL_CORE_ID,
+          path: basename(zipPath),
+          source: metadata?.source ?? 'none',
+          ms: Date.now() - perZipStart,
+        });
+        onResolved({ path: zipPath, metadata, error: false });
+        resolvedCount += 1;
+      } catch (err) {
+        diagLog('error', 'prefetch', '✗', 'arcade-lookup failed', {
+          coreId: ARCADE_VIRTUAL_CORE_ID,
+          path: basename(zipPath),
+          ms: Date.now() - perZipStart,
+          err: err instanceof Error ? err.message : String(err),
+        });
+        onResolved({ path: zipPath, metadata: null, error: true });
+        errorCount += 1;
+      }
+    }
+    diagLog('info', 'prefetch', '←', 'done', {
+      coreId: ARCADE_VIRTUAL_CORE_ID,
+      resolved: resolvedCount,
+      errors: errorCount,
+      hashSkipped,
+      uniqueZips: resolved.length,
+      ms: Date.now() - startWall,
+    });
   }
 
   async getRomsMetadata(
