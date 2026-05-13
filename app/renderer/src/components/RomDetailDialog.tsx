@@ -68,15 +68,28 @@ export interface RomDetailDialogProps {
   /**
    * Hand off to the edit-metadata modal (closes self first). The
    * Edit button is hidden in the empty state — `RomEditMetadataDialog`
-   * requires a non-null record.
+   * requires a non-null record. Also hidden when `readOnly=true`.
    */
   readonly onEdit: () => void;
-  /** Hand off to the Find on ScreenScraper modal (closes self first). */
+  /**
+   * Hand off to the Find on ScreenScraper modal (closes self first).
+   * Hidden when `readOnly=true` (arcade detail view is read-only;
+   * a manual ScreenScraper search dialog tailored to .mras is v0.2).
+   */
   readonly onSearch: () => void;
+  /**
+   * feat/arcade-parity-3-ui — read-only mode for surfaces where the
+   * Edit / Find-on-ScreenScraper hand-offs aren't wired yet (e.g.
+   * the arcade pane). Hides both buttons; the only action left is
+   * Close. Additive — defaults to `false`, existing RomsPane wiring
+   * keeps its full button row.
+   */
+  readonly readOnly?: boolean;
 }
 
 export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
-  const { filename, metadata, open, onOpenChange, onEdit, onSearch } = props;
+  const { filename, metadata, open, onOpenChange, onEdit, onSearch, readOnly } =
+    props;
   if (metadata === null) {
     return (
       <EmptyDetailDialog
@@ -84,6 +97,7 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
         open={open}
         onOpenChange={onOpenChange}
         onSearch={onSearch}
+        readOnly={readOnly === true}
       />
     );
   }
@@ -94,6 +108,7 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
       onOpenChange={onOpenChange}
       onEdit={onEdit}
       onSearch={onSearch}
+      readOnly={readOnly === true}
     />
   );
 }
@@ -104,8 +119,9 @@ function PopulatedDetailDialog(props: {
   readonly onOpenChange: (open: boolean) => void;
   readonly onEdit: () => void;
   readonly onSearch: () => void;
+  readonly readOnly: boolean;
 }): JSX.Element {
-  const { metadata, open, onOpenChange, onEdit, onSearch } = props;
+  const { metadata, open, onOpenChange, onEdit, onSearch, readOnly } = props;
 
   // Lightbox state, scoped to this dialog instance. A non-null URL
   // mounts the nested Dialog; null hides it. Radix handles Esc +
@@ -243,12 +259,16 @@ function PopulatedDetailDialog(props: {
         ) : null}
 
         <div className="flex justify-end gap-2 pt-1">
-          <Button variant="ghost" onClick={handleEdit}>
-            Edit...
-          </Button>
-          <Button variant="ghost" onClick={handleSearch}>
-            Find on ScreenScraper...
-          </Button>
+          {readOnly ? null : (
+            <>
+              <Button variant="ghost" onClick={handleEdit}>
+                Edit...
+              </Button>
+              <Button variant="ghost" onClick={handleSearch}>
+                Find on ScreenScraper...
+              </Button>
+            </>
+          )}
           <Button variant="primary" onClick={() => onOpenChange(false)}>
             Close
           </Button>
@@ -379,6 +399,7 @@ function EmptyDetailDialog(props: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly onSearch: () => void;
+  readonly readOnly: boolean;
 }): JSX.Element {
   function handleSearch(): void {
     props.onOpenChange(false);
@@ -398,18 +419,23 @@ function EmptyDetailDialog(props: {
           <div className="flex min-w-0 flex-col gap-2">
             <SectionLabel>No metadata yet</SectionLabel>
             <p className="text-body-sm text-fg-body">
-              ScreenScraper hasn't matched this file. Click "Find on
-              ScreenScraper" to search manually, or wait for the
-              prefetch to land.
+              {props.readOnly
+                ? "ScreenScraper hasn't matched this entry. The auto-scrape pass will retry on the next connect; manual search is coming in a follow-up."
+                : 'ScreenScraper hasn\'t matched this file. Click "Find on ScreenScraper" to search manually, or wait for the prefetch to land.'}
             </p>
           </div>
         </div>
 
         <div className="flex justify-end gap-2 pt-1">
-          <Button variant="primary" onClick={handleSearch}>
-            Find on ScreenScraper...
-          </Button>
-          <Button variant="ghost" onClick={() => props.onOpenChange(false)}>
+          {props.readOnly ? null : (
+            <Button variant="primary" onClick={handleSearch}>
+              Find on ScreenScraper...
+            </Button>
+          )}
+          <Button
+            variant={props.readOnly ? 'primary' : 'ghost'}
+            onClick={() => props.onOpenChange(false)}
+          >
             Close
           </Button>
         </div>

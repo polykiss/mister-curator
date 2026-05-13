@@ -209,12 +209,17 @@ describe('arcade-adapter metadata wiring (feat/arcade-parity-2-metadata)', () =>
     );
   });
 
-  it('iterates `enrichedPresentable` (not `presentable`) in the table body', () => {
-    // The table-body map MUST use the enriched list so each row's
-    // `entry.metadata` is accessible. If the row map iterates
-    // `presentable` instead, PR C's cell additions silently won't
-    // see metadata.
-    expect(ARCADE_ADAPTER).toMatch(/enrichedPresentable\.map\(\(entry\)/);
+  it('iterates a metadata-enriched, sorted view in the table body (not raw `presentable`)', () => {
+    // The table-body map MUST iterate a list that carries metadata so
+    // each row's `entry.metadata` is accessible to the cells. PR C
+    // wraps `enrichedPresentable` with a sort step (`sortedRows`)
+    // before rendering; the sort preserves the enrichment, so each
+    // row still has `metadata`. Pin both halves: enrichment exists,
+    // and the body iterates the post-sort view.
+    expect(ARCADE_ADAPTER).toMatch(
+      /sortedRows\s*=\s*useMemo[\s\S]{0,400}enrichedPresentable/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(/sortedRows\.map\(\(entry\)/);
   });
 });
 
@@ -232,6 +237,245 @@ describe('preload-api: getArcadeMetadataBatch IPC surface', () => {
     // null). The shape is what enriches the adapter entries.
     expect(preloadApi).toMatch(
       /getArcadeMetadataBatch\(\)[\s\S]{0,80}Record<string, RomMetadata \| null>/,
+    );
+  });
+});
+
+describe('arcade-adapter cell parity (feat/arcade-parity-3-ui G1-G4)', () => {
+  it('reuses RomMetadataCells primitives for thumbnail / name / year / genre+rating / density+eye', () => {
+    // The whole point of PR C is to reuse RomsPane's metadata-cell
+    // primitives so arcade rows look identical to ROM rows. If a
+    // future change inlines a custom name renderer (or stops
+    // importing one of these), the visual parity drifts.
+    expect(ARCADE_ADAPTER).toMatch(
+      /from '@app\/renderer\/src\/components\/RomMetadataCells'/,
+    );
+    for (const sym of [
+      'RomThumbnailCell',
+      'RomNameInner',
+      'RomYearCell',
+      'RomMetadataInfoCells',
+      'RomDensityEyeCell',
+      'BackThumbnailCell',
+    ]) {
+      expect(ARCADE_ADAPTER).toContain(sym);
+    }
+  });
+
+  it('synthesises a Rom shape per entry via makeArcadeRom from the shared lib', () => {
+    // The Rom shape lets the row flow through sortRoms + the cell
+    // primitives without renaming/reshaping. Lives in `arcade-row.ts`
+    // (pure module) so the unit tests can import without dragging
+    // React. The adapter imports from there.
+    expect(ARCADE_ADAPTER).toMatch(
+      /from '@app\/renderer\/src\/lib\/arcade-row'/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(/makeArcadeRom\(entry\)/);
+  });
+
+  it('preserves the "Missing ROMs" pill inside the name cell', () => {
+    // The arcade pane's distinctive playability badge survives PR C
+    // intact. The pill copy and the tooltip explaining it are part
+    // of the contract.
+    expect(ARCADE_ADAPTER).toContain('Missing ROMs');
+    expect(ARCADE_ADAPTER).toContain(
+      'At least one ROM zip referenced by this .mra is not present',
+    );
+  });
+});
+
+describe('arcade-adapter sortable headers (feat/arcade-parity-3-ui G8)', () => {
+  it('imports the extracted SortableHeader + rom-sort APIs', () => {
+    expect(ARCADE_ADAPTER).toMatch(
+      /from '@app\/renderer\/src\/components\/SortableHeader'/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(
+      /from '@app\/renderer\/src\/lib\/rom-sort'/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(/DEFAULT_SORT/);
+    expect(ARCADE_ADAPTER).toMatch(/nextSortState/);
+    expect(ARCADE_ADAPTER).toMatch(/sortRoms/);
+  });
+
+  it('wires SortableHeader for all four metadata columns (Name, Year, Genre, Rating) — full RomsPane parity', () => {
+    // The earlier round shipped Genre as a plain <TableHead> on the
+    // theory that sparse arcade metadata made the sort key noise.
+    // Live use disagreed: with .mras that DO have a genre (most do
+    // after a scrape pass) the sort is the natural way to group
+    // shooters / fighters / puzzlers. Flipping it back to match
+    // RomsPane keeps the user-mental-model identical across panes.
+    expect(ARCADE_ADAPTER).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="name"/);
+    expect(ARCADE_ADAPTER).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="year"/);
+    expect(ARCADE_ADAPTER).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="genre"/);
+    expect(ARCADE_ADAPTER).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="rating"/);
+    // No leftover plain TableHead for Genre — would render two genre
+    // headers if both were present.
+    expect(ARCADE_ADAPTER).not.toMatch(
+      /<TableHead className="w-28">Genre<\/TableHead>/,
+    );
+  });
+
+  it('Genre header carries `normal-case` so the column label renders mixed-case instead of all-caps', () => {
+    // Live regression: the inherited `uppercase` on the base TableHead
+    // primitive made the arcade Genre column read "GENRE" in caps.
+    // RomsPane shows it mixed-case; pinning the override keeps the
+    // arcade column consistent with the live ROM-pane behavior.
+    expect(ARCADE_ADAPTER).toMatch(
+      /<SortableHeader[\s\S]{0,300}sortKey="genre"[\s\S]{0,300}className="w-28 normal-case"/,
+    );
+  });
+
+  it('declares a per-pane sortState defaulting to DEFAULT_SORT (not persisted)', () => {
+    expect(ARCADE_ADAPTER).toMatch(
+      /\[sortState,\s*setSortState\]\s*=\s*useState<SortState>\(DEFAULT_SORT\)/,
+    );
+    // The not-persisted assertion is structural: usePersistedBool
+    // appears only twice — for `showHiddenArcadeMras`. Renaming
+    // the sort state into a persisted slot would surface here.
+    const persistMatches = ARCADE_ADAPTER.match(/usePersistedBool/g) ?? [];
+    expect(persistMatches.length, 'sort state must not be persisted').toBeLessThan(3);
+  });
+
+  it('extracted SortableHeader lives in its own shared file (no inline copy in roms-adapter)', () => {
+    const sortableHeaderSrc = readFileSync(
+      resolve(__dirname, 'SortableHeader.tsx'),
+      'utf8',
+    );
+    expect(sortableHeaderSrc).toMatch(/export function SortableHeader/);
+    expect(ROMS_ADAPTER).toMatch(
+      /from '@app\/renderer\/src\/components\/SortableHeader'/,
+    );
+    // The inline definition in roms-adapter is gone (would shadow
+    // the extracted one and silently keep two implementations).
+    expect(ROMS_ADAPTER).not.toMatch(/^function SortableHeader/m);
+  });
+});
+
+describe('arcade-adapter subfolder drill (feat/arcade-parity-3-ui G15)', () => {
+  it('imports the breadcrumb + back-row helpers used by RomsPane', () => {
+    expect(ARCADE_ADAPTER).toMatch(
+      /from '@app\/renderer\/src\/lib\/breadcrumb'/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(/computeBreadcrumb/);
+    expect(ARCADE_ADAPTER).toMatch(/computeBackRow/);
+    expect(ARCADE_ADAPTER).toMatch(/subPathAtDepth/);
+  });
+
+  it('declares subPath state initialised to "" (core root)', () => {
+    expect(ARCADE_ADAPTER).toMatch(
+      /\[subPath,\s*setSubPath\]\s*=\s*useState<string>\(''\)/,
+    );
+  });
+
+  it('renders a back row that resets subPath to the parent (mirrors RomsPane)', () => {
+    expect(ARCADE_ADAPTER).toMatch(
+      /onClick=\{\(\)\s*=>\s*setSubPath\(backRow\.targetSubPath\)\}/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(/<BackThumbnailCell\s*\/>/);
+  });
+
+  it('passes the arcade label "Arcade" as the breadcrumb root (matches the h2 title)', () => {
+    expect(ARCADE_ADAPTER).toMatch(/computeBreadcrumb\('Arcade',\s*subPath\)/);
+    expect(ARCADE_ADAPTER).toMatch(/computeBackRow\('Arcade',\s*subPath\)/);
+  });
+});
+
+describe('arcade-adapter loading skeleton parity (feat/arcade-parity-3-ui G21)', () => {
+  it('renders 8 skeleton rows during the cold load (matches RomsPane)', () => {
+    // The skeleton block in RomsPane uses `Array.from({ length: 8 })`
+    // and a `Skeleton className="h-10 w-full"`. Arcade must match
+    // so the cold-load visual rhythm is consistent.
+    expect(ARCADE_ADAPTER).toMatch(
+      /Array\.from\(\{\s*length:\s*8\s*\}\)[\s\S]{0,400}Skeleton/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(/Skeleton[\s\S]{0,40}className="h-10 w-full"/);
+    // The pre-PR-C "Loading arcade entries…" centered spinner is gone.
+    expect(ARCADE_ADAPTER).not.toContain('Loading arcade entries…');
+  });
+});
+
+describe('CoresPane MAME/HBMame sidebar filter (feat/arcade-parity-3-ui G23)', () => {
+  const CORES_PANE = readFileSync(
+    resolve(__dirname, 'CoresPane.tsx'),
+    'utf8',
+  );
+
+  it('persists the "Show MAME / HBMame as separate cores" toggle with default OFF', () => {
+    expect(CORES_PANE).toMatch(
+      /usePersistedBool\(\s*'mistercurator\.showMameAsCores',\s*false,?\s*\)/,
+    );
+  });
+
+  it('filters coreId in {mame, hbmame} from visibleCores when the toggle is off', () => {
+    // The filter predicate hides the two zip-management cores by
+    // default so the sidebar reads as a single Arcade entry. Pin
+    // both ids — dropping one would silently surface that core.
+    expect(CORES_PANE).toMatch(/c\.id !== 'mame'/);
+    expect(CORES_PANE).toMatch(/c\.id !== 'hbmame'/);
+    expect(CORES_PANE).toMatch(/showMameAsCores/);
+  });
+
+  it('exposes the toggle in the sidebar header next to "Show hidden"', () => {
+    expect(CORES_PANE).toContain('Show MAME / HBMame as separate cores');
+    expect(CORES_PANE).toContain('Show hidden');
+  });
+});
+
+describe('arcade-adapter detail dialog (feat/arcade-parity-3-ui)', () => {
+  it('imports the shared RomDetailDialog (not a new arcade-specific clone)', () => {
+    expect(ARCADE_ADAPTER).toMatch(
+      /from '@app\/renderer\/src\/components\/RomDetailDialog'/,
+    );
+  });
+
+  it('declares detail-dialog state opened by a name-cell click', () => {
+    // The click handler hangs off the name TableCell so clicking
+    // the box-art / year / genre / rating cells doesn't trigger the
+    // modal (those cells have their own non-click semantics).
+    expect(ARCADE_ADAPTER).toMatch(
+      /\[detailDialogFor,\s*setDetailDialogFor\]\s*=\s*useState/,
+    );
+    expect(ARCADE_ADAPTER).toMatch(/setDetailDialogFor\(\{/);
+  });
+
+  it('renders RomDetailDialog with readOnly so Edit / Find buttons are hidden', () => {
+    // Arcade detail view is read-only this round; manual SS search +
+    // edit dialogs are v0.2. The dialog hides both buttons when
+    // `readOnly` is set, leaving Close as the only action. The
+    // onEdit / onSearch callbacks stay (the dialog's TypeScript
+    // requires them) but are no-ops behind the gate.
+    expect(ARCADE_ADAPTER).toMatch(/<RomDetailDialog[\s\S]{0,800}readOnly/);
+  });
+
+  it('feeds metadata into the dialog via the existing metadataByMra map (no new IPC)', () => {
+    // Reuses the by-hash cache PR B wired up — no new fetch path,
+    // no new state slot. The dialog handles the null case for
+    // entries the prefetch hasn't matched.
+    expect(ARCADE_ADAPTER).toMatch(
+      /metadata=\{metadataByMra\[detailDialogFor\.relativePath\]\s*\?\?\s*null\}/,
+    );
+  });
+
+  it('returns the dialog via `extras` so it sits outside the pane container (modal-portal hygiene)', () => {
+    // ItemListPane composes the pane chrome with `adapter.content`
+    // inside the outer container and `adapter.extras` as a sibling.
+    // Modal portals belong in `extras` so the pane shell can
+    // restructure its container without dragging the modal tree
+    // along (see ItemListPane.test.ts above).
+    expect(ARCADE_ADAPTER).toMatch(/extras:\s*[\s\S]{0,200}<RomDetailDialog/);
+  });
+
+  it('RomDetailDialog accepts a readOnly prop (hides Edit + Find buttons)', () => {
+    const detailDialogSrc = readFileSync(
+      resolve(__dirname, 'RomDetailDialog.tsx'),
+      'utf8',
+    );
+    expect(detailDialogSrc).toMatch(/readonly readOnly\?:\s*boolean/);
+    // The button row guards both Edit and Find behind the readOnly
+    // gate; assert both are inside the gate (not the trivial case
+    // of guarding just one).
+    expect(detailDialogSrc).toMatch(
+      /readOnly\s*\?\s*null\s*:[\s\S]{0,400}Edit\.\.\.[\s\S]{0,400}Find on ScreenScraper/,
     );
   });
 });
