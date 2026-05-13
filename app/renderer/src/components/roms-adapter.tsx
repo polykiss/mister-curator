@@ -1471,7 +1471,6 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
       {/* PR-D2 (PR #29) — search-on-ScreenScraper modal. */}
       {searchScreenScraperFor !== null ? (
         <RomSearchScreenScraperDialog
-          path={searchScreenScraperFor.path}
           filename={searchScreenScraperFor.filename}
           coreId={core.id}
           coreLabel={coreDisplayName(core.id)}
@@ -1479,6 +1478,13 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
           onOpenChange={(open) => {
             if (!open) setSearchScreenScraperFor(null);
           }}
+          onBind={(game) =>
+            window.mister.bindRomMetadataFromSearch(
+              core.id,
+              searchScreenScraperFor.path,
+              game,
+            )
+          }
           onSaved={(updated) => {
             setMetadataByPath((prev) => ({
               ...prev,

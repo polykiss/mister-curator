@@ -1104,6 +1104,104 @@ describe('MetadataOrchestrator', () => {
       expect(gameArg).toMatchObject({ id: 5678, name: 'Policenauts' });
     });
 
+    it('bindArcadeManualMetadataOverride: resolves mra → primary zip → md5 and binds under the zip md5', async () => {
+      // feat/arcade-manual-ss-search — the arcade variant maps the
+      // .mra to its primary zip server-side (the renderer doesn't
+      // carry that mapping). Pin that the bind writes under the
+      // PRIMARY ZIP's md5, not under any mra-derived key, so every
+      // .mra sharing the same primary zip surfaces the override on
+      // the next batched cache read.
+      const ZIP_BASENAME = 'dkong.zip';
+      const ZIP_PATH = `/media/fat/games/mame/${ZIP_BASENAME}`;
+      const ZIP_HASH = 'a'.repeat(32);
+      const MRA_REL_PATH = 'Donkey Kong.mra';
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map([[ZIP_PATH, buildHashEntry(ZIP_HASH)]]),
+      });
+      const bindSpy = vi.fn(
+        async (key: string, _game: unknown) => buildMeta(key, 'Donkey Kong'),
+      );
+      (metadataService as unknown as {
+        bindManualOverride: typeof bindSpy;
+      }).bindManualOverride = bindSpy;
+
+      const snapshot = {
+        entries: [
+          {
+            relativePath: MRA_REL_PATH,
+            requiredZips: [[ZIP_BASENAME]],
+            displayName: 'Donkey Kong',
+            hidden: false,
+            rbf: 'jtdkong',
+            setname: 'dkong',
+          },
+        ],
+        zipBasenames: new Set([ZIP_BASENAME]),
+      };
+      const result = await orchestrator.bindArcadeManualMetadataOverride(
+        snapshot,
+        MRA_REL_PATH,
+        buildSsGame(1234, 'Donkey Kong'),
+      );
+
+      expect(result).not.toBeNull();
+      expect(bindSpy).toHaveBeenCalledTimes(1);
+      const [key, gameArg] = bindSpy.mock.calls[0] ?? ['', undefined];
+      // The key is the PRIMARY ZIP's md5 — fanning out to every .mra
+      // sharing that zip happens for free at read time.
+      expect(key).toBe(ZIP_HASH);
+      expect(gameArg).toMatchObject({ id: 1234, name: 'Donkey Kong' });
+    });
+
+    it('bindArcadeManualMetadataOverride: returns null when the mra is not in the snapshot', async () => {
+      const { orchestrator, metadataService } = makeOrchestrator();
+      const bindSpy = vi.fn(async () => buildMeta('x', 'x'));
+      (metadataService as unknown as {
+        bindManualOverride: typeof bindSpy;
+      }).bindManualOverride = bindSpy;
+      const result = await orchestrator.bindArcadeManualMetadataOverride(
+        { entries: [], zipBasenames: new Set() },
+        'Unknown.mra',
+        buildSsGame(),
+      );
+      expect(result).toBeNull();
+      expect(bindSpy).not.toHaveBeenCalled();
+    });
+
+    it('bindArcadeManualMetadataOverride: returns null when the primary zip is not present in either zip dir', async () => {
+      // The mra references a zip that no candidate path holds a hash
+      // for — both `games/mame/foo.zip` and `games/hbmame/foo.zip`
+      // miss. Returning null lets the renderer surface a "wait for
+      // the prefetch to land" toast rather than silently writing a
+      // synthetic key the batch reader will never find.
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map(),
+      });
+      const bindSpy = vi.fn(async () => buildMeta('x', 'x'));
+      (metadataService as unknown as {
+        bindManualOverride: typeof bindSpy;
+      }).bindManualOverride = bindSpy;
+      const result = await orchestrator.bindArcadeManualMetadataOverride(
+        {
+          entries: [
+            {
+              relativePath: 'Foo.mra',
+              requiredZips: [['foo.zip']],
+              displayName: 'Foo',
+              hidden: false,
+              rbf: 'jtfoo',
+              setname: 'foo',
+            },
+          ],
+          zipBasenames: new Set(['foo.zip']),
+        },
+        'Foo.mra',
+        buildSsGame(),
+      );
+      expect(result).toBeNull();
+      expect(bindSpy).not.toHaveBeenCalled();
+    });
+
     it('bindManualMetadataOverride: prefers real md5 over synthetic when a hash entry exists', async () => {
       // Regression case: a path that already has a hash should use
       // its real md5 — the synthetic fallback is strictly the

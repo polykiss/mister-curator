@@ -4,7 +4,10 @@ import { readFile } from 'node:fs/promises';
 import { ARCADE_VIRTUAL_CORE_ID } from '@shared/arcade-mra';
 import type { ArcadeMraMeta } from '@shared/arcade-mra-parse';
 
-import { groupByPrimaryZipBasename } from '@app/main/services/arcade-prefetch-paths';
+import {
+  groupByPrimaryZipBasename,
+  resolvePrimaryZipBasename,
+} from '@app/main/services/arcade-prefetch-paths';
 import { chunked } from '@shared/chunk';
 import { MISTER_ARCADE_ZIP_DIRS } from '@shared/constants';
 import type { SizeAndMtime } from '@shared/prime-parse';
@@ -332,6 +335,59 @@ export class MetadataOrchestrator {
         ? entry.md5
         : makeSyntheticCacheKey(coreId, path);
     return this.metadataService.bindManualOverride(cacheKey, game);
+  }
+
+  /**
+   * feat/arcade-manual-ss-search — arcade analogue of
+   * `bindManualMetadataOverride`. The renderer doesn't carry the
+   * mra → primary-zip mapping, so the resolution lives here:
+   *
+   *   1. Look up the .mra in the supplied playability snapshot.
+   *   2. Resolve its primary zip basename via the shared
+   *      `resolvePrimaryZipBasename` helper (same logic the auto-
+   *      scrape pass uses).
+   *   3. Probe `games/mame/<basename>` then `games/hbmame/<basename>`
+   *      against the cached hash table; whichever has an md5 wins.
+   *   4. Call `MetadataService.bindManualOverride` keyed on that md5
+   *      so every .mra sharing the same primary zip picks up the
+   *      override on the next batched cache read (no per-mra
+   *      duplication, consistent with how the by-hash cache works).
+   *
+   * Returns null when the mra isn't in the snapshot, when its primary
+   * zip isn't present in either zip dir, or when the primary zip
+   * hasn't been hashed yet (the auto-scrape pass populates the hash
+   * cache on connect — a freshly-connected session might be racing).
+   */
+  async bindArcadeManualMetadataOverride(
+    snapshot: {
+      readonly entries: readonly ArcadeMraMeta[];
+      readonly zipBasenames: ReadonlySet<string>;
+    },
+    mraRelativePath: string,
+    game: ScreenScraperGame,
+  ): Promise<RomMetadata | null> {
+    const session = this.getActiveSession();
+    if (session === null) return null;
+    const mra = snapshot.entries.find(
+      (e) => e.relativePath === mraRelativePath,
+    );
+    if (mra === undefined) return null;
+    const zipBasename = resolvePrimaryZipBasename(mra, snapshot.zipBasenames);
+    if (zipBasename === null) return null;
+    const candidatePaths = MISTER_ARCADE_ZIP_DIRS.map(
+      (dir) => `${dir}/${zipBasename}`,
+    );
+    const hashByPath = await this.hashService.readCachedEntries(
+      session.host,
+      candidatePaths,
+    );
+    for (const path of candidatePaths) {
+      const entry = hashByPath.get(path);
+      if (entry !== null && entry !== undefined) {
+        return this.metadataService.bindManualOverride(entry.md5, game);
+      }
+    }
+    return null;
   }
 
   async readCachedRomsMetadata(

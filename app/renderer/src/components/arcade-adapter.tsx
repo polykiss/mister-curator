@@ -18,6 +18,7 @@ import {
   RomYearCell,
 } from '@app/renderer/src/components/RomMetadataCells';
 import { RomDetailDialog } from '@app/renderer/src/components/RomDetailDialog';
+import { RomSearchScreenScraperDialog } from '@app/renderer/src/components/RomSearchScreenScraperDialog';
 import { SortableHeader } from '@app/renderer/src/components/SortableHeader';
 import { Button } from '@app/renderer/src/components/ui/button';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
@@ -113,10 +114,22 @@ export function useArcadeAdapter(): ItemListAdapter {
   // Empty string = root; slash-joined for nested folders (e.g.
   // `_Konami`, `_Konami/sub`).
   const [subPath, setSubPath] = useState<string>('');
-  // feat/arcade-parity-3-ui (G11-ish, read-only variant) — detail-
-  // dialog target. Carries the entry shape needed to render the modal
-  // (relativePath drives the metadata lookup). Null when closed.
+  // feat/arcade-parity-3-ui — detail-dialog target. Carries the entry
+  // shape needed to render the modal (relativePath drives the metadata
+  // lookup). Null when closed.
   const [detailDialogFor, setDetailDialogFor] = useState<{
+    readonly relativePath: string;
+    readonly displayName: string;
+    readonly filename: string;
+  } | null>(null);
+  // feat/arcade-manual-ss-search — Find-on-ScreenScraper modal target.
+  // Opened from the detail dialog's "Find on ScreenScraper..." button.
+  // Carries the same shape as `detailDialogFor` plus a `path`
+  // (relativePath, used only for `searchScreenScraperFor` identity);
+  // the bind path is resolved on the main side via
+  // `bindArcadeMetadataFromSearch` so the renderer doesn't need to
+  // know the primary zip.
+  const [searchScreenScraperFor, setSearchScreenScraperFor] = useState<{
     readonly relativePath: string;
     readonly displayName: string;
     readonly filename: string;
@@ -694,36 +707,70 @@ export function useArcadeAdapter(): ItemListAdapter {
       </div>
       </>
     ),
-    // feat/arcade-parity-3-ui — read-only metadata detail modal. Opens
-    // on click of the name cell. Renders unconditionally for any open
+    // feat/arcade-parity-3-ui — metadata detail modal. Opens on click
+    // of the name cell. Renders unconditionally for any open
     // `detailDialogFor`; the dialog's empty-state branch handles
     // entries whose ScreenScraper match hasn't landed yet (placeholder
-    // box art + "No metadata yet" note). Edit / Find on ScreenScraper
-    // hand-offs are explicit v0.2 — we pass no-op callbacks behind the
-    // `readOnly` flag, which the dialog uses to hide both buttons.
-    extras:
-      detailDialogFor !== null ? (
-        <RomDetailDialog
-          path={detailDialogFor.relativePath}
-          filename={detailDialogFor.filename}
-          metadata={metadataByMra[detailDialogFor.relativePath] ?? null}
-          open
-          onOpenChange={(open) => {
-            if (!open) setDetailDialogFor(null);
-          }}
-          onEdit={() => {
-            /* arcade detail dialog is read-only; the Edit button is
-               hidden by `readOnly`. The callback is required by the
-               shared dialog props but never fires. v0.2 wires this. */
-          }}
-          onSearch={() => {
-            /* arcade detail dialog is read-only; the Find-on-SS button
-               is hidden by `readOnly`. v0.2 ships a .mra-aware SS
-               search dialog and wires this. */
-          }}
-          readOnly
-        />
-      ) : null,
+    // box art + "No metadata yet" note).
+    //
+    // feat/arcade-manual-ss-search — Edit stays v0.2
+    // (`allowEdit={false}`), Find-on-ScreenScraper is wired now
+    // (`allowSearch={true}`). Clicking Find closes the detail dialog
+    // and opens the SS search modal; the search modal's `onBind`
+    // routes through the arcade-specific IPC that resolves the
+    // primary zip md5 server-side.
+    extras: (
+      <>
+        {detailDialogFor !== null ? (
+          <RomDetailDialog
+            path={detailDialogFor.relativePath}
+            filename={detailDialogFor.filename}
+            metadata={metadataByMra[detailDialogFor.relativePath] ?? null}
+            open
+            onOpenChange={(open) => {
+              if (!open) setDetailDialogFor(null);
+            }}
+            onEdit={() => {
+              /* arcade edit-metadata dialog is v0.2; the Edit button
+                 is hidden by `allowEdit={false}`, this callback never
+                 fires. */
+            }}
+            onSearch={() => {
+              setSearchScreenScraperFor(detailDialogFor);
+            }}
+            allowEdit={false}
+            allowSearch
+          />
+        ) : null}
+        {searchScreenScraperFor !== null ? (
+          <RomSearchScreenScraperDialog
+            filename={searchScreenScraperFor.filename}
+            // SS systemeid resolution uses coreId='mame' → 75, the
+            // same id the auto-scrape pass uses for arcade entries.
+            coreId="mame"
+            coreLabel="Arcade"
+            open
+            onOpenChange={(open) => {
+              if (!open) setSearchScreenScraperFor(null);
+            }}
+            onBind={(game) =>
+              window.mister.bindArcadeMetadataFromSearch(
+                searchScreenScraperFor.relativePath,
+                game,
+              )
+            }
+            onSaved={() => {
+              // The bind writes by primary-zip md5; every .mra
+              // sharing that zip sees the new record. A full refresh
+              // is the simplest correct way to surface the update —
+              // the metadata batch IPC is cache-only (no SSH) so the
+              // refresh is cheap.
+              void refresh(false);
+            }}
+          />
+        ) : null}
+      </>
+    ),
   };
 }
 

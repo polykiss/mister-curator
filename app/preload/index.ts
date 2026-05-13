@@ -273,6 +273,15 @@ const api: MisterApi = {
       path,
       game,
     ),
+  bindArcadeMetadataFromSearch: (
+    mraRelativePath: string,
+    game: ScreenScraperGame,
+  ) =>
+    invoke<RomMetadata | null>(
+      IPC_CHANNELS.bindArcadeMetadataFromSearch,
+      mraRelativePath,
+      game,
+    ),
   searchScreenScraperByName: (coreId: string, searchTerm: string) =>
     invoke<readonly ScreenScraperGame[]>(
       IPC_CHANNELS.searchScreenScraperByName,

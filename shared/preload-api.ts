@@ -79,6 +79,12 @@ export const IPC_CHANNELS = {
   // modal (free-form fields) and search modal (jeuid bind).
   setRomMetadataOverride: 'mister:setRomMetadataOverride',
   bindRomMetadataFromSearch: 'mister:bindRomMetadataFromSearch',
+  // feat/arcade-manual-ss-search — arcade analogue of
+  // bindRomMetadataFromSearch. Maps an .mra relativePath to its
+  // primary zip + cached md5 on the main side, then writes the
+  // manual override against that md5 (so every .mra sharing the
+  // same primary zip picks up the override on the next cache read).
+  bindArcadeMetadataFromSearch: 'mister:bindArcadeMetadataFromSearch',
   // PR-D2 (PR #29) — name-search invoked from the renderer's
   // search modal. Same SS endpoint the auto-scrape pipeline uses,
   // exposed directly so the UI can drive it interactively.
@@ -542,6 +548,27 @@ export interface MisterApi {
   bindRomMetadataFromSearch(
     coreId: string,
     path: string,
+    game: ScreenScraperGame,
+  ): Promise<RomMetadata | null>;
+  /**
+   * feat/arcade-manual-ss-search — arcade analogue of
+   * `bindRomMetadataFromSearch`. The renderer doesn't carry the
+   * mra → primary-zip mapping, so the resolution lives on the main
+   * side: look up the .mra in the cached playability snapshot,
+   * resolve its primary zip basename, find that zip's md5 in the
+   * hash cache, then call the shared `MetadataService.bindManualOverride`
+   * keyed on the zip md5. The bind fans out automatically to every
+   * other .mra sharing the same primary zip on the next
+   * `getArcadeMetadataBatch` read.
+   *
+   * Returns null when the mra isn't in the current snapshot, when its
+   * primary zip can't be resolved (no candidate exists in
+   * games/mame/ or games/hbmame/), or when the primary zip hasn't
+   * been hashed yet (the auto-scrape pass populates the hash cache
+   * on connect — a freshly-connected session might be racing).
+   */
+  bindArcadeMetadataFromSearch(
+    mraRelativePath: string,
     game: ScreenScraperGame,
   ): Promise<RomMetadata | null>;
   /**

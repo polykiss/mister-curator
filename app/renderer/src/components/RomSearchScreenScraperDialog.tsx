@@ -45,15 +45,34 @@ import { useBoxArt } from '@app/renderer/src/lib/use-box-art';
  * surface inline within the dialog.
  */
 export interface RomSearchScreenScraperDialogProps {
-  readonly path: string;
   /** The on-disk filename — used for the search-input prefill. */
   readonly filename: string;
-  /** Core display name shown in the dialog header for context. */
+  /**
+   * Core id used by the SEARCH step (`window.mister.searchScreenScraperByName`)
+   * to resolve the ScreenScraper systemeid. For arcade callers this is
+   * `'mame'` so SS searches systemId=75 (the same id the auto-scrape
+   * pass uses).
+   */
   readonly coreId: string;
   /** Core display label (`mame` → `Arcade`) for the header. */
   readonly coreLabel: string;
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
+  /**
+   * feat/arcade-manual-ss-search — caller-supplied BIND step. Pre-PR,
+   * this dialog called `window.mister.bindRomMetadataFromSearch`
+   * directly with `(coreId, path, game)`. RomsPane's path-keyed cache
+   * resolution and arcade's mra→primary-zip resolution diverge enough
+   * that an `onBind` callback owned by the caller is cleaner than a
+   * dialog-internal branch. RomsPane wires it to
+   * `bindRomMetadataFromSearch`; the arcade adapter wires it to the
+   * new `bindArcadeMetadataFromSearch` IPC.
+   *
+   * Returns the resolved `RomMetadata` for the bound entry (forwarded
+   * to `onSaved`) or `null` when no cache record exists to bind
+   * against (the dialog surfaces a toast in that case).
+   */
+  readonly onBind: (game: ScreenScraperGame) => Promise<RomMetadata | null>;
   /** Called with the updated record after successful bind. */
   readonly onSaved: (updated: RomMetadata) => void;
 }
@@ -61,7 +80,7 @@ export interface RomSearchScreenScraperDialogProps {
 export function RomSearchScreenScraperDialog(
   props: RomSearchScreenScraperDialogProps,
 ): JSX.Element {
-  const { path, filename, coreId, coreLabel, open, onOpenChange, onSaved } =
+  const { filename, coreId, coreLabel, open, onOpenChange, onBind, onSaved } =
     props;
 
   const [searchTerm, setSearchTerm] = useState(() => filenameToSearchTerm(filename));
@@ -113,11 +132,7 @@ export function RomSearchScreenScraperDialog(
   async function handleUseMatch(game: ScreenScraperGame): Promise<void> {
     setBindingId(game.id);
     try {
-      const updated = await window.mister.bindRomMetadataFromSearch(
-        coreId,
-        path,
-        game,
-      );
+      const updated = await onBind(game);
       if (updated === null) {
         toast.error(
           'Couldn\'t bind — no metadata record for this row yet. Wait for the prefetch to land and try again.',
