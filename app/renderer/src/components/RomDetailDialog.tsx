@@ -124,6 +124,19 @@ export interface RomDetailDialogProps {
   readonly onPrev?: () => void;
   readonly onNext?: () => void;
   /**
+   * feat/detail-dialog-nav-layout-fix — optional "12 of 87"
+   * position indicator shown in the header navigation strip. When
+   * the adapter knows the index of the current entry inside the
+   * pane's filtered list it passes both; the strip renders the
+   * position between the Previous and Next buttons. Omitted: the
+   * indicator simply doesn't render (buttons still work). Values
+   * are 1-based display indices (e.g. `current: 12, total: 87`).
+   */
+  readonly navPosition?: {
+    readonly current: number;
+    readonly total: number;
+  };
+  /**
    * feat/detail-modal-nav-hide — Hide/Unhide button in the dialog
    * footer. When `hideAction` is supplied the button renders with
    * the label derived from `currentHidden` and `onToggle` flips
@@ -155,6 +168,7 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
     emptyStateBody,
     onPrev,
     onNext,
+    navPosition,
     hideAction,
   } = props;
   const defaultAllow = readOnly === true ? false : true;
@@ -171,6 +185,7 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
         bodyOverride={emptyStateBody}
         onPrev={onPrev}
         onNext={onNext}
+        navPosition={navPosition}
         hideAction={hideAction}
       />
     );
@@ -186,6 +201,7 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
       allowSearch={resolvedAllowSearch}
       onPrev={onPrev}
       onNext={onNext}
+      navPosition={navPosition}
       hideAction={hideAction}
     />
   );
@@ -201,6 +217,7 @@ function PopulatedDetailDialog(props: {
   readonly allowSearch: boolean;
   readonly onPrev?: () => void;
   readonly onNext?: () => void;
+  readonly navPosition?: RomDetailDialogProps['navPosition'];
   readonly hideAction?: RomDetailDialogProps['hideAction'];
 }): JSX.Element {
   const {
@@ -213,6 +230,7 @@ function PopulatedDetailDialog(props: {
     allowSearch,
     onPrev,
     onNext,
+    navPosition,
     hideAction,
   } = props;
 
@@ -264,6 +282,23 @@ function PopulatedDetailDialog(props: {
   const [primaryUrl, setPrimaryUrl] = useState<string | null>(
     mediaSlots[0]?.url ?? null,
   );
+  // feat/detail-dialog-nav-layout-fix (C) — reset the per-entry
+  // visual state when the dialog navigates to a new entry. Pre-fix
+  // the dialog's `primaryUrl` state was set at mount and carried
+  // across `metadata` prop changes (the parent's prev/next swaps
+  // the metadata in place rather than unmounting), so advancing
+  // to the next entry left the previous entry's image showing
+  // until the user clicked a thumbnail. Tied to `metadata.hash` —
+  // a stable per-record identifier that flips with every entry.
+  // Also close the lightbox: showing the old entry's full-size
+  // image while the dialog body has moved on is incoherent.
+  useEffect(() => {
+    setPrimaryUrl(mediaSlots[0]?.url ?? null);
+    setLightboxIndex(null);
+    // mediaSlots is recomputed from metadata each render; the hash
+    // is the stable change signal we actually want to depend on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [metadata.hash]);
 
   function handleEdit(): void {
     onOpenChange(false);
@@ -294,9 +329,7 @@ function PopulatedDetailDialog(props: {
           scrolling overflow lives on the inner wrapper (below) so
           the absolutely-positioned prev/next arrows stay anchored
           to the DialogContent bounds and don't scroll with content. */}
-      <DialogContent className="flex max-h-[85vh] max-w-[85vw] flex-col p-5">
-        <PrevNextArrows onPrev={onPrev} onNext={onNext} />
-        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+      <DialogContent className="flex max-h-[85vh] max-w-[85vw] flex-col gap-3 p-5">
         <DialogHeader className="min-w-0">
           <DialogTitle
             className="min-w-0 break-words pr-8"
@@ -311,74 +344,104 @@ function PopulatedDetailDialog(props: {
           ) : null}
         </DialogHeader>
 
-        {/* feat/arcade-parse-tolerance-gallery-polish — gallery
-            promotes to a full-width slot above the info stack. The
-            primary container is now fixed-height (`h-[28rem]`) so
-            switching thumbnails doesn't reflow the text below; the
-            <img> uses object-contain to fit any aspect ratio inside
-            the fixed bounds without distortion. */}
-        <MediaGallery
-          slots={mediaSlots}
-          primaryUrl={primaryUrl ?? boxArtUrl}
-          onSelect={setPrimaryUrl}
-          onEnlarge={() => {
-            const idx = mediaSlots.findIndex(
-              (s) => s.url === (primaryUrl ?? boxArtUrl),
-            );
-            setLightboxIndex(idx >= 0 ? idx : 0);
-          }}
-          title={title}
+        {/* feat/detail-dialog-nav-layout-fix (B + D) — ROM
+            navigation strip lives in the header area with text-
+            labeled buttons + a position indicator. Pre-fix the
+            edge chevron arrows looked identical to the lightbox's
+            image-cycling arrows, and they remained visible behind
+            the lightbox when the user opened a fullscreen image.
+            Now: clearly labeled "← Previous" / "Next →" buttons
+            in the header chrome, and the whole strip hides while
+            the lightbox is open so it can't bleed through. */}
+        <DetailNavStrip
+          onPrev={onPrev}
+          onNext={onNext}
+          position={navPosition}
+          hidden={lightboxIndex !== null}
         />
 
-        <div className="flex flex-col gap-4 min-w-0">
-          {description !== null && description.length > 0 ? (
-            <section className="flex flex-col gap-1">
-              <SectionLabel>Synopsis</SectionLabel>
-              <p className="text-body-sm text-fg whitespace-pre-line">
-                {description}
-              </p>
+        {/* feat/detail-dialog-nav-layout-fix (A) — scrollable
+            content (media gallery + info stack). The button row
+            below this wrapper sits OUTSIDE the scroll so it stays
+            pinned to the bottom of the dialog regardless of how
+            tall the synopsis runs. min-h-0 unlocks the overflow
+            on the inner flex child. */}
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+          {/* feat/detail-dialog-nav-layout-fix (A) — primary
+              image height drops from 60vh to 35vh. On the live
+              1200×800 screenshot the 60vh image consumed ~60% of
+              dialog height and the synopsis was clipped behind
+              the scroll-button-row overlap. 35vh leaves room for
+              synopsis + key facts above the footer without scroll
+              on the typical viewport. */}
+          <MediaGallery
+            slots={mediaSlots}
+            primaryUrl={primaryUrl ?? boxArtUrl}
+            onSelect={setPrimaryUrl}
+            onEnlarge={() => {
+              const idx = mediaSlots.findIndex(
+                (s) => s.url === (primaryUrl ?? boxArtUrl),
+              );
+              setLightboxIndex(idx >= 0 ? idx : 0);
+            }}
+            title={title}
+          />
+
+          <div className="flex flex-col gap-4 min-w-0">
+            {description !== null && description.length > 0 ? (
+              <section className="flex flex-col gap-1">
+                <SectionLabel>Synopsis</SectionLabel>
+                <p className="text-body-sm text-fg whitespace-pre-line">
+                  {description}
+                </p>
+              </section>
+            ) : null}
+
+            <section className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
+              <KeyFact label="Players" value={players} />
+              <KeyFact
+                label="Rating"
+                value={rating !== null ? formatRating(rating) : null}
+              />
+              <KeyFact label="Released" value={releaseDate} />
+              <KeyFact label="Publisher" value={publisher} />
             </section>
-          ) : null}
 
-          <section className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
-            <KeyFact label="Players" value={players} />
-            <KeyFact
-              label="Rating"
-              value={rating !== null ? formatRating(rating) : null}
-            />
-            <KeyFact label="Released" value={releaseDate} />
-            <KeyFact label="Publisher" value={publisher} />
-          </section>
+            {tags.length > 0 ? (
+              <section className="flex flex-col gap-1">
+                <SectionLabel>Tags</SectionLabel>
+                <div className="flex flex-wrap gap-1">
+                  {tags.map((tag) => (
+                    <span
+                      key={tag}
+                      className="rounded-sm bg-elevated px-2 py-0.5 text-caption text-fg"
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              </section>
+            ) : null}
 
-          {tags.length > 0 ? (
-            <section className="flex flex-col gap-1">
-              <SectionLabel>Tags</SectionLabel>
-              <div className="flex flex-wrap gap-1">
-                {tags.map((tag) => (
-                  <span
-                    key={tag}
-                    className="rounded-sm bg-elevated px-2 py-0.5 text-caption text-fg"
-                  >
-                    {tag}
-                  </span>
-                ))}
-              </div>
-            </section>
-          ) : null}
+            {note !== null && note.length > 0 ? (
+              <section className="flex flex-col gap-1">
+                <SectionLabel>Note</SectionLabel>
+                <p className="text-body-sm text-fg-body whitespace-pre-line">
+                  {note}
+                </p>
+              </section>
+            ) : null}
 
-          {note !== null && note.length > 0 ? (
-            <section className="flex flex-col gap-1">
-              <SectionLabel>Note</SectionLabel>
-              <p className="text-body-sm text-fg-body whitespace-pre-line">
-                {note}
-              </p>
-            </section>
-          ) : null}
-
-          <ProvenanceFooter metadata={metadata} />
+            <ProvenanceFooter metadata={metadata} />
+          </div>
         </div>
 
-        <div className="flex flex-wrap justify-end gap-2 pt-1">
+        {/* feat/detail-dialog-nav-layout-fix (A) — sticky footer.
+            Sits OUTSIDE the scrollable wrapper above so the action
+            buttons stay pinned at the bottom of the dialog. The
+            top border + small `pt-3` separates it visually from
+            the scrolling content. */}
+        <div className="flex flex-wrap justify-end gap-2 border-t border-subtle pt-3">
           {hideAction !== undefined ? (
             <Button variant="ghost" onClick={hideAction.onToggle}>
               {hideAction.currentHidden ? 'Unhide' : 'Hide'}
@@ -398,7 +461,6 @@ function PopulatedDetailDialog(props: {
             Close
           </Button>
         </div>
-        </div>
 
         {lightboxIndex !== null && mediaSlots.length > 0 ? (
           <Lightbox
@@ -414,49 +476,64 @@ function PopulatedDetailDialog(props: {
 }
 
 /**
- * feat/detail-modal-nav-hide — Prev/Next arrow buttons anchored at
- * the left/right edges of the detail dialog. The adapter passes
- * `onPrev`/`onNext` resolved against the current pane's sorted +
- * filtered row list; either is `undefined` at list boundaries
- * (button renders disabled). When both are undefined the whole
- * affordance disappears (no navigation context — e.g. the detail
- * dialog was opened directly without a list backing it).
+ * feat/detail-dialog-nav-layout-fix — header-area ROM navigation
+ * strip. Replaces PR #76's edge-positioned chevron buttons, which
+ * looked visually identical to the lightbox's image-cycling arrows
+ * and remained visible behind the lightbox overlay on top of the
+ * detail dialog. The new strip:
  *
- * Chrome mirrors the lightbox arrows from PR #74 / PR #75: 40px
- * rounded button, semi-opaque canvas backplate, focus ring. The
- * smaller size (vs. the lightbox's 48px) reflects that the
- * detail-dialog edge is less visually loaded than a fullscreen
- * image.
+ *   • Sits below the dialog header (in-flow, not absolute), so
+ *     the lightbox dialog covers it via z-index by default.
+ *   • Uses text-labeled "← Previous" / "Next →" buttons; the
+ *     icon+text combo reads as "ROM navigation" not as image
+ *     carousel arrows.
+ *   • Renders a centered "<current> of <total>" indicator when
+ *     the adapter supplies a `navPosition`; omitted when the
+ *     adapter doesn't know the index.
+ *   • Disables either side at the list boundary (per spec — no
+ *     wrap-around). Both undefined → strip doesn't render.
+ *   • Honors `hidden` so the dialog can hide it while the
+ *     lightbox is open (feat/detail-dialog-nav-layout-fix D).
  */
-function PrevNextArrows(props: {
+function DetailNavStrip(props: {
   readonly onPrev?: () => void;
   readonly onNext?: () => void;
+  readonly position?: { readonly current: number; readonly total: number };
+  readonly hidden?: boolean;
 }): JSX.Element | null {
-  const { onPrev, onNext } = props;
+  const { onPrev, onNext, position, hidden } = props;
+  if (hidden === true) return null;
   if (onPrev === undefined && onNext === undefined) return null;
-  const baseClass =
-    'absolute top-1/2 z-20 -translate-y-1/2 inline-flex h-10 w-10 items-center justify-center rounded-full bg-canvas/80 text-fg-body shadow-modal transition-colors hover:bg-canvas hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-canvas/80 disabled:hover:text-fg-body';
   return (
-    <>
-      <button
-        type="button"
+    <div className="flex items-center gap-2 border-b border-subtle pb-2">
+      <Button
+        variant="ghost"
+        size="sm"
         onClick={onPrev}
         disabled={onPrev === undefined}
-        aria-label="Previous entry"
-        className={cn(baseClass, 'left-1')}
+        aria-label="Previous ROM entry"
       >
-        <ChevronLeft className="size-5" strokeWidth={1.5} aria-hidden />
-      </button>
-      <button
-        type="button"
+        <ChevronLeft className="mr-1 size-4" aria-hidden />
+        Previous
+      </Button>
+      {position !== undefined ? (
+        <span className="mx-auto text-caption text-fg-muted">
+          {position.current} of {position.total}
+        </span>
+      ) : (
+        <span className="mx-auto" />
+      )}
+      <Button
+        variant="ghost"
+        size="sm"
         onClick={onNext}
         disabled={onNext === undefined}
-        aria-label="Next entry"
-        className={cn(baseClass, 'right-1')}
+        aria-label="Next ROM entry"
       >
-        <ChevronRight className="size-5" strokeWidth={1.5} aria-hidden />
-      </button>
-    </>
+        Next
+        <ChevronRight className="ml-1 size-4" aria-hidden />
+      </Button>
+    </div>
   );
 }
 
@@ -563,7 +640,7 @@ function MediaGallery(props: {
     // the populated primary so the dialog's vertical layout doesn't
     // shift between empty and populated states.
     return (
-      <div className="h-[60vh] w-full rounded-sm border border-subtle bg-overlay/40" />
+      <div className="h-[35vh] w-full rounded-sm border border-subtle bg-overlay/40" />
     );
   }
   return (
@@ -571,19 +648,19 @@ function MediaGallery(props: {
       {/* feat/arcade-parse-tolerance-gallery-polish — fixed-height
           primary container. <img> uses object-contain inside so a
           portrait box-art and a 16:9 screenshot both fit without
-          distorting the surrounding layout. Switching thumbnails
-          replaces the src — the container's height never changes,
-          so nothing below reflows.
-          feat/detail-modal-nav-hide — height moves from a fixed
-          448px (h-[28rem]) to a viewport-relative `h-[60vh]` so the
-          gallery scales with the dialog: a 700px window shows a
-          smaller image, a 1400px window shows a bigger one, always
-          maintaining the breathing room the dialog's max-h-[85vh]
-          enforces around its content. */}
+          distorting the surrounding layout.
+          feat/detail-dialog-nav-layout-fix (A) — height drops from
+          60vh (PR #76) to 35vh. The earlier sizing dominated the
+          modal — on a 1200×800 window the image consumed ~60% of
+          dialog height and the synopsis was getting clipped behind
+          the scroll-button-row overlap. 35vh leaves room for
+          synopsis + key facts above the (now-sticky) footer on a
+          typical viewport and scales down further on small
+          windows. */}
       <button
         type="button"
         onClick={() => primaryUrl !== null && onEnlarge(primaryUrl)}
-        className="flex h-[60vh] w-full items-center justify-center overflow-hidden rounded-sm border border-subtle bg-overlay/40 transition-colors hover:border-emphasis focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+        className="flex h-[35vh] w-full items-center justify-center overflow-hidden rounded-sm border border-subtle bg-overlay/40 transition-colors hover:border-emphasis focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
         aria-label={`${title} primary image — click to enlarge`}
       >
         {primaryLocal !== null ? (
@@ -847,6 +924,7 @@ function EmptyDetailDialog(props: {
   readonly bodyOverride?: string;
   readonly onPrev?: () => void;
   readonly onNext?: () => void;
+  readonly navPosition?: RomDetailDialogProps['navPosition'];
   readonly hideAction?: RomDetailDialogProps['hideAction'];
 }): JSX.Element {
   function handleSearch(): void {
@@ -860,9 +938,7 @@ function EmptyDetailDialog(props: {
       : "ScreenScraper hasn't matched this entry. The auto-scrape pass will retry on the next connect.");
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogContent className="flex max-h-[85vh] max-w-[85vw] flex-col p-5">
-        <PrevNextArrows onPrev={props.onPrev} onNext={props.onNext} />
-        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+      <DialogContent className="flex max-h-[85vh] max-w-[85vw] flex-col gap-3 p-5">
         <DialogHeader className="min-w-0">
           <DialogTitle
             className="min-w-0 break-words pr-8"
@@ -872,15 +948,30 @@ function EmptyDetailDialog(props: {
           </DialogTitle>
         </DialogHeader>
 
-        <div className="grid grid-cols-[12rem_1fr] gap-5">
-          <div className="aspect-[3/4] w-full rounded-sm border border-subtle bg-overlay/40" />
-          <div className="flex min-w-0 flex-col gap-2">
-            <SectionLabel>No metadata yet</SectionLabel>
-            <p className="text-body-sm text-fg-body">{bodyText}</p>
+        {/* feat/detail-dialog-nav-layout-fix — header-area ROM nav
+            strip, same shape as the populated variant. The empty
+            dialog has no lightbox of its own to hide, so the
+            `hidden` flag is always false here. */}
+        <DetailNavStrip
+          onPrev={props.onPrev}
+          onNext={props.onNext}
+          position={props.navPosition}
+        />
+
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+          <div className="grid grid-cols-[12rem_1fr] gap-5">
+            <div className="aspect-[3/4] w-full rounded-sm border border-subtle bg-overlay/40" />
+            <div className="flex min-w-0 flex-col gap-2">
+              <SectionLabel>No metadata yet</SectionLabel>
+              <p className="text-body-sm text-fg-body">{bodyText}</p>
+            </div>
           </div>
         </div>
 
-        <div className="flex flex-wrap justify-end gap-2 pt-1">
+        {/* feat/detail-dialog-nav-layout-fix (A) — sticky footer
+            outside the scroll area, same shape as the populated
+            variant for consistent button-row position. */}
+        <div className="flex flex-wrap justify-end gap-2 border-t border-subtle pt-3">
           {props.hideAction !== undefined ? (
             <Button variant="ghost" onClick={props.hideAction.onToggle}>
               {props.hideAction.currentHidden ? 'Unhide' : 'Hide'}
@@ -897,7 +988,6 @@ function EmptyDetailDialog(props: {
           >
             Close
           </Button>
-        </div>
         </div>
       </DialogContent>
     </Dialog>
