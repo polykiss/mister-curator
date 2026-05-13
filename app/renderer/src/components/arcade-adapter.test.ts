@@ -52,25 +52,37 @@ describe('arcade-adapter — optimistic single-toggle (feat/pre-beta-polish-batc
   it('onToggleSingle is synchronous (no await on the SSH call) — UI flips before the wire round-trip', () => {
     // Pre-fix the handler was `async ... await setArcadeMraVisibility`,
     // making the spinner mandatory and the eye-flip the LAST step.
-    // Post-fix the handler kicks off the IPC and returns; the
-    // optimistic flips have already painted by the time the
-    // microtask queue picks up the promise.
+    // Post-fix the row's eye toggle is still synchronous (void
+    // return): the optimistic flips paint immediately, the SSH
+    // call runs in background via the shared Promise-returning
+    // helper introduced in feat/detail-modal-nav-hide.
     expect(SOURCE).toMatch(
       /const onToggleSingle = \(entry: ArcadeMraEntry\): void =>/,
     );
-    // The IPC call is no longer awaited inside the handler.
+    // The IPC is invoked inside `applyArcadeMraVisibility`, not
+    // directly inside the row's toggle. The toggle never awaits
+    // the IPC.
     expect(SOURCE).not.toMatch(
-      /await window\.mister\.setArcadeMraVisibility\(/,
+      /onToggleSingle = \(entry: ArcadeMraEntry\): void =>[\s\S]{0,400}await window\.mister\.setArcadeMraVisibility/,
     );
-    // Instead the call lives in a chained .catch(...) — the only
-    // surface that needs the promise is the revert path.
+    // The shared helper exists with the documented signature.
     expect(SOURCE).toMatch(
-      /window\.mister[\s\S]{0,60}\.setArcadeMraVisibility\(originalPath, next\)[\s\S]{0,200}\.catch\(\(err: unknown\) =>/,
+      /const applyArcadeMraVisibility = \(\s*entry: ArcadeMraEntry,\s*next: boolean,\s*\): Promise<void> =>/,
+    );
+    // And THAT helper drives the SSH call.
+    expect(SOURCE).toMatch(
+      /window\.mister[\s\S]{0,80}\.setArcadeMraVisibility\(originalPath, next\)/,
     );
   });
 
-  it('optimistic writes run BEFORE the SSH call (so the UI is in the target state when the wire op starts)', () => {
-    const start = SOURCE.indexOf('const onToggleSingle = (entry: ArcadeMraEntry)');
+  it('the shared optimistic helper performs all three local writes BEFORE the SSH call', () => {
+    // feat/detail-modal-nav-hide extracted the optimistic core
+    // into `applyArcadeMraVisibility` so the detail dialog can
+    // await it. The ordering contract — local writes first, then
+    // SSH — moved into the helper. Pin it there.
+    const start = SOURCE.indexOf(
+      'const applyArcadeMraVisibility = (',
+    );
     expect(start).toBeGreaterThan(-1);
     const tail = SOURCE.slice(start);
     const sshIdx = tail.indexOf('.setArcadeMraVisibility(originalPath, next)');
@@ -85,25 +97,40 @@ describe('arcade-adapter — optimistic single-toggle (feat/pre-beta-polish-batc
     expect(head).toMatch(/adjustArcadeHiddenCount\(next \? 1 : -1\)/);
   });
 
-  it('the .catch handler reverts every optimistic write before surfacing the toast', () => {
-    const catchIdx = SOURCE.indexOf('.catch((err: unknown) =>');
-    expect(catchIdx).toBeGreaterThan(-1);
-    const tail = SOURCE.slice(catchIdx);
-    const toastIdx = tail.indexOf('toast.error');
-    expect(toastIdx).toBeGreaterThan(-1);
-    const revertBlock = tail.slice(0, toastIdx);
-    // Each write has a paired inverse-write — pin them so a
-    // future "I'll just revert one of them" regression surfaces.
+  it('the helper reverts every optimistic write and re-throws so callers can decide on toast / no advance', () => {
+    // Pre-PR the catch handler swallowed the rejection and
+    // surfaced a toast inline. Now the helper re-throws so the
+    // detail dialog can:
+    //   (a) advance only on success, or
+    //   (b) stay on the current entry on failure.
+    // The row's `onToggleSingle` wraps in its own catch + toast.
+    const catchIdx = SOURCE.indexOf(
+      "window.mister\n      .setArcadeMraVisibility(originalPath, next)\n      .catch((err: unknown) =>",
+    );
+    // Tolerate formatting drift on the .catch — use a regex match.
+    const helperRegex =
+      /applyArcadeMraVisibility[\s\S]+?\.setArcadeMraVisibility\(originalPath, next\)[\s\S]+?\.catch\(\(err: unknown\) =>([\s\S]+?)throw err;/;
+    const helperCatch = SOURCE.match(helperRegex);
+    void catchIdx; // unused — the regex is the assertion path.
+    expect(helperCatch).not.toBeNull();
+    const revertBlock = helperCatch?.[1] ?? '';
+    // Inverse-writes pinned in the same order: counts, metadata,
+    // entries.
     expect(revertBlock).toMatch(/adjustArcadeHiddenCount\(next \? -1 : 1\)/);
     expect(revertBlock).toMatch(/setMetadataByMra\(\(prev\) =>/);
     expect(revertBlock).toMatch(/setEntries\(\(prev\) =>/);
   });
 
-  it('toast message reads "Hide failed: <name>" or "Show failed: <name>" so the user sees WHICH direction failed', () => {
-    // The user's expected copy from the pre-beta polish brief.
-    // Pre-fix the message was "Could not hide/show ..." (more
-    // verbose, less scannable).
-    expect(SOURCE).toMatch(
+  it('the row-toggle wrapper surfaces toast.error with "Hide failed" / "Show failed" copy on rejection', () => {
+    // The row-view eye click is fire-and-forget — its catch path
+    // owns the toast. The detail-dialog's hide button owns its
+    // own toast for the same shape (see the dialog wiring tests).
+    const onToggleIdx = SOURCE.indexOf(
+      'const onToggleSingle = (entry: ArcadeMraEntry): void =>',
+    );
+    expect(onToggleIdx).toBeGreaterThan(-1);
+    const block = SOURCE.slice(onToggleIdx);
+    expect(block).toMatch(
       /toast\.error\(\s*`\$\{next \? 'Hide' : 'Show'\} failed: \$\{entry\.displayName\}`/,
     );
   });

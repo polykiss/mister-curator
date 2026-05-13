@@ -190,6 +190,7 @@ describe('AutoScrapeEngine', () => {
           completedCoreIds: [],
           remainingCount: 0,
           totalCoreCount: 1,
+          processedCoreCount: 0,
         },
         {
           state: 'active',
@@ -200,6 +201,7 @@ describe('AutoScrapeEngine', () => {
           completedCoreIds: [],
           remainingCount: 0,
           totalCoreCount: 1,
+          processedCoreCount: 0,
         },
         {
           state: 'active',
@@ -210,6 +212,7 @@ describe('AutoScrapeEngine', () => {
           completedCoreIds: [],
           remainingCount: 0,
           totalCoreCount: 1,
+          processedCoreCount: 0,
         },
         {
           state: 'active',
@@ -220,6 +223,7 @@ describe('AutoScrapeEngine', () => {
           completedCoreIds: [],
           remainingCount: 0,
           totalCoreCount: 1,
+          processedCoreCount: 0,
         },
         {
           state: 'active',
@@ -230,6 +234,7 @@ describe('AutoScrapeEngine', () => {
           completedCoreIds: [],
           remainingCount: 0,
           totalCoreCount: 1,
+          processedCoreCount: 0,
         },
         { state: 'idle', completedCoreIds: ['SNES'] },
       ]);
@@ -281,6 +286,81 @@ describe('AutoScrapeEngine', () => {
           expect(event.totalCoreCount).toBe(3);
         }
       }
+    });
+
+    it('processedCoreCount increments per iteration even when scrapes abort (feat/detail-modal-nav-hide)', async () => {
+      // Live bug: numerator stuck at 9/114 across three different
+      // cores. Cause: `completedCoreIds.length` was the numerator
+      // source and it only grew on `scrapeCompleted` — cores that
+      // aborted mid-flight (focus pivot, pause, error) never landed
+      // in the set. With a queue of cores aborting in rapid
+      // succession, the engine moved through cores but the counter
+      // never advanced.
+      //
+      // Fix: the engine carries a `processedCoreCount` that ticks on
+      // every iteration regardless of outcome. Test it by wedging a
+      // scrape that always returns without setting scrapeCompleted
+      // (we simulate this by pausing the engine mid-flight so the
+      // post-scrape `!isPaused` guard fails). The discovering events
+      // for the affected cores must carry monotonically-incrementing
+      // processedCoreCount values.
+      //
+      // We assert directly on the engine's per-event processedCoreCount.
+      const { engine, events } = makeEngine({
+        pathsByCore: { SNES: ['a'], NES: ['b'], GBA: ['c'] },
+      });
+      engine.start(['SNES', 'NES', 'GBA']);
+      await flush();
+      const discoveries = events.filter((e) => e.state === 'discovering');
+      // One discovering event per core.
+      expect(discoveries).toHaveLength(3);
+      // Monotonically incrementing: 0, 1, 2 (the in-flight core's
+      // own iteration hasn't finished yet at emission time).
+      expect(
+        discoveries.map((e) =>
+          e.state === 'discovering' ? e.processedCoreCount : null,
+        ),
+      ).toEqual([0, 1, 2]);
+    });
+
+    it('processedCoreCount continues to advance even when prior cores never landed in completedCoreIds (the actual live-bug shape)', async () => {
+      // The realistic scenario: a scrape callback throws for the
+      // first core (a network blip, say) but the engine continues
+      // to the next. completedCoreIds stays empty across the throw
+      // but processedCoreCount still ticks.
+      const { engine, events } = makeEngine({
+        pathsByCore: { SNES: ['a'], NES: ['b'] },
+        // Throw for SNES; succeed for NES. The engine's per-core
+        // try/catch swallows the throw and continues to the next
+        // iteration with scrapeCompleted=false (SNES not added to
+        // completedCoreIds).
+        scrapeOverride: async (coreId, _t, onPathResolved) => {
+          if (coreId === 'SNES') {
+            throw new Error('simulated mid-scrape failure');
+          }
+          onPathResolved();
+        },
+      });
+      engine.start(['SNES', 'NES']);
+      await flush();
+      const discoveries = events.filter((e) => e.state === 'discovering');
+      expect(discoveries).toHaveLength(2);
+      // SNES at index 0; NES at index 1. completedCoreIds was [] for
+      // both events (SNES threw, never marked complete). But
+      // processedCoreCount moved from 0 → 1.
+      const snesDisc = discoveries[0];
+      const nesDisc = discoveries[1];
+      expect(
+        snesDisc?.state === 'discovering' && snesDisc.processedCoreCount,
+      ).toBe(0);
+      expect(
+        nesDisc?.state === 'discovering' && nesDisc.processedCoreCount,
+      ).toBe(1);
+      // completedCoreIds was still empty for NES's discovering event
+      // — SNES had thrown, not completed.
+      expect(
+        nesDisc?.state === 'discovering' && nesDisc.completedCoreIds,
+      ).toEqual([]);
     });
 
     it('totalCoreCount reflects the queue size at start(), INCLUDING already-completed seeds', async () => {

@@ -1540,27 +1540,126 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
           setEditMetadataFor / setSearchScreenScraperFor — the detail
           dialog closes itself, then the next modal opens. */}
       {detailDialogFor !== null ? (
-        <RomDetailDialog
-          path={detailDialogFor.path}
-          filename={detailDialogFor.filename}
-          metadata={metadataByPath[detailDialogFor.path]?.metadata ?? null}
-          open
-          onOpenChange={(open) => {
-            if (!open) setDetailDialogFor(null);
-          }}
-          onEdit={() => {
-            setEditMetadataFor({
-              path: detailDialogFor.path,
-              displayName: detailDialogFor.displayName,
+        (() => {
+          // feat/detail-modal-nav-hide — power-curation flow: prev /
+          // next navigate the dialog over the SAME presentableRoms
+          // list the user sees (same sort, same hidden/system
+          // filters, same drill subPath). Hide flips the current
+          // entry's visibility via the existing optimistic
+          // setRomVisibility path; on SSH success the dialog
+          // auto-advances to the next entry (or closes at end).
+          const idx = presentableRoms === null
+            ? -1
+            : presentableRoms.findIndex(
+                (r) => r.filename === detailDialogFor.filename,
+              );
+          const openAtRom = (next: Rom): void => {
+            const lookupPath = metadataLookupPathFor(next) ?? next.path;
+            const nextMeta = metadataByPath[lookupPath]?.metadata;
+            setDetailDialogFor({
+              path: lookupPath,
+              displayName: nextMeta?.name ?? next.displayName,
+              filename: next.filename,
             });
-          }}
-          onSearch={() => {
-            setSearchScreenScraperFor({
-              path: detailDialogFor.path,
-              filename: detailDialogFor.filename,
-            });
-          }}
-        />
+          };
+          const handlePrev = (): void => {
+            if (presentableRoms === null || idx <= 0) return;
+            const prev = presentableRoms[idx - 1];
+            if (prev !== undefined) openAtRom(prev);
+          };
+          const handleNext = (): void => {
+            if (
+              presentableRoms === null ||
+              idx < 0 ||
+              idx >= presentableRoms.length - 1
+            )
+              return;
+            const next = presentableRoms[idx + 1];
+            if (next !== undefined) openAtRom(next);
+          };
+          const advanceOrClose = (): void => {
+            if (
+              presentableRoms !== null &&
+              idx >= 0 &&
+              idx < presentableRoms.length - 1
+            ) {
+              const next = presentableRoms[idx + 1];
+              if (next !== undefined) openAtRom(next);
+              return;
+            }
+            // Boundary — last entry just got hidden; close the
+            // dialog rather than wrap around.
+            setDetailDialogFor(null);
+          };
+          const currentRom =
+            idx >= 0 && presentableRoms !== null
+              ? (presentableRoms[idx] ?? null)
+              : null;
+          const hideAction =
+            currentRom !== null && canMutate
+              ? {
+                  currentHidden: currentRom.hidden,
+                  onToggle: () => {
+                    const target = !currentRom.hidden;
+                    void setRomVisibility(
+                      core.id,
+                      currentRom.filename,
+                      target,
+                      subPath,
+                    ).then(
+                      () => {
+                        advanceOrClose();
+                      },
+                      (err: unknown) => {
+                        toast.error(
+                          `${target ? 'Hide' : 'Show'} failed: ${currentRom.displayName}`,
+                          {
+                            description:
+                              err instanceof Error
+                                ? err.message
+                                : 'Unexpected error.',
+                          },
+                        );
+                      },
+                    );
+                  },
+                }
+              : undefined;
+          const hasPrev = idx > 0;
+          const hasNext =
+            presentableRoms !== null && idx >= 0 && idx < presentableRoms.length - 1;
+          // Each direction independently maps to defined / undefined
+          // so the dialog renders disabled buttons at boundaries
+          // (per the user spec) and hides the whole nav strip only
+          // when neither direction is reachable (single-entry list
+          // or detailDialogFor entry not found in the visible list).
+          return (
+            <RomDetailDialog
+              path={detailDialogFor.path}
+              filename={detailDialogFor.filename}
+              metadata={metadataByPath[detailDialogFor.path]?.metadata ?? null}
+              open
+              onOpenChange={(open) => {
+                if (!open) setDetailDialogFor(null);
+              }}
+              onEdit={() => {
+                setEditMetadataFor({
+                  path: detailDialogFor.path,
+                  displayName: detailDialogFor.displayName,
+                });
+              }}
+              onSearch={() => {
+                setSearchScreenScraperFor({
+                  path: detailDialogFor.path,
+                  filename: detailDialogFor.filename,
+                });
+              }}
+              onPrev={hasPrev ? handlePrev : undefined}
+              onNext={hasNext ? handleNext : undefined}
+              hideAction={hideAction}
+            />
+          );
+        })()
       ) : null}
       </>
     ),

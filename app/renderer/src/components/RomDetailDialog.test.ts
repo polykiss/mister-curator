@@ -157,11 +157,16 @@ describe('RomDetailDialog — structural contract', () => {
     expect(SOURCE).toMatch(/DialogTitle className="sr-only"/);
   });
 
-  it('uses max-w-3xl per the §6 layout spec', () => {
-    // Wider than the form/list modals; narrower than full-screen.
-    // Pin the size class so a future "let's make it bigger / sheet
-    // it" change is intentional.
-    expect(SOURCE).toMatch(/max-w-3xl/);
+  it('uses viewport-relative max-w/max-h so the modal scales with window size (feat/detail-modal-nav-hide)', () => {
+    // Pre-PR (max-w-3xl, no max-h): the modal was a fixed 768px
+    // wide with no height cap, so on a 1024×600 window it filled
+    // the screen with no negative space and on a 4K window it
+    // looked lost in the middle. Post-PR `max-w-[85vw]` +
+    // `max-h-[85vh]` cap both dimensions at 85% of viewport so the
+    // modal scales with the window and always leaves breathing room
+    // around the dialog edges.
+    expect(SOURCE).toMatch(/max-w-\[85vw\]/);
+    expect(SOURCE).toMatch(/max-h-\[85vh\]/);
   });
 
   it('provenance footer surfaces source + fetched-date for audit', () => {
@@ -218,13 +223,15 @@ describe('RomDetailDialog — empty state (no metadata yet)', () => {
     expect(empty).not.toMatch(/Edit\.\.\./);
   });
 
-  it('empty state uses the same max-w-3xl shell as the populated view', () => {
-    // Modal width consistency — switching from no-metadata to
+  it('empty state uses the same viewport-relative shell as the populated view', () => {
+    // Modal sizing consistency — switching from no-metadata to
     // populated (e.g. after a successful Find + bind) shouldn't
-    // visibly resize the dialog.
+    // visibly resize the dialog. Both variants use the same
+    // max-w-[85vw] + max-h-[85vh] caps.
     const idx = SOURCE.indexOf('function EmptyDetailDialog');
     const empty = SOURCE.slice(idx);
-    expect(empty).toMatch(/max-w-3xl/);
+    expect(empty).toMatch(/max-w-\[85vw\]/);
+    expect(empty).toMatch(/max-h-\[85vh\]/);
   });
 });
 
@@ -406,15 +413,19 @@ describe('RomDetailDialog — gallery primary sizing (feat/arcade-parse-toleranc
   // fixed-height container with `object-contain` — any aspect fits,
   // nothing below moves.
 
-  it('primary image button is a fixed-height container (h-[28rem]), no reflow on thumbnail swap', () => {
-    // The button is the click target AND the visual container.
-    // Pinning the height class catches a regression where someone
-    // restores aspect-ratio-driven sizing (which reflows).
+  it('primary image button is a viewport-relative fixed-height container (h-[60vh]), no reflow on thumbnail swap', () => {
+    // feat/detail-modal-nav-hide — height moves from a fixed
+    // 448px (h-[28rem]) to viewport-relative `h-[60vh]` so the
+    // gallery scales with the dialog: a 700px window shows a
+    // smaller image, a 1400px window shows a bigger one. The
+    // container is still FIXED (60vh, not max-h-[60vh]), so
+    // switching thumbnails with different aspect ratios doesn't
+    // reflow anything below.
     const primaryButton = SOURCE.match(
       /<button[\s\S]*?onClick=\{\(\) => primaryUrl !== null && onEnlarge[\s\S]*?className="([^"]+)"/,
     );
     expect(primaryButton).not.toBeNull();
-    expect(primaryButton![1]).toContain('h-[28rem]');
+    expect(primaryButton![1]).toContain('h-[60vh]');
     expect(primaryButton![1]).toContain('w-full');
     // Required so a tall image stays inside the container instead of
     // pushing the layout down.
@@ -422,10 +433,10 @@ describe('RomDetailDialog — gallery primary sizing (feat/arcade-parse-toleranc
   });
 
   it('zero-media placeholder matches the populated container height (no jump between states)', () => {
-    // If the placeholder block were a different height, an empty
-    // record's modal would size differently than a populated one.
-    // Pin both to h-[28rem] so they're visually identical.
-    expect(SOURCE).toMatch(/h-\[28rem\] w-full rounded-sm border border-subtle bg-overlay\/40/);
+    // Pre-PR both used h-[28rem] (fixed px). Post-PR both use
+    // h-[60vh] (viewport-relative) so the placeholder scales the
+    // same way the populated container does.
+    expect(SOURCE).toMatch(/h-\[60vh\] w-full rounded-sm border border-subtle bg-overlay\/40/);
   });
 
   it('primary <img> fills the fixed container and uses object-contain to preserve aspect', () => {
@@ -434,7 +445,7 @@ describe('RomDetailDialog — gallery primary sizing (feat/arcade-parse-toleranc
     // screenshot rendered at its intrinsic 800×600 inside a much
     // larger container — switching to a portrait box-art changed
     // the visible size of the image. h-full w-full forces the IMG
-    // element to fill the fixed h-[28rem] container; object-contain
+    // element to fill the fixed h-[60vh] container; object-contain
     // then preserves the source aspect inside that fixed frame.
     expect(SOURCE).toMatch(
       /alt=\{`\$\{title\} primary image`\}[\s\S]{0,1200}className="h-full w-full object-contain"/,
@@ -496,20 +507,24 @@ describe('RomDetailDialog — lightbox navigation (feat/arcade-parse-tolerance-g
     );
   });
 
-  it('overlay-blocking buttons stopPropagation so their click does not close the dialog via the backdrop', () => {
-    // Radix Dialog closes on overlay click. If the arrow's onClick
-    // bubbled, the very click that navigates would also close the
-    // lightbox. Same for the custom close button — without
-    // stopPropagation, Radix would interpret the click as a
-    // backdrop close AND our handler would fire, racing on which
-    // close path wins. e.stopPropagation() is load-bearing — pin it.
-    // feat/pre-beta-polish-batch: 2 arrows + 1 close = 3 calls.
+  it('elements that should NOT close the lightbox each stopPropagation against the backdrop-close handler', () => {
+    // DialogContent's onClick={onClose} is the
+    // feat/detail-modal-nav-hide click-backdrop-to-close handler.
+    // Every element INSIDE DialogContent that doesn't represent a
+    // backdrop click must stopPropagation so it doesn't bubble to
+    // that handler. There are 5 such elements in the Lightbox:
+    //   2 arrow buttons (prev / next)
+    //   1 close button (calls onClose explicitly + stopPropagation
+    //                   so it doesn't double-fire via backdrop)
+    //   1 image (clicking the image keeps the lightbox open)
+    //   1 loading placeholder (same — the user reads it as
+    //                          "the image area" before bytes land)
     const lightboxIdx = SOURCE.indexOf('function Lightbox');
     expect(lightboxIdx).toBeGreaterThan(-1);
     const lightbox = SOURCE.slice(lightboxIdx);
     const stopPropCount = (lightbox.match(/e\.stopPropagation\(\)/g) ?? [])
       .length;
-    expect(stopPropCount).toBe(3);
+    expect(stopPropCount).toBe(5);
   });
 
   it('binds a document keydown listener for ArrowLeft / ArrowRight (cleans up on unmount)', () => {
@@ -570,6 +585,43 @@ describe('RomDetailDialog — lightbox navigation (feat/arcade-parse-tolerance-g
     );
   });
 
+  it('lightbox DialogContent closes on backdrop click (feat/detail-modal-nav-hide)', () => {
+    // Live bug: PR #75 added hideDefaultClose + a large in-content
+    // close button. That meant the dialog filled most of the
+    // viewport and Radix's onPointerDownOutside (which fires for
+    // clicks OUTSIDE DialogContent) covered only a thin ring.
+    // Clicking the dark "backdrop" area INSIDE DialogContent
+    // (between the image edge and the dialog edge) did nothing.
+    // Fix: route DialogContent's onClick to onClose so anything
+    // inside DialogContent that doesn't stopPropagation closes the
+    // dialog. The image + arrows + close button each stopPropagation
+    // for themselves.
+    const lightboxIdx = SOURCE.indexOf('function Lightbox');
+    const lightbox = SOURCE.slice(lightboxIdx);
+    expect(lightbox).toMatch(
+      /<DialogContent[\s\S]{0,1500}onClick=\{onClose\}/,
+    );
+  });
+
+  it('image + loading placeholder stopPropagation so clicking them does not close the lightbox', () => {
+    // The image area (loaded or loading) is conceptually NOT the
+    // backdrop — clicking it should keep the lightbox open. Without
+    // these stopPropagation calls, the new backdrop-close handler
+    // would fire on every image click.
+    const lightboxIdx = SOURCE.indexOf('function Lightbox');
+    const lightbox = SOURCE.slice(lightboxIdx);
+    // Find the img tag inside the lightbox; assert it has an
+    // onClick that stops propagation.
+    expect(lightbox).toMatch(
+      /<img[\s\S]{0,800}onClick=\{\(e\) => e\.stopPropagation\(\)\}/,
+    );
+    // And the loading placeholder — same protection so a fast
+    // click during the bytes-still-streaming window doesn't bail.
+    expect(lightbox).toMatch(
+      /<div[\s\S]{0,300}bg-overlay\/40"[\s\S]{0,800}onClick=\{\(e\) => e\.stopPropagation\(\)\}/,
+    );
+  });
+
   it('lightbox uses a fixed-size 90vh × 90vw stage; image fills it via h-full w-full + object-contain', () => {
     // feat/pre-beta-polish-batch — the 90vh/90vw lives on the
     // wrapping div, not the <img>. Result: every image renders into
@@ -584,6 +636,183 @@ describe('RomDetailDialog — lightbox navigation (feat/arcade-parse-tolerance-g
     );
     expect(SOURCE).toMatch(
       /className="h-full w-full rounded-sm object-contain"/,
+    );
+  });
+});
+
+describe('RomDetailDialog — Prev/Next entry navigation (feat/detail-modal-nav-hide)', () => {
+  // Power-curation flow: advance to the previous / next entry in
+  // the pane's currently-filtered + sorted row list without
+  // closing the dialog. Adapter resolves neighbours; dialog
+  // renders edge-positioned arrow buttons.
+
+  it('public RomDetailDialog accepts optional onPrev / onNext callbacks', () => {
+    expect(SOURCE).toMatch(/readonly onPrev\?\: \(\) => void;/);
+    expect(SOURCE).toMatch(/readonly onNext\?\: \(\) => void;/);
+  });
+
+  it('a dedicated PrevNextArrows component renders the buttons at the dialog edges', () => {
+    // Edge buttons (mirroring the lightbox arrows) rather than
+    // header-inline so the dialog header / title stays focused on
+    // the entry. Both buttons share chrome via `baseClass`.
+    expect(SOURCE).toMatch(/function PrevNextArrows\(props: \{/);
+    expect(SOURCE).toMatch(/aria-label="Previous entry"/);
+    expect(SOURCE).toMatch(/aria-label="Next entry"/);
+  });
+
+  it('PrevNextArrows returns null when neither prev nor next is supplied (no nav context → no chrome)', () => {
+    // The adapter passes undefined for both when the dialog is
+    // opened on an entry that isn't in the visible row list (the
+    // single-entry case is the most common: e.g. an arcade `.mra`
+    // surfaced from a non-list code path).
+    expect(SOURCE).toMatch(
+      /if \(onPrev === undefined && onNext === undefined\) return null;/,
+    );
+  });
+
+  it('arrow buttons render disabled at list boundaries (button still present, click ignored)', () => {
+    // Per the spec: at boundaries the button stays visible but
+    // disabled, not absent. `disabled={onPrev === undefined}` (and
+    // similar for next) gives us this exact behavior — the
+    // adapter passes undefined only for the missing direction.
+    expect(SOURCE).toMatch(/disabled=\{onPrev === undefined\}/);
+    expect(SOURCE).toMatch(/disabled=\{onNext === undefined\}/);
+    // Visual disabled state pinned on the className.
+    expect(SOURCE).toMatch(/disabled:opacity-40/);
+    expect(SOURCE).toMatch(/disabled:cursor-not-allowed/);
+  });
+
+  it('DialogContent stops scrolling on the outer container — inner wrapper handles overflow so the absolutely-positioned arrows stay anchored', () => {
+    // Pre-PR DialogContent had `overflow-y-auto` directly; that
+    // means absolute children inside scroll WITH the content as
+    // the user moves through a tall description. Post-PR
+    // DialogContent is `flex flex-col` (no overflow on itself), and
+    // an inner div wraps the scrolling content. The arrows are
+    // children of DialogContent (not the scrolling wrapper) so
+    // they stay anchored at the dialog edges.
+    const populated = SOURCE.indexOf('function PopulatedDetailDialog');
+    const empty = SOURCE.indexOf('function EmptyDetailDialog');
+    expect(populated).toBeGreaterThan(-1);
+    expect(empty).toBeGreaterThan(-1);
+    const populatedBlock = SOURCE.slice(populated, empty);
+    expect(populatedBlock).toMatch(
+      /<PrevNextArrows onPrev=\{onPrev\} onNext=\{onNext\} \/>/,
+    );
+    // Inner scrollable wrapper sits right after PrevNextArrows.
+    expect(populatedBlock).toMatch(
+      /<div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">/,
+    );
+  });
+
+  it('EmptyDetailDialog gets the same Prev/Next nav (so users can advance even on no-metadata entries)', () => {
+    // Users curating an unfamiliar core hit a string of no-metadata
+    // entries. The dialog should let them advance without closing
+    // — same affordance as populated entries.
+    const empty = SOURCE.indexOf('function EmptyDetailDialog');
+    const emptyBlock = SOURCE.slice(empty);
+    expect(emptyBlock).toMatch(
+      /<PrevNextArrows onPrev=\{props\.onPrev\} onNext=\{props\.onNext\} \/>/,
+    );
+  });
+});
+
+describe('RomDetailDialog — Hide/Unhide button with auto-advance (feat/detail-modal-nav-hide)', () => {
+  it('public RomDetailDialog accepts an optional hideAction with currentHidden + onToggle', () => {
+    expect(SOURCE).toMatch(
+      /readonly hideAction\?\: \{\s*readonly currentHidden: boolean;\s*readonly onToggle: \(\) => void;\s*\};/,
+    );
+  });
+
+  it('PopulatedDetailDialog renders Hide/Unhide button only when hideAction is supplied', () => {
+    const populated = SOURCE.indexOf('function PopulatedDetailDialog');
+    const empty = SOURCE.indexOf('function EmptyDetailDialog');
+    const block = SOURCE.slice(populated, empty);
+    expect(block).toMatch(
+      /\{hideAction !== undefined \? \(\s*<Button variant="ghost" onClick=\{hideAction\.onToggle\}>\s*\{hideAction\.currentHidden \? 'Unhide' : 'Hide'\}/,
+    );
+  });
+
+  it('EmptyDetailDialog also supports hideAction (no-metadata entries can still be hidden)', () => {
+    // Pure-empty-state entries (source: 'none' sentinels, files
+    // with no SS hit yet) are still real files on disk — the
+    // user can hide them from the dialog without needing metadata
+    // first.
+    const empty = SOURCE.indexOf('function EmptyDetailDialog');
+    const block = SOURCE.slice(empty);
+    expect(block).toMatch(
+      /\{props\.hideAction !== undefined \? \(\s*<Button variant="ghost" onClick=\{props\.hideAction\.onToggle\}>\s*\{props\.hideAction\.currentHidden \? 'Unhide' : 'Hide'\}/,
+    );
+  });
+
+  it('Hide button reads "Hide" for visible entries and "Unhide" for hidden ones (label flips with state)', () => {
+    // Pin both labels — a future "let's call it 'Show'" change
+    // surfaces here. The exact word "Unhide" was specified by the
+    // user in the brief.
+    expect(SOURCE).toMatch(/'Unhide' : 'Hide'/);
+  });
+});
+
+describe('roms-adapter / arcade-adapter — detail-dialog nav + hide wiring (feat/detail-modal-nav-hide)', () => {
+  const ROMS = readFileSync(
+    resolve(__dirname, 'roms-adapter.tsx'),
+    'utf8',
+  );
+  const ARCADE = readFileSync(
+    resolve(__dirname, 'arcade-adapter.tsx'),
+    'utf8',
+  );
+
+  it('roms-adapter computes prev/next over `presentableRoms` (same filter + sort the user sees)', () => {
+    // Pin the data source — the user spec is explicit that the
+    // nav order must match the row view exactly. `presentableRoms`
+    // is the post-filter post-sort list rendered in the table.
+    expect(ROMS).toMatch(
+      /presentableRoms\.findIndex\(\s*\(r\) => r\.filename === detailDialogFor\.filename,/,
+    );
+  });
+
+  it('roms-adapter passes undefined for missing direction at boundaries (button disabled, not absent)', () => {
+    // The dialog renders disabled buttons when the callback is
+    // undefined. Adapter computes hasPrev / hasNext from the index
+    // and forwards undefined for the missing direction.
+    expect(ROMS).toMatch(/onPrev=\{hasPrev \? handlePrev : undefined\}/);
+    expect(ROMS).toMatch(/onNext=\{hasNext \? handleNext : undefined\}/);
+  });
+
+  it('roms-adapter Hide flow advances on SSH success and toasts on failure (no advance on fail)', () => {
+    // The Hide button calls setRomVisibility (CoresContext path,
+    // which is already optimistic). On the promise's resolve we
+    // advanceOrClose; on its reject we surface a toast.error and
+    // stay put. Pin both branches.
+    expect(ROMS).toMatch(/setRomVisibility\([\s\S]{0,200}\)\.then\(/);
+    expect(ROMS).toMatch(/advanceOrClose\(\);/);
+    expect(ROMS).toMatch(
+      /toast\.error\(\s*`\$\{target \? 'Hide' : 'Show'\} failed: \$\{currentRom\.displayName\}`/,
+    );
+  });
+
+  it('roms-adapter advanceOrClose closes the dialog at the end of the list (no wrap-around)', () => {
+    expect(ROMS).toMatch(
+      /const advanceOrClose = \(\): void => \{[\s\S]{0,800}setDetailDialogFor\(null\);/,
+    );
+  });
+
+  it('arcade-adapter navigates over `sortedRows` filtered to mra rows only (subfolders skip)', () => {
+    // sortedRows includes both mra and subfolder rows; only mras
+    // can be opened in the detail dialog, so navigation only steps
+    // through them. Pin the filter so future row-kind additions
+    // don't accidentally include them in the nav order.
+    expect(ARCADE).toMatch(
+      /sortedRows\.filter\(\s*\(r\) => r\.kind === 'mra',\s*\)/,
+    );
+  });
+
+  it('arcade-adapter Hide flow uses the new applyArcadeMraVisibility helper and advances on success', () => {
+    expect(ARCADE).toMatch(/applyArcadeMraVisibility\([\s\S]{0,200}\)\.then\(/);
+    expect(ARCADE).toMatch(/advanceOrClose\(\);/);
+    // Toast on failure mirrors the row-toggle copy.
+    expect(ARCADE).toMatch(
+      /toast\.error\(\s*`\$\{next \? 'Hide' : 'Show'\} failed: \$\{currentEntry\.displayName\}`/,
     );
   });
 });

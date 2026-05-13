@@ -241,8 +241,16 @@ export function autoScrapeMessageFor(
     // trace showed the user "Probing ROM directories: 24/103 →
     // 24/99 → 24/57" as the engine walked the queue. The renderer
     // now trusts the engine's stable counter.
-    const doneCount = event.completedCoreIds.length;
-    const current = doneCount + 1;
+    //
+    // feat/detail-modal-nav-hide — numerator now uses the engine's
+    // `processedCoreCount` (incremented per loop iteration
+    // regardless of scrapeCompleted) rather than
+    // `completedCoreIds.length`. Pre-fix the numerator stalled when
+    // cores aborted in sequence: live trace showed "9/114 · APPLE-I",
+    // "9/114 · C64", "9/114 · Lynx48" — completedCoreIds stuck at 8
+    // while the engine actually advanced through three cores. The
+    // engine's new counter ticks on every iteration.
+    const current = event.processedCoreCount + 1;
     return `Probing ROM directories: ${String(current)}/${String(event.totalCoreCount)} · ${event.coreLabel}`;
   }
   if (event.state !== 'active') return null;
