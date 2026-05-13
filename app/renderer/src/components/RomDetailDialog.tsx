@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import type { JSX, ReactNode } from 'react';
 
 import type { RomMetadata } from '@shared/metadata-types';
@@ -161,10 +162,12 @@ function PopulatedDetailDialog(props: {
 }): JSX.Element {
   const { metadata, open, onOpenChange, onEdit, onSearch, allowEdit, allowSearch } = props;
 
-  // Lightbox state, scoped to this dialog instance. A non-null URL
-  // mounts the nested Dialog; null hides it. Radix handles Esc +
-  // click-outside-overlay to close.
-  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
+  // feat/arcade-parse-tolerance-gallery-polish — lightbox state is
+  // an INDEX into the gallery's media slots (was a URL pre-PR). The
+  // index lets the arrow keys + onscreen prev/next buttons cycle
+  // through the same slot order the thumbnail strip uses, with
+  // wrap-around at both ends. `null` = lightbox closed.
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
   // feat/detail-dialog-multi-media — the legacy top-level
   // `useBoxArt(boxArtUrl)` resolution moved into `MediaGallery`
@@ -244,68 +247,71 @@ function PopulatedDetailDialog(props: {
           ) : null}
         </DialogHeader>
 
-        <div className="grid grid-cols-[12rem_1fr] gap-5">
-          {/* Left column: media gallery + provenance footer. Fixed
-              width keeps the right column's text reflow predictable
-              across boxes of varying aspect ratios. */}
-          <div className="flex flex-col gap-2">
-            <MediaGallery
-              slots={mediaSlots}
-              primaryUrl={primaryUrl ?? boxArtUrl}
-              onSelect={setPrimaryUrl}
-              onEnlarge={(url) => setLightboxUrl(url)}
-              title={title}
-            />
-            <ProvenanceFooter metadata={metadata} />
-          </div>
+        {/* feat/arcade-parse-tolerance-gallery-polish — gallery
+            promotes to a full-width slot above the info stack. The
+            primary container is now fixed-height (`h-[28rem]`) so
+            switching thumbnails doesn't reflow the text below; the
+            <img> uses object-contain to fit any aspect ratio inside
+            the fixed bounds without distortion. */}
+        <MediaGallery
+          slots={mediaSlots}
+          primaryUrl={primaryUrl ?? boxArtUrl}
+          onSelect={setPrimaryUrl}
+          onEnlarge={() => {
+            const idx = mediaSlots.findIndex(
+              (s) => s.url === (primaryUrl ?? boxArtUrl),
+            );
+            setLightboxIndex(idx >= 0 ? idx : 0);
+          }}
+          title={title}
+        />
 
-          {/* Right column: synopsis + key facts + tags + note. Each
-              section omits itself when its data is absent. */}
-          <div className="flex flex-col gap-4 min-w-0">
-            {description !== null && description.length > 0 ? (
-              <section className="flex flex-col gap-1">
-                <SectionLabel>Synopsis</SectionLabel>
-                <p className="text-body-sm text-fg whitespace-pre-line">
-                  {description}
-                </p>
-              </section>
-            ) : null}
-
-            <section className="grid grid-cols-2 gap-x-4 gap-y-2">
-              <KeyFact label="Players" value={players} />
-              <KeyFact
-                label="Rating"
-                value={rating !== null ? formatRating(rating) : null}
-              />
-              <KeyFact label="Released" value={releaseDate} />
-              <KeyFact label="Publisher" value={publisher} />
+        <div className="flex flex-col gap-4 min-w-0">
+          {description !== null && description.length > 0 ? (
+            <section className="flex flex-col gap-1">
+              <SectionLabel>Synopsis</SectionLabel>
+              <p className="text-body-sm text-fg whitespace-pre-line">
+                {description}
+              </p>
             </section>
+          ) : null}
 
-            {tags.length > 0 ? (
-              <section className="flex flex-col gap-1">
-                <SectionLabel>Tags</SectionLabel>
-                <div className="flex flex-wrap gap-1">
-                  {tags.map((tag) => (
-                    <span
-                      key={tag}
-                      className="rounded-sm bg-elevated px-2 py-0.5 text-caption text-fg"
-                    >
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-              </section>
-            ) : null}
+          <section className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
+            <KeyFact label="Players" value={players} />
+            <KeyFact
+              label="Rating"
+              value={rating !== null ? formatRating(rating) : null}
+            />
+            <KeyFact label="Released" value={releaseDate} />
+            <KeyFact label="Publisher" value={publisher} />
+          </section>
 
-            {note !== null && note.length > 0 ? (
-              <section className="flex flex-col gap-1">
-                <SectionLabel>Note</SectionLabel>
-                <p className="text-body-sm text-fg-body whitespace-pre-line">
-                  {note}
-                </p>
-              </section>
-            ) : null}
-          </div>
+          {tags.length > 0 ? (
+            <section className="flex flex-col gap-1">
+              <SectionLabel>Tags</SectionLabel>
+              <div className="flex flex-wrap gap-1">
+                {tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="rounded-sm bg-elevated px-2 py-0.5 text-caption text-fg"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {note !== null && note.length > 0 ? (
+            <section className="flex flex-col gap-1">
+              <SectionLabel>Note</SectionLabel>
+              <p className="text-body-sm text-fg-body whitespace-pre-line">
+                {note}
+              </p>
+            </section>
+          ) : null}
+
+          <ProvenanceFooter metadata={metadata} />
         </div>
 
         <div className="flex flex-wrap justify-end gap-2 pt-1">
@@ -324,10 +330,12 @@ function PopulatedDetailDialog(props: {
           </Button>
         </div>
 
-        {lightboxUrl !== null ? (
+        {lightboxIndex !== null && mediaSlots.length > 0 ? (
           <Lightbox
-            url={lightboxUrl}
-            onClose={() => setLightboxUrl(null)}
+            slots={mediaSlots}
+            index={lightboxIndex}
+            onIndexChange={setLightboxIndex}
+            onClose={() => setLightboxIndex(null)}
           />
         ) : null}
       </DialogContent>
@@ -434,26 +442,35 @@ function MediaGallery(props: {
   const { slots, primaryUrl, onSelect, onEnlarge, title } = props;
   const primaryLocal = useBoxArt(primaryUrl);
   if (slots.length === 0) {
+    // No media at all — render a grey placeholder block sized like
+    // the populated primary so the dialog's vertical layout doesn't
+    // shift between empty and populated states.
     return (
-      <div className="aspect-[3/4] w-full rounded-sm border border-subtle bg-overlay/40" />
+      <div className="h-[28rem] w-full rounded-sm border border-subtle bg-overlay/40" />
     );
   }
   return (
-    <>
+    <div className="flex flex-col gap-2">
+      {/* feat/arcade-parse-tolerance-gallery-polish — fixed-height
+          primary container (`h-[28rem]` ≈ 448px). The <img> uses
+          object-contain inside, so a portrait box-art and a 16:9
+          screenshot both fit without distorting the surrounding
+          layout. Switching thumbnails replaces the src — the
+          container's height never changes, so nothing below reflows. */}
       <button
         type="button"
         onClick={() => primaryUrl !== null && onEnlarge(primaryUrl)}
-        className="block w-full rounded-sm border border-subtle bg-overlay/40 transition-colors hover:border-emphasis focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+        className="flex h-[28rem] w-full items-center justify-center overflow-hidden rounded-sm border border-subtle bg-overlay/40 transition-colors hover:border-emphasis focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
         aria-label={`${title} primary image — click to enlarge`}
       >
         {primaryLocal !== null ? (
           <img
             src={primaryLocal}
             alt={`${title} primary image`}
-            className="w-full rounded-sm object-contain"
+            className="max-h-full max-w-full object-contain"
           />
         ) : (
-          <div className="aspect-[3/4] w-full rounded-sm" />
+          <div className="h-full w-full" />
         )}
       </button>
       {slots.length > 1 ? (
@@ -468,7 +485,7 @@ function MediaGallery(props: {
           ))}
         </div>
       ) : null}
-    </>
+    </div>
   );
 }
 
@@ -514,35 +531,107 @@ function MediaThumb(props: {
 }
 
 /**
- * Click-to-enlarge nested Dialog. Single fullscreen <img> centered;
- * Esc and click-on-overlay close (Radix defaults). The image bytes
- * are already cached locally by the time the thumbnail renders, so
- * the lightbox <img> resolves instantly from the same `useBoxArt`
- * hook — no second network fetch.
+ * feat/arcade-parse-tolerance-gallery-polish — navigable lightbox.
+ *
+ * Click-to-enlarge nested Dialog with prev/next navigation through
+ * the same slot list the thumbnail strip uses. Bindings:
+ *
+ *   • Esc                          → close (Radix's default)
+ *   • Click backdrop               → close (Radix's default)
+ *   • Click arrow button           → navigate; click does NOT
+ *                                    bubble to the backdrop
+ *   • ArrowLeft / ArrowRight key   → navigate
+ *   • Wrap-around at both ends: index 0 ← right→ last; last → 0
+ *
+ * The image bytes are already cached locally by the time the
+ * thumbnail renders, so the lightbox <img> resolves instantly from
+ * the same `useBoxArt` hook — no second network fetch.
  */
 function Lightbox(props: {
-  readonly url: string;
+  readonly slots: readonly MediaSlot[];
+  readonly index: number;
+  readonly onIndexChange: (next: number) => void;
   readonly onClose: () => void;
 }): JSX.Element {
-  const localUrl = useBoxArt(props.url);
+  const { slots, index, onIndexChange, onClose } = props;
+  const slot = slots[index];
+  const localUrl = useBoxArt(slot?.url ?? null);
+  const count = slots.length;
+  const hasMultiple = count > 1;
+
+  // Wrap-around step: modulo math with the `+ count) % count`
+  // double-mod handles negative deltas without a sign branch.
+  const step = (delta: number): number =>
+    count === 0 ? 0 : ((index + delta) % count + count) % count;
+
+  useEffect(() => {
+    if (!hasMultiple) return undefined;
+    function onKey(e: KeyboardEvent): void {
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        onIndexChange(step(-1));
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        onIndexChange(step(1));
+      }
+    }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+    // step's closure captures `index` + `count`; binding the effect
+    // to those is what re-attaches with fresh state every nav step.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [index, count, hasMultiple]);
+
   return (
-    <Dialog open onOpenChange={(open) => (open ? undefined : props.onClose())}>
+    <Dialog open onOpenChange={(open) => (open ? undefined : onClose())}>
       <DialogContent
-        className="max-w-[min(96vw,1600px)] border-none bg-transparent p-0 shadow-none"
-        aria-label="Screenshot at full size"
+        className="h-[96vh] max-w-[96vw] border-none bg-transparent p-0 shadow-none"
+        aria-label={`${slot?.label ?? 'Image'} at full size`}
       >
         {/* Radix Dialog requires a title for a11y; visually hidden
             since the user-facing label is the image itself. */}
-        <DialogTitle className="sr-only">Screenshot</DialogTitle>
-        {localUrl !== null ? (
-          <img
-            src={localUrl}
-            alt="Screenshot at full size"
-            className="max-h-[90vh] w-full rounded-sm object-contain"
-          />
-        ) : (
-          <div className="h-[60vh] w-full rounded-sm bg-overlay/40" />
-        )}
+        <DialogTitle className="sr-only">
+          {slot?.label ?? 'Image'}
+        </DialogTitle>
+        <div className="relative flex h-full w-full items-center justify-center">
+          {hasMultiple ? (
+            <button
+              type="button"
+              onClick={(e) => {
+                // Stop propagation so the click doesn't escape to the
+                // Radix overlay (which would close the dialog).
+                e.stopPropagation();
+                onIndexChange(step(-1));
+              }}
+              aria-label="Previous image"
+              className="absolute left-4 top-1/2 z-10 -translate-y-1/2 inline-flex h-12 w-12 items-center justify-center rounded-full bg-canvas/80 text-fg-body shadow-modal transition-colors hover:bg-canvas hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              <ChevronLeft className="size-6" strokeWidth={1.5} aria-hidden />
+            </button>
+          ) : null}
+          {localUrl !== null ? (
+            <img
+              src={localUrl}
+              alt={slot?.label ?? 'Image'}
+              className="max-h-[90vh] max-w-[90vw] rounded-sm object-contain"
+            />
+          ) : (
+            <div className="h-[60vh] w-[60vh] rounded-sm bg-overlay/40" />
+          )}
+          {hasMultiple ? (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onIndexChange(step(1));
+              }}
+              aria-label="Next image"
+              className="absolute right-4 top-1/2 z-10 -translate-y-1/2 inline-flex h-12 w-12 items-center justify-center rounded-full bg-canvas/80 text-fg-body shadow-modal transition-colors hover:bg-canvas hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              <ChevronRight className="size-6" strokeWidth={1.5} aria-hidden />
+            </button>
+          ) : null}
+        </div>
       </DialogContent>
     </Dialog>
   );

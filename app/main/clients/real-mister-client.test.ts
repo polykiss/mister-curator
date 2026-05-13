@@ -1070,6 +1070,59 @@ describe('RealMisterClient', () => {
       mocks.execCommand.mockResolvedValueOnce(execFail(1, 'awk: oops'));
       await expect(client.parseArcadeMras()).rejects.toThrow(/parseArcadeMras failed/);
     });
+
+    it('tolerates the hide/parse race: non-zero exit with only ENOENT-shape stderr returns partial stdout (no throw)', async () => {
+      // Live trace: the renderer hid Turtles.mra while parseArcadeMras
+      // was mid-flight. `find … | xargs awk` enumerated entries
+      // up-front; awk's open of the now-vanished ./Turtles.mra emitted
+      //   awk: ./Turtles.mra: No such file or directory
+      // to stderr and exited 123, but the other entries had already
+      // streamed their TSV rows to stdout. Pre-fix, the whole call
+      // threw and `getArcadePlayability` IPC failed.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      // One playable .mra streamed before awk hit the vanished file;
+      // shape mirrors the production TSV row from
+      // `buildArcadeParseAwkScript` (tab-separated fields).
+      const tsvRow = [
+        'Galaga.mra',
+        'galaga',
+        'galaga.zip',
+        '',
+      ].join('\t');
+      mocks.execCommand.mockResolvedValueOnce({
+        stdout: `${tsvRow}\n`,
+        stderr: 'awk: ./Turtles.mra: No such file or directory\n',
+        code: 123,
+        signal: null,
+      });
+      const out = await client.parseArcadeMras();
+      // Should NOT throw. The surviving entry comes back parsed.
+      expect(out).toHaveLength(1);
+      expect(out[0]!.relativePath).toBe('Galaga.mra');
+    });
+
+    it('still throws when stderr contains anything other than ENOENT lines (real script bugs stay loud)', async () => {
+      // The tolerance is narrowly scoped: ONLY when every non-empty
+      // stderr line matches the ENOENT shape. A genuine awk syntax
+      // error or shell failure must still surface.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce({
+        stdout: '',
+        stderr: [
+          'awk: ./Turtles.mra: No such file or directory',
+          'awk: cmd. line:1: syntax error',
+        ].join('\n'),
+        code: 2,
+        signal: null,
+      });
+      await expect(client.parseArcadeMras()).rejects.toThrow(
+        /parseArcadeMras failed/,
+      );
+    });
   });
 
   describe('listArcadeZipBasenames (PR 1/2)', () => {
