@@ -903,3 +903,121 @@ describe('roms-adapter / arcade-adapter — detail-dialog nav + hide wiring (fea
     );
   });
 });
+
+describe('RomDetailDialog — two-column content layout (feat/detail-dialog-two-column-layout)', () => {
+  // Pre-fix the scrolling content stacked vertically: image +
+  // thumbnails first, then the synopsis / stats / tags / note stack
+  // below. On wide windows this wasted right-side real estate.
+  // Post-fix the content splits into two columns inside the same
+  // scroll wrapper:
+  //   • Left ~40%: image, thumbnail strip, source/fetched line.
+  //   • Right ~60%: stats grid, synopsis (+ tags + note when
+  //     present).
+  // The grid collapses to a single column on narrow viewports.
+
+  it('content wrapper holds a CSS grid with two columns at md+ that collapses to one column below', () => {
+    // Pin both the responsive grid AND `items-start` so the
+    // columns top-align rather than stretching to match each
+    // other's height (a wide synopsis next to a short image
+    // shouldn't make the image grow vertically).
+    expect(SOURCE).toMatch(
+      /<div className="grid grid-cols-1 gap-4 md:grid-cols-\[2fr_3fr\] md:items-start">/,
+    );
+  });
+
+  it('LEFT column contains MediaGallery (image + thumbnails) then ProvenanceFooter', () => {
+    // Pin the inner-column structure so a future "let me also put
+    // the synopsis in the left" refactor is loud. The MediaGallery
+    // component already owns the image button + thumbnail strip;
+    // we just sandwich ProvenanceFooter under it.
+    const populated = SOURCE.indexOf('function PopulatedDetailDialog');
+    const empty = SOURCE.indexOf('function EmptyDetailDialog');
+    const block = SOURCE.slice(populated, empty);
+    // Find the LEFT column wrapper (first child of the grid).
+    const leftIdx = block.indexOf(
+      '<div className="flex min-w-0 flex-col gap-2">',
+    );
+    expect(leftIdx).toBeGreaterThan(-1);
+    // Grab the next ~2000 chars (the column's body) and assert the
+    // two members are present in order.
+    const leftBlock = block.slice(leftIdx, leftIdx + 2000);
+    const galleryIdx = leftBlock.indexOf('<MediaGallery');
+    const provenanceIdx = leftBlock.indexOf('<ProvenanceFooter');
+    expect(galleryIdx).toBeGreaterThan(-1);
+    expect(provenanceIdx).toBeGreaterThan(galleryIdx);
+  });
+
+  it('RIGHT column contains the stats grid first, then the synopsis', () => {
+    // Pin the order — stats before synopsis is what the user
+    // expects to see at the top of the right column.
+    const populated = SOURCE.indexOf('function PopulatedDetailDialog');
+    const empty = SOURCE.indexOf('function EmptyDetailDialog');
+    const block = SOURCE.slice(populated, empty);
+    // The RIGHT column wrapper uses gap-4 (the stats / synopsis
+    // / tags / note stack); the LEFT uses gap-2 (image + thumbs
+    // + provenance). Distinct so a sloppy edit can't mix them.
+    const rightIdx = block.indexOf(
+      '<div className="flex min-w-0 flex-col gap-4">',
+    );
+    expect(rightIdx).toBeGreaterThan(-1);
+    const rightBlock = block.slice(rightIdx, rightIdx + 3000);
+    const statsIdx = rightBlock.indexOf('<KeyFact label="Players"');
+    const synopsisIdx = rightBlock.indexOf('<SectionLabel>Synopsis</SectionLabel>');
+    expect(statsIdx).toBeGreaterThan(-1);
+    // Synopsis present (when description is non-empty — the JSX
+    // path always contains the label string).
+    expect(synopsisIdx).toBeGreaterThan(statsIdx);
+  });
+
+  it('stats grid keeps the 2x2 → 4-across responsive shape (per spec: fall back to 2x2 when cramped)', () => {
+    // Inside the narrower right column the 4-across at sm:
+    // (640px viewport ≈ 326px column width) is borderline, but
+    // matches the spec's "fall back to 2x2 if 4-across is too
+    // cramped" intent — the row falls back to 2x2 at viewport
+    // below the sm: breakpoint.
+    expect(SOURCE).toMatch(
+      /<section className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">/,
+    );
+  });
+
+  it('ProvenanceFooter renders a single inline row joined by a middle dot (not two stacked lines)', () => {
+    // Pre-fix this rendered as a two-line flex-col under the
+    // synopsis. In the two-column layout it lives in the left
+    // column under thumbnails where vertical space is precious,
+    // so it collapses to one line. flex-wrap lets it break onto
+    // two lines naturally if the column ever gets too narrow.
+    expect(SOURCE).toMatch(
+      /<div className="flex flex-wrap gap-x-2 gap-y-0.5 text-caption text-fg-muted">/,
+    );
+    expect(SOURCE).toMatch(/<span aria-hidden>·<\/span>/);
+    // Still source-first, fetched-second.
+    expect(SOURCE).toMatch(
+      /<span>source: \{metadata\.source\}<\/span>\s*<span aria-hidden>·<\/span>\s*<span>fetched: \{date\}<\/span>/,
+    );
+  });
+
+  it('narrow-viewport breakpoint collapses both columns to a single vertical stack (grid-cols-1)', () => {
+    // The grid's default is `grid-cols-1`; the `md:grid-cols-
+    // [2fr_3fr]` override only kicks in at viewport >= 768px
+    // (Tailwind's md: breakpoint, ≈ 653px modal at 85vw — close
+    // enough to the user's "~720px modal width" guidance).
+    expect(SOURCE).toMatch(/grid grid-cols-1 gap-4 md:grid-cols-/);
+  });
+
+  it('tags + note sections live in the right column under synopsis (not in a third spanning row)', () => {
+    // The user spec listed only stats + synopsis in the right
+    // column; tags + note continue the metadata stack there since
+    // they're the same content class. Pinning their position
+    // prevents a future "let me move tags below the columns"
+    // refactor from quietly breaking the two-column rhythm.
+    const populated = SOURCE.indexOf('function PopulatedDetailDialog');
+    const empty = SOURCE.indexOf('function EmptyDetailDialog');
+    const block = SOURCE.slice(populated, empty);
+    const rightIdx = block.indexOf(
+      '<div className="flex min-w-0 flex-col gap-4">',
+    );
+    const rightBlock = block.slice(rightIdx, rightIdx + 3500);
+    expect(rightBlock).toMatch(/<SectionLabel>Tags<\/SectionLabel>/);
+    expect(rightBlock).toMatch(/<SectionLabel>Note<\/SectionLabel>/);
+  });
+});
