@@ -147,7 +147,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
 
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
     const onDisk = JSON.parse(await fs.readFile(path, 'utf-8')) as RomMetadata;
-    expect(onDisk.version).toBe(6);
+    expect(onDisk.version).toBe(7);
     expect(onDisk.source).toBe('openvgdb');
     expect(onDisk.system).toBe('Super Nintendo Entertainment System');
   });
@@ -161,8 +161,8 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
     const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
     const onDisk = JSON.parse(await fs.readFile(path, 'utf-8')) as RomMetadata;
     expect(onDisk.source).toBe('none');
-    // Writes use current schema (v6 after feat/metadata-detail-modal).
-    expect(onDisk.version).toBe(6);
+    // Writes use current schema (v7 after feat/detail-dialog-multi-media).
+    expect(onDisk.version).toBe(7);
   });
 
   it('hit on a system not in the libretro map → null thumbnail URLs but full metadata', async () => {
@@ -1836,7 +1836,40 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
         'https://ss-cdn/screenshot-2.png',
         'https://ss-cdn/screenshot-3.png',
       ]);
-      expect(updated.version).toBe(6);
+      expect(updated.version).toBe(7);
+    });
+
+    it('bindManualOverride: persists box3D / marquee / clearLogo URLs from extra (feat/detail-dialog-multi-media)', async () => {
+      // Pre-v7 the composer dropped these three URLs at cache-write
+      // time even though the SS parser had collected them into
+      // `ScreenScraperGame.extra`. The detail-dialog gallery's new
+      // thumbnail strip surfaces whichever ones land in the cache,
+      // so we pin the propagation here + on the readback so the
+      // gallery slot list is non-empty for entries that have them.
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      const updated = await svc.bindManualOverride(
+        HASH,
+        buildSsHit({
+          extra: {
+            box3DUrl: 'https://ss-cdn/box3d.png',
+            marqueeUrl: 'https://ss-cdn/marquee.png',
+            titleScreenUrl: null,
+            snapUrl: null,
+            clearLogoUrl: 'https://ss-cdn/wheel.png',
+            screenshots: [],
+          },
+        }),
+      );
+      expect(updated.box3DUrl).toBe('https://ss-cdn/box3d.png');
+      expect(updated.marqueeUrl).toBe('https://ss-cdn/marquee.png');
+      expect(updated.clearLogoUrl).toBe('https://ss-cdn/wheel.png');
+      // Round-trip through disk to confirm the validator accepts
+      // the new shape and reads the fields back.
+      const reread = await svc.readCachedMetadata(HASH);
+      expect(reread?.box3DUrl).toBe('https://ss-cdn/box3d.png');
+      expect(reread?.marqueeUrl).toBe('https://ss-cdn/marquee.png');
+      expect(reread?.clearLogoUrl).toBe('https://ss-cdn/wheel.png');
     });
   });
 
@@ -2127,7 +2160,7 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
           },
         }),
       );
-      expect(written.version).toBe(6);
+      expect(written.version).toBe(7);
       expect(written.screenshotUrls).toEqual([
         'https://ss-cdn/a.png',
         'https://ss-cdn/b.png',

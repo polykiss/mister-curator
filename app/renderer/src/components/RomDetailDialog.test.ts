@@ -3,6 +3,10 @@ import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
+import type { RomMetadata } from '@shared/metadata-types';
+
+import { buildMediaSlots } from '@app/renderer/src/components/RomDetailDialog';
+
 /**
  * feat/metadata-detail-modal — structural contract for the
  * RomDetailDialog component.
@@ -22,21 +26,19 @@ const SOURCE = readFileSync(
 );
 
 describe('RomDetailDialog — structural contract', () => {
-  it('reuses useBoxArt for the main box art', () => {
+  it('reuses useBoxArt for every gallery image (primary + thumbnails + lightbox)', () => {
     // Whole point of the cache architecture: don't add a new
     // image-fetching path. If anyone introduces a separate
     // <img src={metadata.boxArtUrl}> bypassing useBoxArt, the
     // SS-credential redaction + IPC byte-stream pipeline breaks.
+    //
+    // feat/detail-dialog-multi-media: the primary image is now the
+    // gallery's currently-selected slot; thumbnails resolve each
+    // slot's url via the same hook.
     expect(SOURCE).toContain("import { useBoxArt }");
-    expect(SOURCE).toMatch(/useBoxArt\(boxArtUrl\)/);
-  });
-
-  it('reuses useBoxArt for each screenshot thumbnail', () => {
-    // Same hook for screenshots — the image cache is URL-agnostic
-    // and "BoxArt" is a misnomer for what's really a generic image
-    // fetcher. Pin the reuse so a future refactor doesn't sneak a
-    // <img src={url}> direct-fetch in.
-    expect(SOURCE).toMatch(/useBoxArt\(url\)/);
+    expect(SOURCE).toMatch(/useBoxArt\(primaryUrl\)/);
+    expect(SOURCE).toMatch(/useBoxArt\(slot\.url\)/);
+    expect(SOURCE).toMatch(/useBoxArt\(props\.url\)/);
   });
 
   it('reuses metadata-display helpers (no raw metadata.name access)', () => {
@@ -67,8 +69,11 @@ describe('RomDetailDialog — structural contract', () => {
     expect(SOURCE).toMatch(/description !== null && description\.length > 0/);
   });
 
-  it('renders the screenshot strip only when at least one screenshot exists', () => {
-    expect(SOURCE).toMatch(/screenshots\.length > 0/);
+  it('renders the gallery thumbnail strip only when multiple media URLs exist', () => {
+    // feat/detail-dialog-multi-media: the single screenshot strip
+    // folded into the gallery. Zero slots → grey placeholder; one
+    // slot → primary only (no strip); 2+ slots → primary + strip.
+    expect(SOURCE).toMatch(/slots\.length > 1/);
   });
 
   it('renders the tags section only when at least one tag exists', () => {
@@ -272,5 +277,118 @@ describe('RomDetailDialog — long-title overflow guard (feat/arcade-polish-cont
     expect(SOURCE).not.toMatch(
       /ScreenScraper hasn['\\]+t matched this file/,
     );
+  });
+});
+
+describe('buildMediaSlots (feat/detail-dialog-multi-media)', () => {
+  // Pure helper — collects every non-null media URL from a cached
+  // record into the gallery's ordered slot list. Box art first
+  // (default primary), then title screen / screenshots / box3D /
+  // marquee / clearLogo. Dedup by URL.
+
+  function baseMeta(): RomMetadata {
+    return {
+      version: 7,
+      hash: 'h',
+      name: 'Sample',
+      system: 'NEOGEO',
+      year: 1996,
+      publisher: null,
+      developer: null,
+      genre: null,
+      description: null,
+      players: null,
+      rating: null,
+      releaseDate: null,
+      boxArtUrl: null,
+      titleScreenUrl: null,
+      screenshotUrl: null,
+      screenshotUrls: [],
+      box3DUrl: null,
+      marqueeUrl: null,
+      clearLogoUrl: null,
+      source: 'screenscraper',
+      fetchedAt: '2026-05-13T00:00:00.000Z',
+    };
+  }
+
+  it('returns empty when the record has no media URLs at all', () => {
+    expect(buildMediaSlots(baseMeta())).toEqual([]);
+  });
+
+  it('puts box art first so the gallery default primary is unchanged from pre-PR behaviour', () => {
+    const slots = buildMediaSlots({
+      ...baseMeta(),
+      boxArtUrl: 'https://ss/box.png',
+      titleScreenUrl: 'https://ss/title.png',
+      screenshotUrl: 'https://ss/snap.png',
+    });
+    expect(slots.map((s) => s.url)).toEqual([
+      'https://ss/box.png',
+      'https://ss/title.png',
+      'https://ss/snap.png',
+    ]);
+    expect(slots[0]!.label).toBe('Box art');
+  });
+
+  it('collects every cached media type (box3D / marquee / clearLogo) in the documented order', () => {
+    const slots = buildMediaSlots({
+      ...baseMeta(),
+      boxArtUrl: 'https://ss/box.png',
+      titleScreenUrl: 'https://ss/title.png',
+      screenshotUrl: 'https://ss/snap.png',
+      screenshotUrls: ['https://ss/snap2.png', 'https://ss/snap3.png'],
+      box3DUrl: 'https://ss/box3d.png',
+      marqueeUrl: 'https://ss/marquee.png',
+      clearLogoUrl: 'https://ss/logo.png',
+    });
+    expect(slots.map((s) => s.label)).toEqual([
+      'Box art',
+      'Title screen',
+      'Screenshot',
+      'Screenshot',
+      'Screenshot',
+      '3D box',
+      'Marquee',
+      'Logo',
+    ]);
+  });
+
+  it('dedups by URL when SS reuses a URL across media types (box2D == box3D)', () => {
+    const slots = buildMediaSlots({
+      ...baseMeta(),
+      boxArtUrl: 'https://ss/shared.png',
+      box3DUrl: 'https://ss/shared.png',
+    });
+    expect(slots.map((s) => s.url)).toEqual(['https://ss/shared.png']);
+  });
+
+  it('tolerates v4–v6 records that lack box3DUrl/marqueeUrl/clearLogoUrl (undefined → absent)', () => {
+    // Legacy on-disk records won't have the new fields at all. The
+    // helper must treat `undefined` the same as `null` — no crash,
+    // no empty-slot pollution.
+    const legacy = baseMeta();
+    delete (legacy as { box3DUrl?: unknown }).box3DUrl;
+    delete (legacy as { marqueeUrl?: unknown }).marqueeUrl;
+    delete (legacy as { clearLogoUrl?: unknown }).clearLogoUrl;
+    expect(() => buildMediaSlots(legacy)).not.toThrow();
+    expect(
+      buildMediaSlots({ ...legacy, boxArtUrl: 'https://ss/box.png' }),
+    ).toEqual([{ url: 'https://ss/box.png', label: 'Box art' }]);
+  });
+});
+
+describe('RomDetailDialog — gallery primary swap (feat/detail-dialog-multi-media)', () => {
+  it('declares primaryUrl state initialised from the first media slot', () => {
+    // Default primary = box art (when present), else the first
+    // available media URL. State allows the user to click a
+    // thumbnail and swap the displayed primary.
+    expect(SOURCE).toMatch(
+      /\[primaryUrl,\s*setPrimaryUrl\]\s*=\s*useState[\s\S]{0,200}mediaSlots\[0\]/,
+    );
+  });
+
+  it('thumbnail click handler routes through setPrimaryUrl (gallery is interactive)', () => {
+    expect(SOURCE).toMatch(/onSelect=\{setPrimaryUrl\}/);
   });
 });

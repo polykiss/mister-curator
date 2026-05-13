@@ -10,6 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@app/renderer/src/components/ui/dialog';
+import { cn } from '@app/renderer/src/lib/cn';
 import { useBoxArt } from '@app/renderer/src/lib/use-box-art';
 import {
   displayGenre,
@@ -165,8 +166,12 @@ function PopulatedDetailDialog(props: {
   // click-outside-overlay to close.
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
+  // feat/detail-dialog-multi-media — the legacy top-level
+  // `useBoxArt(boxArtUrl)` resolution moved into `MediaGallery`
+  // (which now owns the primary-image rendering). `boxArtUrl` stays
+  // available here as a fallback when the gallery starts with no
+  // selection (zero-media metadata edge case).
   const boxArtUrl = metadata.boxArtUrl;
-  const boxArt = useBoxArt(boxArtUrl);
 
   const title = displayName(metadata);
   const year = displayYear(metadata);
@@ -189,7 +194,19 @@ function PopulatedDetailDialog(props: {
   const releaseDate = metadata.releaseDate;
   const publisher = metadata.publisher;
 
-  const screenshots = metadata.screenshotUrls ?? [];
+  // feat/detail-dialog-multi-media — collect every cached media URL
+  // into a single gallery list. SS frequently returns some subset of
+  // these per game (box art always, screenshots usually, box3D and
+  // marquee less often, clear logo intermittently). Dedup so the same
+  // URL doesn't render twice (boxArtUrl can occasionally equal
+  // box3DUrl on cores where SS uses the same render). Box art leads
+  // when present so the dialog's default look is unchanged.
+  const mediaSlots = buildMediaSlots(metadata);
+  // Initial primary: box-art (or the first available slot when no
+  // box art exists; null when the game has no media at all).
+  const [primaryUrl, setPrimaryUrl] = useState<string | null>(
+    mediaSlots[0]?.url ?? null,
+  );
 
   function handleEdit(): void {
     onOpenChange(false);
@@ -228,19 +245,17 @@ function PopulatedDetailDialog(props: {
         </DialogHeader>
 
         <div className="grid grid-cols-[12rem_1fr] gap-5">
-          {/* Left column: box art + provenance footer. Fixed width
-              keeps the right column's text reflow predictable across
-              boxes of varying aspect ratios. */}
+          {/* Left column: media gallery + provenance footer. Fixed
+              width keeps the right column's text reflow predictable
+              across boxes of varying aspect ratios. */}
           <div className="flex flex-col gap-2">
-            {boxArt !== null ? (
-              <img
-                src={boxArt}
-                alt={`${title} box art`}
-                className="w-full rounded-sm border border-subtle bg-overlay/40 object-contain"
-              />
-            ) : (
-              <div className="aspect-[3/4] w-full rounded-sm border border-subtle bg-overlay/40" />
-            )}
+            <MediaGallery
+              slots={mediaSlots}
+              primaryUrl={primaryUrl ?? boxArtUrl}
+              onSelect={setPrimaryUrl}
+              onEnlarge={(url) => setLightboxUrl(url)}
+              title={title}
+            />
             <ProvenanceFooter metadata={metadata} />
           </div>
 
@@ -292,21 +307,6 @@ function PopulatedDetailDialog(props: {
             ) : null}
           </div>
         </div>
-
-        {screenshots.length > 0 ? (
-          <section className="flex flex-col gap-2">
-            <SectionLabel>Screenshots</SectionLabel>
-            <div className="flex gap-2 overflow-x-auto pb-1">
-              {screenshots.map((url) => (
-                <ScreenshotThumb
-                  key={url}
-                  url={url}
-                  onClick={() => setLightboxUrl(url)}
-                />
-              ))}
-            </div>
-          </section>
-        ) : null}
 
         <div className="flex flex-wrap justify-end gap-2 pt-1">
           {allowEdit ? (
@@ -369,27 +369,145 @@ function ProvenanceFooter(props: {
   );
 }
 
-function ScreenshotThumb(props: {
+/**
+ * feat/detail-dialog-multi-media — media-type slot for the gallery.
+ * Each slot carries the URL plus a short user-facing label used for
+ * the alt text + screen-reader name on the thumbnail button.
+ */
+export interface MediaSlot {
   readonly url: string;
+  readonly label: string;
+}
+
+/**
+ * Build the ordered media-slot list from a cached RomMetadata
+ * record. Order matters — the first slot is the gallery's default
+ * primary image, so box art leads when present (preserves the
+ * pre-PR look on the common case). Dedup by URL so the same image
+ * doesn't render twice when SS happens to reuse a URL across media
+ * types (the box-2D / box-3D pair is the usual collision).
+ *
+ * Exported for unit-testing without rendering React.
+ */
+export function buildMediaSlots(metadata: RomMetadata): MediaSlot[] {
+  const out: MediaSlot[] = [];
+  const seen = new Set<string>();
+  const push = (url: string | null | undefined, label: string): void => {
+    if (url === null || url === undefined || url === '') return;
+    if (seen.has(url)) return;
+    seen.add(url);
+    out.push({ url, label });
+  };
+  push(metadata.boxArtUrl, 'Box art');
+  push(metadata.titleScreenUrl, 'Title screen');
+  push(metadata.screenshotUrl, 'Screenshot');
+  for (const url of metadata.screenshotUrls ?? []) {
+    push(url, 'Screenshot');
+  }
+  push(metadata.box3DUrl, '3D box');
+  push(metadata.marqueeUrl, 'Marquee');
+  push(metadata.clearLogoUrl, 'Logo');
+  return out;
+}
+
+/**
+ * feat/detail-dialog-multi-media — left-column gallery widget.
+ * Primary image at the top (clickable → lightbox); thumbnail strip
+ * below for switching the primary. Renders gracefully when only one
+ * (or zero) media URLs exist:
+ *   • zero  → grey aspect-3/4 placeholder, no thumbnail strip.
+ *   • one   → primary only, no thumbnail strip.
+ *   • 2+    → primary + horizontal thumbnail strip below.
+ *
+ * Thumbnails lazy-load via `useBoxArt` (the same hook the row cells
+ * and the lightbox use) — no new HTTP path. Per the spec we don't
+ * store image bytes locally beyond the existing main-process image
+ * cache.
+ */
+function MediaGallery(props: {
+  readonly slots: readonly MediaSlot[];
+  readonly primaryUrl: string | null;
+  readonly onSelect: (url: string) => void;
+  readonly onEnlarge: (url: string) => void;
+  readonly title: string;
+}): JSX.Element {
+  const { slots, primaryUrl, onSelect, onEnlarge, title } = props;
+  const primaryLocal = useBoxArt(primaryUrl);
+  if (slots.length === 0) {
+    return (
+      <div className="aspect-[3/4] w-full rounded-sm border border-subtle bg-overlay/40" />
+    );
+  }
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => primaryUrl !== null && onEnlarge(primaryUrl)}
+        className="block w-full rounded-sm border border-subtle bg-overlay/40 transition-colors hover:border-emphasis focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+        aria-label={`${title} primary image — click to enlarge`}
+      >
+        {primaryLocal !== null ? (
+          <img
+            src={primaryLocal}
+            alt={`${title} primary image`}
+            className="w-full rounded-sm object-contain"
+          />
+        ) : (
+          <div className="aspect-[3/4] w-full rounded-sm" />
+        )}
+      </button>
+      {slots.length > 1 ? (
+        <div className="flex flex-wrap gap-1">
+          {slots.map((slot) => (
+            <MediaThumb
+              key={slot.url}
+              slot={slot}
+              selected={slot.url === primaryUrl}
+              onClick={() => onSelect(slot.url)}
+            />
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * Single thumbnail inside `MediaGallery`'s strip. Square-ish 3rem
+ * tiles flex-wrap inside the 12rem left column (≈3 per row with the
+ * 0.25rem gap). The selected slot gets the accent ring so the user
+ * can see which thumb corresponds to the currently-displayed primary.
+ */
+function MediaThumb(props: {
+  readonly slot: MediaSlot;
+  readonly selected: boolean;
   readonly onClick: () => void;
 }): JSX.Element {
-  const { url, onClick } = props;
-  const localUrl = useBoxArt(url);
+  const { slot, selected, onClick } = props;
+  const local = useBoxArt(slot.url);
   return (
     <button
       type="button"
       onClick={onClick}
-      className="shrink-0 rounded-sm border border-subtle bg-overlay/40 transition-colors hover:border-emphasis focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-      aria-label="Open screenshot at full size"
+      title={slot.label}
+      aria-label={`Show ${slot.label}`}
+      aria-pressed={selected}
+      className={cn(
+        'h-12 w-12 shrink-0 overflow-hidden rounded-sm border bg-overlay/40 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent',
+        selected
+          ? 'border-accent'
+          : 'border-subtle hover:border-emphasis',
+      )}
     >
-      {localUrl !== null ? (
+      {local !== null ? (
         <img
-          src={localUrl}
-          alt="Screenshot"
-          className="h-24 rounded-sm object-contain"
+          src={local}
+          alt={slot.label}
+          className="h-full w-full object-cover"
+          loading="lazy"
         />
       ) : (
-        <div className="h-24 w-32 rounded-sm" />
+        <div className="h-full w-full" />
       )}
     </button>
   );
