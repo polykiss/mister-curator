@@ -784,13 +784,39 @@ export class RealMisterClient implements IMisterClient {
       this.ssh.execCommand(script),
     );
     if (result.code !== 0) {
-      // Surface the error rather than hiding it — a non-zero exit
-      // here means the awk script blew up or the heredoc failed,
-      // both of which are bugs in this method (not absence of
-      // _Arcade/, which short-circuits cleanly above).
-      throw new Error(
-        `parseArcadeMras failed (code ${String(result.code)}): ${result.stderr.trim() || 'no stderr'}`,
-      );
+      // feat/arcade-parse-tolerance-gallery-polish — tolerate the
+      // hide/parse race. `find … | xargs awk` enumerates entries
+      // up-front, then awk opens each. If the renderer renames a
+      // .mra mid-flight (Foo.mra → .Foo.mra via the hide ledger),
+      // awk's open of the vanished path emits
+      //   `awk: ./Foo.mra: No such file or directory`
+      // to stderr and the script exits non-zero, but the other
+      // entries' TSV rows have already streamed to stdout. We split
+      // that case from a genuine script bug by inspecting stderr:
+      // when EVERY non-empty line is the ENOENT shape, log a warn
+      // and use the partial stdout. Anything else still throws so
+      // an awk syntax error or shell failure stays loud.
+      const stderrLines = result.stderr
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      const ENOENT_RE = /^awk: .+: No such file or directory$/;
+      const onlyVanishedFiles =
+        stderrLines.length > 0 &&
+        stderrLines.every((l) => ENOENT_RE.test(l));
+      if (!onlyVanishedFiles) {
+        // Surface the error rather than hiding it — a non-zero exit
+        // here means the awk script blew up or the heredoc failed,
+        // both of which are bugs in this method (not absence of
+        // _Arcade/, which short-circuits cleanly above).
+        throw new Error(
+          `parseArcadeMras failed (code ${String(result.code)}): ${result.stderr.trim() || 'no stderr'}`,
+        );
+      }
+      diagLog('warn', 'arcade', '·', 'parse-skip-vanished', {
+        code: result.code ?? undefined,
+        skipped: stderrLines.length,
+      });
     }
     const out: ArcadeMraMeta[] = [];
     for (const line of result.stdout.split('\n')) {

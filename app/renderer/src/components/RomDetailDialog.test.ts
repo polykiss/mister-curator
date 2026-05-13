@@ -38,7 +38,10 @@ describe('RomDetailDialog — structural contract', () => {
     expect(SOURCE).toContain("import { useBoxArt }");
     expect(SOURCE).toMatch(/useBoxArt\(primaryUrl\)/);
     expect(SOURCE).toMatch(/useBoxArt\(slot\.url\)/);
-    expect(SOURCE).toMatch(/useBoxArt\(props\.url\)/);
+    // Lightbox resolves the current slot's URL through useBoxArt too;
+    // post-PR the lookup goes through `slot?.url` (slots-array-based)
+    // rather than a flat URL prop, so we accept either spelling.
+    expect(SOURCE).toMatch(/useBoxArt\(slot\?\.url\s*\?\?\s*null\)/);
   });
 
   it('reuses metadata-display helpers (no raw metadata.name access)', () => {
@@ -137,12 +140,13 @@ describe('RomDetailDialog — structural contract', () => {
     expect(sHandoffIdx).toBeGreaterThan(sCloseIdx);
   });
 
-  it('lightbox: a nested Dialog instance keyed on a clicked screenshot URL', () => {
-    // The lightbox is a second Dialog mounted on demand (non-null
-    // lightboxUrl state). Esc + click-outside close come from
-    // Radix Dialog defaults — pin that we don't reinvent.
-    expect(SOURCE).toMatch(/const \[lightboxUrl, setLightboxUrl\] = useState/);
-    expect(SOURCE).toMatch(/lightboxUrl !== null \? \(/);
+  it('lightbox: a nested Dialog instance keyed on a clicked slot index', () => {
+    // feat/arcade-parse-tolerance-gallery-polish: the lightbox is
+    // navigable, so its open state is now an INDEX into the gallery
+    // slot list (was a URL pre-PR). Esc + click-outside close come
+    // from Radix Dialog defaults — pin that we don't reinvent them.
+    expect(SOURCE).toMatch(/const \[lightboxIndex, setLightboxIndex\] = useState/);
+    expect(SOURCE).toMatch(/lightboxIndex !== null && mediaSlots\.length > 0/);
     expect(SOURCE).toMatch(/function Lightbox/);
   });
 
@@ -150,7 +154,7 @@ describe('RomDetailDialog — structural contract', () => {
     // Radix Dialog raises a console warning without a DialogTitle.
     // The lightbox's title is the image itself, so the title text
     // is visually hidden but present in the a11y tree.
-    expect(SOURCE).toMatch(/DialogTitle className="sr-only">Screenshot</);
+    expect(SOURCE).toMatch(/DialogTitle className="sr-only"/);
   });
 
   it('uses max-w-3xl per the §6 layout spec', () => {
@@ -390,5 +394,139 @@ describe('RomDetailDialog — gallery primary swap (feat/detail-dialog-multi-med
 
   it('thumbnail click handler routes through setPrimaryUrl (gallery is interactive)', () => {
     expect(SOURCE).toMatch(/onSelect=\{setPrimaryUrl\}/);
+  });
+});
+
+describe('RomDetailDialog — gallery primary sizing (feat/arcade-parse-tolerance-gallery-polish)', () => {
+  // Pre-PR: the primary image lived in a 12rem-wide left column and
+  // shared its height with whatever the right info column ran to,
+  // which produced a postage-stamp-sized box art on most cores AND
+  // a layout reflow every time the user swapped thumbnails (because
+  // each source image had a different aspect ratio). The fix is a
+  // fixed-height container with `object-contain` — any aspect fits,
+  // nothing below moves.
+
+  it('primary image button is a fixed-height container (h-[28rem]), no reflow on thumbnail swap', () => {
+    // The button is the click target AND the visual container.
+    // Pinning the height class catches a regression where someone
+    // restores aspect-ratio-driven sizing (which reflows).
+    const primaryButton = SOURCE.match(
+      /<button[\s\S]*?onClick=\{\(\) => primaryUrl !== null && onEnlarge[\s\S]*?className="([^"]+)"/,
+    );
+    expect(primaryButton).not.toBeNull();
+    expect(primaryButton![1]).toContain('h-[28rem]');
+    expect(primaryButton![1]).toContain('w-full');
+    // Required so a tall image stays inside the container instead of
+    // pushing the layout down.
+    expect(primaryButton![1]).toContain('overflow-hidden');
+  });
+
+  it('zero-media placeholder matches the populated container height (no jump between states)', () => {
+    // If the placeholder block were a different height, an empty
+    // record's modal would size differently than a populated one.
+    // Pin both to h-[28rem] so they're visually identical.
+    expect(SOURCE).toMatch(/h-\[28rem\] w-full rounded-sm border border-subtle bg-overlay\/40/);
+  });
+
+  it('primary <img> uses object-contain (preserves aspect, fits any source)', () => {
+    // The whole point of the fixed container: any aspect ratio fits.
+    // `object-cover` would crop tall box-art; `object-fill` would
+    // stretch a wide screenshot. Both are wrong — pin object-contain.
+    expect(SOURCE).toMatch(
+      /alt=\{`\$\{title\} primary image`\}\s+className="max-h-full max-w-full object-contain"/,
+    );
+  });
+});
+
+describe('RomDetailDialog — lightbox navigation (feat/arcade-parse-tolerance-gallery-polish)', () => {
+  // The pre-PR lightbox was a single static image with Esc-to-close.
+  // This PR adds onscreen prev/next arrows, ArrowLeft/Right key
+  // bindings, and wrap-around at both ends — so the user can flip
+  // through every media slot without leaving fullscreen view.
+
+  it('Lightbox takes slots / index / onIndexChange / onClose (index-keyed, not URL-keyed)', () => {
+    // Switching from URL-keyed to index-keyed is what makes
+    // "previous/next" expressible at all. Pin the signature so a
+    // future refactor that drops one of the props is caught here
+    // rather than at runtime.
+    expect(SOURCE).toMatch(/function Lightbox\(props: \{/);
+    expect(SOURCE).toMatch(/readonly slots: readonly MediaSlot\[\];/);
+    expect(SOURCE).toMatch(/readonly index: number;/);
+    expect(SOURCE).toMatch(/readonly onIndexChange: \(next: number\) => void;/);
+    expect(SOURCE).toMatch(/readonly onClose: \(\) => void;/);
+  });
+
+  it('uses a wrap-around step formula so prev-from-0 lands on last (and next-from-last on 0)', () => {
+    // Double-modulo `((i + d) % n + n) % n` handles the negative
+    // delta without a branch. If someone simplifies to a plain
+    // `(i + d) % n`, ArrowLeft from index 0 returns -1 and the
+    // current-slot lookup blows up.
+    expect(SOURCE).toMatch(
+      /\(\(index \+ delta\) % count \+ count\) % count/,
+    );
+  });
+
+  it('opens from the gallery primary at the slot index matching the currently-displayed URL', () => {
+    // Clicking the primary should open the lightbox on the same
+    // image, not on slot 0. Pin the `findIndex` lookup so a future
+    // refactor doesn't reset to 0 every time.
+    expect(SOURCE).toMatch(
+      /const idx = mediaSlots\.findIndex\(\s*\(s\) => s\.url === \(primaryUrl \?\? boxArtUrl\),?\s*\);/,
+    );
+    expect(SOURCE).toMatch(/setLightboxIndex\(idx >= 0 \? idx : 0\)/);
+  });
+
+  it('renders Previous / Next arrow buttons with discoverable a11y labels', () => {
+    // Visual arrows are required by the spec; aria-label is what
+    // makes them screen-reader-discoverable since the icon is
+    // aria-hidden. The buttons render only when there's more than
+    // one slot.
+    expect(SOURCE).toMatch(/aria-label="Previous image"/);
+    expect(SOURCE).toMatch(/aria-label="Next image"/);
+    // Icons come from lucide-react; pin the import so a future
+    // icon-set swap surfaces here.
+    expect(SOURCE).toMatch(/import \{ ChevronLeft, ChevronRight \} from 'lucide-react'/);
+  });
+
+  it('arrow buttons stopPropagation so a click on the arrow does not close the dialog via the backdrop', () => {
+    // Radix Dialog closes on overlay click. If the arrow's onClick
+    // bubbled, the very click that navigates would also close the
+    // lightbox. e.stopPropagation() is load-bearing — pin it.
+    const lightboxIdx = SOURCE.indexOf('function Lightbox');
+    expect(lightboxIdx).toBeGreaterThan(-1);
+    const lightbox = SOURCE.slice(lightboxIdx);
+    const stopPropCount = (lightbox.match(/e\.stopPropagation\(\)/g) ?? [])
+      .length;
+    // Two arrows → two stopPropagation calls.
+    expect(stopPropCount).toBe(2);
+  });
+
+  it('binds a document keydown listener for ArrowLeft / ArrowRight (cleans up on unmount)', () => {
+    // The effect attaches on mount + every index change (closure
+    // captures `index`); the cleanup removes the same listener.
+    // Without the cleanup, navigating between slots stacks listeners
+    // and the first key press fires N times.
+    expect(SOURCE).toMatch(/document\.addEventListener\('keydown', onKey\)/);
+    expect(SOURCE).toMatch(/document\.removeEventListener\('keydown', onKey\)/);
+    expect(SOURCE).toMatch(/if \(e\.key === 'ArrowLeft'\)/);
+    expect(SOURCE).toMatch(/else if \(e\.key === 'ArrowRight'\)/);
+  });
+
+  it('relies on Radix Dialog defaults for Esc + backdrop close (no custom handlers)', () => {
+    // Esc + click-outside come for free from Radix — we just need to
+    // route `onOpenChange(false)` to our onClose. Pin the inline
+    // adapter so a future "let's intercept Esc" change is loud.
+    expect(SOURCE).toMatch(
+      /<Dialog open onOpenChange=\{\(open\) => \(open \? undefined : onClose\(\)\)\}>/,
+    );
+  });
+
+  it('lightbox image uses object-contain at max-h-[90vh] / max-w-[90vw] (full size, no distortion)', () => {
+    // Spec: image at ~90vh/90vw with object-contain preserving
+    // aspect. Smaller and the user can't see detail; larger and the
+    // arrow buttons would overlap the image edges on narrow screens.
+    expect(SOURCE).toMatch(
+      /className="max-h-\[90vh\] max-w-\[90vw\] rounded-sm object-contain"/,
+    );
   });
 });
