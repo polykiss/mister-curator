@@ -95,6 +95,26 @@ import type { VisibilityChange } from '@app/renderer/src/lib/optimistic';
 import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
 
 /**
+ * fix/render-cascade-hide-unhide Fix 1: returns a copy of `prev`
+ * keeping only keys that appear in `newPaths`. For a typical
+ * hide/unhide where no paths are added or removed, the result
+ * contains the same entries as `prev` — existing metadata survives
+ * the roms reference change.
+ *
+ * Exported for unit testing.
+ */
+export function diffMetadataByPath<T>(
+  prev: Readonly<Record<string, T>>,
+  newPaths: ReadonlySet<string>,
+): Record<string, T> {
+  const result: Record<string, T> = {};
+  for (const key of Object.keys(prev)) {
+    if (newPaths.has(key)) result[key] = prev[key]!;
+  }
+  return result;
+}
+
+/**
  * Tooltip for buttons disabled because the SSH session is in a
  * lost-connection / reconnecting state. Mirrors the spec wording.
  */
@@ -235,9 +255,21 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
   const [metadataByPath, setMetadataByPath] = useState<
     Record<string, { metadata: RomMetadata | null; error: boolean }>
   >({});
+
+  // fix/render-cascade-hide-unhide Fix 2: shared rAF handle + pending
+  // batch for the main prefetch and resume-on-reconnect listeners.
+  // Both listeners write here; the rAF coalesces N events per frame
+  // into one setMetadataByPath call.
+  const rafHandleRef = useRef<number | null>(null);
+  const pendingBatchRef = useRef<
+    Record<string, { metadata: RomMetadata | null; error: boolean }>
+  >({});
+
   useEffect(() => {
-    setMetadataByPath({});
-    if (!roms || roms.length === 0) return;
+    if (!roms || roms.length === 0) {
+      setMetadataByPath({});
+      return;
+    }
     // PR-D1 (PR #27): include atomic folders' contained primary
     // ROM file in the prefetch list so the folder row can show the
     // contained game's box art (with the folder badge overlay).
@@ -256,6 +288,11 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
       .filter((e) => e.kind === 'atomic-folder')
       .map((e) => e.path);
     if (filePaths.length === 0) return;
+    // fix/render-cascade-hide-unhide Fix 1: diff instead of unconditional
+    // wipe. For a typical hide/unhide where no paths are added or removed,
+    // this is a no-op — existing metadata survives the roms reference change.
+    const filePathSet = new Set(filePaths);
+    setMetadataByPath((prev) => diffMetadataByPath(prev, filePathSet));
     // PR-D1 round 2 (PR #27 round 2): optimistic-render path. Read
     // the disk cache snapshot first (no SSH, no SS — instant) and
     // hydrate `metadataByPath` so rows paint immediately. Then the
@@ -305,10 +342,20 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
         source: event.metadata?.source ?? 'none',
         error: event.error ? 1 : undefined,
       });
-      setMetadataByPath((prev) => ({
-        ...prev,
-        [event.path]: { metadata: event.metadata, error: event.error },
-      }));
+      // fix/render-cascade-hide-unhide Fix 2: accumulate events and flush
+      // once per animation frame — N rapid resolves → 1 setState call.
+      pendingBatchRef.current[event.path] = {
+        metadata: event.metadata,
+        error: event.error,
+      };
+      if (rafHandleRef.current === null) {
+        rafHandleRef.current = requestAnimationFrame(() => {
+          rafHandleRef.current = null;
+          const batch = pendingBatchRef.current;
+          pendingBatchRef.current = {};
+          setMetadataByPath((prev) => ({ ...prev, ...batch }));
+        });
+      }
     });
     void window.mister.prefetchRomsMetadata(core.id, filePaths, {
       operationId,
@@ -319,6 +366,11 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
       // if the user navigates away before it lands. Prevents stale
       // cache snapshot from clobbering a fresh pane's metadata.
       cancelled = true;
+      if (rafHandleRef.current !== null) {
+        cancelAnimationFrame(rafHandleRef.current);
+        rafHandleRef.current = null;
+      }
+      pendingBatchRef.current = {};
       diagLog('info', 'roms-pane', '·', 'unsubscribed', {
         opId: operationId,
       });
@@ -442,10 +494,20 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
         source: event.metadata?.source ?? 'none',
         error: event.error ? 1 : undefined,
       });
-      setMetadataByPath((prev) => ({
-        ...prev,
-        [event.path]: { metadata: event.metadata, error: event.error },
-      }));
+      // fix/render-cascade-hide-unhide Fix 2: same rAF batching as
+      // the main prefetch listener — coalesce reconnect-resume events.
+      pendingBatchRef.current[event.path] = {
+        metadata: event.metadata,
+        error: event.error,
+      };
+      if (rafHandleRef.current === null) {
+        rafHandleRef.current = requestAnimationFrame(() => {
+          rafHandleRef.current = null;
+          const batch = pendingBatchRef.current;
+          pendingBatchRef.current = {};
+          setMetadataByPath((prev) => ({ ...prev, ...batch }));
+        });
+      }
     });
     void window.mister.prefetchRomsMetadata(core.id, pending, {
       operationId,
@@ -482,6 +544,22 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     return map;
   }, [roms, systemFilesMarks, core.id]);
 
+  // fix/render-cascade-hide-unhide Fix 3: identity-only key for
+  // scroll-restore. Depends on ROM presence/visibility but NOT on
+  // metadataByPath or sortState, so the scroll-restore useLayoutEffect
+  // fires only when the visible set changes (hide/unhide), not on
+  // every metadata update.
+  const romScrollKey = useMemo(() => {
+    if (!roms) return null;
+    return roms
+      .filter((r) => {
+        if (!showHidden && r.hidden) return false;
+        if (!showSystem && systemFlags.get(r.filename) === true) return false;
+        return true;
+      })
+      .map((r) => r.filename);
+  }, [roms, showHidden, showSystem, systemFlags]);
+
   // The list the user actually sees — hidden + system filters apply
   // independently. Counts in the header reflect this filtered view so
   // "47 ROMs" doesn't include the 12 NEOGEO BIOS files when
@@ -510,9 +588,10 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     return sortRoms(withMeta, sortState).map((r) => r.rom);
   }, [roms, showHidden, showSystem, systemFlags, metadataByPath, sortState]);
 
-  // After each presentableRoms update, restore scroll if an anchor
+  // After each visible-ROM-set change, restore scroll if an anchor
   // was captured. useLayoutEffect fires before the browser paints,
-  // preventing the visible jump.
+  // preventing the visible jump. Depends on romScrollKey (identity
+  // only, no metadata) so metadata updates don't trigger this.
   useLayoutEffect(() => {
     const restore = pendingScrollRestoreRef.current;
     if (!restore || !scrollContainerRef.current) return;
@@ -524,7 +603,7 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     if (!row) return;
     const elTop = el.getBoundingClientRect().top;
     el.scrollTop += row.getBoundingClientRect().top - elTop - restore.offset;
-  }, [presentableRoms]);
+  }, [romScrollKey]);
 
   // Density-bar denominator for the size column — peer max across the
   // rows actually being rendered. SYSTEM.md §10: ROMs use file size /

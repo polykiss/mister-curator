@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { diagLog } from '@shared/diag-log';
 
@@ -9,26 +9,68 @@ import { diagLog } from '@shared/diag-log';
  *
  * `url` is the upstream CDN URL (ScreenScraper or libretro-thumbnails).
  * Pass `null` to indicate "no art available" — the hook skips the
- * fetch and returns null. Changing `url` revokes the previous
- * objectURL before issuing the next fetch.
+ * fetch and returns null. Changing `url` to a different non-null value
+ * revokes the previous objectURL before issuing the next fetch.
+ *
+ * fix/render-cascade-hide-unhide Fix 4: when `url` briefly becomes
+ * null (e.g., metadata wipe + repopulate during a hide/unhide cycle)
+ * the objectURL is preserved rather than immediately cleared. It is
+ * revoked only when a genuinely different URL arrives or the component
+ * unmounts. This eliminates the skeleton flash when the same art URL
+ * returns after a short null interval.
  *
  * Lifecycle:
- *   - On mount / url change: fetch bytes, build Blob, create
- *     objectURL, return.
- *   - On unmount / url change: revoke the previous objectURL so the
- *     browser can release the underlying memory. Critical when many
- *     rows scroll in and out of view.
+ *   - On mount / new url: fetch bytes, build Blob, create objectURL.
+ *   - url → same non-null url: re-surface the cached objectURL, no refetch.
+ *   - url → null: no-op; preserve existing objectURL across brief clears.
+ *   - url → different non-null url: revoke previous, fetch new.
+ *   - On unmount: revoke the current objectURL to release memory.
  */
 export function useBoxArt(url: string | null): string | null {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
+  // Tracks the last successfully-fetched { url, objectUrl } pair so we
+  // can re-surface it when the same URL returns after a null cycle,
+  // without issuing a new fetch.
+  const lastFetchRef = useRef<{ url: string; objectUrl: string } | null>(null);
+
+  // Revoke on unmount — handles the "row removed from list" case.
+  useEffect(() => {
+    return () => {
+      const last = lastFetchRef.current;
+      if (last !== null) {
+        URL.revokeObjectURL(last.objectUrl);
+        lastFetchRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (url === null || url.length === 0) {
-      setObjectUrl(null);
+      // Preserve existing objectURL across brief null cycles — return
+      // without touching state. The art stays displayed until a different
+      // URL arrives or the component unmounts.
       return;
     }
+
+    const last = lastFetchRef.current;
+
+    if (last !== null && last.url === url) {
+      // Same URL came back — re-surface the cached objectURL without
+      // a new fetch. React bails out of the re-render if the value
+      // is already current.
+      setObjectUrl(last.objectUrl);
+      return;
+    }
+
+    // Different (or first) URL — revoke the previous objectURL and
+    // issue a fresh fetch. Revocation is explicit here rather than in
+    // the cleanup so the URL survives across null cycles.
+    if (last !== null) {
+      URL.revokeObjectURL(last.objectUrl);
+      lastFetchRef.current = null;
+    }
+
     let cancelled = false;
-    let createdUrl: string | null = null;
     diagLog('info', 'boxart', '→', 'use-hook fetching', {
       // No url field — main-side logs the redacted url and we want
       // to keep this side free of unredacted SS creds.
@@ -54,11 +96,12 @@ export function useBoxArt(url: string | null): string | null {
         // changing semantics — Blob's binary input handling is the
         // same either way.
         const blob = new Blob([new Uint8Array(bytes)]);
-        createdUrl = URL.createObjectURL(blob);
+        const created = URL.createObjectURL(blob);
+        lastFetchRef.current = { url, objectUrl: created };
         diagLog('info', 'boxart', '←', 'use-hook ready', {
           bytes: bytes.byteLength,
         });
-        setObjectUrl(createdUrl);
+        setObjectUrl(created);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -68,8 +111,8 @@ export function useBoxArt(url: string | null): string | null {
         setObjectUrl(null);
       });
     return () => {
+      // Don't revoke here — preserve the objectURL across null cycles.
       cancelled = true;
-      if (createdUrl !== null) URL.revokeObjectURL(createdUrl);
     };
   }, [url]);
 
