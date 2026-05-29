@@ -2212,6 +2212,173 @@ describe('MetadataService (round 3 — OpenVGDB + libretro)', () => {
       expect(await svc.readCachedMetadata(HASH)).toBeNull();
     });
   });
+
+  describe('fix/metadata-manual-override-preservation — manual-override records are never overwritten by automatic sources', () => {
+    function makeSS(opts: {
+      status?: 'available' | 'unavailable';
+      result?: ScreenScraperGame | null;
+    } = {}): {
+      svc: ScreenScraperService;
+      lookupCalls: ScreenScraperLookupQuery[];
+    } {
+      const lookupCalls: ScreenScraperLookupQuery[] = [];
+      const stub = {
+        getStatus: vi.fn(() => opts.status ?? 'available'),
+        lookup: vi.fn(async (q: ScreenScraperLookupQuery) => {
+          lookupCalls.push(q);
+          return opts.result ?? null;
+        }),
+      } as unknown as ScreenScraperService;
+      return { svc: stub, lookupCalls };
+    }
+
+    function buildSsGame(
+      overrides: Partial<ScreenScraperGame> = {},
+    ): ScreenScraperGame {
+      return {
+        id: 9999,
+        name: 'Auto-Scraped Game',
+        system: 'Nintendo Entertainment System',
+        description: null,
+        developer: null,
+        publisher: null,
+        genres: [],
+        releaseDate: '1988-01-01',
+        rating: null,
+        players: null,
+        boxArtUrl: 'https://ss-cdn/auto.png',
+        extra: {
+          box3DUrl: null,
+          marqueeUrl: null,
+          titleScreenUrl: null,
+          snapUrl: null,
+          clearLogoUrl: null,
+          screenshots: [],
+        },
+        ...overrides,
+      };
+    }
+
+    const SS_HINT = {
+      systemId: 18,
+      md5: HASH,
+      sha1: 'c'.repeat(40),
+      crc32: 'cafebabe',
+      romName: 'Translation ROM (Demiforce).nes',
+      romSize: 262144,
+    };
+
+    it('getMetadata returns the manual-override record without querying SS or OpenVGDB', async () => {
+      // Seed via bindManualOverride (the real user path).
+      const m = makeMocks({ dbReturns: buildDbHit() });
+      const ss = makeSS({ result: buildSsGame() });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      await svc.bindManualOverride(HASH, buildSsGame({ id: 1, name: 'User Pick' }));
+
+      // Second call: auto-scrape path. SS and OpenVGDB both have data.
+      const result = await svc.getMetadata(HASH, { filename: SS_HINT.romName }, SS_HINT);
+
+      expect(result?.source).toBe('manual-override');
+      expect(result?.name).toBe('User Pick');
+      // Neither SS nor OpenVGDB should have been contacted.
+      expect(ss.lookupCalls).toHaveLength(0);
+      expect(m.dbCalls).toHaveLength(0);
+    });
+
+    it('getMetadata returns the manual-override record when all sources miss (sentinel write guard)', async () => {
+      // This is the exact data-loss scenario: translation ROM, SS miss,
+      // OpenVGDB miss. Without the fix decideForCached returned
+      // refetch:true, ran the pipeline, wrote source:'none', and
+      // destroyed the manual bind.
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ result: null }); // SS miss
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      await svc.bindManualOverride(HASH, buildSsGame({ id: 2, name: 'Fan Translation' }));
+
+      const result = await svc.getMetadata(HASH, { filename: SS_HINT.romName }, SS_HINT);
+
+      expect(result?.source).toBe('manual-override');
+      expect(result?.name).toBe('Fan Translation');
+      // Verify the on-disk record was NOT overwritten with a sentinel.
+      const path = join(dir, 'by-hash', HASH.slice(0, 2), `${HASH}.json`);
+      const onDisk = JSON.parse(await fs.readFile(path, 'utf-8')) as RomMetadata;
+      expect(onDisk.source).toBe('manual-override');
+      expect(onDisk.name).toBe('Fan Translation');
+    });
+
+    it('getMetadata returns the manual-override record when SS is unavailable (no sentinel regression)', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ status: 'unavailable' });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+      await svc.bindManualOverride(HASH, buildSsGame({ id: 3, name: 'Patch v2' }));
+
+      const result = await svc.getMetadata(HASH, {}, SS_HINT);
+
+      expect(result?.source).toBe('manual-override');
+      expect(result?.name).toBe('Patch v2');
+      expect(ss.lookupCalls).toHaveLength(0);
+      expect(m.dbCalls).toHaveLength(0);
+    });
+
+    it('getMetadata returns the manual-override record when screenScraper is null (OpenVGDB guard)', async () => {
+      // SS service not configured; OpenVGDB has a match. Without the
+      // fix the OpenVGDB hit would overwrite the manual binding.
+      const m = makeMocks({ dbReturns: buildDbHit() });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      await svc.bindManualOverride(HASH, buildSsGame({ id: 4, name: 'No-SS Bind' }));
+
+      const result = await svc.getMetadata(HASH);
+
+      expect(result?.source).toBe('manual-override');
+      expect(result?.name).toBe('No-SS Bind');
+      expect(m.dbCalls).toHaveLength(0);
+    });
+
+    it('writeUserOverride on a manual-override record updates userOverride but preserves source and name (regression)', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      await svc.bindManualOverride(HASH, buildSsGame({ id: 5, name: 'Original Bind' }));
+
+      const updated = await svc.writeUserOverride(HASH, {
+        name: 'My Custom Name',
+        tags: ['fan-translation'],
+      });
+
+      expect(updated?.source).toBe('manual-override');
+      // Base name from the SS game is preserved; userOverride.name
+      // is the user-visible override but source-resolved name stays.
+      expect(updated?.name).toBe('Original Bind');
+      expect(updated?.userOverride?.name).toBe('My Custom Name');
+      expect(updated?.userOverride?.tags).toEqual(['fan-translation']);
+    });
+
+    it('bindManualOverride can re-bind to a different jeu (second call wins)', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, null);
+      await svc.bindManualOverride(HASH, buildSsGame({ id: 10, name: 'First Bind' }));
+      const second = await svc.bindManualOverride(
+        HASH,
+        buildSsGame({ id: 11, name: 'Second Bind' }),
+      );
+      expect(second.source).toBe('manual-override');
+      expect(second.name).toBe('Second Bind');
+      // On disk the second bind is the persisted value.
+      const result = await svc.readCachedMetadata(HASH);
+      expect(result?.name).toBe('Second Bind');
+    });
+
+    it('cold-cache path still runs the full scrape chain when no record exists (regression)', async () => {
+      const m = makeMocks({ dbReturns: null });
+      const ss = makeSS({ result: buildSsGame({ id: 20, name: 'Auto Result' }) });
+      const svc = new MetadataService(dir, m.openVgdb, m.thumbnails, ss.svc);
+
+      const result = await svc.getMetadata(HASH, { filename: SS_HINT.romName }, SS_HINT);
+
+      expect(result?.source).toBe('screenscraper');
+      expect(result?.name).toBe('Auto Result');
+      expect(ss.lookupCalls).toHaveLength(1);
+    });
+  });
 });
 
 describe('sanitizeArcadeMraKey (feat/arcade-noromsneeded-overrides)', () => {
