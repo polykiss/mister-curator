@@ -241,6 +241,14 @@ export class MetadataService {
       });
     }
 
+    // Defense-in-depth: manual-override records must never reach the
+    // scrape path. decideForCached above returns refetch:false for
+    // manual-override and the early-return at line 219 handles it —
+    // this guard catches any future regression where that path changes.
+    if (cached?.source === 'manual-override') {
+      return cached;
+    }
+
     // Source priority 1: ScreenScraper.
     if (this.screenScraper !== null && ssHint !== undefined) {
       const status = this.screenScraper.getStatus();
@@ -677,9 +685,12 @@ export class MetadataService {
    * from rounds 3–8.
    *
    * Non-sentinel sources:
-   *   - cached SS         → never refetch (highest priority).
-   *   - cached OpenVGDB   → refetch iff SS is currently queryable
-   *                         (upgrade path).
+   *   - cached manual-override → never refetch (user intent is
+   *     authoritative; no automatic source may overwrite it).
+   *   - cached SS              → never refetch (highest-priority
+   *     auto-source).
+   *   - cached OpenVGDB        → refetch iff SS is currently queryable
+   *                              (upgrade path).
    *
    * Sentinels (`source === 'none'`) split on
    * `ssAvailableAtWrite`:
@@ -704,6 +715,12 @@ export class MetadataService {
     cached: RomMetadata,
     ssAvailable: boolean,
   ): { readonly refetch: boolean; readonly reason: string } {
+    if (cached.source === 'manual-override') {
+      // User-selected bind: always authoritative. No automatic source
+      // (SS, OpenVGDB, or sentinel) may overwrite a manual binding.
+      // The user revisits it explicitly via the search modal.
+      return { refetch: false, reason: 'cached-manual-override' };
+    }
     if (cached.source === 'screenscraper') {
       return { refetch: false, reason: 'cached-screenscraper' };
     }
