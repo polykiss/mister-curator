@@ -9,6 +9,7 @@ import type {
   OpenVGDBService,
 } from '@app/main/metadata/openvgdb-service';
 import {
+  EMPTY_CONTENT_MD5,
   ScreenScraperAuthError,
   type ScreenScraperGame,
   type ScreenScraperLookupQuery,
@@ -1004,6 +1005,51 @@ export class MetadataService {
   private cachePath(hash: string): string {
     const shard = hash.slice(0, 2);
     return join(this.rootDir, 'by-hash', shard, `${hash}.json`);
+  }
+}
+
+// ─── startup migrations ─────────────────────────────────────────────
+
+/**
+ * One-shot cache cleanup: remove the by-hash record for the empty-
+ * content MD5 (`d41d8cd…`) if it was written by an older version of
+ * the app before the zero-byte guard was in place.
+ *
+ * ScreenScraper has a stub entry for this hash that maps to "Ah Eikou
+ * No Koshien" (a Taito Classics game). Any zip that extracted to zero
+ * bytes would fetch that record and pollute every future zero-byte file
+ * across all systems with the same wrong metadata.
+ *
+ * Safe to call on every launch:
+ *   - Record absent (fresh install, already cleaned): returns false.
+ *   - Record present: deletes it and returns true.
+ * FIX A (hash-script guard) + FIX B (SS service guard) prevent
+ * re-poisoning, so this runs exactly once per affected installation.
+ */
+export async function removePoisonedEmptyHashRecord(
+  metadataRoot: string,
+): Promise<boolean> {
+  const poisonedPath = join(
+    metadataRoot,
+    'by-hash',
+    EMPTY_CONTENT_MD5.slice(0, 2),
+    `${EMPTY_CONTENT_MD5}.json`,
+  );
+  try {
+    await fs.unlink(poisonedPath);
+    // eslint-disable-next-line no-console
+    console.log('[cache-migration] removed poisoned empty-hash record');
+    return true;
+  } catch (err) {
+    if (
+      err !== null &&
+      typeof err === 'object' &&
+      'code' in err &&
+      (err as NodeJS.ErrnoException).code === 'ENOENT'
+    ) {
+      return false;
+    }
+    throw err;
   }
 }
 

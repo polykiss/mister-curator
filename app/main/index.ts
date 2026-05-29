@@ -23,7 +23,10 @@ import {
   MetadataOrchestrator,
   type SystemIdResolver,
 } from '@app/main/metadata/metadata-orchestrator';
-import { MetadataService } from '@app/main/metadata/metadata-service';
+import {
+  MetadataService,
+  removePoisonedEmptyHashRecord,
+} from '@app/main/metadata/metadata-service';
 import { OpenVGDBService } from '@app/main/metadata/openvgdb-service';
 import { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
 import { AutoScrapeEngine } from '@app/main/services/auto-scrape-engine';
@@ -147,6 +150,17 @@ void app.whenReady().then(async () => {
   // unavailable and MetadataService silently falls through to
   // OpenVGDB + libretro (PR #15's existing chain).
   const metadataRoot = path.join(app.getPath('userData'), 'metadata');
+
+  // fix/zero-byte-hash-guard — one-shot cleanup for the poisoned
+  // empty-hash by-hash record written by pre-fix app versions.
+  // Idempotent: no-op when the file is already absent.
+  try {
+    await removePoisonedEmptyHashRecord(metadataRoot);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[cache-migration] failed to remove poisoned empty-hash record:', err);
+  }
+
   const hashService = new HashService(metadataRoot);
   const openVgdb = new OpenVGDBService(metadataRoot);
   const thumbnails = new LibretroThumbnailsFetcher();

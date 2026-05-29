@@ -69,6 +69,15 @@
  */
 
 const ENDPOINT = 'https://api.screenscraper.fr/api2/jeuInfos.php';
+
+/**
+ * MD5 of zero bytes. A zip file whose inner content extracts to
+ * nothing produces this hash; ScreenScraper happens to have a
+ * cross-system stub entry for it, so sending it returns a wrong match
+ * that poisons the by-hash cache for every other zero-byte file.
+ * Never send this hash to SS — it cannot identify any real ROM.
+ */
+export const EMPTY_CONTENT_MD5 = 'd41d8cd98f00b204e9800998ecf8427e';
 /**
  * PR-D1 (PR #27): name-search endpoint. Used as a fallback when
  * `jeuInfos.php` returns no match for a known hash AND OpenVGDB
@@ -391,6 +400,16 @@ export class ScreenScraperService {
       return null;
     }
     if (this.getStatus() !== 'available') return null;
+    // Sending the empty-content MD5 (d41d8cd…) to SS returns a
+    // cross-system stub that would poison the by-hash cache for every
+    // other zero-byte file. A romSize of 0 is equally invalid — skip
+    // both and let the caller fall through to name-search / sentinel.
+    if (
+      query.md5 === EMPTY_CONTENT_MD5 ||
+      (query.romSize !== undefined && query.romSize === 0)
+    ) {
+      return null;
+    }
     return this.enqueue(() => this.doLookup(query));
   }
 

@@ -11,6 +11,7 @@ import type {
 } from '@app/main/metadata/openvgdb-service';
 import {
   MetadataService,
+  removePoisonedEmptyHashRecord,
   sanitizeArcadeMraKey,
 } from '@app/main/metadata/metadata-service';
 import {
@@ -2414,5 +2415,74 @@ describe('sanitizeArcadeMraKey (feat/arcade-noromsneeded-overrides)', () => {
   it('is deterministic + reversible (splitting on __ recovers directory segments)', () => {
     const key = sanitizeArcadeMraKey('_alternatives/sub/Game.mra');
     expect(key.split('__')).toEqual(['_alternatives', 'sub', 'Game']);
+  });
+});
+
+describe('removePoisonedEmptyHashRecord', () => {
+  let metadataRoot: string;
+
+  beforeEach(async () => {
+    metadataRoot = await fs.mkdtemp(join(tmpdir(), 'mc-meta-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(metadataRoot, { recursive: true, force: true });
+  });
+
+  it('deletes the poisoned record and returns true when it exists', async () => {
+    const poisonedDir = join(metadataRoot, 'by-hash', 'd4');
+    await fs.mkdir(poisonedDir, { recursive: true });
+    await fs.writeFile(
+      join(poisonedDir, 'd41d8cd98f00b204e9800998ecf8427e.json'),
+      JSON.stringify({ name: 'Ah Eikou No Koshien', source: 'screenscraper' }),
+      'utf-8',
+    );
+
+    const result = await removePoisonedEmptyHashRecord(metadataRoot);
+
+    expect(result).toBe(true);
+    await expect(
+      fs.access(join(poisonedDir, 'd41d8cd98f00b204e9800998ecf8427e.json')),
+    ).rejects.toThrow();
+  });
+
+  it('returns false (no-op) when the record is already absent', async () => {
+    const result = await removePoisonedEmptyHashRecord(metadataRoot);
+    expect(result).toBe(false);
+  });
+
+  it('is idempotent — second call after removal returns false', async () => {
+    const poisonedDir = join(metadataRoot, 'by-hash', 'd4');
+    await fs.mkdir(poisonedDir, { recursive: true });
+    await fs.writeFile(
+      join(poisonedDir, 'd41d8cd98f00b204e9800998ecf8427e.json'),
+      '{}',
+      'utf-8',
+    );
+
+    const first = await removePoisonedEmptyHashRecord(metadataRoot);
+    const second = await removePoisonedEmptyHashRecord(metadataRoot);
+
+    expect(first).toBe(true);
+    expect(second).toBe(false);
+  });
+
+  it('logs [cache-migration] removed poisoned empty-hash record when deleting', async () => {
+    const poisonedDir = join(metadataRoot, 'by-hash', 'd4');
+    await fs.mkdir(poisonedDir, { recursive: true });
+    await fs.writeFile(
+      join(poisonedDir, 'd41d8cd98f00b204e9800998ecf8427e.json'),
+      '{}',
+      'utf-8',
+    );
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await removePoisonedEmptyHashRecord(metadataRoot);
+      expect(logSpy).toHaveBeenCalledWith(
+        '[cache-migration] removed poisoned empty-hash record',
+      );
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 });

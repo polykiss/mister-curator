@@ -90,8 +90,17 @@ describe('hash-script', () => {
       // The printf gate requires md5, sha1, size, disk_size, and mtime
       // all non-empty — defends against partial tool failures.
       expect(script).toContain(
-        '[ -n "$md5" ] && [ -n "$sha1" ] && [ -n "$size" ] && [ -n "$disk_size" ] && [ -n "$mtime" ]',
+        '[ -n "$md5" ] && [ -n "$sha1" ] && [ -n "$size" ] && [ "$size" != "0" ] && [ -n "$disk_size" ] && [ -n "$mtime" ]',
       );
+    });
+
+    it('drops a line when size is "0" (zero-byte extraction guard)', () => {
+      // A zip whose inner content extracts to zero bytes (corrupted /
+      // unsupported compression) produces md5 d41d8cd… and size 0.
+      // The shell guard must exclude such records so they never enter
+      // hashes.json and can never poison the by-hash SS cache.
+      const script = buildHashScript(['/game.zip']);
+      expect(script).toContain('[ "$size" != "0" ]');
     });
   });
 
@@ -213,6 +222,18 @@ describe('hash-script', () => {
 
     it('returns empty for empty input', () => {
       expect(parseHashOutput('')).toEqual([]);
+    });
+
+    it('rejects lines whose size is 0 (empty-content hash guard)', () => {
+      // size=0 means the file extracted to zero bytes — the well-known
+      // empty-content MD5 (d41d8cd…). Even if such a line somehow
+      // reached the parser, it must be dropped so it can never be used
+      // in a ScreenScraper hash lookup.
+      const EMPTY_MD5 = 'd41d8cd98f00b204e9800998ecf8427e';
+      const sha1 = 'b'.repeat(40);
+      expect(
+        parseHashOutput(`/game.zip\t${EMPTY_MD5}\t${sha1}\t0\t8192\t1700000000\n`),
+      ).toEqual([]);
     });
   });
 });
