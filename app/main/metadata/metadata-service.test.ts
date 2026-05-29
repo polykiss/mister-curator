@@ -11,6 +11,7 @@ import type {
 } from '@app/main/metadata/openvgdb-service';
 import {
   MetadataService,
+  pruneEmptyHashEntriesFromHashesJson,
   removePoisonedEmptyHashRecord,
   sanitizeArcadeMraKey,
 } from '@app/main/metadata/metadata-service';
@@ -2415,6 +2416,211 @@ describe('sanitizeArcadeMraKey (feat/arcade-noromsneeded-overrides)', () => {
   it('is deterministic + reversible (splitting on __ recovers directory segments)', () => {
     const key = sanitizeArcadeMraKey('_alternatives/sub/Game.mra');
     expect(key.split('__')).toEqual(['_alternatives', 'sub', 'Game']);
+  });
+});
+
+const EMPTY_MD5 = 'd41d8cd98f00b204e9800998ecf8427e';
+const GOOD_MD5 = 'a'.repeat(32);
+const GOOD_SHA1 = 'b'.repeat(40);
+
+/** Minimal hashes.json fixture with the given entries map. */
+function makeHashesJson(
+  host: string,
+  entries: Record<string, unknown>,
+): string {
+  return JSON.stringify({ version: 1, hashStrategyVersion: 4, host, entries }, null, 2);
+}
+
+describe('pruneEmptyHashEntriesFromHashesJson', () => {
+  let metadataRoot: string;
+
+  beforeEach(async () => {
+    metadataRoot = await fs.mkdtemp(join(tmpdir(), 'mc-meta-prune-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(metadataRoot, { recursive: true, force: true });
+  });
+
+  it('removes entries whose md5 equals the empty-content hash and rewrites the file', async () => {
+    const hostDir = join(metadataRoot, '192.168.50.196');
+    await fs.mkdir(hostDir, { recursive: true });
+    const good = { md5: GOOD_MD5, sha1: GOOD_SHA1, size: 1048576, diskSizeBytes: 512000, mtime: 100, hashedAt: '2026-01-01T00:00:00.000Z' };
+    const bad = { md5: EMPTY_MD5, sha1: 'c'.repeat(40), size: 0, diskSizeBytes: 8192, mtime: 200, hashedAt: '2026-01-01T00:00:00.000Z' };
+    await fs.writeFile(
+      join(hostDir, 'hashes.json'),
+      makeHashesJson('192.168.50.196', {
+        '/media/fat/games/SNES/Mario.zip': good,
+        '/media/fat/games/NeoGeoPocket/Dark Arms.zip': bad,
+        '/media/fat/games/NeoGeoPocket/Last Blade.zip': { ...bad, mtime: 201 },
+      }),
+    );
+
+    await pruneEmptyHashEntriesFromHashesJson(metadataRoot);
+
+    const written = JSON.parse(await fs.readFile(join(hostDir, 'hashes.json'), 'utf-8')) as { entries: Record<string, unknown> };
+    expect(Object.keys(written.entries)).toEqual(['/media/fat/games/SNES/Mario.zip']);
+  });
+
+  it('logs the count and host when entries are pruned', async () => {
+    const hostDir = join(metadataRoot, '192.168.50.196');
+    await fs.mkdir(hostDir, { recursive: true });
+    await fs.writeFile(
+      join(hostDir, 'hashes.json'),
+      makeHashesJson('192.168.50.196', {
+        '/a.zip': { md5: EMPTY_MD5, sha1: 'c'.repeat(40), size: 0, diskSizeBytes: 1, mtime: 1, hashedAt: '' },
+        '/b.zip': { md5: EMPTY_MD5, sha1: 'c'.repeat(40), size: 0, diskSizeBytes: 1, mtime: 2, hashedAt: '' },
+      }),
+    );
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await pruneEmptyHashEntriesFromHashesJson(metadataRoot);
+      expect(logSpy).toHaveBeenCalledWith(
+        '[cache-migration] pruned 2 stale empty-hash entries from 192.168.50.196/hashes.json',
+      );
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('uses singular "entry" in the log when exactly 1 entry is pruned', async () => {
+    const hostDir = join(metadataRoot, '192.168.50.196');
+    await fs.mkdir(hostDir, { recursive: true });
+    await fs.writeFile(
+      join(hostDir, 'hashes.json'),
+      makeHashesJson('192.168.50.196', {
+        '/a.zip': { md5: EMPTY_MD5, sha1: 'c'.repeat(40), size: 0, diskSizeBytes: 1, mtime: 1, hashedAt: '' },
+      }),
+    );
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await pruneEmptyHashEntriesFromHashesJson(metadataRoot);
+      expect(logSpy).toHaveBeenCalledWith(
+        '[cache-migration] pruned 1 stale empty-hash entry from 192.168.50.196/hashes.json',
+      );
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('no-op and no log when no entries have the empty-content md5', async () => {
+    const hostDir = join(metadataRoot, '192.168.50.196');
+    await fs.mkdir(hostDir, { recursive: true });
+    const good = { md5: GOOD_MD5, sha1: GOOD_SHA1, size: 1048576, diskSizeBytes: 512000, mtime: 100, hashedAt: '2026-01-01T00:00:00.000Z' };
+    await fs.writeFile(
+      join(hostDir, 'hashes.json'),
+      makeHashesJson('192.168.50.196', { '/a.zip': good }),
+    );
+    const mtimeBefore = (await fs.stat(join(hostDir, 'hashes.json'))).mtimeMs;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await pruneEmptyHashEntriesFromHashesJson(metadataRoot);
+      expect(logSpy).not.toHaveBeenCalled();
+    } finally {
+      logSpy.mockRestore();
+    }
+    const mtimeAfter = (await fs.stat(join(hostDir, 'hashes.json'))).mtimeMs;
+    expect(mtimeAfter).toBe(mtimeBefore);
+  });
+
+  it('is idempotent — second run on a pruned file is a no-op', async () => {
+    const hostDir = join(metadataRoot, '192.168.50.196');
+    await fs.mkdir(hostDir, { recursive: true });
+    await fs.writeFile(
+      join(hostDir, 'hashes.json'),
+      makeHashesJson('192.168.50.196', {
+        '/a.zip': { md5: EMPTY_MD5, sha1: 'c'.repeat(40), size: 0, diskSizeBytes: 1, mtime: 1, hashedAt: '' },
+      }),
+    );
+
+    await pruneEmptyHashEntriesFromHashesJson(metadataRoot);
+    const mtimeAfterFirst = (await fs.stat(join(hostDir, 'hashes.json'))).mtimeMs;
+
+    await pruneEmptyHashEntriesFromHashesJson(metadataRoot);
+    const mtimeAfterSecond = (await fs.stat(join(hostDir, 'hashes.json'))).mtimeMs;
+
+    expect(mtimeAfterSecond).toBe(mtimeAfterFirst);
+  });
+
+  it('tolerant of missing hashes.json — skips without error', async () => {
+    const hostDir = join(metadataRoot, '192.168.50.196');
+    await fs.mkdir(hostDir, { recursive: true });
+    // No hashes.json written
+    await expect(pruneEmptyHashEntriesFromHashesJson(metadataRoot)).resolves.toBeUndefined();
+  });
+
+  it('tolerant of corrupt JSON — skips without error', async () => {
+    const hostDir = join(metadataRoot, '192.168.50.196');
+    await fs.mkdir(hostDir, { recursive: true });
+    await fs.writeFile(join(hostDir, 'hashes.json'), 'not valid json');
+    await expect(pruneEmptyHashEntriesFromHashesJson(metadataRoot)).resolves.toBeUndefined();
+  });
+
+  it('tolerant of absent metadataRoot — no-op without error', async () => {
+    await expect(
+      pruneEmptyHashEntriesFromHashesJson(join(metadataRoot, 'nonexistent')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('processes multiple host subdirectories independently', async () => {
+    const bad = { md5: EMPTY_MD5, sha1: 'c'.repeat(40), size: 0, diskSizeBytes: 1, mtime: 1, hashedAt: '' };
+    const good = { md5: GOOD_MD5, sha1: GOOD_SHA1, size: 1048576, diskSizeBytes: 512000, mtime: 100, hashedAt: '2026-01-01T00:00:00.000Z' };
+
+    for (const host of ['192.168.50.194', '192.168.50.196']) {
+      const hostDir = join(metadataRoot, host);
+      await fs.mkdir(hostDir, { recursive: true });
+      await fs.writeFile(
+        join(hostDir, 'hashes.json'),
+        makeHashesJson(host, {
+          '/a.zip': bad,
+          '/b.zip': good,
+        }),
+      );
+    }
+
+    await pruneEmptyHashEntriesFromHashesJson(metadataRoot);
+
+    for (const host of ['192.168.50.194', '192.168.50.196']) {
+      const written = JSON.parse(
+        await fs.readFile(join(metadataRoot, host, 'hashes.json'), 'utf-8'),
+      ) as { entries: Record<string, unknown> };
+      expect(Object.keys(written.entries)).toEqual(['/b.zip']);
+    }
+  });
+
+  it('skips non-host subdirs (e.g. by-hash, images) that lack hashes.json', async () => {
+    await fs.mkdir(join(metadataRoot, 'by-hash', 'd4'), { recursive: true });
+    await fs.writeFile(join(metadataRoot, 'by-hash', 'd4', `${EMPTY_MD5}.json`), '{}');
+    await fs.mkdir(join(metadataRoot, 'images'), { recursive: true });
+    // No hashes.json anywhere — should be a silent no-op.
+    await expect(pruneEmptyHashEntriesFromHashesJson(metadataRoot)).resolves.toBeUndefined();
+  });
+
+  it('preserves non-entries fields (version, hashStrategyVersion, host, failedEntries)', async () => {
+    const hostDir = join(metadataRoot, '192.168.50.196');
+    await fs.mkdir(hostDir, { recursive: true });
+    const sentinel = { size: 512, mtime: 999, failedAt: '2026-01-01T00:00:00.000Z' };
+    const fixture = {
+      version: 1,
+      hashStrategyVersion: 4,
+      host: '192.168.50.196',
+      entries: {
+        '/bad.zip': { md5: EMPTY_MD5, sha1: 'c'.repeat(40), size: 0, diskSizeBytes: 1, mtime: 1, hashedAt: '' },
+      },
+      failedEntries: { '/slow.zip': sentinel },
+    };
+    await fs.writeFile(join(hostDir, 'hashes.json'), JSON.stringify(fixture, null, 2));
+
+    await pruneEmptyHashEntriesFromHashesJson(metadataRoot);
+
+    const written = JSON.parse(
+      await fs.readFile(join(hostDir, 'hashes.json'), 'utf-8'),
+    ) as typeof fixture;
+    expect(written.version).toBe(1);
+    expect(written.hashStrategyVersion).toBe(4);
+    expect(written.host).toBe('192.168.50.196');
+    expect(written.failedEntries).toEqual({ '/slow.zip': sentinel });
+    expect(Object.keys(written.entries)).toHaveLength(0);
   });
 });
 

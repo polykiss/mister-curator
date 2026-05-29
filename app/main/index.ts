@@ -25,6 +25,7 @@ import {
 } from '@app/main/metadata/metadata-orchestrator';
 import {
   MetadataService,
+  pruneEmptyHashEntriesFromHashesJson,
   removePoisonedEmptyHashRecord,
 } from '@app/main/metadata/metadata-service';
 import { OpenVGDBService } from '@app/main/metadata/openvgdb-service';
@@ -159,6 +160,19 @@ void app.whenReady().then(async () => {
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn('[cache-migration] failed to remove poisoned empty-hash record:', err);
+  }
+
+  // fix/zero-byte-hash-guard follow-up — prune stale hashes.json
+  // entries whose md5 equals the empty-content hash. These are
+  // harmless post-fix (FIX B short-circuits the SS lookup) but are
+  // bookkeeping debt. Scans all per-host dirs under metadataRoot;
+  // each affected hashes.json is atomically rewritten with those
+  // entries removed.
+  try {
+    await pruneEmptyHashEntriesFromHashesJson(metadataRoot);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[cache-migration] failed to prune empty-hash entries:', err);
   }
 
   const hashService = new HashService(metadataRoot);

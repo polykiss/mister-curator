@@ -1011,6 +1011,98 @@ export class MetadataService {
 // ─── startup migrations ─────────────────────────────────────────────
 
 /**
+ * Startup migration: scan every per-host `hashes.json` under
+ * `metadataRoot` and remove any entry whose `md5` equals the empty-
+ * content MD5 (`d41d8cd…`).
+ *
+ * These stale entries are harmless post-fix (FIX B blocks the SS
+ * lookup), but they're bookkeeping debt and confusing to inspect.
+ * Pruning them also ensures a future `isHashCacheFile` version bump
+ * doesn't accidentally re-evaluate them under new semantics.
+ *
+ * Operates on the raw JSON so it works regardless of the file's
+ * `hashStrategyVersion` (v3 and v4 both have the same `entries`
+ * shape). Writes back atomically only when something was removed.
+ *
+ * Safe to call on every launch:
+ *   - File missing / metadataRoot absent / parse error: skip silently.
+ *   - No empty-hash entries in a file: no-op (no write, no log).
+ *   - N entries removed: atomic rewrite + log line per host.
+ */
+export async function pruneEmptyHashEntriesFromHashesJson(
+  metadataRoot: string,
+): Promise<void> {
+  let subdirs: string[];
+  try {
+    const dirents = await fs.readdir(metadataRoot, { withFileTypes: true });
+    subdirs = dirents.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch (err) {
+    if (
+      err !== null &&
+      typeof err === 'object' &&
+      'code' in err &&
+      (err as NodeJS.ErrnoException).code === 'ENOENT'
+    ) {
+      return;
+    }
+    throw err;
+  }
+
+  for (const subdir of subdirs) {
+    const hashesPath = join(metadataRoot, subdir, 'hashes.json');
+    let raw: unknown;
+    try {
+      raw = JSON.parse(await fs.readFile(hashesPath, 'utf-8'));
+    } catch {
+      continue;
+    }
+
+    if (
+      raw === null ||
+      typeof raw !== 'object' ||
+      !('entries' in raw) ||
+      (raw as Record<string, unknown>).entries === null ||
+      typeof (raw as Record<string, unknown>).entries !== 'object'
+    ) {
+      continue;
+    }
+
+    const entries = (raw as Record<string, unknown>).entries as Record<
+      string,
+      unknown
+    >;
+    let pruned = 0;
+    const kept: Record<string, unknown> = {};
+    for (const [path, entry] of Object.entries(entries)) {
+      if (
+        entry !== null &&
+        typeof entry === 'object' &&
+        'md5' in entry &&
+        (entry as Record<string, unknown>).md5 === EMPTY_CONTENT_MD5
+      ) {
+        pruned += 1;
+      } else {
+        kept[path] = entry;
+      }
+    }
+
+    if (pruned === 0) continue;
+
+    const updated = { ...(raw as Record<string, unknown>), entries: kept };
+    const tmp = `${hashesPath}.tmp`;
+    await fs.writeFile(tmp, `${JSON.stringify(updated, null, 2)}\n`, {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    await fs.rename(tmp, hashesPath);
+    // eslint-disable-next-line no-console
+    console.log(
+      `[cache-migration] pruned ${String(pruned)} stale empty-hash ${pruned === 1 ? 'entry' : 'entries'} from ${subdir}/hashes.json`,
+    );
+  }
+}
+
+/**
  * One-shot cache cleanup: remove the by-hash record for the empty-
  * content MD5 (`d41d8cd…`) if it was written by an older version of
  * the app before the zero-byte guard was in place.
