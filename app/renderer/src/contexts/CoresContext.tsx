@@ -253,6 +253,14 @@ interface CoresContextValue {
     readonly snapshotCreatedAt: string;
   } | null;
   /**
+   * Non-null while an update-mode operation is in-flight.
+   * `'entering'` while `enterUpdateMode` runs (snapshot capture +
+   * un-dot); `'restoring'` while `restoreFromUpdateMode` runs (re-dot).
+   * Used by the progress modal to know which title/helper copy to show
+   * and whether to be visible at all.
+   */
+  readonly updateModeOperationPhase: 'entering' | 'restoring' | null;
+  /**
    * Capture the hidden-file snapshot then un-dot all hidden files so
    * the MiSTer update tool can overwrite them without creating duplicates.
    * Reports progress via the `onUpdateModeProgress` IPC event, which
@@ -292,6 +300,9 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     readonly totalFiles: number;
     readonly snapshotCreatedAt: string;
   } | null>(null);
+  const [updateModeOperationPhase, setUpdateModeOperationPhase] = useState<
+    'entering' | 'restoring' | null
+  >(null);
 
   // Refs for stale-closure-safe reads inside async callbacks.
   const coresRef = useRef(cores);
@@ -559,28 +570,38 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
 
   const enterUpdateMode = useCallback(
     async (operationId: string): Promise<void> => {
-      const status = await window.mister.captureHiddenSnapshot();
-      await runWithProgress('Un-dotting hidden files for update…', operationId, () =>
-        window.mister.applyUpdateMode({ operationId }),
-      );
-      setUpdateModeActive(true);
-      setUpdateModeSnapshot(
-        status.snapshot
-          ? { totalFiles: status.snapshot.totalFiles, snapshotCreatedAt: status.snapshot.createdAt }
-          : null,
-      );
+      setUpdateModeOperationPhase('entering');
+      try {
+        const status = await window.mister.captureHiddenSnapshot();
+        await runWithProgress('Un-dotting hidden files for update…', operationId, () =>
+          window.mister.applyUpdateMode({ operationId }),
+        );
+        setUpdateModeActive(true);
+        setUpdateModeSnapshot(
+          status.snapshot
+            ? { totalFiles: status.snapshot.totalFiles, snapshotCreatedAt: status.snapshot.createdAt }
+            : null,
+        );
+      } finally {
+        setUpdateModeOperationPhase(null);
+      }
     },
     [runWithProgress],
   );
 
   const restoreFromUpdateMode = useCallback(
     async (operationId: string): Promise<UpdateModeRestoreResult> => {
-      const result = await runWithProgress('Restoring hidden files…', operationId, () =>
-        window.mister.restoreFromSnapshot({ operationId }),
-      );
-      setUpdateModeActive(false);
-      setUpdateModeSnapshot(null);
-      return result;
+      setUpdateModeOperationPhase('restoring');
+      try {
+        const result = await runWithProgress('Restoring hidden files…', operationId, () =>
+          window.mister.restoreFromSnapshot({ operationId }),
+        );
+        setUpdateModeActive(false);
+        setUpdateModeSnapshot(null);
+        return result;
+      } finally {
+        setUpdateModeOperationPhase(null);
+      }
     },
     [runWithProgress],
   );
@@ -1006,6 +1027,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     setLedgerCoreIds(new Set());
     setUpdateModeActive(false);
     setUpdateModeSnapshot(null);
+    setUpdateModeOperationPhase(null);
   }, [status, lostConnection, autoRetry, autoRetryFailed]);
 
   // Load cores on entering the connected state.
@@ -1093,6 +1115,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       adjustArcadeHiddenCount,
       updateModeActive,
       updateModeSnapshot,
+      updateModeOperationPhase,
       enterUpdateMode,
       restoreFromUpdateMode,
     }),
@@ -1125,6 +1148,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       adjustArcadeHiddenCount,
       updateModeActive,
       updateModeSnapshot,
+      updateModeOperationPhase,
       enterUpdateMode,
       restoreFromUpdateMode,
     ],

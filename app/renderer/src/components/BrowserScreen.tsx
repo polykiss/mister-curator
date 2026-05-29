@@ -1,6 +1,6 @@
 import { LogOut, RefreshCw, ShieldCheck } from 'lucide-react';
 import type { JSX } from 'react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 
 import { ARCADE_VIRTUAL_CORE_ID } from '@shared/arcade-mra';
@@ -14,6 +14,7 @@ import { RomsPane } from '@app/renderer/src/components/RomsPane';
 import { StatusBar } from '@app/renderer/src/components/StatusBar';
 import { UpdateModeBanner } from '@app/renderer/src/components/UpdateModeBanner';
 import { UpdateModeDialog } from '@app/renderer/src/components/UpdateModeDialog';
+import { UpdateModeProgressModal } from '@app/renderer/src/components/UpdateModeProgressModal';
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
@@ -31,8 +32,19 @@ const ROMS_PANE_MIN_WIDTH = 300;
 
 export function BrowserScreen(): JSX.Element {
   const { currentProfile, disconnect, lostConnection } = useConnection();
-  const { selectedCore, refresh, coresLoading, updateModeActive } = useCores();
+  const { selectedCore, refresh, coresLoading, updateModeActive, updateModeOperationPhase } = useCores();
   const [updateModeDialogOpen, setUpdateModeDialogOpen] = useState(false);
+  const [progressCurrent, setProgressCurrent] = useState(0);
+  const [progressTotal, setProgressTotal] = useState(0);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.mister?.onUpdateModeProgress) return;
+    const unsubscribe = window.mister.onUpdateModeProgress((event) => {
+      setProgressCurrent(event.done);
+      setProgressTotal(event.total);
+    });
+    return unsubscribe;
+  }, []);
 
   const {
     width: coresWidth,
@@ -187,6 +199,12 @@ export function BrowserScreen(): JSX.Element {
       <UpdateModeDialog
         open={updateModeDialogOpen}
         onOpenChange={setUpdateModeDialogOpen}
+      />
+      <UpdateModeProgressModal
+        open={updateModeOperationPhase !== null}
+        phase={updateModeOperationPhase ?? 'entering'}
+        current={progressCurrent}
+        total={progressTotal}
       />
     </div>
   );
