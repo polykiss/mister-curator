@@ -10,6 +10,12 @@ import {
   MISTER_GAMES_DIR,
   romsCacheWitnessPath,
 } from '@shared/constants';
+import type {
+  UpdateModeProgressEvent,
+  UpdateModeRestoreResult,
+  UpdateModeStatus,
+  UpdateSnapshot,
+} from '@shared/preload-api';
 import { chunked } from '@shared/chunk';
 import { resolvePrimaryZipBasename } from '@app/main/services/arcade-prefetch-paths';
 import {
@@ -2087,6 +2093,114 @@ export class ConnectionManager {
       throw new Error(`Unknown core: ${coreId}`);
     }
     return fresh;
+  }
+
+  // ─── feat/update-mode ─────────────────────────────────────────────
+
+  async captureHiddenSnapshot(): Promise<UpdateModeStatus> {
+    this.assertConnected();
+    const existing = await this.client.readUpdateSnapshot();
+    if (existing !== null) {
+      let parsed: UpdateSnapshot | null = null;
+      try { parsed = JSON.parse(existing) as UpdateSnapshot; } catch { /* malformed */ }
+      if (parsed !== null) {
+        return {
+          active: true,
+          snapshot: { createdAt: parsed.createdAt, totalFiles: parsed.hiddenFiles.length },
+        };
+      }
+    }
+    const hiddenFiles = await this.client.walkHiddenFiles();
+    const snapshot: UpdateSnapshot = {
+      createdAt: new Date().toISOString(),
+      deviceId: this.currentHost ?? 'unknown',
+      hiddenFiles,
+    };
+    await this.client.writeUpdateSnapshot(JSON.stringify(snapshot, null, 2));
+    return {
+      active: true,
+      snapshot: { createdAt: snapshot.createdAt, totalFiles: hiddenFiles.length },
+    };
+  }
+
+  async applyUpdateMode(
+    onProgress: (event: UpdateModeProgressEvent) => void,
+    operationId: string,
+  ): Promise<void> {
+    this.assertConnected();
+    const raw = await this.client.readUpdateSnapshot();
+    if (raw === null) throw new Error('No update snapshot found on device.');
+    let snapshot: UpdateSnapshot;
+    try { snapshot = JSON.parse(raw) as UpdateSnapshot; }
+    catch { throw new Error('Update snapshot is corrupted — cannot apply update mode.'); }
+
+    const renames = snapshot.hiddenFiles.map((dotPath) => {
+      const lastSlash = dotPath.lastIndexOf('/');
+      const dir = dotPath.slice(0, lastSlash);
+      const filename = dotPath.slice(lastSlash + 1);
+      const undotted = filename.startsWith('.') ? filename.slice(1) : filename;
+      return { src: dotPath, dst: `${dir}/${undotted}`, id: dotPath };
+    });
+
+    let done = 0;
+    const total = renames.length;
+    await this.client.batchRenameAbsolutePaths(renames, false, (chunkDone) => {
+      done = chunkDone;
+      onProgress({ operationId, phase: 'un-dot', done, total });
+    });
+  }
+
+  async restoreFromSnapshot(
+    onProgress: (event: UpdateModeProgressEvent) => void,
+    operationId: string,
+  ): Promise<UpdateModeRestoreResult> {
+    this.assertConnected();
+    const raw = await this.client.readUpdateSnapshot();
+    if (raw === null) throw new Error('No update snapshot found on device.');
+    let snapshot: UpdateSnapshot;
+    try { snapshot = JSON.parse(raw) as UpdateSnapshot; }
+    catch { throw new Error('Update snapshot is corrupted — cannot restore.'); }
+
+    const renames = snapshot.hiddenFiles.map((dotPath) => {
+      const lastSlash = dotPath.lastIndexOf('/');
+      const dir = dotPath.slice(0, lastSlash);
+      const filename = dotPath.slice(lastSlash + 1);
+      const undotted = filename.startsWith('.') ? filename.slice(1) : filename;
+      return { src: `${dir}/${undotted}`, dst: dotPath, id: dotPath };
+    });
+
+    const total = renames.length;
+    const results = await this.client.batchRenameAbsolutePaths(renames, true, (chunkDone) => {
+      onProgress({ operationId, phase: 're-dot', done: chunkDone, total });
+    });
+
+    let restored = 0;
+    let skippedMissing = 0;
+    const failedPaths: string[] = [];
+    for (const r of results) {
+      if (r.status === 'ok') restored++;
+      else if (r.status === 'missing') skippedMissing++;
+      else failedPaths.push(r.id);
+    }
+
+    // Delete snapshot regardless of partial failures — the user has
+    // taken action and the snapshot is no longer authoritative.
+    try { await this.client.deleteUpdateSnapshot(); } catch { /* best-effort */ }
+
+    return { restored, skippedMissing, failed: failedPaths.length, failedPaths };
+  }
+
+  async checkUpdateModeActive(): Promise<UpdateModeStatus> {
+    this.assertConnected();
+    const raw = await this.client.readUpdateSnapshot();
+    if (raw === null) return { active: false, snapshot: null };
+    let parsed: UpdateSnapshot | null = null;
+    try { parsed = JSON.parse(raw) as UpdateSnapshot; } catch { /* malformed */ }
+    if (parsed === null) return { active: false, snapshot: null };
+    return {
+      active: true,
+      snapshot: { createdAt: parsed.createdAt, totalFiles: parsed.hiddenFiles.length },
+    };
   }
 
   private assertConnected(): void {

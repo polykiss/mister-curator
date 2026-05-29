@@ -22,6 +22,9 @@ import type {
   RomMetadataResolvedEvent,
   RomVisibilityChangeWire,
   SystemFileMarkChangeWire,
+  UpdateModeProgressEvent,
+  UpdateModeRestoreResult,
+  UpdateModeStatus,
 } from '@shared/preload-api';
 import type {
   MetadataHint,
@@ -373,6 +376,24 @@ const api: MisterApi = {
     invoke<Record<string, RomMetadata | null>>(
       IPC_CHANNELS.getArcadeMetadataBatch,
     ),
+  // feat/update-mode
+  captureHiddenSnapshot: () =>
+    invoke<UpdateModeStatus>(IPC_CHANNELS.captureHiddenSnapshot),
+  applyUpdateMode: (options?: { readonly operationId?: string }) =>
+    invoke<void>(IPC_CHANNELS.applyUpdateMode, options),
+  restoreFromSnapshot: (options?: { readonly operationId?: string }) =>
+    invoke<UpdateModeRestoreResult>(IPC_CHANNELS.restoreFromSnapshot, options),
+  checkUpdateModeActive: () =>
+    invoke<UpdateModeStatus>(IPC_CHANNELS.checkUpdateModeActive),
+  onUpdateModeProgress: (handler: (event: UpdateModeProgressEvent) => void) => {
+    const listener = (_event: unknown, payload: UpdateModeProgressEvent): void => {
+      handler(payload);
+    };
+    ipcRenderer.on(IPC_CHANNELS.updateModeProgress, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.updateModeProgress, listener);
+    };
+  },
 };
 
 contextBridge.exposeInMainWorld('mister', api);

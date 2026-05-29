@@ -34,6 +34,7 @@ import type {
   ArcadePlayabilityIpc,
   ConnectionManager,
 } from '@app/main/ipc/connection-manager';
+import type { UpdateModeProgressEvent } from '@shared/preload-api';
 import type { MetadataOrchestrator } from '@app/main/metadata/metadata-orchestrator';
 import { lookupScreenScraperSystemId } from '@app/main/metadata/screenscraper-system-map';
 import type { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
@@ -130,6 +131,8 @@ export type MetadataDatabaseEmitter = (
     | { readonly kind: 'error'; readonly message: string },
 ) => void;
 
+export type UpdateModeProgressEmitter = (event: UpdateModeProgressEvent) => void;
+
 export function registerIpcHandlers(
   manager: ConnectionManager,
   store: ProfileStore,
@@ -142,6 +145,7 @@ export function registerIpcHandlers(
   // a renderer-driven IPC; the SS service is passed in so the
   // handler can reach it.
   screenScraper: ScreenScraperService | null,
+  emitUpdateModeProgress: UpdateModeProgressEmitter,
 ): void {
   handle<[], MisterProfile[]>(IPC_CHANNELS.listProfiles, () => store.list());
 
@@ -555,6 +559,45 @@ export function registerIpcHandlers(
           emitMetadataDatabaseProgress(event);
         }
       }),
+  );
+
+  // feat/update-mode — temp-unhide + restore.
+  let nextUpdateModeOpId = 1;
+  const newUpdateOpId = (): string => `um-${String(nextUpdateModeOpId++)}`;
+
+  handle<[], import('@shared/preload-api').UpdateModeStatus>(
+    IPC_CHANNELS.captureHiddenSnapshot,
+    () => manager.captureHiddenSnapshot(),
+  );
+
+  handle<[{ readonly operationId?: string } | undefined], void>(
+    IPC_CHANNELS.applyUpdateMode,
+    async (options) => {
+      const operationId = options?.operationId ?? newUpdateOpId();
+      await manager.applyUpdateMode(
+        (event) => emitUpdateModeProgress(event),
+        operationId,
+      );
+    },
+  );
+
+  handle<
+    [{ readonly operationId?: string } | undefined],
+    import('@shared/preload-api').UpdateModeRestoreResult
+  >(
+    IPC_CHANNELS.restoreFromSnapshot,
+    async (options) => {
+      const operationId = options?.operationId ?? newUpdateOpId();
+      return manager.restoreFromSnapshot(
+        (event) => emitUpdateModeProgress(event),
+        operationId,
+      );
+    },
+  );
+
+  handle<[], import('@shared/preload-api').UpdateModeStatus>(
+    IPC_CHANNELS.checkUpdateModeActive,
+    () => manager.checkUpdateModeActive(),
   );
 
   ipcMain.handle(

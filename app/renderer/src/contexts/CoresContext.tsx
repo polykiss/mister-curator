@@ -20,7 +20,7 @@ import {
   type ArcadeMraEntry,
 } from '@shared/arcade-mra';
 import { arcadeMraVisiblePath } from '@shared/ledger';
-import type { ArcadePlayabilityWire } from '@shared/preload-api';
+import type { ArcadePlayabilityWire, UpdateModeRestoreResult } from '@shared/preload-api';
 import { EMPTY_SYSTEM_FILES_MARKS, isMarked } from '@shared/system-files-marks';
 import type {
   CoreEntry,
@@ -245,6 +245,25 @@ interface CoresContextValue {
    * not yet resolved, or device has no `.mra` content).
    */
   readonly adjustArcadeHiddenCount: (delta: number) => void;
+  /** True while the pre-update hidden-file snapshot is active on the device. */
+  readonly updateModeActive: boolean;
+  /** Snapshot metadata shown in the update-mode banner. */
+  readonly updateModeSnapshot: {
+    readonly totalFiles: number;
+    readonly snapshotCreatedAt: string;
+  } | null;
+  /**
+   * Capture the hidden-file snapshot then un-dot all hidden files so
+   * the MiSTer update tool can overwrite them without creating duplicates.
+   * Reports progress via the `onUpdateModeProgress` IPC event, which
+   * OperationStatusContext forwards to the StatusBar.
+   */
+  readonly enterUpdateMode: (operationId: string) => Promise<void>;
+  /**
+   * Read the snapshot, re-dot all files that are still present, delete
+   * the snapshot on success. Returns a summary of the operation.
+   */
+  readonly restoreFromUpdateMode: (operationId: string) => Promise<UpdateModeRestoreResult>;
 }
 
 const CoresContext = createContext<CoresContextValue | null>(null);
@@ -268,6 +287,11 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   const [ledgerCoreIds, setLedgerCoreIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  const [updateModeActive, setUpdateModeActive] = useState(false);
+  const [updateModeSnapshot, setUpdateModeSnapshot] = useState<{
+    readonly totalFiles: number;
+    readonly snapshotCreatedAt: string;
+  } | null>(null);
 
   // Refs for stale-closure-safe reads inside async callbacks.
   const coresRef = useRef(cores);
@@ -423,6 +447,17 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
         setRomsCache('loadCores', '*', {});
         setRomCacheVersion((v) => v + 1);
         setRomsLoading({});
+        try {
+          const umStatus = await window.mister.checkUpdateModeActive();
+          setUpdateModeActive(umStatus.active);
+          setUpdateModeSnapshot(
+            umStatus.snapshot
+              ? { totalFiles: umStatus.snapshot.totalFiles, snapshotCreatedAt: umStatus.snapshot.createdAt }
+              : null,
+          );
+        } catch {
+          // best-effort; update mode state stays at defaults
+        }
       } catch (err) {
         const message =
           err instanceof Error ? err.message : 'Failed to load cores.';
@@ -521,6 +556,34 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       );
     });
   }, []);
+
+  const enterUpdateMode = useCallback(
+    async (operationId: string): Promise<void> => {
+      const status = await window.mister.captureHiddenSnapshot();
+      await runWithProgress('Un-dotting hidden files for update…', operationId, () =>
+        window.mister.applyUpdateMode({ operationId }),
+      );
+      setUpdateModeActive(true);
+      setUpdateModeSnapshot(
+        status.snapshot
+          ? { totalFiles: status.snapshot.totalFiles, snapshotCreatedAt: status.snapshot.createdAt }
+          : null,
+      );
+    },
+    [runWithProgress],
+  );
+
+  const restoreFromUpdateMode = useCallback(
+    async (operationId: string): Promise<UpdateModeRestoreResult> => {
+      const result = await runWithProgress('Restoring hidden files…', operationId, () =>
+        window.mister.restoreFromSnapshot({ operationId }),
+      );
+      setUpdateModeActive(false);
+      setUpdateModeSnapshot(null);
+      return result;
+    },
+    [runWithProgress],
+  );
 
   const setRomVisibility = useCallback(
     async (
@@ -941,6 +1004,8 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     setSystemFilesMarks(EMPTY_SYSTEM_FILES_MARKS);
     setPendingCoreIds(new Set());
     setLedgerCoreIds(new Set());
+    setUpdateModeActive(false);
+    setUpdateModeSnapshot(null);
   }, [status, lostConnection, autoRetry, autoRetryFailed]);
 
   // Load cores on entering the connected state.
@@ -1026,6 +1091,10 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       setSystemFileMarks,
       setFolderClassification,
       adjustArcadeHiddenCount,
+      updateModeActive,
+      updateModeSnapshot,
+      enterUpdateMode,
+      restoreFromUpdateMode,
     }),
     [
       cores,
@@ -1054,6 +1123,10 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       setSystemFileMarks,
       setFolderClassification,
       adjustArcadeHiddenCount,
+      updateModeActive,
+      updateModeSnapshot,
+      enterUpdateMode,
+      restoreFromUpdateMode,
     ],
   );
 

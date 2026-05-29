@@ -118,6 +118,19 @@ export function OperationStatusProvider({ children }: { children: ReactNode }): 
     return unsubscribe;
   }, [reportProgress]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.mister?.onUpdateModeProgress) {
+      return;
+    }
+    const unsubscribe = window.mister.onUpdateModeProgress((event) => {
+      reportProgress(event.operationId, {
+        done: event.done,
+        total: event.total,
+      });
+    });
+    return unsubscribe;
+  }, [reportProgress]);
+
   const top = stack.length > 0 ? stack[stack.length - 1] : undefined;
   const current = top?.message ?? null;
   const currentProgress = top?.progress ?? null;

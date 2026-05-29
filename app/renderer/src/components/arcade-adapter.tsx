@@ -91,13 +91,15 @@ import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
  */
 export function useArcadeAdapter(): ItemListAdapter {
   const { status } = useConnection();
-  const canMutate = status === 'connected';
   // feat/pre-beta-polish-batch — single-toggle hide/show writes
   // through to the sidebar Arcade row's hidden-count badge via this
   // helper so the badge updates with the same click that flips the
   // pane row's eye icon. (Pre-fix the badge waited for the next
   // CoresContext refresh.)
-  const { adjustArcadeHiddenCount, romCacheVersion } = useCores();
+  const { adjustArcadeHiddenCount, romCacheVersion, updateModeActive } = useCores();
+  // Also gate on !updateModeActive: while update mode is active the
+  // hidden-file state is intentionally in flux and mutations are unsafe.
+  const canMutate = status === 'connected' && !updateModeActive;
 
   const [entries, setEntries] = useState<readonly ArcadeMraEntry[] | null>(
     null,
