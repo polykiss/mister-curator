@@ -46,6 +46,17 @@ export function BrowserScreen(): JSX.Element {
     return unsubscribe;
   }, []);
 
+  // Reset progress counters when a new operation begins so the modal
+  // always starts at 0/0 instead of briefly showing the previous
+  // operation's final values (e.g. 100% full bar) before the first
+  // progress event from the new operation arrives.
+  useEffect(() => {
+    if (updateModeOperationPhase !== null) {
+      setProgressCurrent(0);
+      setProgressTotal(0);
+    }
+  }, [updateModeOperationPhase]);
+
   const {
     width: coresWidth,
     onDragStart,

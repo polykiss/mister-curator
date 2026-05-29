@@ -111,4 +111,24 @@ describe('BrowserScreen — UpdateModeProgressModal integration', () => {
   it('opens modal when updateModeOperationPhase is non-null', () => {
     expect(BROWSER_SCREEN).toMatch(/open=\{updateModeOperationPhase !== null\}/);
   });
+
+  it('resets progress counters to 0 when updateModeOperationPhase becomes non-null', () => {
+    // Guards against the 100%-flash bug: leftover current/total from the
+    // previous operation render for ~100-500ms before the first progress
+    // event of the new operation arrives. The fix is a useEffect that fires
+    // on every non-null transition and resets both counters synchronously
+    // before the modal renders with new content.
+    expect(BROWSER_SCREEN).toMatch(
+      /if \(updateModeOperationPhase !== null\)[\s\S]{0,100}setProgressCurrent\(0\)/,
+    );
+    expect(BROWSER_SCREEN).toMatch(
+      /if \(updateModeOperationPhase !== null\)[\s\S]{0,100}setProgressTotal\(0\)/,
+    );
+  });
+
+  it('the reset effect depends on updateModeOperationPhase so it fires on every phase transition', () => {
+    expect(BROWSER_SCREEN).toMatch(
+      /\}, \[updateModeOperationPhase\]\)/,
+    );
+  });
 });
