@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  EMPTY_CONTENT_MD5,
   ScreenScraperAuthError,
   ScreenScraperService,
   parseScreenScraperResponse,
@@ -174,6 +175,45 @@ describe('ScreenScraperService — credentials', () => {
   });
 });
 
+describe('ScreenScraperService — zero-byte hash guard', () => {
+  it('returns null without fetching when md5 equals the empty-content hash', async () => {
+    // d41d8cd… is MD5 of zero bytes. SS has a stub entry for it that
+    // maps to a Taito Classics game — sending it would poison the by-hash
+    // cache for every other zero-byte file across all systems.
+    const fetchMock = vi.fn();
+    const svc = makeService({ fetch: fetchMock as unknown as typeof fetch });
+    const result = await svc.lookup({
+      systemId: SNES_SYSTEM_ID,
+      md5: EMPTY_CONTENT_MD5,
+      sha1: HASH_SHA1,
+    });
+    expect(result).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('returns null without fetching when romSize is 0', async () => {
+    // romSize=0 means the zip extracted to zero bytes — same empty-hash
+    // scenario. Guard on size too so even a non-MD5 hash path is covered.
+    const fetchMock = vi.fn();
+    const svc = makeService({ fetch: fetchMock as unknown as typeof fetch });
+    const result = await svc.lookup({ ...SNES_QUERY, romSize: 0 });
+    expect(result).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('EMPTY_CONTENT_MD5 constant matches the well-known empty-content hash', () => {
+    expect(EMPTY_CONTENT_MD5).toBe('d41d8cd98f00b204e9800998ecf8427e');
+    expect(EMPTY_CONTENT_MD5).toHaveLength(32);
+  });
+
+  it('still fetches when md5 is a normal (non-empty-content) hash', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(SAMPLE_JEU));
+    const svc = makeService({ fetch: fetchMock as unknown as typeof fetch });
+    await svc.lookup(SNES_QUERY);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+});
+
 describe('ScreenScraperService — request URL', () => {
   it('passes softname, output, devid, devpassword, systemeid in the URL', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(SAMPLE_JEU));
@@ -249,17 +289,11 @@ describe('ScreenScraperService — request URL', () => {
     expect(url).toContain('romtaille=524288');
   });
 
-  it('omits romtaille when romSize is undefined or zero', async () => {
+  it('omits romtaille when romSize is undefined', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(SAMPLE_JEU));
     const svc = makeService({ fetch: fetchMock as unknown as typeof fetch });
     await svc.lookup(SNES_QUERY); // no romSize
-    let url = fetchMock.mock.calls[0]?.[0] as string;
-    expect(url).not.toContain('romtaille=');
-
-    fetchMock.mockClear();
-    fetchMock.mockResolvedValue(jsonResponse(SAMPLE_JEU));
-    await svc.lookup({ ...SNES_QUERY, romSize: 0 });
-    url = fetchMock.mock.calls[0]?.[0] as string;
+    const url = fetchMock.mock.calls[0]?.[0] as string;
     expect(url).not.toContain('romtaille=');
   });
 

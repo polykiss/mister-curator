@@ -94,7 +94,7 @@ export function buildHashScript(paths: readonly string[]): string {
     '        ;;',
     '    esac',
     '    mtime=$(stat -c %Y "$f" 2>/dev/null)',
-    '    if [ -n "$md5" ] && [ -n "$sha1" ] && [ -n "$size" ] && [ -n "$disk_size" ] && [ -n "$mtime" ]; then',
+    '    if [ -n "$md5" ] && [ -n "$sha1" ] && [ -n "$size" ] && [ "$size" != "0" ] && [ -n "$disk_size" ] && [ -n "$mtime" ]; then',
     '      printf \'%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n\' "$f" "$md5" "$sha1" "$size" "$disk_size" "$mtime"',
     '    fi',
     '  fi',
@@ -130,7 +130,7 @@ export function parseHashOutput(stdout: string): readonly HashRecord[] {
     if (!isHexLength(md5, 32)) continue;
     if (!isHexLength(sha1, 40)) continue;
     const size = Number.parseInt(sizeStr, 10);
-    if (!Number.isFinite(size) || size < 0) continue;
+    if (!Number.isFinite(size) || size <= 0) continue;
     const diskSize = Number.parseInt(diskSizeStr, 10);
     if (!Number.isFinite(diskSize) || diskSize < 0) continue;
     const mtime = Number.parseInt(mtimeStr, 10);
