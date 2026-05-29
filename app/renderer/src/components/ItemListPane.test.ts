@@ -959,25 +959,23 @@ describe('arcade-mra-overrides storage + routing (feat/arcade-noromsneeded-overr
 
 describe('arcade row alignment with RomsPane (feat/arcade-edit-detail-alignment)', () => {
   it('arcade table header starts with the same w-10 pl-4 leading slot RomsPane uses for the checkbox column', () => {
-    // RomsPane: TableHead className="w-10 pl-4" → checkbox column.
-    // Arcade has no per-row bulk select in v0.1 but mirrors the slot
-    // (empty TableHead) so the right-edge columns align when both
-    // panes render side-by-side at the same width.
+    // Both panes now carry a "select all" checkbox in the w-10 pl-4
+    // TableHead slot so the header row is pixel-identical across panes.
     expect(ROMS_ADAPTER).toMatch(
       /<TableHead className="w-10 pl-4">[\s\S]{0,400}type="checkbox"/,
     );
     expect(ARCADE_ADAPTER).toMatch(
-      /<TableHead className="w-10 pl-4"\s*\/>/,
+      /<TableHead className="w-10 pl-4">[\s\S]{0,400}type="checkbox"/,
     );
   });
 
-  it('arcade data + back rows carry the matching w-10 pl-4 leading TableCell', () => {
-    // Same spacer must appear in EVERY row variant so the column
-    // grid stays consistent: data rows + the back-row above them.
+  it('arcade back-row and folder rows carry the w-10 pl-4 leading TableCell spacer', () => {
+    // MRA rows now carry a checkbox in their leading cell; back-row
+    // and folder rows still use an empty spacer to keep column rhythm.
     const cells = ARCADE_ADAPTER.match(
       /<TableCell className="w-10 pl-4"\s*\/>/g,
     );
-    expect(cells, 'arcade-adapter should have ≥2 leading spacers (back-row + data row)').not.toBeNull();
+    expect(cells, 'arcade-adapter should have ≥2 leading spacers (back-row + folder-row branch)').not.toBeNull();
     expect(cells!.length).toBeGreaterThanOrEqual(2);
   });
 

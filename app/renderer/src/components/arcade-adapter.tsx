@@ -122,6 +122,12 @@ export function useArcadeAdapter(): ItemListAdapter {
     'mistercurator.showHiddenArcadeMras',
     false,
   );
+  // feat/arcade-bulk-select-and-toolbar — per-row bulk selection.
+  // Keyed by arcadeMraVisiblePath(entry.relativePath) so the key is
+  // stable across hide/show (the dot-prefix rename doesn't orphan it).
+  const [selectedKeys, setSelectedKeys] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   // feat/arcade-parity-3-ui (G8) — per-pane sort state, not persisted
   // (matches RomsPane). Switching panes resets to the default.
   const [sortState, setSortState] = useState<SortState>(DEFAULT_SORT);
@@ -293,6 +299,47 @@ export function useArcadeAdapter(): ItemListAdapter {
     return out;
   }, [enrichedPresentable, sortState]);
 
+  // Purge stale selections whenever the visible row set changes (filter
+  // toggle, hide operation, subPath change). Uses the normalized key so
+  // a hide/show that changes relativePath doesn't orphan a selection.
+  useEffect(() => {
+    setSelectedKeys((prev) => {
+      if (prev.size === 0) return prev;
+      const visible = new Set(
+        sortedRows
+          .filter((r) => r.kind === 'mra')
+          .map((r) => arcadeMraVisiblePath(r.relativePath)),
+      );
+      const next = new Set<string>();
+      for (const k of prev) {
+        if (visible.has(k)) next.add(k);
+      }
+      return next.size === prev.size ? prev : next;
+    });
+  }, [sortedRows]);
+
+  const visibleSelectedCount = useMemo(
+    () =>
+      sortedRows.filter(
+        (r) =>
+          r.kind === 'mra' &&
+          !r.hidden &&
+          selectedKeys.has(arcadeMraVisiblePath(r.relativePath)),
+      ).length,
+    [sortedRows, selectedKeys],
+  );
+
+  const hiddenSelectedCount = useMemo(
+    () =>
+      sortedRows.filter(
+        (r) =>
+          r.kind === 'mra' &&
+          r.hidden &&
+          selectedKeys.has(arcadeMraVisiblePath(r.relativePath)),
+      ).length,
+    [sortedRows, selectedKeys],
+  );
+
   // feat/arcade-polish-context-menu — density-bar denominator. Max
   // primary-zip size across the currently-visible rows (matches the
   // RomsPane convention: per-pane peer max, not a global). Folder
@@ -458,6 +505,185 @@ export function useArcadeAdapter(): ItemListAdapter {
     }
   };
 
+  const onToggleSelect = (key: string, checked: boolean): void => {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  };
+
+  const onToggleAll = (checked: boolean): void => {
+    setSelectedKeys(
+      checked
+        ? new Set(
+            sortedRows
+              .filter((r) => r.kind === 'mra')
+              .map((r) => arcadeMraVisiblePath(r.relativePath)),
+          )
+        : new Set(),
+    );
+  };
+
+  const onHideSelected = async (): Promise<void> => {
+    const targets = sortedRows.filter(
+      (r) =>
+        r.kind === 'mra' &&
+        !r.hidden &&
+        selectedKeys.has(arcadeMraVisiblePath(r.relativePath)),
+    );
+    if (targets.length === 0) return;
+    const pathMap = new Map<string, string>(
+      targets.map((t) => [t.relativePath, arcadeMraHiddenPath(t.relativePath)]),
+    );
+    setEntries((prev) => {
+      if (prev === null) return prev;
+      return prev.map((e) => {
+        const predicted = pathMap.get(e.relativePath);
+        return predicted !== undefined
+          ? { ...e, hidden: true, relativePath: predicted }
+          : e;
+      });
+    });
+    setMetadataByMra((prev) => {
+      const next: Record<string, RomMetadata | null> = {};
+      for (const [key, value] of Object.entries(prev)) {
+        const predicted = pathMap.get(key);
+        next[predicted ?? key] = value;
+      }
+      return next;
+    });
+    adjustArcadeHiddenCount(targets.length);
+    setSelectedKeys(new Set());
+    try {
+      const changes = targets.map((t) => ({
+        relativePath: t.relativePath,
+        hidden: true,
+      }));
+      const result = await window.mister.setBulkArcadeMraVisibility(changes);
+      const summary = summarizeBulkResult({
+        action: 'Hid',
+        itemNoun: 'ROM',
+        succeeded: result.succeeded,
+        failed: result.failed,
+        failedNames: result.failed.map((f) => f.filename),
+      });
+      const surface =
+        summary.kind === 'success'
+          ? toast.success
+          : summary.kind === 'partial'
+            ? toast.warning
+            : toast.error;
+      surface(summary.title, { description: summary.description });
+      if (result.failed.length > 0) await refresh(true);
+    } catch (err) {
+      const reverseMap = new Map<string, string>(
+        targets.map((t) => [arcadeMraHiddenPath(t.relativePath), t.relativePath]),
+      );
+      setEntries((prev) => {
+        if (prev === null) return prev;
+        return prev.map((e) => {
+          const original = reverseMap.get(e.relativePath);
+          return original !== undefined
+            ? { ...e, hidden: false, relativePath: original }
+            : e;
+        });
+      });
+      setMetadataByMra((prev) => {
+        const next: Record<string, RomMetadata | null> = {};
+        for (const [key, value] of Object.entries(prev)) {
+          const original = reverseMap.get(key);
+          next[original ?? key] = value;
+        }
+        return next;
+      });
+      adjustArcadeHiddenCount(-targets.length);
+      toast.error('Hide selected failed', {
+        description: err instanceof Error ? err.message : 'Unexpected error.',
+      });
+    }
+  };
+
+  const onShowSelected = async (): Promise<void> => {
+    const targets = sortedRows.filter(
+      (r) =>
+        r.kind === 'mra' &&
+        r.hidden &&
+        selectedKeys.has(arcadeMraVisiblePath(r.relativePath)),
+    );
+    if (targets.length === 0) return;
+    const pathMap = new Map<string, string>(
+      targets.map((t) => [t.relativePath, arcadeMraVisiblePath(t.relativePath)]),
+    );
+    setEntries((prev) => {
+      if (prev === null) return prev;
+      return prev.map((e) => {
+        const predicted = pathMap.get(e.relativePath);
+        return predicted !== undefined
+          ? { ...e, hidden: false, relativePath: predicted }
+          : e;
+      });
+    });
+    setMetadataByMra((prev) => {
+      const next: Record<string, RomMetadata | null> = {};
+      for (const [key, value] of Object.entries(prev)) {
+        const predicted = pathMap.get(key);
+        next[predicted ?? key] = value;
+      }
+      return next;
+    });
+    adjustArcadeHiddenCount(-targets.length);
+    setSelectedKeys(new Set());
+    try {
+      const changes = targets.map((t) => ({
+        relativePath: t.relativePath,
+        hidden: false,
+      }));
+      const result = await window.mister.setBulkArcadeMraVisibility(changes);
+      const summary = summarizeBulkResult({
+        action: 'Restored',
+        itemNoun: 'ROM',
+        succeeded: result.succeeded,
+        failed: result.failed,
+        failedNames: result.failed.map((f) => f.filename),
+      });
+      const surface =
+        summary.kind === 'success'
+          ? toast.success
+          : summary.kind === 'partial'
+            ? toast.warning
+            : toast.error;
+      surface(summary.title, { description: summary.description });
+      if (result.failed.length > 0) await refresh(true);
+    } catch (err) {
+      const reverseMap = new Map<string, string>(
+        targets.map((t) => [arcadeMraVisiblePath(t.relativePath), t.relativePath]),
+      );
+      setEntries((prev) => {
+        if (prev === null) return prev;
+        return prev.map((e) => {
+          const original = reverseMap.get(e.relativePath);
+          return original !== undefined
+            ? { ...e, hidden: true, relativePath: original }
+            : e;
+        });
+      });
+      setMetadataByMra((prev) => {
+        const next: Record<string, RomMetadata | null> = {};
+        for (const [key, value] of Object.entries(prev)) {
+          const original = reverseMap.get(key);
+          next[original ?? key] = value;
+        }
+        return next;
+      });
+      adjustArcadeHiddenCount(targets.length);
+      toast.error('Unhide selected failed', {
+        description: err instanceof Error ? err.message : 'Unexpected error.',
+      });
+    }
+  };
+
   /**
    * Toggle the persisted auto-hide preference. The main-process
    * call also applies the rule diff (hides every missing-ROM mra
@@ -616,11 +842,40 @@ export function useArcadeAdapter(): ItemListAdapter {
             }
           >
             <Eye strokeWidth={1.5} />
-            Show all
+            Unhide all
           </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void onHideSelected()}
+            disabled={!canMutate || visibleSelectedCount === 0}
+            title={canMutate ? undefined : 'Reconnect to make changes.'}
+          >
+            Hide selected ({visibleSelectedCount})
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void onShowSelected()}
+            disabled={!canMutate || hiddenSelectedCount === 0}
+            title={canMutate ? undefined : 'Reconnect to make changes.'}
+          >
+            Unhide selected ({hiddenSelectedCount})
+          </Button>
+        </div>
+        <div className="flex flex-wrap gap-4 text-body-sm text-fg-body">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              className="accent-accent"
+              checked={showHidden}
+              onChange={(e) => setShowHidden(e.target.checked)}
+            />
+            Show hidden
+          </label>
           <label
             className={cn(
-              'ml-auto flex items-center gap-2 text-body-sm text-fg-body',
+              'flex items-center gap-2',
               (!canMutate || autoHidePending || autoHideEnabled === null) &&
                 'opacity-60',
             )}
@@ -646,15 +901,6 @@ export function useArcadeAdapter(): ItemListAdapter {
                 strokeWidth={1.5}
               />
             ) : null}
-          </label>
-          <label className="flex items-center gap-2 text-body-sm text-fg-body">
-            <input
-              type="checkbox"
-              className="accent-accent"
-              checked={showHidden}
-              onChange={(e) => setShowHidden(e.target.checked)}
-            />
-            Show hidden
           </label>
         </div>
       </header>
@@ -687,14 +933,22 @@ export function useArcadeAdapter(): ItemListAdapter {
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                {/* feat/arcade-edit-detail-alignment — empty leading
-                    spacer column matching RomsPane's checkbox slot
-                    (`w-10 pl-4`). Arcade has no per-row bulk select
-                    in v0.1, but mirroring the slot keeps the right-
-                    edge columns aligned when both panes render
-                    side-by-side. Empty header / TableCells in the
-                    rows below preserve the grid. */}
-                <TableHead className="w-10 pl-4" />
+                <TableHead className="w-10 pl-4">
+                  <input
+                    type="checkbox"
+                    className="accent-accent"
+                    aria-label="Select all"
+                    checked={
+                      sortedRows.filter((r) => r.kind === 'mra').length > 0 &&
+                      sortedRows
+                        .filter((r) => r.kind === 'mra')
+                        .every((r) =>
+                          selectedKeys.has(arcadeMraVisiblePath(r.relativePath)),
+                        )
+                    }
+                    onChange={(e) => onToggleAll(e.target.checked)}
+                  />
+                </TableHead>
                 <TableHead className="w-16" aria-label="Box art" />
                 <SortableHeader
                   label="Name"
@@ -760,7 +1014,6 @@ export function useArcadeAdapter(): ItemListAdapter {
                   aria-label={`Back to ${backRow.parentLabel}`}
                   title={`Back to ${backRow.parentLabel}`}
                 >
-                  {/* Leading spacer matches the header. */}
                   <TableCell className="w-10 pl-4" />
                   <BackThumbnailCell />
                   <TableCell className="max-w-0 truncate">
@@ -847,11 +1100,28 @@ export function useArcadeAdapter(): ItemListAdapter {
                       isFolder ? `Open ${entry.displayName}` : undefined
                     }
                   >
-                    {/* Leading spacer matches the header / back-row;
-                        arcade has no per-row bulk select but the
-                        slot keeps right-edge columns aligned with
-                        RomsPane when both panes render side-by-side. */}
-                    <TableCell className="w-10 pl-4" />
+                    {isFolder ? (
+                      <TableCell className="w-10 pl-4" />
+                    ) : (
+                      <TableCell className="w-10 pl-4">
+                        <input
+                          type="checkbox"
+                          className="accent-accent"
+                          aria-label={`Select ${entry.displayName}`}
+                          checked={selectedKeys.has(
+                            arcadeMraVisiblePath(entry.relativePath),
+                          )}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            onToggleSelect(
+                              arcadeMraVisiblePath(entry.relativePath),
+                              e.target.checked,
+                            );
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      </TableCell>
+                    )}
                     {/* feat/pre-beta-polish-batch (F) — thumbnail
                         mirrors the title cell's onClick. Folder rows
                         drill (same as the parent TableRow's onClick);
