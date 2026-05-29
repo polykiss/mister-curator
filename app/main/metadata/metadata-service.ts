@@ -1103,6 +1103,115 @@ export async function pruneEmptyHashEntriesFromHashesJson(
 }
 
 /**
+ * Startup migration: scan every per-host `hashes.json` under
+ * `metadataRoot` and rename any entry key whose immediate parent
+ * directory segment starts with `.` to the undotted form.
+ *
+ * Background: fix/folder-atomic-rom-path-stability made
+ * `containedRomPath` always undotted (canonical) so the metadata
+ * cache is stable across hide/unhide cycles. Existing installations
+ * may have entries keyed under dotted paths (e.g.
+ * `.Gradius/Gradius.xdf`) recorded before the fix. This migration
+ * converts those keys to their canonical form (`Gradius/Gradius.xdf`)
+ * so `readCachedEntries` lookups with the new undotted keys succeed
+ * without an SSH round-trip.
+ *
+ * Only the immediate parent directory of the filename is un-dotted
+ * (same rule as `normalizeSshPath` in hash-service.ts). Hidden
+ * flat-file ROM paths (e.g. `/media/fat/games/SNES/.Mario.sfc`) are
+ * NOT affected because their dot is on the LAST segment.
+ *
+ * Safe to call on every launch:
+ *   - File missing / metadataRoot absent / parse error: skip silently.
+ *   - No dotted-directory keys: no-op (no write, no log).
+ *   - N keys normalized: atomic rewrite + log line per host.
+ */
+export async function normalizeFolderAtomicHashKeys(
+  metadataRoot: string,
+): Promise<void> {
+  let subdirs: string[];
+  try {
+    const dirents = await fs.readdir(metadataRoot, { withFileTypes: true });
+    subdirs = dirents.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch (err) {
+    if (
+      err !== null &&
+      typeof err === 'object' &&
+      'code' in err &&
+      (err as NodeJS.ErrnoException).code === 'ENOENT'
+    ) {
+      return;
+    }
+    throw err;
+  }
+
+  for (const subdir of subdirs) {
+    const hashesPath = join(metadataRoot, subdir, 'hashes.json');
+    let raw: unknown;
+    try {
+      raw = JSON.parse(await fs.readFile(hashesPath, 'utf-8'));
+    } catch {
+      continue;
+    }
+
+    if (
+      raw === null ||
+      typeof raw !== 'object' ||
+      !('entries' in raw) ||
+      (raw as Record<string, unknown>).entries === null ||
+      typeof (raw as Record<string, unknown>).entries !== 'object'
+    ) {
+      continue;
+    }
+
+    const entries = (raw as Record<string, unknown>).entries as Record<
+      string,
+      unknown
+    >;
+    let migrated = 0;
+    const normalized: Record<string, unknown> = {};
+    for (const [path, entry] of Object.entries(entries)) {
+      const canonical = normalizeHashKey(path);
+      if (canonical !== path) {
+        migrated += 1;
+        // If the canonical key already exists, keep the existing entry
+        // (it was written after the fix was deployed) and discard the
+        // old dotted key to avoid duplicates.
+        if (!(canonical in normalized)) {
+          normalized[canonical] = entry;
+        }
+      } else {
+        normalized[path] = entry;
+      }
+    }
+
+    if (migrated === 0) continue;
+
+    const updated = { ...(raw as Record<string, unknown>), entries: normalized };
+    const tmp = `${hashesPath}.tmp`;
+    await fs.writeFile(tmp, `${JSON.stringify(updated, null, 2)}\n`, {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    await fs.rename(tmp, hashesPath);
+    // eslint-disable-next-line no-console
+    console.log(
+      `[cache-migration] normalized ${String(migrated)} folder-atomic hash ${migrated === 1 ? 'key' : 'keys'} in ${subdir}/hashes.json`,
+    );
+  }
+}
+
+function normalizeHashKey(path: string): string {
+  const lastSlash = path.lastIndexOf('/');
+  if (lastSlash <= 0) return path;
+  const beforeParent = path.lastIndexOf('/', lastSlash - 1);
+  if (beforeParent < 0) return path;
+  const parent = path.slice(beforeParent + 1, lastSlash);
+  if (!parent.startsWith('.') || parent === '..') return path;
+  return `${path.slice(0, beforeParent + 1)}${parent.slice(1)}${path.slice(lastSlash)}`;
+}
+
+/**
  * One-shot cache cleanup: remove the by-hash record for the empty-
  * content MD5 (`d41d8cd…`) if it was written by an older version of
  * the app before the zero-byte guard was in place.

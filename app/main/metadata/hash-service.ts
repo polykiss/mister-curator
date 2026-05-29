@@ -554,6 +554,40 @@ export class HashService {
       ? await client.statWitnesses(statTargets)
       : ({} as Record<string, number>);
 
+    // fix/folder-atomic-rom-path-stability: for paths where the stat
+    // returned 0 (file not found at the canonical undotted path), probe
+    // the dotted-parent variant — the device path when the enclosing
+    // folder is hidden. One extra SSH stat batch covering only missing
+    // paths; no-op for everything else.
+    const sshFor = new Map<string, string>(); // canonical → actual SSH path
+    {
+      const zeroTargets = statTargets.filter((p) => (mtimes[p] ?? 0) === 0);
+      if (zeroTargets.length > 0) {
+        const dottedCandidates = new Map<string, string>(); // canonical → dotted
+        for (const p of zeroTargets) {
+          const d = dottedParentPath(p);
+          if (d !== undefined) dottedCandidates.set(p, d);
+        }
+        if (dottedCandidates.size > 0) {
+          try {
+            const dottedMtimes = await client.statWitnesses([
+              ...dottedCandidates.values(),
+            ]);
+            for (const [canonical, dotted] of dottedCandidates) {
+              const m = dottedMtimes[dotted];
+              if (m !== undefined && m !== 0) {
+                mtimes[canonical] = m;
+                sshFor.set(canonical, dotted);
+              }
+            }
+          } catch {
+            // probe failed — proceed with original zero mtimes
+          }
+        }
+      }
+    }
+    const toSsh = (p: string) => sshFor.get(p) ?? p;
+
     // feat/sample-based-hashing — collect mtime-drift candidates
     // with cached sampleMd5 for the batched fast-path validation
     // below. Setting `result` for these is deferred until after the
@@ -616,7 +650,7 @@ export class HashService {
       let samples: Record<string, string> = {};
       try {
         samples = await client.computeSampleMd5s(
-          sampleCandidates.map((c) => c.path),
+          sampleCandidates.map((c) => toSsh(c.path)),
         );
       } catch {
         // Sample compute failed wholesale — push every candidate
@@ -625,7 +659,7 @@ export class HashService {
         for (const c of sampleCandidates) needsHash.push(c.path);
       }
       for (const c of sampleCandidates) {
-        const sample = samples[c.path];
+        const sample = samples[toSsh(c.path)];
         if (sample !== undefined && sample === c.entry.sampleMd5) {
           const refreshed: HashEntry = {
             ...c.entry,
@@ -732,7 +766,9 @@ export class HashService {
     const nowIso = this.now().toISOString();
     for (let i = 0; i < needsHash.length; i += this.batchSize) {
       const chunk = needsHash.slice(i, i + this.batchSize);
-      const records = await client.hashPaths(chunk);
+      // Use the actual on-device SSH path (dotted parent for hidden
+      // folder-atomics); map results back to canonical keys below.
+      const records = await client.hashPaths(chunk.map(toSsh));
       let samples: Record<string, string> = {};
       try {
         samples = await client.computeSampleMd5s(
@@ -744,6 +780,10 @@ export class HashService {
         // drift (today's pre-PR behaviour). No data loss.
       }
       for (const r of records) {
+        // Normalize the SSH path back to the canonical cache key so
+        // hidden folder-atomic entries are stored under the undotted
+        // parent form (e.g. `Gradius/` not `.Gradius/`).
+        const canonical = normalizeSshPath(r.path);
         const sampleMd5 = samples[r.path];
         const entry: HashEntry = {
           md5: r.md5,
@@ -754,8 +794,8 @@ export class HashService {
           hashedAt: nowIso,
           ...(sampleMd5 !== undefined ? { sampleMd5 } : {}),
         };
-        result.set(r.path, entry);
-        next[r.path] = entry;
+        result.set(canonical, entry);
+        next[canonical] = entry;
         dirty = true;
         diagLog('info', 'meta', '·', 'hash-computed', {
           path: pathBasename(r.path),
@@ -935,6 +975,38 @@ export class HashService {
         failedPaths,
       };
     }
+
+    // fix/folder-atomic-rom-path-stability: probe dotted-parent variants
+    // for paths that stat as 0. Mirrors the same block in `doGetHash`.
+    const sshForCheck = new Map<string, string>(); // canonical → SSH path
+    {
+      const zeroTargets = statTargets.filter((p) => (mtimes[p] ?? 0) === 0);
+      if (zeroTargets.length > 0) {
+        const dottedCandidates = new Map<string, string>();
+        for (const p of zeroTargets) {
+          const d = dottedParentPath(p);
+          if (d !== undefined) dottedCandidates.set(p, d);
+        }
+        if (dottedCandidates.size > 0) {
+          try {
+            const dottedMtimes = await client.statWitnesses([
+              ...dottedCandidates.values(),
+            ]);
+            for (const [canonical, dotted] of dottedCandidates) {
+              const m = dottedMtimes[dotted];
+              if (m !== undefined && m !== 0) {
+                mtimes[canonical] = m;
+                sshForCheck.set(canonical, dotted);
+              }
+            }
+          } catch {
+            // probe failed — proceed with original zero mtimes
+          }
+        }
+      }
+    }
+    const toSshCheck = (p: string) => sshForCheck.get(p) ?? p;
+
     let exactCount = 0;
     let toleranceCount = 0;
     let sampleCount = 0;
@@ -1000,7 +1072,7 @@ export class HashService {
       let samples: Record<string, string> = {};
       try {
         samples = await client.computeSampleMd5s(
-          sampleCandidates.map((c) => c.path),
+          sampleCandidates.map((c) => toSshCheck(c.path)),
         );
       } catch {
         // Sample compute itself failed — treat every candidate
@@ -1009,7 +1081,7 @@ export class HashService {
         for (const c of sampleCandidates) result.set(c.path, null);
       }
       for (const c of sampleCandidates) {
-        const sample = samples[c.path];
+        const sample = samples[toSshCheck(c.path)];
         if (sample !== undefined && sample === c.entry.sampleMd5) {
           // Sample match — file is byte-stable. Accept the cached
           // full md5 and refresh the entry's mtime (+ sample, in
@@ -1094,9 +1166,16 @@ export class HashService {
     host: string,
     path: string,
   ): Promise<HashEntry | undefined> {
+    // fix/folder-atomic-rom-path-stability: if the canonical (undotted)
+    // path yields no records, try the dotted-parent variant for the
+    // case where the enclosing folder is hidden on the device.
+    const sshPath = dottedParentPath(path) ?? path;
     let records: readonly HashRecord[];
     try {
       records = await client.hashPaths([path]);
+      if (records.length === 0 && sshPath !== path) {
+        records = await client.hashPaths([sshPath]);
+      }
     } catch (err) {
       // feat/hash-failure-sentinel — persist a sentinel keyed by the
       // file's CURRENT stat so future connects can skip the retry.
@@ -1115,6 +1194,9 @@ export class HashService {
     // hashPaths can return multiple records on one input only when
     // the script aliases (it doesn't); take the first / only one.
     const r = records[0]!;
+    // Normalize the SSH-returned path back to the canonical key so
+    // hidden folder-atomic entries are stored under the undotted form.
+    const canonical = normalizeSshPath(r.path);
     // feat/sample-based-hashing — fetch the sample fingerprint
     // alongside the freshly-computed full hash so the resulting
     // entry can short-circuit a future mtime drift. Best-effort —
@@ -1145,14 +1227,14 @@ export class HashService {
     });
     const entries = await this.loadEntries(host);
     const failedEntries = await this.loadFailedEntries(host);
-    const next = { ...entries, [r.path]: entry };
+    const next = { ...entries, [canonical]: entry };
     // Successful hash clears any sentinel for this path — the file
     // is no longer the "perma-failing" kind. Skip the clone when
     // there's nothing to clear (the common case for fresh paths).
     let nextFailed = failedEntries;
-    if (r.path in failedEntries) {
+    if (canonical in failedEntries) {
       const cleared: Record<string, HashFailureEntry> = { ...failedEntries };
-      delete cleared[r.path];
+      delete cleared[canonical];
       nextFailed = cleared;
       this.memFailedEntries.set(host, nextFailed);
       diagLog('info', 'meta', '·', 'hash-sentinel-cleared', {
@@ -1468,6 +1550,51 @@ function isHashCacheFileV3(v: unknown): v is HashCacheFileV3 {
 function pathBasename(path: string): string {
   const i = path.lastIndexOf('/');
   return i < 0 ? path : path.slice(i + 1);
+}
+
+/**
+ * fix/folder-atomic-rom-path-stability: given a canonical (undotted)
+ * contained-ROM path, return the dotted-parent variant that the
+ * device uses when the enclosing folder is hidden.
+ *
+ * Example: `/media/fat/games/X68000/Gradius/Gradius.xdf`
+ *        → `/media/fat/games/X68000/.Gradius/Gradius.xdf`
+ *
+ * Returns `undefined` when the path has no parent directory segment
+ * before the filename, or when the parent already starts with `.`.
+ */
+function dottedParentPath(p: string): string | undefined {
+  const lastSlash = p.lastIndexOf('/');
+  if (lastSlash <= 0) return undefined;
+  const beforeParent = p.lastIndexOf('/', lastSlash - 1);
+  if (beforeParent < 0) return undefined;
+  const parent = p.slice(beforeParent + 1, lastSlash);
+  if (parent.startsWith('.')) return undefined;
+  return `${p.slice(0, beforeParent + 1)}.${parent}${p.slice(lastSlash)}`;
+}
+
+/**
+ * fix/folder-atomic-rom-path-stability: convert an SSH-returned path
+ * that may have a dotted parent directory (hidden folder-atomic) back
+ * to its canonical undotted cache-key form.
+ *
+ * Only the immediate parent directory of the filename is un-dotted;
+ * the filename itself and deeper ancestors are left unchanged — so
+ * hidden flat-file ROMs (`.Mario.sfc`) are NOT affected.
+ *
+ * Example: `/media/fat/games/X68000/.Gradius/Gradius.xdf`
+ *        → `/media/fat/games/X68000/Gradius/Gradius.xdf`
+ *          `/media/fat/games/SNES/.Mario.sfc`
+ *        → `/media/fat/games/SNES/.Mario.sfc`  (unchanged)
+ */
+function normalizeSshPath(sshPath: string): string {
+  const lastSlash = sshPath.lastIndexOf('/');
+  if (lastSlash <= 0) return sshPath;
+  const beforeParent = sshPath.lastIndexOf('/', lastSlash - 1);
+  if (beforeParent < 0) return sshPath;
+  const parent = sshPath.slice(beforeParent + 1, lastSlash);
+  if (!parent.startsWith('.') || parent === '..') return sshPath;
+  return `${sshPath.slice(0, beforeParent + 1)}${parent.slice(1)}${sshPath.slice(lastSlash)}`;
 }
 
 /**

@@ -11,6 +11,7 @@ import type {
 } from '@app/main/metadata/openvgdb-service';
 import {
   MetadataService,
+  normalizeFolderAtomicHashKeys,
   pruneEmptyHashEntriesFromHashesJson,
   removePoisonedEmptyHashRecord,
   sanitizeArcadeMraKey,
@@ -2690,5 +2691,229 @@ describe('removePoisonedEmptyHashRecord', () => {
     } finally {
       logSpy.mockRestore();
     }
+  });
+});
+
+describe('normalizeFolderAtomicHashKeys', () => {
+  let metadataRoot: string;
+
+  beforeEach(async () => {
+    metadataRoot = await fs.mkdtemp(join(tmpdir(), 'mc-meta-normalize-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(metadataRoot, { recursive: true, force: true });
+  });
+
+  const goodEntry = {
+    md5: GOOD_MD5,
+    sha1: GOOD_SHA1,
+    size: 40960,
+    diskSizeBytes: 40960,
+    mtime: 1700000000,
+    hashedAt: '2026-01-01T00:00:00.000Z',
+  };
+
+  it('renames dotted-parent keys to their undotted canonical form', async () => {
+    const hostDir = join(metadataRoot, '192.168.50.196');
+    await fs.mkdir(hostDir, { recursive: true });
+    await fs.writeFile(
+      join(hostDir, 'hashes.json'),
+      makeHashesJson('192.168.50.196', {
+        '/media/fat/games/X68000/.Gradius/Gradius.zip': goodEntry,
+        '/media/fat/games/X68000/.Castlevania/Castlevania.zip': goodEntry,
+        '/media/fat/games/SNES/Mario.sfc': goodEntry, // flat file — unchanged
+      }),
+    );
+
+    await normalizeFolderAtomicHashKeys(metadataRoot);
+
+    const written = JSON.parse(
+      await fs.readFile(join(hostDir, 'hashes.json'), 'utf-8'),
+    ) as { entries: Record<string, unknown> };
+    expect(
+      Object.keys(written.entries).sort(),
+    ).toEqual([
+      '/media/fat/games/SNES/Mario.sfc',
+      '/media/fat/games/X68000/Castlevania/Castlevania.zip',
+      '/media/fat/games/X68000/Gradius/Gradius.zip',
+    ]);
+  });
+
+  it('does NOT normalize hidden flat-file ROM keys (dot is on the last segment)', async () => {
+    const hostDir = join(metadataRoot, 'host-1');
+    await fs.mkdir(hostDir, { recursive: true });
+    await fs.writeFile(
+      join(hostDir, 'hashes.json'),
+      makeHashesJson('host-1', {
+        '/media/fat/games/SNES/.Mario.sfc': goodEntry, // hidden flat file — must stay dotted
+        '/media/fat/games/X68000/.Gradius/Gradius.zip': goodEntry, // folder-atomic — must undot
+      }),
+    );
+
+    await normalizeFolderAtomicHashKeys(metadataRoot);
+
+    const written = JSON.parse(
+      await fs.readFile(join(hostDir, 'hashes.json'), 'utf-8'),
+    ) as { entries: Record<string, unknown> };
+    expect(Object.keys(written.entries).sort()).toEqual([
+      '/media/fat/games/SNES/.Mario.sfc',
+      '/media/fat/games/X68000/Gradius/Gradius.zip',
+    ]);
+  });
+
+  it('no-op when no dotted-directory keys exist', async () => {
+    const hostDir = join(metadataRoot, 'host-1');
+    await fs.mkdir(hostDir, { recursive: true });
+    const original = makeHashesJson('host-1', {
+      '/media/fat/games/SNES/Mario.sfc': goodEntry,
+    });
+    await fs.writeFile(join(hostDir, 'hashes.json'), original);
+
+    await normalizeFolderAtomicHashKeys(metadataRoot);
+
+    const written = await fs.readFile(join(hostDir, 'hashes.json'), 'utf-8');
+    // File was NOT rewritten (no migration needed).
+    expect(written).toBe(original);
+  });
+
+  it('logs the count of migrated keys per host', async () => {
+    const hostDir = join(metadataRoot, '192.168.50.10');
+    await fs.mkdir(hostDir, { recursive: true });
+    await fs.writeFile(
+      join(hostDir, 'hashes.json'),
+      makeHashesJson('192.168.50.10', {
+        '/media/fat/games/X68000/.Gradius/Gradius.zip': goodEntry,
+        '/media/fat/games/X68000/.Castlevania/Castlevania.zip': goodEntry,
+      }),
+    );
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await normalizeFolderAtomicHashKeys(metadataRoot);
+      expect(logSpy).toHaveBeenCalledWith(
+        '[cache-migration] normalized 2 folder-atomic hash keys in 192.168.50.10/hashes.json',
+      );
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('singular log message for exactly 1 migrated key', async () => {
+    const hostDir = join(metadataRoot, 'host-1');
+    await fs.mkdir(hostDir, { recursive: true });
+    await fs.writeFile(
+      join(hostDir, 'hashes.json'),
+      makeHashesJson('host-1', {
+        '/media/fat/games/Saturn/.Nights/Nights.cue': goodEntry,
+      }),
+    );
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await normalizeFolderAtomicHashKeys(metadataRoot);
+      expect(logSpy).toHaveBeenCalledWith(
+        '[cache-migration] normalized 1 folder-atomic hash key in host-1/hashes.json',
+      );
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('keeps the canonical key entry when both dotted and undotted keys exist (conflict resolution)', async () => {
+    // If a new entry was written under the canonical undotted key after
+    // the fix deployed, but an old dotted key still exists, the canonical
+    // one wins and the dotted duplicate is dropped.
+    const hostDir = join(metadataRoot, 'host-1');
+    await fs.mkdir(hostDir, { recursive: true });
+    const newEntry = { ...goodEntry, mtime: 1800000000 }; // newer mtime
+    await fs.writeFile(
+      join(hostDir, 'hashes.json'),
+      makeHashesJson('host-1', {
+        '/media/fat/games/X68000/Gradius/Gradius.zip': newEntry, // canonical
+        '/media/fat/games/X68000/.Gradius/Gradius.zip': goodEntry, // old dotted
+      }),
+    );
+
+    await normalizeFolderAtomicHashKeys(metadataRoot);
+
+    const written = JSON.parse(
+      await fs.readFile(join(hostDir, 'hashes.json'), 'utf-8'),
+    ) as { entries: Record<string, { mtime: number }> };
+    expect(Object.keys(written.entries)).toEqual([
+      '/media/fat/games/X68000/Gradius/Gradius.zip',
+    ]);
+    // The canonical (newer) entry is preserved, not overwritten by the old dotted one.
+    expect(written.entries['/media/fat/games/X68000/Gradius/Gradius.zip']?.mtime).toBe(1800000000);
+  });
+
+  it('is idempotent — running twice produces the same result', async () => {
+    const hostDir = join(metadataRoot, 'host-1');
+    await fs.mkdir(hostDir, { recursive: true });
+    await fs.writeFile(
+      join(hostDir, 'hashes.json'),
+      makeHashesJson('host-1', {
+        '/media/fat/games/X68000/.Gradius/Gradius.zip': goodEntry,
+      }),
+    );
+
+    await normalizeFolderAtomicHashKeys(metadataRoot);
+    const first = await fs.readFile(join(hostDir, 'hashes.json'), 'utf-8');
+
+    await normalizeFolderAtomicHashKeys(metadataRoot);
+    const second = await fs.readFile(join(hostDir, 'hashes.json'), 'utf-8');
+
+    expect(first).toBe(second);
+  });
+
+  it('handles multiple host directories independently', async () => {
+    const hostA = join(metadataRoot, 'host-A');
+    const hostB = join(metadataRoot, 'host-B');
+    await fs.mkdir(hostA, { recursive: true });
+    await fs.mkdir(hostB, { recursive: true });
+    await fs.writeFile(
+      join(hostA, 'hashes.json'),
+      makeHashesJson('host-A', {
+        '/media/fat/games/X68000/.Gradius/Gradius.zip': goodEntry,
+      }),
+    );
+    await fs.writeFile(
+      join(hostB, 'hashes.json'),
+      makeHashesJson('host-B', {
+        '/media/fat/games/Saturn/.Nights/Nights.cue': goodEntry,
+        '/media/fat/games/SNES/Mario.sfc': goodEntry,
+      }),
+    );
+
+    await normalizeFolderAtomicHashKeys(metadataRoot);
+
+    const wA = JSON.parse(
+      await fs.readFile(join(hostA, 'hashes.json'), 'utf-8'),
+    ) as { entries: Record<string, unknown> };
+    const wB = JSON.parse(
+      await fs.readFile(join(hostB, 'hashes.json'), 'utf-8'),
+    ) as { entries: Record<string, unknown> };
+    expect(Object.keys(wA.entries)).toEqual([
+      '/media/fat/games/X68000/Gradius/Gradius.zip',
+    ]);
+    expect(Object.keys(wB.entries).sort()).toEqual([
+      '/media/fat/games/SNES/Mario.sfc',
+      '/media/fat/games/Saturn/Nights/Nights.cue',
+    ]);
+  });
+
+  it('skips missing or unparseable hashes.json silently', async () => {
+    const hostDir = join(metadataRoot, 'host-1');
+    await fs.mkdir(hostDir, { recursive: true });
+    await fs.writeFile(join(hostDir, 'hashes.json'), 'not-valid-json', 'utf-8');
+    await expect(
+      normalizeFolderAtomicHashKeys(metadataRoot),
+    ).resolves.toBeUndefined();
+  });
+
+  it('returns without error when metadataRoot does not exist', async () => {
+    await expect(
+      normalizeFolderAtomicHashKeys(join(metadataRoot, 'nonexistent')),
+    ).resolves.toBeUndefined();
   });
 });
