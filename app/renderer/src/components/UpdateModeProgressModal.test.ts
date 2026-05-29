@@ -111,4 +111,18 @@ describe('BrowserScreen — UpdateModeProgressModal integration', () => {
   it('opens modal when updateModeOperationPhase is non-null', () => {
     expect(BROWSER_SCREEN).toMatch(/open=\{updateModeOperationPhase !== null\}/);
   });
+
+  it('reads updateModeOperationKey from CoresContext', () => {
+    expect(BROWSER_SCREEN).toMatch(/updateModeOperationKey/);
+  });
+
+  it('passes key={updateModeOperationKey} to UpdateModeProgressModal (forces DOM remount on each new operation)', () => {
+    expect(BROWSER_SCREEN).toMatch(/key=\{updateModeOperationKey\}/);
+  });
+
+  it('resets progress counters to 0 when a new operation starts (belt-and-suspenders for counter text)', () => {
+    expect(BROWSER_SCREEN).toMatch(/updateModeOperationPhase !== null/);
+    expect(BROWSER_SCREEN).toMatch(/setProgressCurrent\(0\)/);
+    expect(BROWSER_SCREEN).toMatch(/setProgressTotal\(0\)/);
+  });
 });

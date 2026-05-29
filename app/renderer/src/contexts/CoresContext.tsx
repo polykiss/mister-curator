@@ -261,6 +261,14 @@ interface CoresContextValue {
    */
   readonly updateModeOperationPhase: 'entering' | 'restoring' | null;
   /**
+   * Monotonically-increasing integer, incremented once per operation
+   * start (enter or restore). Used as the `key` prop on the progress
+   * modal so React unmounts the previous DOM subtree and mounts a
+   * fresh one — eliminating the CSS `transition-[width]` animation
+   * from the prior operation's final 100% width to the new 0% start.
+   */
+  readonly updateModeOperationKey: number;
+  /**
    * Capture the hidden-file snapshot then un-dot all hidden files so
    * the MiSTer update tool can overwrite them without creating duplicates.
    * Reports progress via the `onUpdateModeProgress` IPC event, which
@@ -303,6 +311,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   const [updateModeOperationPhase, setUpdateModeOperationPhase] = useState<
     'entering' | 'restoring' | null
   >(null);
+  const [updateModeOperationKey, setUpdateModeOperationKey] = useState(0);
 
   // Refs for stale-closure-safe reads inside async callbacks.
   const coresRef = useRef(cores);
@@ -571,6 +580,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   const enterUpdateMode = useCallback(
     async (operationId: string): Promise<void> => {
       setUpdateModeOperationPhase('entering');
+      setUpdateModeOperationKey((k) => k + 1);
       try {
         const status = await window.mister.captureHiddenSnapshot();
         await runWithProgress('Un-dotting hidden files for update…', operationId, () =>
@@ -592,6 +602,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   const restoreFromUpdateMode = useCallback(
     async (operationId: string): Promise<UpdateModeRestoreResult> => {
       setUpdateModeOperationPhase('restoring');
+      setUpdateModeOperationKey((k) => k + 1);
       try {
         const result = await runWithProgress('Restoring hidden files…', operationId, () =>
           window.mister.restoreFromSnapshot({ operationId }),
@@ -1028,6 +1039,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     setUpdateModeActive(false);
     setUpdateModeSnapshot(null);
     setUpdateModeOperationPhase(null);
+    setUpdateModeOperationKey(0);
   }, [status, lostConnection, autoRetry, autoRetryFailed]);
 
   // Load cores on entering the connected state.
@@ -1116,6 +1128,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       updateModeActive,
       updateModeSnapshot,
       updateModeOperationPhase,
+      updateModeOperationKey,
       enterUpdateMode,
       restoreFromUpdateMode,
     }),
@@ -1149,6 +1162,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       updateModeActive,
       updateModeSnapshot,
       updateModeOperationPhase,
+      updateModeOperationKey,
       enterUpdateMode,
       restoreFromUpdateMode,
     ],

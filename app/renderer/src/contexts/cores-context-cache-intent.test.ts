@@ -220,6 +220,23 @@ describe('CoresContext — Bug B/C/D/E renderer-cache-state-races fixes', () => 
   });
 });
 
+describe('CoresContext — updateModeOperationKey (stale-flash fix)', () => {
+  it('exposes updateModeOperationKey in the interface and context value', () => {
+    expect(CORES_CONTEXT).toMatch(/readonly updateModeOperationKey:\s*number/);
+    expect(CORES_CONTEXT).toMatch(/updateModeOperationKey,/);
+  });
+
+  it('enterUpdateMode increments updateModeOperationKey alongside phase set', () => {
+    const block = extractTopLevelBinding(CORES_CONTEXT, 'enterUpdateMode');
+    expect(block).toMatch(/setUpdateModeOperationKey\(\(k\) => k \+ 1\)/);
+  });
+
+  it('restoreFromUpdateMode increments updateModeOperationKey alongside phase set', () => {
+    const block = extractTopLevelBinding(CORES_CONTEXT, 'restoreFromUpdateMode');
+    expect(block).toMatch(/setUpdateModeOperationKey\(\(k\) => k \+ 1\)/);
+  });
+});
+
 /** Extract the first JSX/JS block matching the given pattern, or
  * throw a readable error so failures in the regex don't masquerade
  * as failed assertions about the source. */

@@ -32,7 +32,7 @@ const ROMS_PANE_MIN_WIDTH = 300;
 
 export function BrowserScreen(): JSX.Element {
   const { currentProfile, disconnect, lostConnection } = useConnection();
-  const { selectedCore, refresh, coresLoading, updateModeActive, updateModeOperationPhase } = useCores();
+  const { selectedCore, refresh, coresLoading, updateModeActive, updateModeOperationPhase, updateModeOperationKey } = useCores();
   const [updateModeDialogOpen, setUpdateModeDialogOpen] = useState(false);
   const [progressCurrent, setProgressCurrent] = useState(0);
   const [progressTotal, setProgressTotal] = useState(0);
@@ -45,6 +45,13 @@ export function BrowserScreen(): JSX.Element {
     });
     return unsubscribe;
   }, []);
+
+  useEffect(() => {
+    if (updateModeOperationPhase !== null) {
+      setProgressCurrent(0);
+      setProgressTotal(0);
+    }
+  }, [updateModeOperationPhase]);
 
   const {
     width: coresWidth,
@@ -201,6 +208,7 @@ export function BrowserScreen(): JSX.Element {
         onOpenChange={setUpdateModeDialogOpen}
       />
       <UpdateModeProgressModal
+        key={updateModeOperationKey}
         open={updateModeOperationPhase !== null}
         phase={updateModeOperationPhase ?? 'entering'}
         current={progressCurrent}
