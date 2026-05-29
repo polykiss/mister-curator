@@ -153,6 +153,16 @@ interface CoresContextValue {
   readonly romsByCore: RomsByCore;
   readonly romsLoading: LoadingByCore;
   /**
+   * Monotonically-increasing integer, incremented whenever the ROM
+   * cache is fully cleared (Refresh, bulk-core ops, disconnect reset).
+   * Adapters include this in their `ensureRoms` effect deps so the
+   * effect re-fires after a cache wipe even when core.id and subPath
+   * didn't change — which would otherwise leave the pane stuck in
+   * "No ROMs in this core" until the user navigates away and back
+   * (Bug C).
+   */
+  readonly romCacheVersion: number;
+  /**
    * Cores with an in-flight hide / show operation. The cores list
    * uses this to render an inline "hiding…" / "showing…" indicator
    * in place of the eye icon while the rename is on the wire.
@@ -248,6 +258,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   const [selectedCoreId, setSelectedCoreId] = useState<string | null>(null);
   const [romsByCore, setRomsByCore] = useState<RomsByCore>({});
   const [romsLoading, setRomsLoading] = useState<LoadingByCore>({});
+  const [romCacheVersion, setRomCacheVersion] = useState(0);
   const [systemFilesMarks, setSystemFilesMarks] = useState<SystemFilesMarks>(
     EMPTY_SYSTEM_FILES_MARKS,
   );
@@ -279,6 +290,25 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   selectedCoreIdRef.current = selectedCoreId;
 
   /**
+   * Debug-logging wrapper around `setRomsByCore`. Every mutation to
+   * the renderer ROM cache goes through here so future state-race
+   * debugging has a clear audit trail without adding per-site noise.
+   * `caller` identifies the function making the change; `key` is the
+   * romsKey string (or `'*'` for a full-cache wipe).
+   */
+  const setRomsCache = useCallback(
+    (
+      caller: string,
+      key: string,
+      update: RomsByCore | ((prev: RomsByCore) => RomsByCore),
+    ) => {
+      console.debug('[cores] roms-cache', { caller, key });
+      setRomsByCore(update);
+    },
+    [],
+  );
+
+  /**
    * After a bulk op invalidates the rom cache, the RomsPane's `useEffect`
    * doesn't re-fire (its dep array is stable), so the right pane goes
    * blank until the user clicks away and back. Force a re-fetch for the
@@ -293,7 +323,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       const fresh = await runWithStatus(`Loading ROMs in ${sel}…`, () =>
         window.mister.listRoms(sel),
       );
-      setRomsByCore((prev) => ({ ...prev, [key]: fresh }));
+      setRomsCache('refetchSelectedRoms', key, (prev) => ({ ...prev, [key]: fresh }));
     } catch {
       // Best-effort — leave the cache empty and let the next render
       // trigger ensureRoms via the normal effect path.
@@ -321,7 +351,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
         const fresh = await runWithStatus(`Loading ROMs in ${label}…`, () =>
           window.mister.listRoms(coreId, subPath, { forceRefresh: true }),
         );
-        setRomsByCore((prev) => ({ ...prev, [key]: fresh }));
+        setRomsCache('refetchRoms', key, (prev) => ({ ...prev, [key]: fresh }));
       } finally {
         setRomsLoading((prev) => ({ ...prev, [key]: false }));
       }
@@ -390,7 +420,8 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
           arcadeEntry = null;
         }
         setCores(arcadeEntry ? [arcadeEntry, ...next] : next);
-        setRomsByCore({});
+        setRomsCache('loadCores', '*', {});
+        setRomCacheVersion((v) => v + 1);
         setRomsLoading({});
       } catch (err) {
         const message =
@@ -442,7 +473,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       pendingRomsRef.current.set(key, fetchPromise);
       try {
         const roms = await fetchPromise;
-        setRomsByCore((prev) => ({ ...prev, [key]: roms }));
+        setRomsCache('ensureRoms', key, (prev) => ({ ...prev, [key]: roms }));
       } catch (err) {
         // The IPC layer already logs main-side; on the renderer we
         // surface a one-line warning so the user can spot it without
@@ -507,7 +538,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       }
 
       const optimistic = applyVisibilityChange(previousRoms, { filename, hidden });
-      setRomsByCore((prev) => ({ ...prev, [key]: optimistic }));
+      setRomsCache('setRomVisibility-optimistic', key, (prev) => ({ ...prev, [key]: optimistic }));
       // The cores-list romCount/hiddenCount only reflects top-level
       // entries — nested hides don't change the parent count.
       if (subPath === '') updateCoreCounts(coreId, optimistic);
@@ -515,9 +546,24 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       try {
         await window.mister.setRomVisibility(coreId, filename, hidden, subPath);
       } catch (err) {
-        setRomsByCore((prev) => ({ ...prev, [key]: previousRoms }));
+        setRomsCache('setRomVisibility-revert', key, (prev) => ({ ...prev, [key]: previousRoms }));
         if (previousCores && subPath === '') setCores(previousCores);
         throw err;
+      }
+      // Post-success reconciliation: re-fetch from device to confirm
+      // the optimistic state matches truth. forceRefresh bypasses the
+      // witness check (the rename already bumped the games-dir mtime
+      // and invalidated the main-process cache). Best-effort — the
+      // optimistic state is already correct on SSH success; this just
+      // catches any edge-case drift.
+      try {
+        const fresh = await window.mister.listRoms(coreId, subPath, {
+          forceRefresh: true,
+        });
+        setRomsCache('setRomVisibility-reconcile', key, (prev) => ({ ...prev, [key]: fresh }));
+        if (subPath === '') updateCoreCounts(coreId, fresh);
+      } catch {
+        /* best-effort — optimistic state is still correct on SSH success */
       }
     },
     [updateCoreCounts],
@@ -535,7 +581,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
 
       if (previousRoms) {
         const optimistic = applyBulkVisibilityChange(previousRoms, changes);
-        setRomsByCore((prev) => ({ ...prev, [key]: optimistic }));
+        setRomsCache('setBulkRomVisibility-optimistic', key, (prev) => ({ ...prev, [key]: optimistic }));
         if (subPath === '') updateCoreCounts(coreId, optimistic);
       }
 
@@ -550,7 +596,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
         );
       } catch (err) {
         if (previousRoms) {
-          setRomsByCore((prev) => ({ ...prev, [key]: previousRoms }));
+          setRomsCache('setBulkRomVisibility-revert', key, (prev) => ({ ...prev, [key]: previousRoms }));
           if (previousCores && subPath === '') setCores(previousCores);
         }
         throw err;
@@ -558,8 +604,15 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
 
       if (result.failed.length > 0 && previousRoms) {
         try {
-          const fresh = await window.mister.listRoms(coreId, subPath);
-          setRomsByCore((prev) => ({ ...prev, [key]: fresh }));
+          // forceRefresh bypasses the witness check — the renames that
+          // succeeded already invalidated the cache, so without this
+          // the witness may still match the pre-op snapshot and return
+          // stale data that overwrites the correct optimistic state
+          // (Bug B: ~0.5s flash-then-disappear on partial failure).
+          const fresh = await window.mister.listRoms(coreId, subPath, {
+            forceRefresh: true,
+          });
+          setRomsCache('setBulkRomVisibility-recovery', key, (prev) => ({ ...prev, [key]: fresh }));
           if (subPath === '') updateCoreCounts(coreId, fresh);
         } catch {
           /* best-effort */
@@ -619,7 +672,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
         // The hide/unhide changed the on-disk basename for this
         // core's ROM list — invalidate the cache so the next
         // `ensureRoms` re-fetches.
-        setRomsByCore((prev) => {
+        setRomsCache('setSingleCoreVisibility-invalidate', coreId, (prev) => {
           if (!(coreId in prev)) return prev;
           const copy = { ...prev };
           delete copy[coreId];
@@ -685,7 +738,8 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       // optimistic mental model isn't reliable.
       const next = await window.mister.listAllCoresWithFiles();
       setCores(next);
-      setRomsByCore({});
+      setRomsCache('setBulkCoreVisibility', '*', {});
+      setRomCacheVersion((v) => v + 1);
       // Ledger snapshot may have shifted (entries added on hide / removed
       // on show). Refresh so "Unhide all (N)" stays accurate.
       try {
@@ -737,7 +791,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
           window.mister.listRoms(coreId),
           window.mister.listAllCoresWithFiles(),
         ]);
-        setRomsByCore((prev) => ({ ...prev, [coreId]: freshRoms }));
+        setRomsCache('addSystemFileMark', coreId, (prev) => ({ ...prev, [coreId]: freshRoms }));
         setCores(freshCores);
       } catch {
         // Best-effort reconciliation — the next normal refresh fixes it.
@@ -770,7 +824,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
           window.mister.listRoms(coreId),
           window.mister.listAllCoresWithFiles(),
         ]);
-        setRomsByCore((prev) => ({ ...prev, [coreId]: freshRoms }));
+        setRomsCache('removeSystemFileMark', coreId, (prev) => ({ ...prev, [coreId]: freshRoms }));
         setCores(freshCores);
       } catch {
         // Best-effort reconciliation — the next normal refresh fixes it.
@@ -802,7 +856,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       try {
         const fresh = await window.mister.listRoms(target.coreId, target.subPath);
         const key = romsKey(target.coreId, target.subPath);
-        setRomsByCore((prev) => ({ ...prev, [key]: fresh }));
+        setRomsCache('setFolderClassification', key, (prev) => ({ ...prev, [key]: fresh }));
       } catch {
         /* best-effort */
       }
@@ -856,7 +910,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
           window.mister.listRoms(coreId),
           window.mister.listAllCoresWithFiles(),
         ]);
-        setRomsByCore((prev) => ({ ...prev, [coreId]: freshRoms }));
+        setRomsCache('setSystemFileMarks', coreId, (prev) => ({ ...prev, [coreId]: freshRoms }));
         setCores(freshCores);
       } catch {
         // Best-effort reconciliation.
@@ -879,7 +933,8 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     if (lostConnection || autoRetry !== null) return;
     setCores(null);
     setSelectedCoreId(null);
-    setRomsByCore({});
+    setRomsCache('disconnect-reset', '*', {});
+    setRomCacheVersion((v) => v + 1);
     setRomsLoading({});
     setCoresError(null);
     setCoresLoading(false);
@@ -952,6 +1007,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       selectedCore,
       romsByCore,
       romsLoading,
+      romCacheVersion,
       pendingCoreIds,
       ledgerCoreIds,
       selectCore,
@@ -979,6 +1035,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       selectedCore,
       romsByCore,
       romsLoading,
+      romCacheVersion,
       pendingCoreIds,
       ledgerCoreIds,
       selectCore,

@@ -1201,3 +1201,80 @@ describe('ConnectionManager — arcade auto-hide rule + ledger (PR 2/2)', () => 
     expect(manager.getArcadeAutoHideEnabled()).toBe(false);
   });
 });
+
+describe('ConnectionManager — Bug D: arcade cache in-place update on single hide/show', () => {
+  let workDir: string;
+  let cacheDir: string;
+  let client: FakeMisterClient;
+  let cache: CacheManager;
+  let manager: ConnectionManager;
+
+  beforeEach(async () => {
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-arcade-inplace-'));
+    cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-arcade-inplace-cache-'));
+    client = new FakeMisterClient({
+      rootPath: workDir,
+      pristineRootPath: fixturesDir,
+      latencyMs: 0,
+    });
+    await client.reset();
+    // Minimal _Arcade/ setup — two .mra files, no rom zips so
+    // auto-hide doesn't run and complicate the listing.
+    const arcadeDir = path.join(workDir, '_Arcade');
+    await fs.rm(arcadeDir, { recursive: true, force: true });
+    await fs.mkdir(arcadeDir, { recursive: true });
+    await fs.writeFile(
+      path.join(arcadeDir, 'Galaga.mra'),
+      '<misterromdescription/>',
+    );
+    await fs.writeFile(
+      path.join(arcadeDir, 'Pac-Man.mra'),
+      '<misterromdescription/>',
+    );
+    cache = new CacheManager(cacheDir);
+    manager = new ConnectionManager(client, makeStubStore(), cache);
+  });
+
+  afterEach(async () => {
+    await manager.disconnect().catch(() => { /* best-effort */ });
+    await fs.rm(workDir, { recursive: true, force: true });
+    await fs.rm(cacheDir, { recursive: true, force: true });
+  });
+
+  it('setArcadeMraVisibility updates the in-memory listing in place — no full walk on re-navigation (Bug D)', async () => {
+    await manager.connect(profile.id);
+
+    // Prime the in-memory cache with an explicit listing call.
+    const before = await manager.listArcadeMraEntries();
+    const beforePaths = before.map((e) => e.relativePath).sort();
+    expect(beforePaths).toContain('Galaga.mra');
+    expect(beforePaths).toContain('Pac-Man.mra');
+
+    // Hide Galaga. Pre-fix this nulled arcadeMraCache entirely, so
+    // the next listArcadeMraEntries would walk the device. Post-fix
+    // the cache is updated in place.
+    await manager.setArcadeMraVisibility('Galaga.mra', true);
+
+    const after = await manager.listArcadeMraEntries();
+    const galaga = after.find((e) => e.relativePath === '.Galaga.mra');
+    expect(galaga).toBeDefined();
+    expect(galaga?.hidden).toBe(true);
+    // Pac-Man survives unchanged in the preserved cache.
+    const pacman = after.find((e) => e.relativePath === 'Pac-Man.mra');
+    expect(pacman).toBeDefined();
+    expect(pacman?.hidden).toBe(false);
+  });
+
+  it('setArcadeMraVisibility hide then unhide round-trips correctly in the in-memory cache', async () => {
+    await manager.connect(profile.id);
+    await manager.listArcadeMraEntries(); // prime cache
+
+    await manager.setArcadeMraVisibility('Pac-Man.mra', true);
+    const hidden = await manager.listArcadeMraEntries();
+    expect(hidden.find((e) => e.relativePath === '.Pac-Man.mra')?.hidden).toBe(true);
+
+    await manager.setArcadeMraVisibility('.Pac-Man.mra', false);
+    const restored = await manager.listArcadeMraEntries();
+    expect(restored.find((e) => e.relativePath === 'Pac-Man.mra')?.hidden).toBe(false);
+  });
+});

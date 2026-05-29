@@ -45,7 +45,7 @@ describe('arcade-adapter — optimistic single-toggle (feat/pre-beta-polish-batc
       /import \{ useCores \} from '@app\/renderer\/src\/contexts\/CoresContext'/,
     );
     expect(SOURCE).toMatch(
-      /const \{ adjustArcadeHiddenCount \} = useCores\(\);/,
+      /const \{ adjustArcadeHiddenCount[^}]* \} = useCores\(\);/,
     );
   });
 

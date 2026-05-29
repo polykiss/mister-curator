@@ -1,5 +1,5 @@
 import { Eye, EyeOff, Loader2, MoreHorizontal } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import type { ArcadeMraEntry } from '@shared/arcade-mra';
@@ -97,7 +97,7 @@ export function useArcadeAdapter(): ItemListAdapter {
   // helper so the badge updates with the same click that flips the
   // pane row's eye icon. (Pre-fix the badge waited for the next
   // CoresContext refresh.)
-  const { adjustArcadeHiddenCount } = useCores();
+  const { adjustArcadeHiddenCount, romCacheVersion } = useCores();
 
   const [entries, setEntries] = useState<readonly ArcadeMraEntry[] | null>(
     null,
@@ -213,9 +213,21 @@ export function useArcadeAdapter(): ItemListAdapter {
     [],
   );
 
+  // Track whether this is the initial mount so we can distinguish
+  // the lazy first-load (forceRefresh: false — allow the in-memory
+  // cache to hit) from a re-fire triggered by the user pressing
+  // Refresh (romCacheVersion bumps — forceRefresh: true to bypass
+  // the stale arcade listing cache and reload from device).
+  const isInitialArcadeMountRef = useRef(true);
   useEffect(() => {
-    void refresh(false);
-  }, [refresh]);
+    const forceRefresh = !isInitialArcadeMountRef.current;
+    isInitialArcadeMountRef.current = false;
+    void refresh(forceRefresh);
+    // romCacheVersion: re-fire when CoresContext clears its ROM cache
+    // (user pressed Refresh). Parity with the roms-adapter ensureRoms
+    // effect so both panes reflect the Refresh in a single click.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refresh, romCacheVersion]);
 
   // Every `.mra` at any depth — drives the header chip and the
   // Hide all / Show all bulk buttons. Pre-PR-C this filtered to
@@ -398,8 +410,10 @@ export function useArcadeAdapter(): ItemListAdapter {
    */
   const onToggleSingle = (entry: ArcadeMraEntry): void => {
     if (!canMutate) return;
+    captureArcadeScrollAnchor();
     const next = !entry.hidden;
     void applyArcadeMraVisibility(entry, next).catch((err: unknown) => {
+      arcadePendingScrollRef.current = null; // discard on error
       toast.error(
         `${next ? 'Hide' : 'Show'} failed: ${entry.displayName}`,
         {
@@ -473,6 +487,42 @@ export function useArcadeAdapter(): ItemListAdapter {
       setAutoHidePending(false);
     }
   };
+
+  // Bug E — scroll preservation for arcade single-toggle (mirrors the
+  // roms-adapter pattern). Anchor the first partially-visible row
+  // before the optimistic flip; restore after the list re-renders.
+  const arcadeScrollContainerRef = useRef<HTMLDivElement>(null);
+  const arcadePendingScrollRef = useRef<{
+    readonly filename: string;
+    readonly offset: number;
+  } | null>(null);
+  const captureArcadeScrollAnchor = useCallback(() => {
+    const el = arcadeScrollContainerRef.current;
+    if (!el) return;
+    const elTop = el.getBoundingClientRect().top;
+    const rows = el.querySelectorAll<HTMLElement>('[data-arcade-row]');
+    for (const row of rows) {
+      if (row.getBoundingClientRect().bottom > elTop + 1) {
+        arcadePendingScrollRef.current = {
+          filename: row.getAttribute('data-arcade-row') ?? '',
+          offset: row.getBoundingClientRect().top - elTop,
+        };
+        return;
+      }
+    }
+  }, []);
+  useLayoutEffect(() => {
+    const restore = arcadePendingScrollRef.current;
+    if (!restore || !arcadeScrollContainerRef.current) return;
+    arcadePendingScrollRef.current = null;
+    const el = arcadeScrollContainerRef.current;
+    const row = el.querySelector<HTMLElement>(
+      `[data-arcade-row="${CSS.escape(restore.filename)}"]`,
+    );
+    if (!row) return;
+    const elTop = el.getBoundingClientRect().top;
+    el.scrollTop += row.getBoundingClientRect().top - elTop - restore.offset;
+  }, [sortedRows]);
 
   const breadcrumb = computeBreadcrumb('Arcade', subPath);
   const backRow = computeBackRow('Arcade', subPath);
@@ -614,7 +664,7 @@ export function useArcadeAdapter(): ItemListAdapter {
           clear of the scrollbar. Without these, arcade rows extended
           to a slightly different right edge than RomsPane rows because
           the macOS overlay scrollbar shifted them inward. */}
-      <div className="scroll-themed flex-1 overflow-auto pr-2.5">
+      <div ref={arcadeScrollContainerRef} className="scroll-themed flex-1 overflow-auto pr-2.5">
         {loading && entries === null ? (
           <div className="space-y-1 p-4">
             {Array.from({ length: 8 }).map((_, i) => (
@@ -767,6 +817,7 @@ export function useArcadeAdapter(): ItemListAdapter {
                 return (
                   <TableRow
                     key={entry.relativePath}
+                    data-arcade-row={rom.filename}
                     className={cn(
                       'group/row',
                       entry.hidden &&
