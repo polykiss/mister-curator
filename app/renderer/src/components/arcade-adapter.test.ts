@@ -149,6 +149,165 @@ describe('arcade-adapter — optimistic single-toggle (feat/pre-beta-polish-batc
   });
 });
 
+describe('arcade-adapter — bulk-select (feat/arcade-bulk-select-and-toolbar)', () => {
+  it('tracks selectedKeys with useState — keyed by arcadeMraVisiblePath so the key is stable across hide/show', () => {
+    // Selection key = arcadeMraVisiblePath(entry.relativePath) so a
+    // dot-rename (hide/show) doesn't orphan the selection entry.
+    expect(SOURCE).toMatch(/arcadeMraVisiblePath\(r\.relativePath\)/);
+    expect(SOURCE).toMatch(/selectedKeys.*ReadonlySet<string>/);
+  });
+
+  it('purges stale selections when sortedRows changes — useEffect keyed on sortedRows', () => {
+    // When rows leave the visible set (filter toggle, subPath change,
+    // row hidden with Show Hidden off), their keys are removed from
+    // selectedKeys.
+    expect(SOURCE).toMatch(
+      /setSelectedKeys\(\(prev\) => \{[\s\S]{0,400}visible\.has\(k\)/,
+    );
+    expect(SOURCE).toMatch(/\}, \[sortedRows\]\)/);
+  });
+
+  it('onToggleAll selects all visible mra rows when checked, clears when unchecked', () => {
+    expect(SOURCE).toMatch(/const onToggleAll = \(checked: boolean\): void =>/);
+    // Checked: new Set of all mra relativePaths via arcadeMraVisiblePath.
+    expect(SOURCE).toMatch(
+      /filter\(\(r\) => r\.kind === 'mra'\)[\s\S]{0,80}\.map\(\(r\) => arcadeMraVisiblePath\(r\.relativePath\)\)/,
+    );
+  });
+
+  it('header checkbox is rendered in the w-10 pl-4 slot and is wired to onToggleAll', () => {
+    expect(SOURCE).toMatch(
+      /<TableHead className="w-10 pl-4">\s*<input[\s\S]{0,200}aria-label="Select all"/,
+    );
+    expect(SOURCE).toMatch(/onChange=\{\(e\) => onToggleAll\(e\.target\.checked\)\}/);
+  });
+
+  it('each mra row renders a checkbox wired to onToggleSelect — folder rows get an empty cell', () => {
+    // Folder rows: <TableCell className="w-10 pl-4" /> (no checkbox).
+    // MRA rows: <TableCell className="w-10 pl-4"><input ... /></TableCell>.
+    expect(SOURCE).toMatch(/isFolder \? \(\s*<TableCell className="w-10 pl-4" \/>/);
+    expect(SOURCE).toMatch(/aria-label=\{`Select \$\{entry\.displayName\}`\}/);
+    expect(SOURCE).toMatch(/onToggleSelect\(\s*arcadeMraVisiblePath\(entry\.relativePath\),/);
+  });
+
+  it('"Hide selected (N)" button is disabled when visibleSelectedCount === 0', () => {
+    expect(SOURCE).toMatch(
+      /disabled=\{!canMutate \|\| visibleSelectedCount === 0\}/,
+    );
+    expect(SOURCE).toMatch(/Hide selected \(\{visibleSelectedCount\}\)/);
+  });
+
+  it('"Unhide selected (N)" button is disabled when hiddenSelectedCount === 0', () => {
+    expect(SOURCE).toMatch(
+      /disabled=\{!canMutate \|\| hiddenSelectedCount === 0\}/,
+    );
+    expect(SOURCE).toMatch(/Unhide selected \(\{hiddenSelectedCount\}\)/);
+  });
+
+  it('onHideSelected applies optimistic flips then calls setBulkArcadeMraVisibility', () => {
+    const start = SOURCE.indexOf('const onHideSelected = async (): Promise<void>');
+    expect(start).toBeGreaterThan(-1);
+    const block = SOURCE.slice(start, start + 3000);
+    // Optimistic flips before the batch SSH call.
+    const sshIdx = block.indexOf('setBulkArcadeMraVisibility');
+    expect(sshIdx).toBeGreaterThan(-1);
+    const preSSH = block.slice(0, sshIdx);
+    expect(preSSH).toMatch(/setEntries\(\(prev\) =>/);
+    expect(preSSH).toMatch(/setMetadataByMra\(\(prev\) =>/);
+    expect(preSSH).toMatch(/adjustArcadeHiddenCount\(targets\.length\)/);
+    expect(preSSH).toMatch(/setSelectedKeys\(new Set\(\)\)/);
+  });
+
+  it('onHideSelected reverts optimistic flips and toasts on full failure', () => {
+    const start = SOURCE.indexOf('const onHideSelected = async (): Promise<void>');
+    const block = SOURCE.slice(start, start + 3000);
+    expect(block).toMatch(/adjustArcadeHiddenCount\(-targets\.length\)/);
+    expect(block).toMatch(/toast\.error\('Hide selected failed'/);
+  });
+
+  it('onShowSelected applies optimistic flips then calls setBulkArcadeMraVisibility', () => {
+    const start = SOURCE.indexOf('const onShowSelected = async (): Promise<void>');
+    expect(start).toBeGreaterThan(-1);
+    const block = SOURCE.slice(start, start + 3000);
+    const sshIdx = block.indexOf('setBulkArcadeMraVisibility');
+    expect(sshIdx).toBeGreaterThan(-1);
+    const preSSH = block.slice(0, sshIdx);
+    expect(preSSH).toMatch(/adjustArcadeHiddenCount\(-targets\.length\)/);
+    expect(preSSH).toMatch(/setSelectedKeys\(new Set\(\)\)/);
+  });
+
+  it('selection is cleared (setSelectedKeys new Set) after hide-selected and show-selected', () => {
+    // Both bulk-selected paths call setSelectedKeys(new Set()) before
+    // the SSH batch so the UI clears immediately on click.
+    const hideStart = SOURCE.indexOf('const onHideSelected');
+    const showStart = SOURCE.indexOf('const onShowSelected');
+    expect(SOURCE.slice(hideStart, hideStart + 3000)).toMatch(
+      /setSelectedKeys\(new Set\(\)\)/,
+    );
+    expect(SOURCE.slice(showStart, showStart + 3000)).toMatch(
+      /setSelectedKeys\(new Set\(\)\)/,
+    );
+  });
+
+  it('onToggleSingle does NOT call setSelectedKeys — single-toggle eye icon leaves selection intact', () => {
+    const start = SOURCE.indexOf(
+      'const onToggleSingle = (entry: ArcadeMraEntry): void =>',
+    );
+    expect(start).toBeGreaterThan(-1);
+    // Find the end of onToggleSingle (next const declaration).
+    const tail = SOURCE.slice(start);
+    const nextConst = tail.indexOf('\n  const ', 10);
+    const block = tail.slice(0, nextConst > 0 ? nextConst : 400);
+    expect(block).not.toMatch(/setSelectedKeys/);
+  });
+});
+
+describe('arcade-adapter — top bar consolidation (feat/arcade-bulk-select-and-toolbar)', () => {
+  it('does not contain "Mark as system" or "Unmark as system" buttons', () => {
+    expect(SOURCE).not.toMatch(/Mark as system/);
+    expect(SOURCE).not.toMatch(/Unmark as system/);
+  });
+
+  it('"Show hidden" checkbox is rendered in the second-row leftmost position', () => {
+    // Second row = div.flex.flex-wrap.gap-4. "Show hidden" must appear
+    // before "Auto-hide missing ROMs" in the source (DOM order = layout
+    // position for a left-to-right flex row).
+    const secondRowStart = SOURCE.indexOf('flex flex-wrap gap-4');
+    expect(secondRowStart).toBeGreaterThan(-1);
+    const block = SOURCE.slice(secondRowStart, secondRowStart + 2000);
+    const showHiddenIdx = block.indexOf('Show hidden');
+    const autoHideIdx = block.indexOf('Auto-hide missing ROMs');
+    expect(showHiddenIdx).toBeGreaterThan(-1);
+    expect(autoHideIdx).toBeGreaterThan(-1);
+    expect(showHiddenIdx).toBeLessThan(autoHideIdx);
+  });
+
+  it('"Auto-hide missing ROMs" is rendered in the second row (same row as "Show hidden")', () => {
+    const secondRowStart = SOURCE.indexOf('flex flex-wrap gap-4');
+    const block = SOURCE.slice(secondRowStart, secondRowStart + 2000);
+    expect(block).toMatch(/Auto-hide missing ROMs/);
+  });
+
+  it('top row contains "Hide all", "Unhide all", "Hide selected", "Unhide selected" in order', () => {
+    const firstRowStart = SOURCE.indexOf('flex flex-wrap items-center gap-2');
+    expect(firstRowStart).toBeGreaterThan(-1);
+    const block = SOURCE.slice(firstRowStart, firstRowStart + 2500);
+    const hideAllIdx = block.indexOf('Hide all');
+    const unhideAllIdx = block.indexOf('Unhide all');
+    const hideSelIdx = block.indexOf('Hide selected (');
+    const unhideSelIdx = block.indexOf('Unhide selected (');
+    expect(hideAllIdx).toBeGreaterThan(-1);
+    expect(unhideAllIdx).toBeGreaterThan(hideAllIdx);
+    expect(hideSelIdx).toBeGreaterThan(unhideAllIdx);
+    expect(unhideSelIdx).toBeGreaterThan(hideSelIdx);
+  });
+
+  it('renames "Show all" to "Unhide all" for ROM-pane parity', () => {
+    expect(SOURCE).not.toMatch(/>\s*Show all\s*</);
+    expect(SOURCE).toMatch(/Unhide all/);
+  });
+});
+
 describe('arcade-adapter — sidebar-badge sync (feat/pre-beta-polish-batch)', () => {
   it('CoresContext exposes adjustArcadeHiddenCount with the documented +/- delta contract', () => {
     const ctx = readFileSync(
