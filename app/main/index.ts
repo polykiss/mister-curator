@@ -4,6 +4,7 @@ import { app, BrowserWindow, shell } from 'electron';
 
 import type { RomMetadata } from '@shared/metadata-types';
 import { IPC_CHANNELS } from '@shared/preload-api';
+import type { UpdateModeProgressEvent } from '@shared/preload-api';
 
 import { CacheManager } from '@app/main/cache/cache-manager';
 import type { CacheEvent } from '@app/main/cache/cache-types';
@@ -247,6 +248,21 @@ void app.whenReady().then(async () => {
     }
   };
 
+  // feat/update-mode: streaming progress from applyUpdateMode /
+  // restoreFromSnapshot. Same fan-out shape as the other emitters.
+  const updateModeProgressListeners = new Set<
+    (event: UpdateModeProgressEvent) => void
+  >();
+  const emitUpdateModeProgress = (event: UpdateModeProgressEvent): void => {
+    for (const fn of updateModeProgressListeners) {
+      try {
+        fn(event);
+      } catch {
+        /* swallow */
+      }
+    }
+  };
+
   // PR-C (PR #26) — auto-scrape engine. Walks every core's metadata
   // in the background on connect, sidebar order. Pause/resume tied
   // to connection lifecycle (see manager.onStatusChange below).
@@ -362,6 +378,7 @@ void app.whenReady().then(async () => {
     // PR-D2 (PR #29): the search modal calls jeuRecherche directly
     // via a renderer-driven IPC; pass the SS service through.
     screenScraper,
+    emitUpdateModeProgress,
   );
 
   const window = createWindow();
@@ -404,6 +421,12 @@ void app.whenReady().then(async () => {
   autoScrapeEngine.onProgress((event) => {
     if (!window.isDestroyed()) {
       window.webContents.send(IPC_CHANNELS.autoScrapeProgress, event);
+    }
+  });
+
+  updateModeProgressListeners.add((event) => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.updateModeProgress, event);
     }
   });
 
@@ -555,6 +578,11 @@ void app.whenReady().then(async () => {
       autoScrapeEngine.onProgress((event) => {
         if (!newWindow.isDestroyed()) {
           newWindow.webContents.send(IPC_CHANNELS.autoScrapeProgress, event);
+        }
+      });
+      updateModeProgressListeners.add((event) => {
+        if (!newWindow.isDestroyed()) {
+          newWindow.webContents.send(IPC_CHANNELS.updateModeProgress, event);
         }
       });
     }

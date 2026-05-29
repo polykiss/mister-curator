@@ -458,6 +458,59 @@ export interface IMisterClient {
   computeSampleMd5s(
     paths: readonly string[],
   ): Promise<Record<string, string>>;
+
+  // ─── feat/update-mode ───────────────────────────────────────────
+  /**
+   * Walk `/media/fat/games` (mindepth 2, maxdepth 5) and
+   * `/media/fat/_Arcade` (mindepth 1, maxdepth 4) for every
+   * dot-prefixed regular file. Returns the absolute paths.
+   */
+  walkHiddenFiles(): Promise<readonly string[]>;
+
+  /**
+   * Atomically write a JSON string to the update snapshot path on
+   * the device (temp-file + mv). Creates the `.mistercurator` dir
+   * if absent.
+   */
+  writeUpdateSnapshot(json: string): Promise<void>;
+
+  /**
+   * Read the update snapshot JSON from the device. Returns null when
+   * the file does not exist.
+   */
+  readUpdateSnapshot(): Promise<string | null>;
+
+  /**
+   * Delete the update snapshot file from the device. Idempotent
+   * (no error when already absent).
+   */
+  deleteUpdateSnapshot(): Promise<void>;
+
+  /**
+   * Chunked batch rename of absolute paths. Each entry has:
+   *   src  — current on-device path
+   *   dst  — desired on-device path
+   *   id   — opaque string echoed back in the result (typically src)
+   *
+   * When `checkSrcExists` is true the script emits `MISSING\t<id>`
+   * for an absent src instead of attempting the rename. When false,
+   * an absent src produces a `FAIL` entry (normal mv error).
+   *
+   * Calls `onProgress(done, total)` after every chunk so the caller
+   * can stream progress to the renderer.
+   *
+   * Returns a flat list of per-path results; the caller accumulates
+   * ok / missing / fail counts.
+   */
+  batchRenameAbsolutePaths(
+    renames: readonly { readonly src: string; readonly dst: string; readonly id: string }[],
+    checkSrcExists: boolean,
+    onProgress: (done: number, total: number) => void,
+  ): Promise<readonly {
+    readonly id: string;
+    readonly status: 'ok' | 'missing' | 'fail';
+    readonly reason?: string;
+  }[]>;
 }
 
 /**

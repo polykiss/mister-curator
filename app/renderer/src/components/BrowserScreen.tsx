@@ -1,5 +1,6 @@
-import { LogOut, RefreshCw } from 'lucide-react';
+import { LogOut, RefreshCw, ShieldCheck } from 'lucide-react';
 import type { JSX } from 'react';
+import { useState } from 'react';
 import { toast } from 'sonner';
 
 import { ARCADE_VIRTUAL_CORE_ID } from '@shared/arcade-mra';
@@ -11,6 +12,8 @@ import { CoresPane } from '@app/renderer/src/components/CoresPane';
 import { DisconnectBanner } from '@app/renderer/src/components/DisconnectBanner';
 import { RomsPane } from '@app/renderer/src/components/RomsPane';
 import { StatusBar } from '@app/renderer/src/components/StatusBar';
+import { UpdateModeBanner } from '@app/renderer/src/components/UpdateModeBanner';
+import { UpdateModeDialog } from '@app/renderer/src/components/UpdateModeDialog';
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
@@ -28,7 +31,8 @@ const ROMS_PANE_MIN_WIDTH = 300;
 
 export function BrowserScreen(): JSX.Element {
   const { currentProfile, disconnect, lostConnection } = useConnection();
-  const { selectedCore, refresh, coresLoading } = useCores();
+  const { selectedCore, refresh, coresLoading, updateModeActive } = useCores();
+  const [updateModeDialogOpen, setUpdateModeDialogOpen] = useState(false);
 
   const {
     width: coresWidth,
@@ -71,6 +75,7 @@ export function BrowserScreen(): JSX.Element {
       )}
     >
       <DisconnectBanner />
+      <UpdateModeBanner />
       <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-subtle bg-chrome px-4">
         <div className="min-w-0">
           <div className="truncate text-body font-medium text-fg">
@@ -94,6 +99,16 @@ export function BrowserScreen(): JSX.Element {
               strokeWidth={1.5}
             />
             Refresh
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setUpdateModeDialogOpen(true)}
+            disabled={updateModeActive || coresLoading}
+            title={updateModeActive ? 'Update mode already active — restore first' : undefined}
+          >
+            <ShieldCheck strokeWidth={1.5} />
+            Update mode
           </Button>
           <Button variant="ghost" size="sm" onClick={() => void onDisconnect()}>
             <LogOut strokeWidth={1.5} />
@@ -169,6 +184,10 @@ export function BrowserScreen(): JSX.Element {
       </div>
 
       <StatusBar />
+      <UpdateModeDialog
+        open={updateModeDialogOpen}
+        onOpenChange={setUpdateModeDialogOpen}
+      />
     </div>
   );
 }

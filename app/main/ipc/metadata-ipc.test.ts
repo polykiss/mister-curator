@@ -135,6 +135,7 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
       // PR-D2 (PR #29): search-by-name path not exercised here;
       // pass null for the SS service.
       null,
+      () => undefined,
     );
   });
 
@@ -304,6 +305,7 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
       // PR-D2 (PR #29): search-by-name path not exercised here;
       // pass null for the SS service.
       null,
+      () => undefined,
     );
     const h = handlers.get(IPC_CHANNELS.ensureMetadataDatabase);
     await h!.handler({});
@@ -367,6 +369,7 @@ describe('IPC bridge — searchScreenScraperByName diag logs', () => {
       vi.fn() as never,
       { setFocus: () => undefined } as never,
       (opts.withSS ?? true ? stubScreenScraper : null) as never,
+      () => undefined,
     );
   }
 
@@ -513,6 +516,7 @@ describe('IPC bridge — setAutoScrapeFocus passes ARCADE_VIRTUAL_CORE_ID throug
       vi.fn(),
       stubEngine as never,
       null,
+      () => undefined,
     );
   });
 

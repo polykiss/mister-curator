@@ -15,6 +15,7 @@ import {
   MISTER_LEDGER_DIR,
   MISTER_LEDGER_PATH,
   MISTER_SYSTEM_FILES_PATH,
+  MISTER_UPDATE_SNAPSHOT_PATH,
 } from '@shared/constants';
 import {
   parseArcadeMra,
@@ -1033,6 +1034,134 @@ export class FakeMisterClient implements IMisterClient {
       out[p] = createHash('md5').update(sampleInput).digest('hex');
     }
     return out;
+  }
+
+  // ─── feat/update-mode ─────────────────────────────────────────────
+
+  async walkHiddenFiles(): Promise<readonly string[]> {
+    this.assertConnected();
+    const results: string[] = [];
+    const gamesLocal = this.toLocal(MISTER_GAMES_DIR);
+    const arcadeLocal = this.toLocal(MISTER_ARCADE_DIR);
+
+    async function walk(dir: string, depth: number, maxDepth: number): Promise<void> {
+      if (depth > maxDepth) return;
+      let entries: Dirent[];
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isFile() && e.name.startsWith('.')) {
+          results.push(full);
+        } else if (e.isDirectory()) {
+          await walk(full, depth + 1, maxDepth);
+        }
+      }
+    }
+
+    // Replicate the real client's find depth limits:
+    //   games: mindepth 2 (skip core-dir level), maxdepth 5 → local depth 5
+    //   arcade: mindepth 1, maxdepth 4
+    // We walk from the games dir (depth 0 = /media/fat/games) and
+    // skip files at depth 1 (core dir itself). For arcade depth 0
+    // means the arcade dir itself.
+    await (async () => {
+      let entries: Dirent[];
+      try {
+        entries = await fs.readdir(gamesLocal, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const coreDir of entries) {
+        if (!coreDir.isDirectory()) continue;
+        await walk(path.join(gamesLocal, coreDir.name), 1, 4);
+      }
+    })();
+    await walk(arcadeLocal, 0, 3);
+
+    // Convert local paths back to device paths
+    return results.map((local) => {
+      const rel = path.relative(this.rootPath, local).split(path.sep).join('/');
+      return `${FAKE_FAT_DIR}/${rel}`;
+    });
+  }
+
+  async writeUpdateSnapshot(json: string): Promise<void> {
+    this.assertConnected();
+    await this.delay();
+    const localDir = this.toLocal(MISTER_LEDGER_DIR);
+    const localPath = this.toLocal(MISTER_UPDATE_SNAPSHOT_PATH);
+    await fs.mkdir(localDir, { recursive: true });
+    const tmp = `${localPath}.tmp`;
+    await fs.writeFile(tmp, json, 'utf-8');
+    await fs.rename(tmp, localPath);
+  }
+
+  async readUpdateSnapshot(): Promise<string | null> {
+    this.assertConnected();
+    await this.delay();
+    const localPath = this.toLocal(MISTER_UPDATE_SNAPSHOT_PATH);
+    try {
+      const text = await fs.readFile(localPath, 'utf-8');
+      return text.trim().length > 0 ? text.trim() : null;
+    } catch (err) {
+      if (isNodeError(err) && err.code === 'ENOENT') return null;
+      throw err;
+    }
+  }
+
+  async deleteUpdateSnapshot(): Promise<void> {
+    this.assertConnected();
+    await this.delay();
+    const localPath = this.toLocal(MISTER_UPDATE_SNAPSHOT_PATH);
+    try {
+      await fs.unlink(localPath);
+    } catch (err) {
+      if (isNodeError(err) && err.code === 'ENOENT') return;
+      throw err;
+    }
+  }
+
+  async batchRenameAbsolutePaths(
+    renames: readonly { readonly src: string; readonly dst: string; readonly id: string }[],
+    checkSrcExists: boolean,
+    onProgress: (done: number, total: number) => void,
+  ): Promise<readonly {
+    readonly id: string;
+    readonly status: 'ok' | 'missing' | 'fail';
+    readonly reason?: string;
+  }[]> {
+    this.assertConnected();
+    if (renames.length === 0) return [];
+    await this.delay();
+    const results: { id: string; status: 'ok' | 'missing' | 'fail'; reason?: string }[] = [];
+    const total = renames.length;
+    for (let i = 0; i < renames.length; i++) {
+      const r = renames[i]!;
+      const srcLocal = this.toLocal(r.src);
+      const dstLocal = this.toLocal(r.dst);
+      try {
+        if (checkSrcExists) {
+          try {
+            await fs.access(srcLocal);
+          } catch {
+            results.push({ id: r.id, status: 'missing' });
+            onProgress(i + 1, total);
+            continue;
+          }
+        }
+        await fs.rename(srcLocal, dstLocal);
+        results.push({ id: r.id, status: 'ok' });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        results.push({ id: r.id, status: 'fail', reason });
+      }
+      onProgress(i + 1, total);
+    }
+    return results;
   }
 
   /**

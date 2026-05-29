@@ -131,12 +131,15 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     setSystemFileMarks,
     setFolderClassification,
     romCacheVersion,
+    updateModeActive,
   } = useCores();
   const { status } = useConnection();
   // Mid-session disconnect / pre-reconnect state — every mutating
   // button gates on this. Reads (browse, drill, filter) stay enabled
   // so the user can still inspect the cached state.
-  const canMutate = status === 'connected';
+  // Also gate on !updateModeActive: while update mode is active the
+  // hidden-file state is intentionally in flux and mutations are unsafe.
+  const canMutate = status === 'connected' && !updateModeActive;
   // Drilled-in path inside the core. Empty string means top-level.
   // Slash-joined for nested folders (`'1 World A-Z'`,
   // `'parent/child'`). Used for every ROM-level operation; the cores

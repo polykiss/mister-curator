@@ -155,7 +155,7 @@ describe('CoresContext — Bug B/C/D/E renderer-cache-state-races fixes', () => 
   });
 
   it('roms-adapter destructures romCacheVersion from useCores (Bug C)', () => {
-    expect(ROMS_ADAPTER).toMatch(/romCacheVersion,?\s*\n?\s*\} = useCores\(\)/);
+    expect(ROMS_ADAPTER).toMatch(/romCacheVersion[^}]* \} = useCores\(\)/);
   });
 
   it('setBulkRomVisibility recovery uses forceRefresh: true (Bug B)', () => {

@@ -136,6 +136,19 @@ export const IPC_CHANNELS = {
   // mraRelativePath. Entries with no cached record (zip not yet
   // hashed, or SS lookup hasn't completed) map to null.
   getArcadeMetadataBatch: 'mister:getArcadeMetadataBatch',
+  // feat/update-mode — temp-unhide-for-update + restore.
+  //   captureHiddenSnapshot: walk all ROM + arcade dirs, write the
+  //     list of hidden files to device as a snapshot JSON.
+  //   applyUpdateMode: read snapshot, un-dot every file in it.
+  //   restoreFromSnapshot: read snapshot, re-dot every file in it,
+  //     delete snapshot on success.
+  //   checkUpdateModeActive: check for snapshot presence + metadata.
+  //   updateModeProgress: streaming progress during un-dot / re-dot.
+  captureHiddenSnapshot: 'mister:captureHiddenSnapshot',
+  applyUpdateMode: 'mister:applyUpdateMode',
+  restoreFromSnapshot: 'mister:restoreFromSnapshot',
+  checkUpdateModeActive: 'mister:checkUpdateModeActive',
+  updateModeProgress: 'mister:updateModeProgress',
 } as const;
 
 /** PR #15 prefetch progress kind. Discriminator for the wire event. */
@@ -743,6 +756,97 @@ export interface MisterApi {
    * the auto-scrape engine handles population in the background.
    */
   getArcadeMetadataBatch(): Promise<Record<string, RomMetadata | null>>;
+  // ─── feat/update-mode ─────────────────────────────────────────────
+  /**
+   * Walk all ROM dirs + the arcade dir, collect every dot-prefixed
+   * (hidden) file, write the list as a snapshot JSON to the device,
+   * and return the presence status. A snapshot already on the device
+   * is NOT overwritten — call `restoreFromSnapshot` first to clear
+   * it. The returned `active: true` always means a snapshot now
+   * exists; the caller should guard on the status before showing
+   * the confirmation dialog.
+   */
+  captureHiddenSnapshot(): Promise<UpdateModeStatus>;
+  /**
+   * Read the snapshot from the device and un-dot every file in it
+   * (rename `.foo.nes` → `foo.nes`). Per-file failures are collected
+   * but do NOT abort the batch. Progress events are emitted on the
+   * `updateModeProgress` channel. Returns when all files have been
+   * attempted.
+   */
+  applyUpdateMode(options?: { readonly operationId?: string }): Promise<void>;
+  /**
+   * Read the snapshot from the device and re-dot every file in it
+   * (rename `foo.nes` → `.foo.nes`). Files absent from the device
+   * (deleted by the update tool) are silently skipped and counted
+   * in `skippedMissing`. Deletes the snapshot on success (even
+   * when some files failed). Progress events on `updateModeProgress`.
+   */
+  restoreFromSnapshot(
+    options?: { readonly operationId?: string },
+  ): Promise<UpdateModeRestoreResult>;
+  /**
+   * Check whether a snapshot file exists on the device, without
+   * modifying anything. Used on connect to re-surface the persistent
+   * update-mode banner after an app restart.
+   */
+  checkUpdateModeActive(): Promise<UpdateModeStatus>;
+  /**
+   * Subscribe to streaming progress from `applyUpdateMode` /
+   * `restoreFromSnapshot`. Returns an unsubscribe function.
+   */
+  onUpdateModeProgress(
+    handler: (event: UpdateModeProgressEvent) => void,
+  ): () => void;
+}
+
+/**
+ * feat/update-mode — snapshot written to the device before the user
+ * runs an update tool. Stores the full absolute paths of every
+ * dot-prefixed (hidden) file so the restore step can re-apply the
+ * dot prefix after the update finishes.
+ */
+export interface UpdateSnapshot {
+  readonly createdAt: string;
+  /** Host IP of the connected MiSTer — sanity-check on restore. */
+  readonly deviceId: string;
+  /** Absolute paths of the hidden files AT CAPTURE TIME (dot-prefixed). */
+  readonly hiddenFiles: readonly string[];
+}
+
+/**
+ * Presence check returned by `captureHiddenSnapshot` and
+ * `checkUpdateModeActive`.
+ */
+export interface UpdateModeStatus {
+  readonly active: boolean;
+  readonly snapshot: {
+    readonly createdAt: string;
+    readonly totalFiles: number;
+  } | null;
+}
+
+/**
+ * Streaming progress event for un-dot and re-dot operations.
+ * `operationId` lets the renderer ignore stale events from a prior
+ * run. `phase` distinguishes the two halves of the flow.
+ */
+export interface UpdateModeProgressEvent {
+  readonly operationId: string;
+  readonly phase: 'un-dot' | 're-dot';
+  readonly done: number;
+  readonly total: number;
+}
+
+/**
+ * Summary returned by `restoreFromSnapshot` after all re-dot
+ * attempts complete.
+ */
+export interface UpdateModeRestoreResult {
+  readonly restored: number;
+  readonly skippedMissing: number;
+  readonly failed: number;
+  readonly failedPaths: readonly string[];
 }
 
 /** feat/arcade-phase-1.5 — wire shape for `.mra` entries. */

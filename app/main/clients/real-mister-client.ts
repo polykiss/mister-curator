@@ -12,6 +12,8 @@ import {
   MISTER_LEDGER_DIR,
   MISTER_LEDGER_PATH,
   MISTER_SYSTEM_FILES_PATH,
+  MISTER_UPDATE_SNAPSHOT_PATH,
+  UPDATE_SNAPSHOT_HEREDOC_DELIMITER,
 } from '@shared/constants';
 import {
   decodeArcadeMraTsv,
@@ -1832,6 +1834,110 @@ export class RealMisterClient implements IMisterClient {
       (acc, next) => Object.assign(acc, next),
       {},
     );
+  }
+
+  async walkHiddenFiles(): Promise<readonly string[]> {
+    this.assertConnected();
+    const script = [
+      `find ${shellQuote(MISTER_GAMES_DIR)} -mindepth 2 -maxdepth 5 -type f -name '.*' -printf '%p\\n' 2>/dev/null || true`,
+      `find ${shellQuote(MISTER_ARCADE_DIR)} -mindepth 1 -maxdepth 4 -type f -name '.*' -printf '%p\\n' 2>/dev/null || true`,
+    ].join('\n');
+    const result = await this.runSshOp(script, () => this.ssh.execCommand(script));
+    return result.stdout
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+  }
+
+  async writeUpdateSnapshot(json: string): Promise<void> {
+    this.assertConnected();
+    const tmpPath = `${MISTER_UPDATE_SNAPSHOT_PATH}.tmp`;
+    const script =
+      `mkdir -p ${shellQuote(MISTER_LEDGER_DIR)}\n` +
+      `cat > ${shellQuote(tmpPath)} <<'${UPDATE_SNAPSHOT_HEREDOC_DELIMITER}'\n` +
+      json + '\n' +
+      `${UPDATE_SNAPSHOT_HEREDOC_DELIMITER}\n` +
+      `mv ${shellQuote(tmpPath)} ${shellQuote(MISTER_UPDATE_SNAPSHOT_PATH)}\n`;
+    const result = await this.runSshOp(script, () => this.ssh.execCommand(script));
+    if (result.code !== 0) {
+      throw new Error(
+        `Failed to write update snapshot: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
+      );
+    }
+  }
+
+  async readUpdateSnapshot(): Promise<string | null> {
+    this.assertConnected();
+    const cmd = `cat ${shellQuote(MISTER_UPDATE_SNAPSHOT_PATH)} 2>/dev/null || true`;
+    const result = await this.runSshOp(cmd, () => this.ssh.execCommand(cmd));
+    const text = result.stdout.trim();
+    return text.length > 0 ? text : null;
+  }
+
+  async deleteUpdateSnapshot(): Promise<void> {
+    this.assertConnected();
+    const cmd = `rm -f ${shellQuote(MISTER_UPDATE_SNAPSHOT_PATH)}`;
+    await this.runSshOp(cmd, () => this.ssh.execCommand(cmd));
+  }
+
+  async batchRenameAbsolutePaths(
+    renames: readonly { readonly src: string; readonly dst: string; readonly id: string }[],
+    checkSrcExists: boolean,
+    onProgress: (done: number, total: number) => void,
+  ): Promise<readonly {
+    readonly id: string;
+    readonly status: 'ok' | 'missing' | 'fail';
+    readonly reason?: string;
+  }[]> {
+    this.assertConnected();
+    if (renames.length === 0) return [];
+
+    const results: { id: string; status: 'ok' | 'missing' | 'fail'; reason?: string }[] = [];
+    const total = renames.length;
+
+    for (let i = 0; i < renames.length; i += BULK_ROM_RENAME_CHUNK_SIZE) {
+      const chunk = renames.slice(i, i + BULK_ROM_RENAME_CHUNK_SIZE);
+      const lines: string[] = [];
+      for (const r of chunk) {
+        const idQ = shellQuote(r.id);
+        if (checkSrcExists) {
+          lines.push(
+            `if [ ! -f ${shellQuote(r.src)} ]; then`,
+            `  printf 'MISSING\\t%s\\n' ${idQ}`,
+            `elif err=$(mv ${shellQuote(r.src)} ${shellQuote(r.dst)} 2>&1); then`,
+            `  printf 'OK\\t%s\\n' ${idQ}`,
+            `else`,
+            `  printf 'FAIL\\t%s\\t%s\\n' ${idQ} "$(printf '%s' "$err" | tr '\\n\\t' '  ' | head -c 200)"`,
+            `fi`,
+          );
+        } else {
+          lines.push(
+            `if err=$(mv ${shellQuote(r.src)} ${shellQuote(r.dst)} 2>&1); then`,
+            `  printf 'OK\\t%s\\n' ${idQ}`,
+            `else`,
+            `  printf 'FAIL\\t%s\\t%s\\n' ${idQ} "$(printf '%s' "$err" | tr '\\n\\t' '  ' | head -c 200)"`,
+            `fi`,
+          );
+        }
+      }
+      const script = lines.join('\n');
+      const result = await this.runSshOp(script, () => this.ssh.execCommand(script));
+      for (const line of result.stdout.split('\n')) {
+        if (line === '') continue;
+        const parts = line.split('\t');
+        const tag = parts[0];
+        const id = parts[1] ?? '';
+        if (tag === 'OK') {
+          results.push({ id, status: 'ok' });
+        } else if (tag === 'MISSING') {
+          results.push({ id, status: 'missing' });
+        } else if (tag === 'FAIL') {
+          results.push({ id, status: 'fail', reason: parts.slice(2).join('\t') || 'unknown error' });
+        }
+      }
+      onProgress(Math.min(i + chunk.length, total), total);
+    }
+    return results;
   }
 
   private async writeFolderClassifications(

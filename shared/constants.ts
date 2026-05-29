@@ -40,6 +40,9 @@ export const MISTER_SYSTEM_FILES_PATH =
   '/media/fat/.mistercurator/system-files.json';
 export const MISTER_FOLDER_CLASSIFICATIONS_PATH =
   '/media/fat/.mistercurator/folder-classifications.json';
+export const MISTER_UPDATE_SNAPSHOT_PATH =
+  '/media/fat/.mistercurator/pre-update-snapshot.json';
+export const UPDATE_SNAPSHOT_HEREDOC_DELIMITER = 'UPDATE_SNAPSHOT_EOF';
 
 /**
  * Core category dirs under `/media/fat/`. The hide-core feature only
