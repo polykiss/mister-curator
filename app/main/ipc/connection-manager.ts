@@ -626,13 +626,35 @@ export class ConnectionManager {
   ): Promise<void> {
     this.assertConnected();
     await this.client.setArcadeMraVisibility(relativePath, hidden);
-    this.arcadeMraCache = null;
-    // The playability snapshot keys off `relativePath`, which flips
-    // when a .mra is hidden (`Foo.mra` ↔ `.Foo.mra`). Invalidating
-    // forces the next `loadArcadeData` to re-walk; the on-disk
-    // cache will miss on witnesses too (`_Arcade/` mtime bumped),
-    // so both layers stay coherent without a write-through here.
-    this.arcadePlayabilityCache = null;
+    const predictedPath = hidden
+      ? arcadeMraHiddenPath(relativePath)
+      : arcadeMraVisiblePath(relativePath);
+    // Update the listing cache in place rather than nuking it — only
+    // the dot-prefix and `hidden` flag change; the rest of the listing
+    // is still valid. Preserving the cache means re-navigation to the
+    // Arcade pane after a single hide/show is served from memory
+    // instead of triggering a full device walk (Bug D).
+    if (this.arcadeMraCache !== null) {
+      this.arcadeMraCache = this.arcadeMraCache.map((e) =>
+        e.relativePath === relativePath
+          ? { ...e, hidden, relativePath: predictedPath }
+          : e,
+      );
+    }
+    // Rekey the playability snapshot for the same relativePath flip.
+    // The byPath map keys off relativePath; without this rekey the
+    // "Missing ROMs" badge would disappear for the toggled entry until
+    // the next full refresh.
+    if (this.arcadePlayabilityCache !== null) {
+      const prev = this.arcadePlayabilityCache;
+      const existingPlayability = prev.byPath.get(relativePath);
+      if (existingPlayability !== undefined) {
+        const newByPath = new Map(prev.byPath);
+        newByPath.delete(relativePath);
+        newByPath.set(predictedPath, existingPlayability);
+        this.arcadePlayabilityCache = { ...prev, byPath: newByPath };
+      }
+    }
     // feat/arcade-ux-and-ledger (PR 2/2) — apply the three-state
     // transition for a user-initiated hide/show. See
     // `applyUserMraVisibilityToLedger` for the rules.

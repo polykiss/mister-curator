@@ -67,29 +67,35 @@ describe('CoresContext — cache-intent split (PR #12 round 2)', () => {
   it('only the audited callsites carry a `forceRefresh: true` literal', () => {
     // Belt-and-suspenders: enumerate every `forceRefresh: true`
     // literal in NON-COMMENT code and assert it appears in exactly
-    // the expected contexts. A future refactor that adds a third
+    // the expected contexts. A future refactor that adds a new
     // bypass path slips through silently otherwise.
     //
-    // Audited callsites (PR #12 round 2):
+    // Audited callsites (fix/renderer-cache-state-races):
     //   1. `refresh` wrapper — Refresh-button entry point.
     //   2. `refetchRoms` — post-mutation listRoms refetch (mark/unmark
     //      flips that need to land before the renderer re-renders;
     //      the manager invalidates the roms cache on these mutations
     //      so the witness-stat would hit a miss anyway, but
     //      forceRefresh skips the redundant stat).
+    //   3. `setRomVisibility` post-success reconciliation — re-fetch
+    //      to confirm device truth matches the optimistic state.
+    //   4. `setBulkRomVisibility` partial-failure recovery — forceRefresh
+    //      bypasses a stale witness that would return pre-op data and
+    //      overwrite the correct optimistic state (Bug B).
     const codeOnly = stripLineComments(CORES_CONTEXT);
     const matches = [...codeOnly.matchAll(/forceRefresh\s*:\s*true/g)];
-    expect(matches).toHaveLength(2);
+    expect(matches).toHaveLength(4);
 
-    // Ensure each `true` literal sits inside one of the two audited
+    // Ensure each `true` literal sits inside one of the four audited
     // callsites. Catches a paste-into-the-wrong-function regression.
     const refreshBlock = extractTopLevelBinding(CORES_CONTEXT, 'refresh');
-    const refetchRomsBlock = extractTopLevelBinding(
-      CORES_CONTEXT,
-      'refetchRoms',
-    );
+    const refetchRomsBlock = extractTopLevelBinding(CORES_CONTEXT, 'refetchRoms');
+    const setRomVisibilityBlock = extractTopLevelBinding(CORES_CONTEXT, 'setRomVisibility');
+    const setBulkBlock = extractTopLevelBinding(CORES_CONTEXT, 'setBulkRomVisibility');
     expect(refreshBlock).toMatch(/forceRefresh:\s*true/);
     expect(refetchRomsBlock).toMatch(/forceRefresh:\s*true/);
+    expect(setRomVisibilityBlock).toMatch(/forceRefresh:\s*true/);
+    expect(setBulkBlock).toMatch(/forceRefresh:\s*true/);
   });
 
   it('post-connect lazy ROM load (`ensureRoms`) does NOT bypass the cache', () => {
@@ -111,6 +117,106 @@ describe('CoresContext — cache-intent split (PR #12 round 2)', () => {
     const block = extractTopLevelBinding(CORES_CONTEXT, 'refetchSelectedRoms');
     expect(block).toMatch(/window\.mister\.listRoms\(/);
     expect(block).not.toMatch(/forceRefresh/);
+  });
+});
+
+describe('CoresContext — Bug B/C/D/E renderer-cache-state-races fixes', () => {
+  const ROMS_ADAPTER = readFileSync(
+    resolve(__dirname, '../components/roms-adapter.tsx'),
+    'utf8',
+  );
+  const ARCADE_ADAPTER = readFileSync(
+    resolve(__dirname, '../components/arcade-adapter.tsx'),
+    'utf8',
+  );
+
+  it('exposes romCacheVersion in the context interface and value (Bug C)', () => {
+    // romCacheVersion is the signal that makes the ensureRoms effect
+    // re-fire after a full Refresh without requiring core.id or subPath
+    // to change.
+    expect(CORES_CONTEXT).toMatch(/readonly romCacheVersion:\s*number/);
+    expect(CORES_CONTEXT).toMatch(/romCacheVersion,/);
+  });
+
+  it('loadCores increments romCacheVersion alongside the cache wipe (Bug C)', () => {
+    // The increment must be co-located with the setRomsByCore({}) call so
+    // the effect fires in the same render cycle as the cache clear.
+    const block = extractTopLevelBinding(CORES_CONTEXT, 'loadCores');
+    expect(block).toMatch(/setRomCacheVersion\(\(v\) => v \+ 1\)/);
+  });
+
+  it('ensureRoms effect deps include romCacheVersion (Bug C — re-fire on Refresh)', () => {
+    // Without this dep the effect never re-fires when romsByCore is
+    // cleared while core.id and subPath stay constant (the common case
+    // when the user hits Refresh while viewing a subfolder).
+    expect(ROMS_ADAPTER).toMatch(
+      /void ensureRoms\(core\.id, subPath\)[\s\S]{0,20}\}, \[core\.id, subPath, ensureRoms, romCacheVersion\]\)/,
+    );
+  });
+
+  it('roms-adapter destructures romCacheVersion from useCores (Bug C)', () => {
+    expect(ROMS_ADAPTER).toMatch(/romCacheVersion,?\s*\n?\s*\} = useCores\(\)/);
+  });
+
+  it('setBulkRomVisibility recovery uses forceRefresh: true (Bug B)', () => {
+    // Without forceRefresh the witness check may pass and return the
+    // pre-op snapshot, overwriting the optimistic state with stale data
+    // and causing a flash-then-disappear on partial bulk failure.
+    const block = extractTopLevelBinding(CORES_CONTEXT, 'setBulkRomVisibility');
+    // The recovery path follows `result.failed.length > 0`.
+    const recoveryStart = block.indexOf('result.failed.length > 0');
+    expect(recoveryStart).toBeGreaterThan(-1);
+    const recovery = block.slice(recoveryStart);
+    expect(recovery).toMatch(/forceRefresh:\s*true/);
+  });
+
+  it('setRomVisibility post-success reconciliation uses forceRefresh: true (Bug B)', () => {
+    const block = extractTopLevelBinding(CORES_CONTEXT, 'setRomVisibility');
+    // Must have at least one forceRefresh: true (the reconciliation re-fetch).
+    expect(block).toMatch(/forceRefresh:\s*true/);
+  });
+
+  it('setRomsCache wrapper exists and calls console.debug before setRomsByCore (diagnostic log)', () => {
+    // Every mutation to the ROM cache goes through this wrapper so
+    // state-race debugging has a clear audit trail.
+    expect(CORES_CONTEXT).toMatch(/const setRomsCache = useCallback/);
+    const wrapperBlock = extractTopLevelBinding(CORES_CONTEXT, 'setRomsCache');
+    expect(wrapperBlock).toMatch(/console\.debug/);
+    expect(wrapperBlock).toMatch(/setRomsByCore/);
+  });
+
+  it('arcade adapter re-fires its load on romCacheVersion change with forceRefresh (Bug C parity)', () => {
+    // When the user hits Refresh while on the Arcade pane, romCacheVersion
+    // bumps → effect re-fires → arcade content reloads too.
+    expect(ARCADE_ADAPTER).toMatch(/romCacheVersion.*\} = useCores\(\)/s);
+    // isInitialArcadeMountRef guards forceRefresh: true on version bumps
+    // vs forceRefresh: false on initial mount.
+    expect(ARCADE_ADAPTER).toMatch(/isInitialArcadeMountRef/);
+    // The load effect depends on romCacheVersion.
+    expect(ARCADE_ADAPTER).toMatch(/\[refresh, romCacheVersion\]/);
+  });
+
+  it('roms-adapter scroll preservation: scrollContainerRef + captureScrollAnchor + useLayoutEffect (Bug E)', () => {
+    // Structural contract: the three moving parts must all exist.
+    expect(ROMS_ADAPTER).toMatch(/scrollContainerRef/);
+    expect(ROMS_ADAPTER).toMatch(/captureScrollAnchor/);
+    // useLayoutEffect runs AFTER presentableRoms is computed (declared via
+    // useMemo), so restore fires before the browser paints the re-ordered
+    // list.
+    expect(ROMS_ADAPTER).toMatch(/useLayoutEffect[\s\S]{0,600}presentableRoms\]/);
+    // The anchor is captured before the SSH call in onSingleToggle.
+    const toggleIdx = ROMS_ADAPTER.indexOf('const onSingleToggle');
+    const toggleBlock = ROMS_ADAPTER.slice(toggleIdx, toggleIdx + 400);
+    expect(toggleBlock).toMatch(/captureScrollAnchor/);
+  });
+
+  it('arcade adapter scroll preservation: analogous pattern to roms-adapter (Bug E parity)', () => {
+    expect(ARCADE_ADAPTER).toMatch(/arcadeScrollContainerRef/);
+    expect(ARCADE_ADAPTER).toMatch(/captureArcadeScrollAnchor/);
+    expect(ARCADE_ADAPTER).toMatch(/useLayoutEffect[\s\S]{0,600}sortedRows\]/);
+    const toggleIdx = ARCADE_ADAPTER.indexOf('const onToggleSingle');
+    const toggleBlock = ARCADE_ADAPTER.slice(toggleIdx, toggleIdx + 400);
+    expect(toggleBlock).toMatch(/captureArcadeScrollAnchor/);
   });
 });
 

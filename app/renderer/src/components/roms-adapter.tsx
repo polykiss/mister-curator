@@ -1,5 +1,5 @@
 import { MoreHorizontal, Settings } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import type { ItemListAdapter } from '@app/renderer/src/components/item-list-adapter';
@@ -130,6 +130,7 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     removeSystemFileMark,
     setSystemFileMarks,
     setFolderClassification,
+    romCacheVersion,
   } = useCores();
   const { status } = useConnection();
   // Mid-session disconnect / pre-reconnect state — every mutating
@@ -211,9 +212,13 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
   // Lazy-fetch ROMs at the current (core, subPath) — including after
   // a drill into a container. The render-time reset above guarantees
   // that when this effect fires for a new core, subPath is already ''.
+  // romCacheVersion is included so the effect re-fires after a full
+  // Refresh (which clears romsByCore but doesn't change core.id or
+  // subPath), preventing the "No ROMs in this core" empty state until
+  // the user navigates away and back (Bug C).
   useEffect(() => {
     void ensureRoms(core.id, subPath);
-  }, [core.id, subPath, ensureRoms]);
+  }, [core.id, subPath, ensureRoms, romCacheVersion]);
 
   // PR #20 round 2 — list-view streaming prefetch. ONE batched IPC
   // call per `roms` change, with per-path results streamed back as
@@ -317,6 +322,41 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
       unsubscribe();
     };
   }, [roms, core.id]);
+
+  // Bug E — scroll-position preservation around single-entry
+  // hide/show. When "Show hidden" is off, hiding a row removes it from
+  // `presentableRoms` and the list shrinks, causing the viewport to
+  // jump. We capture the first row that's at least partially in view
+  // (the "anchor") just before the optimistic state update, then
+  // scroll the container so that anchor is at the same viewport-
+  // relative position after the re-render.
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  // { filename, offset } — filename of the anchor row, offset = its
+  // top edge's distance below the scroll container's top edge (pixels).
+  const pendingScrollRestoreRef = useRef<{
+    readonly filename: string;
+    readonly offset: number;
+  } | null>(null);
+
+  // Capture scroll anchor. Call BEFORE applying any visibility change.
+  const captureScrollAnchor = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const elTop = el.getBoundingClientRect().top;
+    const rows = el.querySelectorAll<HTMLElement>('[data-rom-row]');
+    for (const row of rows) {
+      const bottom = row.getBoundingClientRect().bottom;
+      if (bottom > elTop + 1) {
+        const filename = row.getAttribute('data-rom-row') ?? '';
+        const rowTop = row.getBoundingClientRect().top;
+        pendingScrollRestoreRef.current = {
+          filename,
+          offset: rowTop - elTop,
+        };
+        return;
+      }
+    }
+  }, []);
 
   // PR #20 round 3 — resume after reconnect. When the connection comes
   // back up (status flips to 'connected') AFTER a mid-prefetch drop,
@@ -467,6 +507,22 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     return sortRoms(withMeta, sortState).map((r) => r.rom);
   }, [roms, showHidden, showSystem, systemFlags, metadataByPath, sortState]);
 
+  // After each presentableRoms update, restore scroll if an anchor
+  // was captured. useLayoutEffect fires before the browser paints,
+  // preventing the visible jump.
+  useLayoutEffect(() => {
+    const restore = pendingScrollRestoreRef.current;
+    if (!restore || !scrollContainerRef.current) return;
+    pendingScrollRestoreRef.current = null;
+    const el = scrollContainerRef.current;
+    const row = el.querySelector<HTMLElement>(
+      `[data-rom-row="${CSS.escape(restore.filename)}"]`,
+    );
+    if (!row) return;
+    const elTop = el.getBoundingClientRect().top;
+    el.scrollTop += row.getBoundingClientRect().top - elTop - restore.offset;
+  }, [presentableRoms]);
+
   // Density-bar denominator for the size column — peer max across the
   // rows actually being rendered. SYSTEM.md §10: ROMs use file size /
   // max visible.
@@ -556,9 +612,11 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
   };
 
   const onSingleToggle = async (rom: Rom): Promise<void> => {
+    captureScrollAnchor();
     try {
       await setRomVisibility(core.id, rom.filename, !rom.hidden, subPath);
     } catch (err) {
+      pendingScrollRestoreRef.current = null; // discard on error
       toast.error(`Could not ${rom.hidden ? 'show' : 'hide'} ${rom.displayName}`, {
         description: err instanceof Error ? err.message : 'Unexpected error.',
       });
@@ -1077,7 +1135,7 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
           content and the container's right edge guarantees the
           rightmost cell (density + eye stack) sits well clear of
           the scrollbar regardless of how the gutter resolves. */}
-      <div className="scroll-themed flex-1 overflow-auto pr-2.5">
+      <div ref={scrollContainerRef} className="scroll-themed flex-1 overflow-auto pr-2.5">
         {loading && !roms ? (
           <div className="space-y-1 p-4">
             {Array.from({ length: 8 }).map((_, i) => (
@@ -1270,6 +1328,7 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
                 return (
                   <TableRow
                     key={rom.filename}
+                    data-rom-row={rom.filename}
                     data-state={isSelected ? 'selected' : undefined}
                     onContextMenu={(e) => {
                       e.preventDefault();
