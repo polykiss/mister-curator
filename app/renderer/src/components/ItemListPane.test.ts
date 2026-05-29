@@ -130,10 +130,12 @@ describe('arcade-adapter: useArcadeAdapter', () => {
     expect(ARCADE_ADAPTER).toMatch(/containerClassName:\s*'bg-canvas'/);
   });
 
-  it('returns the existing ArcadeMraPane chrome verbatim inside `content` (title h2 / count chip / bulk buttons / toggle row)', () => {
-    expect(ARCADE_ADAPTER).toMatch(/<h2 className="text-heading text-fg">Arcade</);
+  it('returns the existing ArcadeMraPane chrome verbatim inside `content` (breadcrumb nav / count line / bulk buttons / toggle row)', () => {
+    // Title is now the breadcrumb nav (matches ROM pane), not an h2.
+    expect(ARCADE_ADAPTER).toMatch(/computeBreadcrumb\('Arcade',\s*subPath\)/);
+    expect(ARCADE_ADAPTER).not.toMatch(/<h2 className="text-heading text-fg">Arcade</);
     expect(ARCADE_ADAPTER).toMatch(/Hide all/);
-    expect(ARCADE_ADAPTER).toMatch(/Show all/);
+    expect(ARCADE_ADAPTER).toMatch(/Unhide all/);
     expect(ARCADE_ADAPTER).toMatch(/Auto-hide missing ROMs/);
     expect(ARCADE_ADAPTER).toMatch(/Show hidden/);
   });

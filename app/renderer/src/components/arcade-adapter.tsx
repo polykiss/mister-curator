@@ -1,4 +1,4 @@
-import { Eye, EyeOff, Loader2, MoreHorizontal } from 'lucide-react';
+import { Loader2, MoreHorizontal } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
@@ -754,7 +754,6 @@ export function useArcadeAdapter(): ItemListAdapter {
 
   const breadcrumb = computeBreadcrumb('Arcade', subPath);
   const backRow = computeBackRow('Arcade', subPath);
-  const isDrilled = subPath !== '';
 
   function navigateToDepth(targetDepth: number): void {
     setSubPath(subPathAtDepth(subPath, targetDepth));
@@ -769,52 +768,45 @@ export function useArcadeAdapter(): ItemListAdapter {
     content: (
       <>
       <header className="flex flex-col gap-3 border-b border-subtle bg-chrome px-4 py-3">
-        {isDrilled ? (
-          <nav
-            aria-label="Folder path"
-            className="flex items-center gap-1 overflow-x-auto whitespace-nowrap font-mono text-body-sm"
-          >
-            {breadcrumb.map((seg, i) => (
-              <span
-                key={`${String(seg.depth)}-${seg.label}`}
-                className="flex shrink-0 items-center"
-              >
-                {i > 0 ? (
-                  <span aria-hidden className="px-2 select-none text-fg-disabled">
-                    /
-                  </span>
-                ) : null}
-                {seg.current ? (
-                  <span
-                    aria-current="page"
-                    className="font-medium text-fg"
-                    title={seg.label}
-                  >
-                    {seg.label}
-                  </span>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => navigateToDepth(seg.depth)}
-                    className="rounded text-fg-body transition-colors hover:text-fg focus-visible:text-fg hover:underline focus-visible:underline focus-visible:outline-none"
-                    title={`Go to ${seg.label}`}
-                  >
-                    {seg.label}
-                  </button>
-                )}
-              </span>
-            ))}
-          </nav>
-        ) : null}
-        <div className="flex items-baseline gap-3">
-          <h2 className="text-heading text-fg">Arcade</h2>
-          <span className="font-mono text-body-sm text-fg-muted tabular">
-            {visibleCount}
-            {hiddenCount > 0 ? (
-              <span className="text-fg-disabled"> ({hiddenCount})</span>
-            ) : null}
-          </span>
-        </div>
+        <nav
+          aria-label="Folder path"
+          className="flex items-center gap-1 overflow-x-auto whitespace-nowrap font-mono text-body-sm"
+        >
+          {breadcrumb.map((seg, i) => (
+            <span
+              key={`${String(seg.depth)}-${seg.label}`}
+              className="flex shrink-0 items-center"
+            >
+              {i > 0 ? (
+                <span aria-hidden className="px-2 select-none text-fg-disabled">
+                  /
+                </span>
+              ) : null}
+              {seg.current ? (
+                <span
+                  aria-current="page"
+                  className="font-medium text-fg"
+                  title={seg.label}
+                >
+                  {seg.label}
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => navigateToDepth(seg.depth)}
+                  className="rounded text-fg-body transition-colors hover:text-fg focus-visible:text-fg hover:underline focus-visible:underline focus-visible:outline-none"
+                  title={`Go to ${seg.label}`}
+                >
+                  {seg.label}
+                </button>
+              )}
+            </span>
+          ))}
+        </nav>
+        <p className="font-mono text-body-sm text-fg-muted tabular">
+          <span className="text-fg-body">{visibleCount}</span> ROMs ·{' '}
+          <span className="text-fg-body">{hiddenCount}</span> hidden
+        </p>
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="secondary"
@@ -827,7 +819,6 @@ export function useArcadeAdapter(): ItemListAdapter {
                 : 'Reconnect to make changes.'
             }
           >
-            <EyeOff strokeWidth={1.5} />
             Hide all
           </Button>
           <Button
@@ -841,7 +832,6 @@ export function useArcadeAdapter(): ItemListAdapter {
                 : 'Reconnect to make changes.'
             }
           >
-            <Eye strokeWidth={1.5} />
             Unhide all
           </Button>
           <Button
