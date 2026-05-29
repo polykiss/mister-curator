@@ -1567,6 +1567,48 @@ describe('RealMisterClient', () => {
       expect(container?.containedRomPath).toBeUndefined();
     });
 
+    it('fix/folder-atomic-rom-path-stability: containedRomPath for a hidden folder-atomic uses the undotted parent (canonical cache key)', async () => {
+      // Regression guard: before this fix, containedRomPath for a
+      // hidden atomic folder `.Gradius` was built as
+      // `.../X68000/.Gradius/Gradius.zip` (dotted), causing a cache
+      // key mismatch on every hide/unhide cycle. The fix always uses
+      // the visible `visibleRelPath` so the key is stable regardless
+      // of whether the folder is currently hidden.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            // Visible folder-atomic: key should be undotted (baseline)
+            'd\tGradius\t0',
+            'f\tGradius/Gradius.zip\t40960',
+            // Hidden folder-atomic: key MUST also be undotted after fix
+            'd\t.Castlevania\t0',
+            'f\t.Castlevania/Castlevania.zip\t40960',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('X68000');
+
+      const visible = roms.find((r) => r.filename === 'Gradius');
+      expect(visible?.kind).toBe('folder-atomic');
+      expect(visible?.containedRomPath).toBe(
+        '/media/fat/games/X68000/Gradius/Gradius.zip',
+      );
+      expect(visible?.hidden).toBe(false);
+
+      const hidden = roms.find((r) => r.filename === '.Castlevania');
+      expect(hidden?.kind).toBe('folder-atomic');
+      // containedRomPath must NOT contain the dot-prefixed folder name.
+      expect(hidden?.containedRomPath).toBe(
+        '/media/fat/games/X68000/Castlevania/Castlevania.zip',
+      );
+      expect(hidden?.hidden).toBe(true);
+    });
+
     it('preserves both top-level files and folders in a mixed games dir', async () => {
       // Some cores' games dirs hold both bare-file ROMs and folder
       // ROMs side by side (e.g. a NES core where most ROMs are flat

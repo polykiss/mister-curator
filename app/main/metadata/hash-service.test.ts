@@ -1885,4 +1885,138 @@ describe('HashService', () => {
       expect(checked.failedPaths.has(path)).toBe(false);
     });
   });
+
+  describe('fix/folder-atomic-rom-path-stability — dotted-parent probe', () => {
+    // For hidden folder-atomic ROMs, the canonical (undotted) cache key
+    // is used throughout but the actual file lives at a dotted parent
+    // path on the device (e.g. `.Gradius/Gradius.zip`). The dotted-
+    // parent probe in doGetHash and doCheckCachedMtimes detects this
+    // case and uses the SSH path for I/O while storing/reading the
+    // cache under the canonical key.
+    const canonicalPath = '/media/fat/games/X68000/Gradius/Gradius.zip';
+    const dottedPath = '/media/fat/games/X68000/.Gradius/Gradius.zip';
+
+    it('getHash: returns cache hit when cached under canonical key and file is at dotted path', async () => {
+      const svc = new HashService(dir);
+      const fixture = fix('a', 40960, 1700000100);
+      // Seed cache under the CANONICAL (undotted) key.
+      await svc.getHash(
+        makeClient({ hashes: new Map([[canonicalPath, fixture]]) }),
+        'host-1',
+        [canonicalPath],
+      );
+      // Now stat of the canonical path returns 0 (folder is hidden).
+      // The dotted variant stat returns the real mtime.
+      const client = makeClient({
+        hashes: new Map([[dottedPath, fixture]]),
+        stat: new Map([
+          [canonicalPath, 0],          // file not at undotted path
+          [dottedPath, fixture.mtime], // file IS at dotted path
+        ]),
+      });
+      const result = await svc.getHash(client, 'host-1', [canonicalPath]);
+      expect(result.get(canonicalPath)?.md5).toBe('a'.repeat(32));
+      // No re-hash was needed — the dotted probe found the mtime match.
+      expect(client.hashCalls).toEqual([]);
+    });
+
+    it('getHash: hashes the dotted path and stores result under the canonical key when not cached', async () => {
+      // Seed the cache with any unrelated entry so cacheIsEmpty = false,
+      // which causes ALL input paths (cached + uncached) to be stat'd.
+      // The uncached hidden folder-atomic then goes through the dotted probe.
+      const svc = new HashService(dir);
+      const seed = fix('seed', 100, 1);
+      const seedPath = '/media/fat/games/SNES/Seed.sfc';
+      await svc.getHash(
+        makeClient({ hashes: new Map([[seedPath, seed]]) }),
+        'host-1',
+        [seedPath],
+      );
+
+      const fixture = fix('b', 40960, 1700000200);
+      const client = makeClient({
+        hashes: new Map([[dottedPath, fixture]]),
+        stat: new Map([
+          [seedPath, seed.mtime],
+          [canonicalPath, 0],
+          [dottedPath, fixture.mtime],
+        ]),
+      });
+      const result = await svc.getHash(client, 'host-1', [canonicalPath]);
+      expect(result.get(canonicalPath)?.md5).toBe('b'.repeat(32));
+      // hashPaths was called with the dotted SSH path.
+      expect(client.hashCalls).toEqual([[dottedPath]]);
+      // Cache entry was written under the canonical key.
+      const file = JSON.parse(
+        await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
+      ) as { entries: Record<string, FixtureHash> };
+      expect(file.entries[canonicalPath]).toBeDefined();
+      expect(file.entries[dottedPath]).toBeUndefined();
+    });
+
+    it('getHash: returns undefined when both canonical and dotted probe return 0 (file genuinely absent)', async () => {
+      // Seed so cacheIsEmpty = false → canonicalPath gets stat'd as an
+      // uncached path, then the probe can run for it.
+      const svc = new HashService(dir);
+      const seed = fix('seed', 100, 1);
+      const seedPath = '/media/fat/games/SNES/Seed.sfc';
+      await svc.getHash(
+        makeClient({ hashes: new Map([[seedPath, seed]]) }),
+        'host-1',
+        [seedPath],
+      );
+
+      const client = makeClient({
+        hashes: new Map(), // file exists at neither path
+        stat: new Map([
+          [seedPath, seed.mtime],
+          [canonicalPath, 0],
+          [dottedPath, 0],
+        ]),
+      });
+      const result = await svc.getHash(client, 'host-1', [canonicalPath]);
+      expect(result.get(canonicalPath)).toBeUndefined();
+    });
+
+    it('computeHash: tries dotted path when canonical yields no records', async () => {
+      const svc = new HashService(dir);
+      const fixture = fix('d', 40960, 1700000400);
+      const client = makeClient({
+        // Only the dotted path responds to hashPaths.
+        hashes: new Map([[dottedPath, fixture]]),
+        stat: new Map([[dottedPath, fixture.mtime]]),
+      });
+      const entry = await svc.computeHash(client, 'host-1', canonicalPath);
+      expect(entry?.md5).toBe('d'.repeat(32));
+      // Result stored under canonical key, not dotted path.
+      const file = JSON.parse(
+        await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
+      ) as { entries: Record<string, FixtureHash> };
+      expect(file.entries[canonicalPath]).toBeDefined();
+      expect(file.entries[dottedPath]).toBeUndefined();
+    });
+
+    it('checkCachedMtimes: returns valid entry when cached under canonical key and file is at dotted path', async () => {
+      const svc = new HashService(dir);
+      const fixture = fix('e', 40960, 1700000500);
+      // Pre-seed cache under canonical key.
+      await svc.getHash(
+        makeClient({ hashes: new Map([[canonicalPath, fixture]]) }),
+        'host-1',
+        [canonicalPath],
+      );
+      const client = makeClient({
+        hashes: new Map([[dottedPath, fixture]]),
+        stat: new Map([
+          [canonicalPath, 0],
+          [dottedPath, fixture.mtime],
+        ]),
+      });
+      const checked = await svc.checkCachedMtimes(client, 'host-1', [
+        canonicalPath,
+      ]);
+      expect(checked.entries.get(canonicalPath)?.md5).toBe('e'.repeat(32));
+      expect(checked.entries.get(canonicalPath)).not.toBeNull();
+    });
+  });
 });

@@ -1038,7 +1038,7 @@ export class RealMisterClient implements IMisterClient {
         kind === 'folder-atomic'
           ? pickPrimaryRomFile(
               acc.directFiles,
-              `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`,
+              `${MISTER_GAMES_DIR}/${coreId}/${visibleRelPath}`,
             )
           : undefined;
       roms.push({

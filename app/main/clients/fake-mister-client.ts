@@ -481,7 +481,7 @@ export class FakeMisterClient implements IMisterClient {
               .map((e) => e.name)
               .sort((a, b) => a.localeCompare(b));
             if (launchable.length > 0) {
-              containedRomPath = `${onDevicePath}/${launchable[0]!}`;
+              containedRomPath = `${MISTER_GAMES_DIR}/${coreId}/${visibleRelPath}/${launchable[0]!}`;
             }
           } catch {
             // Unreadable folder — skip; renderer falls back to

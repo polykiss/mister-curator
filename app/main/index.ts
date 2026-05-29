@@ -25,6 +25,7 @@ import {
 } from '@app/main/metadata/metadata-orchestrator';
 import {
   MetadataService,
+  normalizeFolderAtomicHashKeys,
   pruneEmptyHashEntriesFromHashesJson,
   removePoisonedEmptyHashRecord,
 } from '@app/main/metadata/metadata-service';
@@ -173,6 +174,17 @@ void app.whenReady().then(async () => {
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn('[cache-migration] failed to prune empty-hash entries:', err);
+  }
+
+  // fix/folder-atomic-rom-path-stability — normalize hashes.json keys
+  // whose parent directory segment is dot-prefixed (hidden folder-atomic
+  // ROMs written by pre-fix app versions). One atomic rewrite per
+  // affected host; idempotent on subsequent launches.
+  try {
+    await normalizeFolderAtomicHashKeys(metadataRoot);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[cache-migration] failed to normalize folder-atomic hash keys:', err);
   }
 
   const hashService = new HashService(metadataRoot);
