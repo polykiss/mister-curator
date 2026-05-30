@@ -63,9 +63,12 @@ import { EMPTY_FOLDER_CLASSIFICATIONS } from '@shared/folder-classifications';
 import { mergeRecursivePathsWithAtomicFolders } from '@shared/rom-enumeration';
 import { EMPTY_SYSTEM_FILES_MARKS } from '@shared/system-files-marks';
 import { witnessesMatch } from '@app/main/cache/cache-types';
+import { detectCoreDuplicates } from '@shared/core-duplicates';
 import type {
   ConnectionStatus,
   CoreEntry,
+  DuplicateResolution,
+  DuplicateResolveResult,
   FolderClassificationOverride,
   FolderClassifications,
   HiddenCoreEntry,
@@ -499,6 +502,26 @@ export class ConnectionManager {
         diagLog('warn', 'arcade', '·', 'playability-scan failed', {
           err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
         });
+      }
+
+      // feat/duplicate-detect-and-restore (#40) — scan the cores list
+      // for rbf/gamesDir duplicate pairs (both dotted and undotted forms
+      // coexisting after a MiSTer update_all run). If the cache is
+      // already warm the detection is zero-SSH (purely local). On a cold
+      // connect we fetch into a local variable — intentionally not writing
+      // to this.coresCache so that lazy-load tests that mutate the
+      // filesystem after connect still see a fresh walk on first access.
+      try {
+        const coresForDetect =
+          this.coresCache.length > 0
+            ? this.coresCache
+            : await this.client.listAllCoresWithFiles(this.systemFilesMarksCache);
+        const duplicates = detectCoreDuplicates(coresForDetect);
+        if (duplicates.length > 0) {
+          this.emitConnectionEvent({ type: 'duplicates-detected', profileId, duplicates });
+        }
+      } catch {
+        // Detection failure is non-fatal — don't block connect.
       }
 
       this.setStatus('connected');
@@ -2008,6 +2031,38 @@ export class ConnectionManager {
     }
 
     return { succeeded: result.succeeded, failed };
+  }
+
+  /**
+   * feat/duplicate-detect-and-restore (#40) — resolve each detected
+   * duplicate pair by deleting one side via SSH.
+   *
+   *   keep-hidden  → delete visiblePath (undotted), preserve hidden state
+   *   keep-visible → delete hiddenPath  (dotted),   effectively unhide on device
+   *   skip         → no-op for this pair
+   *
+   * After any deletions the cores disk cache is invalidated so the
+   * next `listAllCoresWithFiles` does a fresh walk.
+   */
+  async resolveDuplicateCores(
+    resolutions: readonly DuplicateResolution[],
+  ): Promise<DuplicateResolveResult> {
+    const toDelete: string[] = [];
+    for (const r of resolutions) {
+      if (r.action === 'keep-hidden') toDelete.push(r.visiblePath);
+      else if (r.action === 'keep-visible') toDelete.push(r.hiddenPath);
+    }
+    if (toDelete.length === 0) return { deleted: 0, failed: 0 };
+
+    const { deleted, failed } = await this.client.deleteFilesOrDirs(toDelete);
+
+    if (this.currentHost !== null && deleted.length > 0) {
+      await this.cache
+        .invalidateCoresCache(this.currentHost, { note: 'duplicate-resolve' })
+        .catch(() => { /* swallow */ });
+    }
+
+    return { deleted: deleted.length, failed: failed.length };
   }
 
   /**

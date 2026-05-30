@@ -17,6 +17,8 @@ import type {
   ConnectionStatus,
   CoreEntry,
   CoreRenameConflict,
+  DuplicateResolution,
+  DuplicateResolveResult,
   FolderClassifications,
   MisterProfile,
   Rom,
@@ -150,6 +152,8 @@ export const IPC_CHANNELS = {
   restoreFromSnapshot: 'mister:restoreFromSnapshot',
   checkUpdateModeActive: 'mister:checkUpdateModeActive',
   updateModeProgress: 'mister:updateModeProgress',
+  // feat/duplicate-detect-and-restore (#40)
+  resolveDuplicateCores: 'mister:resolveDuplicateCores',
 } as const;
 
 /** PR #15 prefetch progress kind. Discriminator for the wire event. */
@@ -799,6 +803,16 @@ export interface MisterApi {
   onUpdateModeProgress(
     handler: (event: UpdateModeProgressEvent) => void,
   ): () => void;
+  /**
+   * feat/duplicate-detect-and-restore (#40) — resolve each duplicate pair
+   * by deleting one side. `keep-hidden` deletes the visible (undotted) path;
+   * `keep-visible` deletes the hidden (dotted) path; `skip` is a no-op.
+   * After deletion the cores cache is invalidated so the next
+   * `listAllCoresWithFiles` reflects the cleaned-up state.
+   */
+  resolveDuplicateCores(
+    resolutions: readonly DuplicateResolution[],
+  ): Promise<DuplicateResolveResult>;
 }
 
 /**

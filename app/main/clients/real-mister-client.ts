@@ -2005,6 +2005,36 @@ export class RealMisterClient implements IMisterClient {
     }
   }
 
+  async deleteFilesOrDirs(
+    paths: readonly string[],
+  ): Promise<{ deleted: readonly string[]; failed: readonly string[] }> {
+    this.assertConnected();
+    if (paths.length === 0) return { deleted: [], failed: [] };
+    // Build a script that attempts each rm -rf independently (set +e) and
+    // emits OK:<index> or FAIL:<index> to stdout so results can be mapped
+    // back to the original paths by position.
+    const lines = ['set +e'];
+    paths.forEach((p, i) => {
+      lines.push(
+        `rm -rf ${shellQuote(p)} && printf 'OK:%d\\n' ${String(i)} || printf 'FAIL:%d\\n' ${String(i)}`,
+      );
+    });
+    const script = lines.join('\n');
+    const result = await this.runSshOp(script, () => this.ssh.execCommand(script));
+    const deleted: string[] = [];
+    const failed: string[] = [];
+    for (const line of result.stdout.split('\n')) {
+      if (line.startsWith('OK:')) {
+        const idx = parseInt(line.slice(3), 10);
+        if (!isNaN(idx) && idx < paths.length) deleted.push(paths[idx]!);
+      } else if (line.startsWith('FAIL:')) {
+        const idx = parseInt(line.slice(5), 10);
+        if (!isNaN(idx) && idx < paths.length) failed.push(paths[idx]!);
+      }
+    }
+    return { deleted, failed };
+  }
+
   private assertConnected(): void {
     if (!this.ssh.isConnected()) {
       throw new Error('RealMisterClient is not connected. Call connect() first.');

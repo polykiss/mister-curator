@@ -56,6 +56,13 @@ export interface CoreEntry {
   readonly gamesDirExists: boolean;
   readonly gamesDirHidden: boolean;
   /**
+   * feat/duplicate-detect-and-restore (#40) — true when both a dotted
+   * and undotted form of the games directory coexist on the device
+   * (e.g. `games/NES` AND `games/.NES`). Set by `matchRbfsToGamesDirs`
+   * when it encounters the same canonical games-dir name twice.
+   */
+  readonly gamesDirDuplicate?: boolean;
+  /**
    * On-disk basename of the games directory in its undotted (visible) form,
    * preserved exactly as it appears on the device. Set whenever
    * `gamesDirExists` is true. Distinct from `id` to handle case mismatches
@@ -266,6 +273,36 @@ export interface FolderClassificationOverride {
   readonly folderPath: string;
   readonly classification: 'container' | 'atomic';
   readonly setAt: string;
+}
+
+/**
+ * feat/duplicate-detect-and-restore (#40) — one conflicting file/dir pair
+ * found at connect time. Both a dotted (hidden) and an undotted (visible)
+ * form of the same core file or games directory exist simultaneously on the
+ * device, typically left by a MiSTer update_all.sh run after the user
+ * hid the core via MiSTerCurator.
+ */
+export interface DuplicatePair {
+  readonly coreId: string;
+  readonly coreName: string;
+  /** The undotted (MiSTer-visible) path that is the "intruder". */
+  readonly visiblePath: string;
+  /** The dotted (hidden) path the user originally created. */
+  readonly hiddenPath: string;
+  readonly kind: 'rbf' | 'gamesDir';
+}
+
+export type DuplicateAction = 'keep-hidden' | 'keep-visible' | 'skip';
+
+export interface DuplicateResolution {
+  readonly visiblePath: string;
+  readonly hiddenPath: string;
+  readonly action: DuplicateAction;
+}
+
+export interface DuplicateResolveResult {
+  readonly deleted: number;
+  readonly failed: number;
 }
 
 export interface FolderClassifications {

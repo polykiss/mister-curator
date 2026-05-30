@@ -42,6 +42,8 @@ import { DestinationAlreadyExistsError, MisterConnectionError } from '@shared/ty
 import type {
   ConnectionStatus,
   CoreEntry,
+  DuplicateResolution,
+  DuplicateResolveResult,
   FolderClassifications,
   MisterProfile,
   Rom,
@@ -398,6 +400,9 @@ const api: MisterApi = {
       ipcRenderer.removeListener(IPC_CHANNELS.updateModeProgress, listener);
     };
   },
+  // feat/duplicate-detect-and-restore (#40)
+  resolveDuplicateCores: (resolutions: readonly DuplicateResolution[]) =>
+    invoke<DuplicateResolveResult>(IPC_CHANNELS.resolveDuplicateCores, resolutions),
 };
 
 contextBridge.exposeInMainWorld('mister', api);

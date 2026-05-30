@@ -10,6 +10,7 @@ import { ArcadeMraPane } from '@app/renderer/src/components/ArcadeMraPane';
 import { Button } from '@app/renderer/src/components/ui/button';
 import { CoresPane } from '@app/renderer/src/components/CoresPane';
 import { DisconnectBanner } from '@app/renderer/src/components/DisconnectBanner';
+import { DuplicateCoresBanner } from '@app/renderer/src/components/DuplicateCoresBanner';
 import { RomsPane } from '@app/renderer/src/components/RomsPane';
 import { StatusBar } from '@app/renderer/src/components/StatusBar';
 import { UpdateModeBanner } from '@app/renderer/src/components/UpdateModeBanner';
@@ -94,6 +95,7 @@ export function BrowserScreen(): JSX.Element {
       )}
     >
       <DisconnectBanner />
+      <DuplicateCoresBanner />
       <UpdateModeBanner />
       <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-subtle bg-chrome px-4">
         <div className="min-w-0">

@@ -16,6 +16,7 @@ import { MisterConnectionError } from '@shared/types';
 import type {
   ConnectionErrorCode,
   ConnectionStatus,
+  DuplicatePair,
   MisterProfile,
 } from '@shared/types';
 
@@ -110,6 +111,19 @@ interface ConnectionContextValue {
    * failure-recording path.
    */
   readonly reconnect: () => Promise<void>;
+  /**
+   * feat/duplicate-detect-and-restore (#40) — pairs emitted by the
+   * manager on connect when both dotted and undotted forms coexist.
+   * `null` means no duplicates were detected on the last connect.
+   * Resets to `null` on disconnect; the banner uses this to decide
+   * whether to render.
+   */
+  readonly detectedDuplicates: readonly DuplicatePair[] | null;
+  /**
+   * Dismiss the banner for this session (per-connect, not persisted).
+   * Reappears on the next connect if duplicates are still present.
+   */
+  readonly dismissDuplicates: () => void;
 }
 
 const ConnectionContext = createContext<ConnectionContextValue | null>(null);
@@ -147,6 +161,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
   const [lostConnection, setLostConnection] = useState(false);
   const [autoRetry, setAutoRetry] = useState<AutoRetryProgress | null>(null);
   const [autoRetryFailed, setAutoRetryFailed] = useState(false);
+  const [detectedDuplicates, setDetectedDuplicates] = useState<readonly DuplicatePair[] | null>(null);
 
   // Refs so async callbacks can read the latest "current profile"
   // without re-binding subscriptions on every state change.
@@ -203,6 +218,10 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
           setAutoRetryFailed(false);
           toast.success('Reconnected.');
           break;
+
+        case 'duplicates-detected':
+          setDetectedDuplicates(event.duplicates);
+          break;
       }
     });
 
@@ -256,6 +275,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
       setLostConnection(false);
       setAutoRetry(null);
       setAutoRetryFailed(false);
+      setDetectedDuplicates(null);
 
       const profile = profiles.find((p) => p.id === profileId);
       const message = profile
@@ -286,6 +306,10 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
     [profiles, runWithStatus],
   );
 
+  const dismissDuplicates = useCallback(() => {
+    setDetectedDuplicates(null);
+  }, []);
+
   const disconnect = useCallback(async () => {
     try {
       await runWithStatus('Disconnecting…', () => window.mister.disconnect());
@@ -294,6 +318,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
       setLostConnection(false);
       setAutoRetry(null);
       setAutoRetryFailed(false);
+      setDetectedDuplicates(null);
     }
   }, [runWithStatus]);
 
@@ -348,6 +373,8 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
       autoRetry,
       autoRetryFailed,
       reconnect,
+      detectedDuplicates,
+      dismissDuplicates,
     }),
     [
       status,
@@ -368,6 +395,8 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
       autoRetry,
       autoRetryFailed,
       reconnect,
+      detectedDuplicates,
+      dismissDuplicates,
     ],
   );
 
