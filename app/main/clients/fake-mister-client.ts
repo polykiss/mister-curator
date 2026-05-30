@@ -1125,6 +1125,25 @@ export class FakeMisterClient implements IMisterClient {
     }
   }
 
+  async deleteFilesOrDirs(
+    paths: readonly string[],
+  ): Promise<{ deleted: readonly string[]; failed: readonly string[] }> {
+    this.assertConnected();
+    await this.delay();
+    const deleted: string[] = [];
+    const failed: string[] = [];
+    for (const p of paths) {
+      const local = this.toLocal(p);
+      try {
+        await fs.rm(local, { recursive: true, force: true });
+        deleted.push(p);
+      } catch {
+        failed.push(p);
+      }
+    }
+    return { deleted, failed };
+  }
+
   async batchRenameAbsolutePaths(
     renames: readonly { readonly src: string; readonly dst: string; readonly id: string }[],
     checkSrcExists: boolean,

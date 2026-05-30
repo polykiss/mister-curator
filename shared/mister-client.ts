@@ -502,6 +502,16 @@ export interface IMisterClient {
    * Returns a flat list of per-path results; the caller accumulates
    * ok / missing / fail counts.
    */
+  /**
+   * feat/duplicate-detect-and-restore (#40) — delete each path via
+   * `rm -rf`. Each deletion is independent (a failure on one path does
+   * not abort the rest). Returns lists of successfully deleted paths and
+   * paths that failed.
+   */
+  deleteFilesOrDirs(
+    paths: readonly string[],
+  ): Promise<{ deleted: readonly string[]; failed: readonly string[] }>;
+
   batchRenameAbsolutePaths(
     renames: readonly { readonly src: string; readonly dst: string; readonly id: string }[],
     checkSrcExists: boolean,

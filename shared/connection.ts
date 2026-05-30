@@ -10,7 +10,7 @@
  *     failure card, disconnect banner).
  */
 
-import type { ConnectionErrorCode, MisterProfile } from '@shared/types';
+import type { ConnectionErrorCode, DuplicatePair, MisterProfile } from '@shared/types';
 
 /**
  * Don't show any "Connecting…" feedback for the first 3 seconds — most
@@ -172,6 +172,11 @@ export type ConnectionEvent =
   | {
       readonly type: 'disconnected-unexpected';
       readonly profileId: string;
+    }
+  | {
+      readonly type: 'duplicates-detected';
+      readonly profileId: string;
+      readonly duplicates: readonly DuplicatePair[];
     };
 
 /**

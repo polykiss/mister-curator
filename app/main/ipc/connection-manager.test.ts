@@ -1278,3 +1278,154 @@ describe('ConnectionManager — Bug D: arcade cache in-place update on single hi
     expect(restored.find((e) => e.relativePath === 'Pac-Man.mra')?.hidden).toBe(false);
   });
 });
+
+describe('ConnectionManager — duplicate-detect-and-restore (#40)', () => {
+  let workDir: string;
+  let cacheDir: string;
+  let client: FakeMisterClient;
+  let cache: CacheManager;
+  let manager: ConnectionManager;
+  let events: ConnectionEvent[];
+
+  beforeEach(async () => {
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-dup-'));
+    cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-dup-cache-'));
+    client = new FakeMisterClient({
+      rootPath: workDir,
+      pristineRootPath: fixturesDir,
+      latencyMs: 0,
+    });
+    await client.reset();
+    cache = new CacheManager(cacheDir);
+    manager = new ConnectionManager(client, makeStubStore(), cache);
+    events = [];
+    manager.onConnectionEvent((e) => events.push(e));
+  });
+
+  afterEach(async () => {
+    await fs.rm(workDir, { recursive: true, force: true });
+    await fs.rm(cacheDir, { recursive: true, force: true });
+  });
+
+  it('connect() with clean cores emits no duplicates-detected event', async () => {
+    // First connect populates the cores cache (warm path for duplication
+    // detection on the second connect).
+    await manager.connect(profile.id);
+    const dupEvents = events.filter((e) => e.type === 'duplicates-detected');
+    expect(dupEvents).toHaveLength(0);
+  });
+
+  it('connect() with an rbf duplicate emits a duplicates-detected event', async () => {
+    // Simulate update_all re-installing NES_20240115.rbf alongside the
+    // already-dotted (hidden) version. Both will coexist in _Console/.
+    await manager.connect(profile.id);
+    // Prime the cache so the duplicate is visible on the next connect.
+    await manager.listAllCoresWithFiles();
+    await manager.disconnect();
+
+    // Add the dotted copy of NES_20240115.rbf (mimics user having hidden NES)
+    // then also place the undotted version (mimics update_all restoring it).
+    const consoleDir = path.join(workDir, '_Console');
+    await fs.copyFile(
+      path.join(consoleDir, 'NES_20240115.rbf'),
+      path.join(consoleDir, '.NES_20240115.rbf'),
+    );
+
+    events.length = 0;
+    await manager.connect(profile.id);
+
+    const dupEvents = events.filter((e) => e.type === 'duplicates-detected');
+    expect(dupEvents).toHaveLength(1);
+    const event = dupEvents[0];
+    if (event?.type !== 'duplicates-detected') throw new Error('wrong type');
+    expect(event.duplicates.length).toBeGreaterThan(0);
+    const pair = event.duplicates.find((p) => p.coreId === 'NES');
+    expect(pair).toBeDefined();
+    expect(pair?.kind).toBe('rbf');
+  });
+
+  it('resolveDuplicateCores keep-hidden deletes the visible path', async () => {
+    // Setup: create a dotted + undotted NES rbf duplicate.
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+    await manager.disconnect();
+    const consoleDir = path.join(workDir, '_Console');
+    await fs.copyFile(
+      path.join(consoleDir, 'NES_20240115.rbf'),
+      path.join(consoleDir, '.NES_20240115.rbf'),
+    );
+    await manager.connect(profile.id);
+
+    const result = await manager.resolveDuplicateCores([
+      {
+        visiblePath: '/media/fat/_Console/NES_20240115.rbf',
+        hiddenPath: '/media/fat/_Console/.NES_20240115.rbf',
+        action: 'keep-hidden',
+      },
+    ]);
+    expect(result.deleted).toBe(1);
+    expect(result.failed).toBe(0);
+
+    // Visible path should be gone; dotted path should remain.
+    await expect(
+      fs.access(path.join(consoleDir, 'NES_20240115.rbf')),
+    ).rejects.toThrow();
+    await expect(
+      fs.access(path.join(consoleDir, '.NES_20240115.rbf')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('resolveDuplicateCores keep-visible deletes the hidden path', async () => {
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+    await manager.disconnect();
+    const consoleDir = path.join(workDir, '_Console');
+    await fs.copyFile(
+      path.join(consoleDir, 'NES_20240115.rbf'),
+      path.join(consoleDir, '.NES_20240115.rbf'),
+    );
+    await manager.connect(profile.id);
+
+    const result = await manager.resolveDuplicateCores([
+      {
+        visiblePath: '/media/fat/_Console/NES_20240115.rbf',
+        hiddenPath: '/media/fat/_Console/.NES_20240115.rbf',
+        action: 'keep-visible',
+      },
+    ]);
+    expect(result.deleted).toBe(1);
+    expect(result.failed).toBe(0);
+
+    await expect(
+      fs.access(path.join(consoleDir, '.NES_20240115.rbf')),
+    ).rejects.toThrow();
+    await expect(
+      fs.access(path.join(consoleDir, 'NES_20240115.rbf')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('resolveDuplicateCores skip action deletes nothing', async () => {
+    await manager.connect(profile.id);
+    await manager.listAllCoresWithFiles();
+    await manager.disconnect();
+    const consoleDir = path.join(workDir, '_Console');
+    await fs.copyFile(
+      path.join(consoleDir, 'NES_20240115.rbf'),
+      path.join(consoleDir, '.NES_20240115.rbf'),
+    );
+    await manager.connect(profile.id);
+
+    const result = await manager.resolveDuplicateCores([
+      {
+        visiblePath: '/media/fat/_Console/NES_20240115.rbf',
+        hiddenPath: '/media/fat/_Console/.NES_20240115.rbf',
+        action: 'skip',
+      },
+    ]);
+    expect(result.deleted).toBe(0);
+    expect(result.failed).toBe(0);
+    // Both files still exist.
+    await expect(fs.access(path.join(consoleDir, 'NES_20240115.rbf'))).resolves.toBeUndefined();
+    await expect(fs.access(path.join(consoleDir, '.NES_20240115.rbf'))).resolves.toBeUndefined();
+  });
+});

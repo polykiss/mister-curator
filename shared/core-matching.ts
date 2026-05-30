@@ -234,6 +234,7 @@ interface MutableCoreEntry {
   gamesDirHidden: boolean;
   gamesDirName?: string;
   extraGamesDirNames?: string[];
+  gamesDirDuplicate?: boolean;
 }
 
 /**
@@ -425,6 +426,13 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
           visibleName,
         ];
       } else {
+        // feat/duplicate-detect-and-restore (#40): if the entry already
+        // has a games dir (gamesDirExists = true), we're seeing a second
+        // one for the same canonical key — both dotted and undotted forms
+        // coexist on the device. Flag it for detectCoreDuplicates.
+        if (existing.gamesDirExists) {
+          existing.gamesDirDuplicate = true;
+        }
         existing.gamesDirExists = true;
         existing.gamesDirHidden = isHidden;
         existing.gamesDirName = visibleName;

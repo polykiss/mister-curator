@@ -600,6 +600,14 @@ export function registerIpcHandlers(
     () => manager.checkUpdateModeActive(),
   );
 
+  // feat/duplicate-detect-and-restore (#40)
+  handle<
+    [readonly import('@shared/types').DuplicateResolution[]],
+    import('@shared/types').DuplicateResolveResult
+  >(IPC_CHANNELS.resolveDuplicateCores, (resolutions) =>
+    manager.resolveDuplicateCores(resolutions),
+  );
+
   ipcMain.handle(
     IPC_CHANNELS.pickKeyFile,
     async (event: IpcMainInvokeEvent): Promise<PickedKeyFile | null> => {
