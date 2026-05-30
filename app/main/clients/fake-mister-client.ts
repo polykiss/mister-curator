@@ -1062,12 +1062,26 @@ export class FakeMisterClient implements IMisterClient {
       }
     }
 
-    // Replicate the real client's find depth limits:
-    //   games: mindepth 2 (skip core-dir level), maxdepth 5 → local depth 5
-    //   arcade: mindepth 1, maxdepth 4
-    // We walk from the games dir (depth 0 = /media/fat/games) and
-    // skip files at depth 1 (core dir itself). For arcade depth 0
-    // means the arcade dir itself.
+    // Category dirs (_Console, _Computer, _Other, _Utility): depth-1 hidden
+    // files and directories — mirrors the real find with -mindepth 1 -maxdepth 1
+    // \( -type f -o -type d \) -name '.*'. (#51)
+    for (const { category, dir } of MISTER_CATEGORY_DIRS) {
+      if (category === 'Arcade') continue;
+      const localDir = this.toLocal(dir);
+      let catEntries: Dirent[];
+      try {
+        catEntries = await fs.readdir(localDir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of catEntries) {
+        if (!e.name.startsWith('.')) continue;
+        if (e.isFile() || e.isDirectory()) results.push(path.join(localDir, e.name));
+      }
+    }
+
+    // Depth-1 hidden game dirs (e.g. games/.NES) — real find uses
+    // -mindepth 1 -maxdepth 1 -type d -name '.*'. (#51)
     await (async () => {
       let entries: Dirent[];
       try {
@@ -1077,6 +1091,7 @@ export class FakeMisterClient implements IMisterClient {
       }
       for (const coreDir of entries) {
         if (!coreDir.isDirectory()) continue;
+        if (coreDir.name.startsWith('.')) results.push(path.join(gamesLocal, coreDir.name));
         await walk(path.join(gamesLocal, coreDir.name), 1, 4);
       }
     })();

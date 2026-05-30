@@ -1593,16 +1593,21 @@ describe('ConnectionManager — captureHiddenSnapshot (fix #47)', () => {
     });
     await client.reset();
 
-    // Remove fixture hidden files so walk counts in these tests are predictable.
+    // Remove fixture hidden files/dirs so walk counts in these tests are predictable.
     const gamesRoot = path.join(workDir, 'games');
-    const coreDirs = await fs.readdir(gamesRoot).catch(() => []);
-    for (const coreId of coreDirs) {
-      const coreDir = path.join(gamesRoot, coreId);
-      const entries = await fs.readdir(coreDir, { recursive: true }).catch(() => []);
-      for (const entry of entries) {
-        const name = path.basename(String(entry));
-        if (name.startsWith('.') && !name.startsWith('..')) {
-          await fs.rm(path.join(coreDir, String(entry)), { force: true }).catch(() => {});
+    const gamesEntries = await fs.readdir(gamesRoot, { withFileTypes: true }).catch(() => []);
+    for (const entry of gamesEntries) {
+      if (entry.name.startsWith('.') && !entry.name.startsWith('..')) {
+        // Hidden depth-1 game dir — remove the whole dir (now captured by #51 fix).
+        await fs.rm(path.join(gamesRoot, entry.name), { recursive: true, force: true }).catch(() => {});
+      } else if (entry.isDirectory()) {
+        const coreDir = path.join(gamesRoot, entry.name);
+        const inner = await fs.readdir(coreDir, { recursive: true }).catch(() => []);
+        for (const f of inner) {
+          const name = path.basename(String(f));
+          if (name.startsWith('.') && !name.startsWith('..')) {
+            await fs.rm(path.join(coreDir, String(f)), { force: true }).catch(() => {});
+          }
         }
       }
     }
@@ -1689,5 +1694,142 @@ describe('ConnectionManager — captureHiddenSnapshot (fix #47)', () => {
     // Second call returns cached result.
     const status = await manager.captureHiddenSnapshot();
     expect(status.snapshot?.totalFiles).toBe(1); // not 2 — early-return
+  });
+});
+
+/**
+ * fix/walk-hidden-files-coverage (#51) — walkHiddenFiles previously only
+ * walked games/ (mindepth 2) and _Arcade/, missing hidden .rbf/.mgl files
+ * in category dirs and hidden depth-1 game directories.
+ */
+describe('ConnectionManager — walkHiddenFiles coverage (#51)', () => {
+  let workDir: string;
+  let cacheDir: string;
+  let client: FakeMisterClient;
+  let cache: CacheManager;
+  let manager: ConnectionManager;
+
+  beforeAll(async () => {
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-walk-coverage-test-'));
+    cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-walk-coverage-cache-'));
+  });
+
+  afterAll(async () => {
+    await fs.rm(workDir, { recursive: true, force: true });
+    await fs.rm(cacheDir, { recursive: true, force: true });
+  });
+
+  beforeEach(async () => {
+    client = new FakeMisterClient({
+      rootPath: workDir,
+      pristineRootPath: fixturesDir,
+      latencyMs: 0,
+    });
+    await client.reset();
+
+    // Remove all fixture hidden files/dirs for predictable counts.
+    const gamesRoot = path.join(workDir, 'games');
+    const gamesEntries = await fs.readdir(gamesRoot, { withFileTypes: true }).catch(() => []);
+    for (const entry of gamesEntries) {
+      if (entry.name.startsWith('.') && !entry.name.startsWith('..')) {
+        await fs.rm(path.join(gamesRoot, entry.name), { recursive: true, force: true }).catch(() => {});
+      } else if (entry.isDirectory()) {
+        const coreDir = path.join(gamesRoot, entry.name);
+        const inner = await fs.readdir(coreDir, { recursive: true }).catch(() => []);
+        for (const f of inner) {
+          const name = path.basename(String(f));
+          if (name.startsWith('.') && !name.startsWith('..')) {
+            await fs.rm(path.join(coreDir, String(f)), { force: true }).catch(() => {});
+          }
+        }
+      }
+    }
+
+    const stateDir = path.join(workDir, '.mistercurator');
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(
+      path.join(stateDir, 'state.json'),
+      JSON.stringify({ schemaVersion: 1, hiddenCores: [], arcadeAutoHideEnabled: false }),
+    );
+
+    const perTestCacheDir = await fs.mkdtemp(path.join(cacheDir, 'run-'));
+    cache = new CacheManager(perTestCacheDir);
+    manager = new ConnectionManager(client, makeStubStore(), cache);
+    await manager.connect(profile.id);
+  });
+
+  afterEach(async () => {
+    await manager.disconnect();
+  });
+
+  it('captures a hidden .rbf in a category dir (_Console)', async () => {
+    const consoleDir = path.join(workDir, '_Console');
+    await fs.mkdir(consoleDir, { recursive: true });
+    await fs.writeFile(path.join(consoleDir, '.NES_20240101.rbf'), '');
+
+    await manager.captureHiddenSnapshot();
+
+    const snapshotPath = path.join(workDir, '.mistercurator', 'pre-update-snapshot.json');
+    const raw = await fs.readFile(snapshotPath, 'utf-8');
+    const snapshot = JSON.parse(raw) as { hiddenFiles: string[] };
+    expect(snapshot.hiddenFiles).toContain('/media/fat/_Console/.NES_20240101.rbf');
+  });
+
+  it('captures hidden .rbf files across multiple category dirs', async () => {
+    for (const dir of ['_Console', '_Computer', '_Other', '_Utility']) {
+      await fs.mkdir(path.join(workDir, dir), { recursive: true });
+      await fs.writeFile(path.join(workDir, dir, `.Hidden_20240101.rbf`), '');
+    }
+
+    await manager.captureHiddenSnapshot();
+
+    const snapshotPath = path.join(workDir, '.mistercurator', 'pre-update-snapshot.json');
+    const raw = await fs.readFile(snapshotPath, 'utf-8');
+    const snapshot = JSON.parse(raw) as { hiddenFiles: string[] };
+    expect(snapshot.hiddenFiles).toContain('/media/fat/_Console/.Hidden_20240101.rbf');
+    expect(snapshot.hiddenFiles).toContain('/media/fat/_Computer/.Hidden_20240101.rbf');
+    expect(snapshot.hiddenFiles).toContain('/media/fat/_Other/.Hidden_20240101.rbf');
+    expect(snapshot.hiddenFiles).toContain('/media/fat/_Utility/.Hidden_20240101.rbf');
+  });
+
+  it('captures a hidden depth-1 game directory (games/.NES)', async () => {
+    // Create a dot-prefixed games dir — this is what hideCore does when hiding
+    // a games dir. mindepth 2 previously skipped it entirely. (#51)
+    const hiddenGamesDir = path.join(workDir, 'games', '.NES');
+    await fs.mkdir(hiddenGamesDir, { recursive: true });
+    await fs.writeFile(path.join(hiddenGamesDir, 'mario.nes'), '');
+
+    await manager.captureHiddenSnapshot();
+
+    const snapshotPath = path.join(workDir, '.mistercurator', 'pre-update-snapshot.json');
+    const raw = await fs.readFile(snapshotPath, 'utf-8');
+    const snapshot = JSON.parse(raw) as { hiddenFiles: string[] };
+    expect(snapshot.hiddenFiles).toContain('/media/fat/games/.NES');
+  });
+
+  it('restoreFromSnapshot re-hides a directory entry without treating it as missing', async () => {
+    // Plant a hidden games dir with a unique name (no fixture conflict).
+    // Capture → apply (un-dot) → restore (re-dot).
+    // With [ ! -f ] the dir would be MISSING — with [ ! -e ] it is re-hidden. (#51)
+    const hiddenGamesDir = path.join(workDir, 'games', '.UNIQUECORE');
+    await fs.mkdir(hiddenGamesDir, { recursive: true });
+    await fs.writeFile(path.join(hiddenGamesDir, 'game.rom'), '');
+
+    await manager.captureHiddenSnapshot();
+
+    const fakeOperationId = 'test-op';
+    await manager.applyUpdateMode(() => {}, fakeOperationId);
+
+    // After applyUpdateMode, games/.UNIQUECORE should be renamed to games/UNIQUECORE
+    const visibleDir = path.join(workDir, 'games', 'UNIQUECORE');
+    await expect(fs.access(visibleDir)).resolves.not.toThrow();
+
+    const result = await manager.restoreFromSnapshot(() => {}, fakeOperationId);
+
+    expect(result.restored).toBe(1);
+    expect(result.skippedMissing).toBe(0);
+    // Confirm the directory was re-hidden
+    await expect(fs.access(hiddenGamesDir)).resolves.not.toThrow();
+    await expect(fs.access(visibleDir)).rejects.toThrow();
   });
 });
