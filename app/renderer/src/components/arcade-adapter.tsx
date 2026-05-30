@@ -1,5 +1,5 @@
 import { Loader2, MoreHorizontal } from 'lucide-react';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import type { ArcadeMraEntry } from '@shared/arcade-mra';
@@ -57,6 +57,8 @@ import {
 } from '@app/renderer/src/lib/rom-sort';
 import { classifyRow } from '@app/renderer/src/lib/row-type';
 import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
+import { filterArcadeEntries } from '@app/renderer/src/lib/filter-arcade';
+import { FilterInput } from '@app/renderer/src/components/FilterInput';
 
 /**
  * feat/arcade-phase-1.5 — pane for managing `.mra` files under
@@ -131,6 +133,10 @@ export function useArcadeAdapter(): ItemListAdapter {
   // feat/arcade-parity-3-ui (G8) — per-pane sort state, not persisted
   // (matches RomsPane). Switching panes resets to the default.
   const [sortState, setSortState] = useState<SortState>(DEFAULT_SORT);
+  // feat/filter-as-you-type (#21) — per-pane text filter. Not persisted.
+  const [filterText, setFilterText] = useState('');
+  const deferredFilter = useDeferredValue(filterText);
+  const filterInputRef = useRef<HTMLInputElement | null>(null);
   // feat/arcade-parity-3-ui (G15) — drill location inside `_Arcade/`.
   // Empty string = root; slash-joined for nested folders (e.g.
   // `_Konami`, `_Konami/sub`).
@@ -269,18 +275,27 @@ export function useArcadeAdapter(): ItemListAdapter {
     [entries, subPath, showHidden],
   );
 
+  // feat/filter-as-you-type (#21) — text filter applied after visibility
+  // filtering but before sort. `deferredFilter` defers the computation so
+  // keystrokes stay responsive. allEntries is passed for subfolder child
+  // matching (a subfolder row is included when a descendant .mra matches).
+  const filteredPresentable = useMemo(
+    () => filterArcadeEntries(presentable, deferredFilter, metadataByMra, entries ?? []),
+    [presentable, deferredFilter, metadataByMra, entries],
+  );
+
   // Enrich each entry with a synthetic Rom (kind='file' for mras,
   // 'folder-container' for subfolders so `sortRoms` pins them) plus
   // the cached metadata record. `rom.filename === entry.relativePath`
   // is bijective with the entry, used to round-trip back after sort.
   const enrichedPresentable = useMemo(
     () =>
-      presentable.map((entry) => ({
+      filteredPresentable.map((entry) => ({
         ...entry,
         rom: makeArcadeRom(entry),
         metadata: metadataByMra[entry.relativePath] ?? null,
       })),
-    [presentable, metadataByMra],
+    [filteredPresentable, metadataByMra],
   );
 
   const sortedRows = useMemo(() => {
@@ -354,6 +369,10 @@ export function useArcadeAdapter(): ItemListAdapter {
 
   const visibleCount = mraRows.filter((e) => !e.hidden).length;
   const hiddenCount = mraRows.filter((e) => e.hidden).length;
+  // feat/filter-as-you-type (#21) — count of .mra entries in the
+  // filtered view at the current depth (used for "Showing N of M").
+  const filteredMraCount = filteredPresentable.filter((e) => e.kind === 'mra').length;
+  const preFilterMraCount = presentable.filter((e) => e.kind === 'mra').length;
 
   /**
    * feat/pre-beta-polish-batch — optimistic single-toggle hide/show.
@@ -752,6 +771,18 @@ export function useArcadeAdapter(): ItemListAdapter {
     el.scrollTop += row.getBoundingClientRect().top - elTop - restore.offset;
   }, [sortedRows]);
 
+  // feat/filter-as-you-type (#21) — Cmd/Ctrl+F focuses the filter input.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent): void {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+        e.preventDefault();
+        filterInputRef.current?.focus();
+      }
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   const breadcrumb = computeBreadcrumb('Arcade', subPath);
   const backRow = computeBackRow('Arcade', subPath);
 
@@ -804,9 +835,27 @@ export function useArcadeAdapter(): ItemListAdapter {
           ))}
         </nav>
         <p className="font-mono text-body-sm text-fg-muted tabular">
-          <span className="text-fg-body">{visibleCount}</span> ROMs ·{' '}
-          <span className="text-fg-body">{hiddenCount}</span> hidden
+          {deferredFilter !== '' ? (
+            <>
+              Showing{' '}
+              <span className="text-fg-body">{filteredMraCount}</span> of{' '}
+              <span className="text-fg-body">{preFilterMraCount}</span> ROMs ·{' '}
+              <span className="text-fg-body">{hiddenCount}</span> hidden
+            </>
+          ) : (
+            <>
+              <span className="text-fg-body">{visibleCount}</span> ROMs ·{' '}
+              <span className="text-fg-body">{hiddenCount}</span> hidden
+            </>
+          )}
         </p>
+        {/* feat/filter-as-you-type (#21) */}
+        <FilterInput
+          value={filterText}
+          onChange={setFilterText}
+          placeholder="Filter MRAs…"
+          inputRef={filterInputRef}
+        />
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="secondary"
@@ -917,7 +966,20 @@ export function useArcadeAdapter(): ItemListAdapter {
           </div>
         ) : enrichedPresentable.length === 0 && backRow === null ? (
           <div className="p-4 text-body-sm text-fg-muted">
-            All .mra files are hidden — toggle &ldquo;Show hidden&rdquo; to manage them.
+            {deferredFilter !== ''
+              ? (
+                <>
+                  No MRAs match &ldquo;{deferredFilter}&rdquo;.{' '}
+                  <button
+                    type="button"
+                    onClick={() => setFilterText('')}
+                    className="underline hover:text-fg"
+                  >
+                    Clear filter
+                  </button>
+                </>
+              )
+              : 'All .mra files are hidden — toggle “Show hidden” to manage them.'}
           </div>
         ) : (
           <Table>

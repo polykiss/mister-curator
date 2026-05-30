@@ -1,5 +1,5 @@
 import { MoreHorizontal, Settings } from 'lucide-react';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import type { ItemListAdapter } from '@app/renderer/src/components/item-list-adapter';
@@ -93,6 +93,8 @@ import { cn } from '@app/renderer/src/lib/cn';
 import { summarizeBulkResult } from '@app/renderer/src/lib/format';
 import type { VisibilityChange } from '@app/renderer/src/lib/optimistic';
 import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
+import { filterRoms } from '@app/renderer/src/lib/filter-roms';
+import { FilterInput } from '@app/renderer/src/components/FilterInput';
 
 /**
  * fix/render-cascade-hide-unhide Fix 1: returns a copy of `prev`
@@ -214,12 +216,19 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
   // cores resets to the default (`name asc`) along with subPath /
   // selection / etc.
   const [sortState, setSortState] = useState<SortState>(DEFAULT_SORT);
+  // feat/filter-as-you-type (#21) — per-pane text filter. Resets on
+  // core switch (same synchronous pattern as sortState). Not persisted.
+  const [filterText, setFilterText] = useState('');
+  const deferredFilter = useDeferredValue(filterText);
+  const filterInputRef = useRef<HTMLInputElement | null>(null);
+
   const [trackedCoreId, setTrackedCoreId] = useState(core.id);
   if (trackedCoreId !== core.id) {
     setTrackedCoreId(core.id);
     setSubPath('');
     setSelected(new Set());
     setSortState(DEFAULT_SORT);
+    setFilterText('');
   }
 
   const cacheKey = romsKey(core.id, subPath);
@@ -560,23 +569,25 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
       .map((r) => r.filename);
   }, [roms, showHidden, showSystem, systemFlags]);
 
-  // The list the user actually sees — hidden + system filters apply
-  // independently. Counts in the header reflect this filtered view so
-  // "47 ROMs" doesn't include the 12 NEOGEO BIOS files when
-  // `showSystem` is off.
+  // The list the user actually sees — visibility filters, text filter,
+  // and sort all applied in sequence.
+  // feat/filter-as-you-type (#21): `deferredFilter` runs the text
+  // filter at deferred priority so keystrokes stay responsive even on
+  // lists with hundreds of entries.
   const presentableRoms = useMemo(() => {
     if (!roms) return null;
-    const filtered = roms.filter((r) => {
+    const visibilityFiltered = roms.filter((r) => {
       if (!showHidden && r.hidden) return false;
       if (!showSystem && systemFlags.get(r.filename) === true) return false;
       return true;
     });
+    const textFiltered = filterRoms(visibilityFiltered, deferredFilter, metadataByPath);
     // PR-A item 8: apply the per-pane sort. Folder rows pin to the
     // top alphabetical, file rows follow `sortState`. We project to
     // the sortRoms input shape (rom + metadata), let the pure sort
     // do its work, then project back to the Rom array the rest of
     // the pane consumes.
-    const withMeta = filtered.map((rom) => ({
+    const withMeta = textFiltered.map((rom) => ({
       rom,
       // feat/atomic-folder-consistency: `metadataLookupPathFor`
       // centralizes the atomic-folder-uses-containedRomPath rule.
@@ -586,7 +597,18 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
         metadataByPath[metadataLookupPathFor(rom) ?? rom.path]?.metadata,
     }));
     return sortRoms(withMeta, sortState).map((r) => r.rom);
-  }, [roms, showHidden, showSystem, systemFlags, metadataByPath, sortState]);
+  }, [roms, showHidden, showSystem, systemFlags, metadataByPath, sortState, deferredFilter]);
+
+  // Pre-filter count (visibility only, no text filter) — used by the
+  // header to show "Showing N of M" when the text filter is active.
+  const preFilterCount = useMemo(() => {
+    if (!roms) return 0;
+    return roms.filter((r) => {
+      if (!showHidden && r.hidden) return false;
+      if (!showSystem && systemFlags.get(r.filename) === true) return false;
+      return true;
+    }).length;
+  }, [roms, showHidden, showSystem, systemFlags]);
 
   // After each visible-ROM-set change, restore scroll if an anchor
   // was captured. useLayoutEffect fires before the browser paints,
@@ -604,6 +626,20 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     const elTop = el.getBoundingClientRect().top;
     el.scrollTop += row.getBoundingClientRect().top - elTop - restore.offset;
   }, [romScrollKey]);
+
+  // feat/filter-as-you-type (#21) — Cmd/Ctrl+F focuses the filter
+  // input. Mounted while this pane is active; cleans up on unmount so
+  // it doesn't fire when the arcade pane is open instead.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent): void {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+        e.preventDefault();
+        filterInputRef.current?.focus();
+      }
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   // Density-bar denominator for the size column — peer max across the
   // rows actually being rendered. SYSTEM.md §10: ROMs use file size /
@@ -1111,15 +1147,36 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
           ))}
         </nav>
         <p className="font-mono text-body-sm text-fg-muted tabular">
-          <span className="text-fg-body">{visibleNonSystem}</span> ROMs ·{' '}
-          <span className="text-fg-body">{hiddenNonSystem}</span> hidden
-          {systemCount > 0 ? (
+          {deferredFilter !== '' && presentableRoms !== null ? (
             <>
-              {' '}
-              · <span className="text-fg-body">{systemCount}</span> system
+              Showing{' '}
+              <span className="text-fg-body">{presentableRoms.length}</span> of{' '}
+              <span className="text-fg-body">{preFilterCount}</span> ROMs ·{' '}
+              <span className="text-fg-body">{hiddenNonSystem}</span> hidden
+              {systemCount > 0 ? (
+                <> · <span className="text-fg-body">{systemCount}</span> system</>
+              ) : null}
             </>
-          ) : null}
+          ) : (
+            <>
+              <span className="text-fg-body">{visibleNonSystem}</span> ROMs ·{' '}
+              <span className="text-fg-body">{hiddenNonSystem}</span> hidden
+              {systemCount > 0 ? (
+                <>
+                  {' '}
+                  · <span className="text-fg-body">{systemCount}</span> system
+                </>
+              ) : null}
+            </>
+          )}
         </p>
+        {/* feat/filter-as-you-type (#21) */}
+        <FilterInput
+          value={filterText}
+          onChange={setFilterText}
+          placeholder="Filter ROMs…"
+          inputRef={filterInputRef}
+        />
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="secondary"
@@ -1228,7 +1285,20 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
           <div className="p-6 text-body-sm text-fg-muted">
             {(roms ?? []).length === 0
               ? 'No ROMs in this core.'
-              : 'Nothing to show. Toggle "Show hidden" or "Show system files" to see more.'}
+              : deferredFilter !== ''
+                ? (
+                  <>
+                    No ROMs match &ldquo;{deferredFilter}&rdquo;.{' '}
+                    <button
+                      type="button"
+                      onClick={() => setFilterText('')}
+                      className="underline hover:text-fg"
+                    >
+                      Clear filter
+                    </button>
+                  </>
+                )
+                : 'Nothing to show. Toggle "Show hidden" or "Show system files" to see more.'}
           </div>
         ) : (
           <Table>
