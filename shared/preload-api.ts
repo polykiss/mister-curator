@@ -16,6 +16,7 @@ import type {
   ConnectionErrorCode,
   ConnectionStatus,
   CoreEntry,
+  CoreRenameConflict,
   FolderClassifications,
   MisterProfile,
   Rom,
@@ -943,6 +944,21 @@ export function encodeIpcError(err: unknown): unknown {
       return new Error(`${IPC_ERROR_MARKER}${payload}`);
     }
   }
+  if (
+    err !== null &&
+    typeof err === 'object' &&
+    (err as { name?: unknown }).name === 'DestinationAlreadyExistsError'
+  ) {
+    const e = err as { message?: unknown; conflicts?: unknown };
+    if (typeof e.message === 'string' && Array.isArray(e.conflicts)) {
+      const payload = JSON.stringify({
+        kind: 'DestinationAlreadyExistsError',
+        message: e.message,
+        conflicts: e.conflicts,
+      });
+      return new Error(`${IPC_ERROR_MARKER}${payload}`);
+    }
+  }
   return err;
 }
 
@@ -976,6 +992,18 @@ export function decodeIpcError(err: unknown): unknown {
         return rebuildMisterConnectionError(
           p.code as ConnectionErrorCode,
           p.message,
+        );
+      }
+    } else if (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      (parsed as { kind?: unknown }).kind === 'DestinationAlreadyExistsError'
+    ) {
+      const p = parsed as { message?: unknown; conflicts?: unknown };
+      if (typeof p.message === 'string' && Array.isArray(p.conflicts)) {
+        return rebuildDestinationAlreadyExistsError(
+          p.message,
+          p.conflicts as ReadonlyArray<CoreRenameConflict>,
         );
       }
     }
@@ -1014,6 +1042,41 @@ function rebuildMisterConnectionError(
   const fallback = new Error(message);
   Object.assign(fallback, { name: 'MisterConnectionError', code });
   return fallback;
+}
+
+let destinationAlreadyExistsErrorFactory:
+  | ((conflicts: ReadonlyArray<CoreRenameConflict>) => Error)
+  | null = null;
+
+export function setDestinationAlreadyExistsErrorFactory(
+  factory: (conflicts: ReadonlyArray<CoreRenameConflict>) => Error,
+): void {
+  destinationAlreadyExistsErrorFactory = factory;
+}
+
+function rebuildDestinationAlreadyExistsError(
+  message: string,
+  conflicts: ReadonlyArray<CoreRenameConflict>,
+): Error {
+  if (destinationAlreadyExistsErrorFactory !== null) {
+    return destinationAlreadyExistsErrorFactory(conflicts);
+  }
+  // Fallback: a plain Error tagged with the fields.
+  return Object.assign(new Error(message), {
+    name: 'DestinationAlreadyExistsError',
+    conflicts,
+  });
+}
+
+export function isDestinationAlreadyExistsError(
+  err: unknown,
+): err is { name: string; conflicts: ReadonlyArray<CoreRenameConflict>; message: string } {
+  return (
+    err !== null &&
+    typeof err === 'object' &&
+    (err as { name?: unknown }).name === 'DestinationAlreadyExistsError' &&
+    Array.isArray((err as { conflicts?: unknown }).conflicts)
+  );
 }
 
 /** Test-only: exposed so unit tests can assert on the marker. */

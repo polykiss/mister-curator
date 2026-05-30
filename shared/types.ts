@@ -160,6 +160,22 @@ export class MisterConnectionError extends Error implements ConnectionError {
   }
 }
 
+export interface CoreRenameConflict {
+  readonly from: string;
+  readonly to: string;
+}
+
+export class DestinationAlreadyExistsError extends Error {
+  readonly conflicts: ReadonlyArray<CoreRenameConflict>;
+  constructor(conflicts: ReadonlyArray<CoreRenameConflict>) {
+    super(
+      `Hide aborted: ${conflicts.length} destination path(s) already exist on the device.`,
+    );
+    this.name = 'DestinationAlreadyExistsError';
+    this.conflicts = conflicts;
+  }
+}
+
 /**
  * One entry in the on-MiSTer hide ledger.
  *
