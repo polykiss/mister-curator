@@ -2770,10 +2770,11 @@ describe('RealMisterClient', () => {
       // Three execCommands total: cat ledger, list cores, write cleaned ledger.
       expect(mocks.execCommand).toHaveBeenCalledTimes(3);
       const writeScript = mocks.execCommand.mock.calls[2]?.[0] as string;
+      const writeStdin = (mocks.execCommand.mock.calls[2]?.[1] as { stdin?: string } | undefined)?.stdin ?? '';
       expect(writeScript).toContain(`mkdir -p '/media/fat/.mistercurator'`);
-      // The rewrite contains NES but not _hidden.
-      expect(writeScript).toContain('"coreId": "NES"');
-      expect(writeScript).not.toContain('"coreId": "_hidden"');
+      // The rewrite JSON (via stdin) contains NES but not _hidden.
+      expect(writeStdin).toContain('"coreId": "NES"');
+      expect(writeStdin).not.toContain('"coreId": "_hidden"');
     });
 
     it('readHideLedger returns empty ledger when cat returns nothing (file missing)', async () => {
@@ -2786,13 +2787,13 @@ describe('RealMisterClient', () => {
       expect(ledger).toEqual({ schemaVersion: 1, hiddenCores: [] });
     });
 
-    it('writeHideLedger emits mkdir, heredoc with the documented delimiter, and atomic mv', async () => {
+    it('writeHideLedger uses stdin (not heredoc) and performs atomic mv', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
 
-      await client.writeHideLedger({
-        schemaVersion: 1,
+      const ledger = {
+        schemaVersion: 1 as const,
         hiddenCores: [
           {
             coreId: 'NES',
@@ -2801,16 +2802,22 @@ describe('RealMisterClient', () => {
             hiddenAt: '2026-05-01T12:00:00Z',
           },
         ],
-      });
+      };
+      await client.writeHideLedger(ledger);
 
       expect(mocks.execCommand).toHaveBeenCalledTimes(1);
-      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      const [script, options] = mocks.execCommand.mock.calls[0] as [string, { stdin: string }];
+      // Script must stay small — no JSON payload in argv.
       expect(script).toContain(`mkdir -p '/media/fat/.mistercurator'`);
-      expect(script).toContain(`<<'MISTERCURATOR_LEDGER_EOF'`);
-      expect(script).toContain('\nMISTERCURATOR_LEDGER_EOF\n');
+      expect(script).toContain(`cat > '/media/fat/.mistercurator/state.json.tmp'`);
       expect(script).toContain(
         `mv '/media/fat/.mistercurator/state.json.tmp' '/media/fat/.mistercurator/state.json'`,
       );
+      expect(script).not.toContain('MISTERCURATOR_LEDGER_EOF');
+      // JSON goes via stdin, not in the script string.
+      expect(options?.stdin).toBeTruthy();
+      expect(options?.stdin).toContain('"coreId": "NES"');
+      expect(script).not.toContain('"coreId"');
     });
 
     it('writeHideLedger rejects fast when payload contains the heredoc delimiter', async () => {
@@ -2835,6 +2842,54 @@ describe('RealMisterClient', () => {
       // Must short-circuit before issuing any execCommand so a corrupt ledger
       // can never be written.
       expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('writeUpdateSnapshot (fix #47 — ARG_MAX via stdin)', () => {
+    it('pipes JSON via stdin, not embedded in script, and performs atomic mv', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      const json = JSON.stringify({ createdAt: '2026-05-30T00:00:00Z', hiddenFiles: ['/media/fat/games/NES/.hidden.nes'] });
+      await client.writeUpdateSnapshot(json);
+
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+      const [script, options] = mocks.execCommand.mock.calls[0] as [string, { stdin: string }];
+      // Script must be small — no JSON in argv.
+      expect(script).toContain(`mkdir -p '/media/fat/.mistercurator'`);
+      expect(script).toContain(`cat > '/media/fat/.mistercurator/pre-update-snapshot.json.tmp'`);
+      expect(script).toContain(
+        `mv '/media/fat/.mistercurator/pre-update-snapshot.json.tmp' '/media/fat/.mistercurator/pre-update-snapshot.json'`,
+      );
+      expect(script).not.toContain('UPDATE_SNAPSHOT_EOF');
+      expect(script).not.toContain('hiddenFiles');
+      // JSON travels via stdin.
+      expect(options?.stdin).toBe(json);
+    });
+
+    it('script stays under ARG_MAX even with 3200 hidden paths', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(execOk(''));
+
+      // Synthetic snapshot exceeding ARG_MAX (~128 KB): 3200 paths of ~43 bytes
+      // each in the serialized JSON → ~140 KB total. With the old heredoc approach
+      // this would have caused "Argument list too long" from execvp.
+      const hiddenFiles = Array.from({ length: 3200 }, (_, i) =>
+        `/media/fat/games/NES/.hidden_rom_${String(i).padStart(4, '0')}.nes`,
+      );
+      const json = JSON.stringify({ createdAt: new Date().toISOString(), hiddenFiles });
+      expect(json.length).toBeGreaterThan(128 * 1024); // confirm it would bust ARG_MAX
+
+      await client.writeUpdateSnapshot(json);
+
+      const [script, options] = mocks.execCommand.mock.calls[0] as [string, { stdin: string }];
+      // The script string itself must stay tiny — all the size is in stdin.
+      expect(script.length).toBeLessThan(300);
+      expect(options?.stdin).toBe(json);
     });
   });
 
@@ -2875,7 +2930,7 @@ describe('RealMisterClient', () => {
       expect(marks.marked[0]?.coreId).toBe('C64');
     });
 
-    it('addSystemFileMark reads, mutates, and writes via heredoc', async () => {
+    it('addSystemFileMark reads, mutates, and writes via stdin (not heredoc)', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -2888,14 +2943,17 @@ describe('RealMisterClient', () => {
       await client.addSystemFileMark('C64', 'DolphinDOS_2.0.rom');
 
       expect(mocks.execCommand).toHaveBeenCalledTimes(2);
-      const writeScript = mocks.execCommand.mock.calls[1]?.[0] as string;
+      const [writeScript, writeOptions] = mocks.execCommand.mock.calls[1] as [string, { stdin: string }];
       expect(writeScript).toContain(`mkdir -p '/media/fat/.mistercurator'`);
-      expect(writeScript).toContain(`<<'MISTERCURATOR_SYSTEM_FILES_EOF'`);
-      expect(writeScript).toContain('"coreId": "C64"');
-      expect(writeScript).toContain('"filename": "DolphinDOS_2.0.rom"');
+      expect(writeScript).toContain(`cat > '/media/fat/.mistercurator/system-files.json.tmp'`);
+      expect(writeScript).not.toContain('MISTERCURATOR_SYSTEM_FILES_EOF');
       expect(writeScript).toContain(
         `mv '/media/fat/.mistercurator/system-files.json.tmp' '/media/fat/.mistercurator/system-files.json'`,
       );
+      // JSON in stdin, not in script.
+      expect(writeOptions?.stdin).toContain('"coreId": "C64"');
+      expect(writeOptions?.stdin).toContain('"filename": "DolphinDOS_2.0.rom"');
+      expect(writeScript).not.toContain('"coreId"');
     });
 
     it('addSystemFileMark issues only one read when the mark already exists', async () => {

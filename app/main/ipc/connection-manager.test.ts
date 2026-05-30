@@ -1559,3 +1559,135 @@ describe('ConnectionManager — duplicate-detect-and-restore (#40)', () => {
     await expect(fs.access(path.join(consoleDir, '.NES_20240115.rbf'))).resolves.toBeUndefined();
   });
 });
+
+/**
+ * fix/update-mode-snapshot-stdin (#47) — captureHiddenSnapshot integration
+ * coverage using the fake client. The fake client writes via fs.writeFile, so
+ * these tests exercise the orchestration path (walkHiddenFiles → serialise →
+ * writeUpdateSnapshot) and verify the snapshot file is created with the
+ * correct JSON structure even when the hidden set is large enough that the
+ * old heredoc approach would have hit ARG_MAX.
+ */
+describe('ConnectionManager — captureHiddenSnapshot (fix #47)', () => {
+  let workDir: string;
+  let cacheDir: string;
+  let client: FakeMisterClient;
+  let cache: CacheManager;
+  let manager: ConnectionManager;
+
+  beforeAll(async () => {
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-snapshot-test-'));
+    cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-snapshot-cache-'));
+  });
+
+  afterAll(async () => {
+    await fs.rm(workDir, { recursive: true, force: true });
+    await fs.rm(cacheDir, { recursive: true, force: true });
+  });
+
+  beforeEach(async () => {
+    client = new FakeMisterClient({
+      rootPath: workDir,
+      pristineRootPath: fixturesDir,
+      latencyMs: 0,
+    });
+    await client.reset();
+
+    // Remove fixture hidden files so walk counts in these tests are predictable.
+    const gamesRoot = path.join(workDir, 'games');
+    const coreDirs = await fs.readdir(gamesRoot).catch(() => []);
+    for (const coreId of coreDirs) {
+      const coreDir = path.join(gamesRoot, coreId);
+      const entries = await fs.readdir(coreDir, { recursive: true }).catch(() => []);
+      for (const entry of entries) {
+        const name = path.basename(String(entry));
+        if (name.startsWith('.') && !name.startsWith('..')) {
+          await fs.rm(path.join(coreDir, String(entry)), { force: true }).catch(() => {});
+        }
+      }
+    }
+
+    // Disable arcade auto-hide so connect doesn't try to walk _Arcade/.
+    const stateDir = path.join(workDir, '.mistercurator');
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(
+      path.join(stateDir, 'state.json'),
+      JSON.stringify({ schemaVersion: 1, hiddenCores: [], arcadeAutoHideEnabled: false }),
+    );
+
+    const perTestCacheDir = await fs.mkdtemp(path.join(cacheDir, 'run-'));
+    cache = new CacheManager(perTestCacheDir);
+    manager = new ConnectionManager(client, makeStubStore(), cache);
+    await manager.connect(profile.id);
+  });
+
+  afterEach(async () => {
+    await manager.disconnect();
+  });
+
+  it('writes a snapshot JSON file with the discovered hidden paths', async () => {
+    // Plant one hidden file that walkHiddenFiles will find.
+    const nesGamesDir = path.join(workDir, 'games', 'NES');
+    await fs.mkdir(nesGamesDir, { recursive: true });
+    await fs.writeFile(path.join(nesGamesDir, '.hidden_rom.nes'), '');
+
+    await manager.captureHiddenSnapshot();
+
+    const snapshotPath = path.join(workDir, '.mistercurator', 'pre-update-snapshot.json');
+    const raw = await fs.readFile(snapshotPath, 'utf-8');
+    const snapshot = JSON.parse(raw) as { hiddenFiles: string[]; createdAt: string };
+    expect(snapshot.hiddenFiles).toContain('/media/fat/games/NES/.hidden_rom.nes');
+    expect(snapshot.createdAt).toBeTruthy();
+  });
+
+  it('handles a large hidden set (>4000 paths) without errors', async () => {
+    // Seed 4000+ hidden files across two cores — enough to produce a
+    // snapshot JSON well above ARG_MAX (~128 KB) with the old heredoc approach.
+    for (const coreId of ['NES', 'SNES']) {
+      const gamesDir = path.join(workDir, 'games', coreId);
+      await fs.mkdir(gamesDir, { recursive: true });
+      for (let i = 0; i < 2000; i++) {
+        await fs.writeFile(
+          path.join(gamesDir, `.hidden_${String(i).padStart(4, '0')}.rom`),
+          '',
+        );
+      }
+    }
+
+    await expect(manager.captureHiddenSnapshot()).resolves.not.toThrow();
+
+    const snapshotPath = path.join(workDir, '.mistercurator', 'pre-update-snapshot.json');
+    const raw = await fs.readFile(snapshotPath, 'utf-8');
+    const snapshot = JSON.parse(raw) as { hiddenFiles: string[] };
+    expect(snapshot.hiddenFiles.length).toBeGreaterThanOrEqual(4000);
+    // The snapshot JSON is large — confirm it would have busted the old limit.
+    expect(raw.length).toBeGreaterThan(128 * 1024);
+  });
+
+  it('returns the snapshot metadata with the correct file count', async () => {
+    const gamesDir = path.join(workDir, 'games', 'NES');
+    await fs.mkdir(gamesDir, { recursive: true });
+    await fs.writeFile(path.join(gamesDir, '.a.nes'), '');
+    await fs.writeFile(path.join(gamesDir, '.b.nes'), '');
+
+    const status = await manager.captureHiddenSnapshot();
+    expect(status.active).toBe(true);
+    expect(status.snapshot?.totalFiles).toBe(2);
+  });
+
+  it('returns existing snapshot without re-walking if one is already present', async () => {
+    const gamesDir = path.join(workDir, 'games', 'NES');
+    await fs.mkdir(gamesDir, { recursive: true });
+    await fs.writeFile(path.join(gamesDir, '.a.nes'), '');
+
+    // First capture.
+    await manager.captureHiddenSnapshot();
+
+    // Add another hidden file — a second capture would pick it up.
+    await fs.writeFile(path.join(gamesDir, '.b.nes'), '');
+
+    // Second call returns cached result.
+    const status = await manager.captureHiddenSnapshot();
+    expect(status.snapshot?.totalFiles).toBe(1); // not 2 — early-return
+  });
+});

@@ -13,7 +13,6 @@ import {
   MISTER_LEDGER_PATH,
   MISTER_SYSTEM_FILES_PATH,
   MISTER_UPDATE_SNAPSHOT_PATH,
-  UPDATE_SNAPSHOT_HEREDOC_DELIMITER,
 } from '@shared/constants';
 import {
   decodeArcadeMraTsv,
@@ -49,7 +48,6 @@ import {
 import { displayRomName } from '@shared/display';
 import {
   EMPTY_FOLDER_CLASSIFICATIONS,
-  FOLDER_CLASSIFICATIONS_HEREDOC_DELIMITER,
   getFolderOverride,
   parseFolderClassifications,
   serializeFolderClassifications,
@@ -60,14 +58,12 @@ import { classifyFolder, resolveClassification } from '@shared/folder-rom';
 import {
   healLedger,
   ledgerEqual,
-  LEDGER_HEREDOC_DELIMITER,
   parseLedger,
   serializeLedger,
 } from '@shared/ledger';
 import {
   parseSystemFilesMarks,
   serializeSystemFilesMarks,
-  SYSTEM_FILES_HEREDOC_DELIMITER,
   withMark,
   withoutMark,
 } from '@shared/system-files-marks';
@@ -1468,21 +1464,20 @@ export class RealMisterClient implements IMisterClient {
 
   async writeHideLedger(ledger: HideLedger): Promise<void> {
     this.assertConnected();
-    // serializeLedger refuses to produce a payload containing the heredoc
-    // delimiter — defense-in-depth so a hostile coreId / rbfPath value can
-    // never close the heredoc early and turn the tail of the JSON into
-    // shell commands.
+    // serializeLedger validates the payload does not contain the ledger
+    // delimiter — kept as defense-in-depth even though stdin piping makes
+    // shell injection impossible.
     const json = serializeLedger(ledger);
     const tmpPath = `${MISTER_LEDGER_PATH}.tmp`;
+    // JSON is piped via stdin rather than embedded in the script string so
+    // the command length stays well under ARG_MAX regardless of payload size.
     const script =
-      `mkdir -p ${shellQuote(MISTER_LEDGER_DIR)}\n` +
-      `cat > ${shellQuote(tmpPath)} <<'${LEDGER_HEREDOC_DELIMITER}'\n` +
-      json +
-      `${LEDGER_HEREDOC_DELIMITER}\n` +
-      `mv ${shellQuote(tmpPath)} ${shellQuote(MISTER_LEDGER_PATH)}\n`;
+      `mkdir -p ${shellQuote(MISTER_LEDGER_DIR)} && ` +
+      `cat > ${shellQuote(tmpPath)} && ` +
+      `mv ${shellQuote(tmpPath)} ${shellQuote(MISTER_LEDGER_PATH)}`;
 
     const result = await this.runSshOp(script, () =>
-      this.ssh.execCommand(script),
+      this.ssh.execCommand(script, { stdin: json }),
     );
     if (result.code !== 0) {
       throw new Error(
@@ -1556,15 +1551,14 @@ export class RealMisterClient implements IMisterClient {
   private async writeSystemFilesMarks(marks: SystemFilesMarks): Promise<void> {
     const json = serializeSystemFilesMarks(marks);
     const tmpPath = `${MISTER_SYSTEM_FILES_PATH}.tmp`;
+    // JSON via stdin — avoids ARG_MAX for large mark sets.
     const script =
-      `mkdir -p ${shellQuote(MISTER_LEDGER_DIR)}\n` +
-      `cat > ${shellQuote(tmpPath)} <<'${SYSTEM_FILES_HEREDOC_DELIMITER}'\n` +
-      json +
-      `${SYSTEM_FILES_HEREDOC_DELIMITER}\n` +
-      `mv ${shellQuote(tmpPath)} ${shellQuote(MISTER_SYSTEM_FILES_PATH)}\n`;
+      `mkdir -p ${shellQuote(MISTER_LEDGER_DIR)} && ` +
+      `cat > ${shellQuote(tmpPath)} && ` +
+      `mv ${shellQuote(tmpPath)} ${shellQuote(MISTER_SYSTEM_FILES_PATH)}`;
 
     const result = await this.runSshOp(script, () =>
-      this.ssh.execCommand(script),
+      this.ssh.execCommand(script, { stdin: json }),
     );
     if (result.code !== 0) {
       throw new Error(
@@ -1864,13 +1858,17 @@ export class RealMisterClient implements IMisterClient {
   async writeUpdateSnapshot(json: string): Promise<void> {
     this.assertConnected();
     const tmpPath = `${MISTER_UPDATE_SNAPSHOT_PATH}.tmp`;
+    // JSON is piped via stdin rather than embedded in the script string.
+    // With 1800+ hidden files the snapshot JSON exceeds ~150 KB — well past
+    // busybox's ARG_MAX (~128 KB) when the full script is passed as a single
+    // argv to execvp. stdin has no equivalent limit. (#47)
     const script =
-      `mkdir -p ${shellQuote(MISTER_LEDGER_DIR)}\n` +
-      `cat > ${shellQuote(tmpPath)} <<'${UPDATE_SNAPSHOT_HEREDOC_DELIMITER}'\n` +
-      json + '\n' +
-      `${UPDATE_SNAPSHOT_HEREDOC_DELIMITER}\n` +
-      `mv ${shellQuote(tmpPath)} ${shellQuote(MISTER_UPDATE_SNAPSHOT_PATH)}\n`;
-    const result = await this.runSshOp(script, () => this.ssh.execCommand(script));
+      `mkdir -p ${shellQuote(MISTER_LEDGER_DIR)} && ` +
+      `cat > ${shellQuote(tmpPath)} && ` +
+      `mv ${shellQuote(tmpPath)} ${shellQuote(MISTER_UPDATE_SNAPSHOT_PATH)}`;
+    const result = await this.runSshOp(script, () =>
+      this.ssh.execCommand(script, { stdin: json }),
+    );
     if (result.code !== 0) {
       throw new Error(
         `Failed to write update snapshot: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
@@ -1957,15 +1955,14 @@ export class RealMisterClient implements IMisterClient {
   ): Promise<void> {
     const json = serializeFolderClassifications(marks);
     const tmpPath = `${MISTER_FOLDER_CLASSIFICATIONS_PATH}.tmp`;
+    // JSON via stdin — avoids ARG_MAX for large classification sets.
     const script =
-      `mkdir -p ${shellQuote(MISTER_LEDGER_DIR)}\n` +
-      `cat > ${shellQuote(tmpPath)} <<'${FOLDER_CLASSIFICATIONS_HEREDOC_DELIMITER}'\n` +
-      json +
-      `${FOLDER_CLASSIFICATIONS_HEREDOC_DELIMITER}\n` +
-      `mv ${shellQuote(tmpPath)} ${shellQuote(MISTER_FOLDER_CLASSIFICATIONS_PATH)}\n`;
+      `mkdir -p ${shellQuote(MISTER_LEDGER_DIR)} && ` +
+      `cat > ${shellQuote(tmpPath)} && ` +
+      `mv ${shellQuote(tmpPath)} ${shellQuote(MISTER_FOLDER_CLASSIFICATIONS_PATH)}`;
 
     const result = await this.runSshOp(script, () =>
-      this.ssh.execCommand(script),
+      this.ssh.execCommand(script, { stdin: json }),
     );
     if (result.code !== 0) {
       throw new Error(
