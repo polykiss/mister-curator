@@ -3,6 +3,13 @@ import type { CoreEntry } from '@shared/types';
 export interface CoreAuditResult {
   readonly missingCoreFile: readonly CoreEntry[];
   readonly noRomsForCore: readonly CoreEntry[];
+  /**
+   * feat/arcade-orphan-detect (#46) — zip basenames found in
+   * games/mame/ or games/hbmame/ that are not referenced by any
+   * .mra launcher. These are taking up disk space but can't be
+   * launched from the MiSTer menu.
+   */
+  readonly orphanArcadeRoms: readonly string[];
 }
 
 /**
@@ -43,7 +50,10 @@ const CORE_ALIASES: Readonly<Record<string, readonly string[]>> = {
  * Pure local iteration — zero SSH calls. Results re-derive automatically
  * whenever the caller's CoreEntry list changes (e.g. after hide/show or Refresh).
  */
-export function auditCores(cores: readonly CoreEntry[]): CoreAuditResult {
+export function auditCores(
+  cores: readonly CoreEntry[],
+  orphanArcadeRoms: readonly string[] = [],
+): CoreAuditResult {
   const missingCoreFile: CoreEntry[] = [];
   const noRomsForCore: CoreEntry[] = [];
 
@@ -84,5 +94,5 @@ export function auditCores(cores: readonly CoreEntry[]): CoreAuditResult {
     }
   }
 
-  return { missingCoreFile, noRomsForCore };
+  return { missingCoreFile, noRomsForCore, orphanArcadeRoms };
 }

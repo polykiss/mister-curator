@@ -369,3 +369,35 @@ describe('auditCores', () => {
     expect(result.noRomsForCore.map((c) => c.id)).toEqual(['Minimig']);
   });
 });
+
+describe('auditCores — orphanArcadeRoms', () => {
+  it('no orphans passed → empty array', () => {
+    const result = auditCores([]);
+    expect(result.orphanArcadeRoms).toHaveLength(0);
+  });
+
+  it('explicit empty orphan list → empty array', () => {
+    const result = auditCores([], []);
+    expect(result.orphanArcadeRoms).toHaveLength(0);
+  });
+
+  it('orphans passed through verbatim', () => {
+    const result = auditCores([], ['pacman.zip', 'galaga.zip']);
+    expect(result.orphanArcadeRoms).toEqual(['pacman.zip', 'galaga.zip']);
+  });
+
+  it('core state does not affect orphan list', () => {
+    const cores = [
+      makeCore({
+        id: 'NES',
+        rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
+        gamesDirExists: true,
+        romCount: 100,
+      }),
+    ];
+    const result = auditCores(cores, ['orphan.zip']);
+    expect(result.orphanArcadeRoms).toEqual(['orphan.zip']);
+    expect(result.missingCoreFile).toHaveLength(0);
+    expect(result.noRomsForCore).toHaveLength(0);
+  });
+});

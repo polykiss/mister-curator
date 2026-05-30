@@ -608,6 +608,12 @@ export function registerIpcHandlers(
     manager.resolveDuplicateCores(resolutions),
   );
 
+  // feat/arcade-orphan-detect (#46)
+  handle<[], import('@shared/preload-api').ArcadeOrphansWire>(
+    IPC_CHANNELS.getArcadeOrphans,
+    () => manager.getArcadeOrphans(),
+  );
+
   ipcMain.handle(
     IPC_CHANNELS.pickKeyFile,
     async (event: IpcMainInvokeEvent): Promise<PickedKeyFile | null> => {

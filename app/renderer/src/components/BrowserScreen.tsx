@@ -39,7 +39,8 @@ export function BrowserScreen(): JSX.Element {
   const [auditDialogOpen, setAuditDialogOpen] = useState(false);
   const auditIssueCount =
     (auditResult?.missingCoreFile.length ?? 0) +
-    (auditResult?.noRomsForCore.length ?? 0);
+    (auditResult?.noRomsForCore.length ?? 0) +
+    (auditResult?.orphanArcadeRoms.length ?? 0);
   const [progressCurrent, setProgressCurrent] = useState(0);
   const [progressTotal, setProgressTotal] = useState(0);
 

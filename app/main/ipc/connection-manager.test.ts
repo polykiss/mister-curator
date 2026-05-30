@@ -888,6 +888,111 @@ describe('ConnectionManager — arcade playability data layer (PR 1/2)', () => {
 });
 
 /**
+ * feat/arcade-orphan-detect (#46) — getArcadeOrphans() coverage.
+ * Reuses the same fixture layout as the PR 1/2 block (dkong.zip present,
+ * missing.zip absent, one no-roms-needed mra). Orphan = zip on disk that
+ * no .mra references.
+ */
+describe('ConnectionManager — getArcadeOrphans (#46)', () => {
+  let workDir: string;
+  let cacheDir: string;
+  let client: FakeMisterClient;
+  let cache: CacheManager;
+  let manager: ConnectionManager;
+
+  beforeAll(async () => {
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cm-orphan-test-'));
+    cacheDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'cm-orphan-test-cache-'),
+    );
+  });
+
+  afterAll(async () => {
+    await fs.rm(workDir, { recursive: true, force: true });
+    await fs.rm(cacheDir, { recursive: true, force: true });
+  });
+
+  beforeEach(async () => {
+    client = new FakeMisterClient({
+      rootPath: workDir,
+      pristineRootPath: fixturesDir,
+      latencyMs: 0,
+    });
+    await client.reset();
+
+    const arcadeDir = path.join(workDir, '_Arcade');
+    await fs.rm(arcadeDir, { recursive: true, force: true });
+    await fs.mkdir(arcadeDir, { recursive: true });
+    await fs.writeFile(
+      path.join(arcadeDir, 'Donkey Kong.mra'),
+      [
+        '<misterromdescription>',
+        '  <setname>dkong</setname>',
+        '  <rbf>donkeykong</rbf>',
+        '  <rom index="0" zip="dkong.zip"/>',
+        '</misterromdescription>',
+      ].join('\n'),
+    );
+
+    const mameDir = path.join(workDir, 'games', 'mame');
+    const hbmameDir = path.join(workDir, 'games', 'hbmame');
+    await fs.rm(mameDir, { recursive: true, force: true });
+    await fs.rm(hbmameDir, { recursive: true, force: true });
+    await fs.mkdir(mameDir, { recursive: true });
+    await fs.mkdir(hbmameDir, { recursive: true });
+    // dkong.zip is referenced by the Donkey Kong .mra — not an orphan.
+    await fs.writeFile(path.join(mameDir, 'dkong.zip'), 'z');
+
+    const stateDir = path.join(workDir, '.mistercurator');
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(
+      path.join(stateDir, 'state.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        hiddenCores: [],
+        arcadeAutoHideEnabled: false,
+      }),
+    );
+
+    const perTestCacheDir = await fs.mkdtemp(path.join(cacheDir, 'run-'));
+    cache = new CacheManager(perTestCacheDir);
+    manager = new ConnectionManager(client, makeStubStore(), cache);
+  });
+
+  it('no orphans when all zips are referenced by an mra', async () => {
+    await manager.connect(profile.id);
+    const out = await manager.getArcadeOrphans();
+    expect(out.orphanZips).toHaveLength(0);
+  });
+
+  it('unreferenced zip is reported as orphan', async () => {
+    const mameDir = path.join(workDir, 'games', 'mame');
+    await fs.writeFile(path.join(mameDir, 'orphan.zip'), 'z');
+    await manager.connect(profile.id);
+    const out = await manager.getArcadeOrphans();
+    expect(out.orphanZips).toContain('orphan.zip');
+    expect(out.orphanZips).not.toContain('dkong.zip');
+  });
+
+  it('zip in hbmame/ that is unreferenced is also reported', async () => {
+    const hbmameDir = path.join(workDir, 'games', 'hbmame');
+    await fs.writeFile(path.join(hbmameDir, 'homebrew.zip'), 'z');
+    await manager.connect(profile.id);
+    const out = await manager.getArcadeOrphans();
+    expect(out.orphanZips).toContain('homebrew.zip');
+  });
+
+  it('result is stable when called from cached snapshot', async () => {
+    const mameDir = path.join(workDir, 'games', 'mame');
+    await fs.writeFile(path.join(mameDir, 'orphan.zip'), 'z');
+    await manager.connect(profile.id);
+    const first = await manager.getArcadeOrphans();
+    const second = await manager.getArcadeOrphans();
+    expect(first.orphanZips).toEqual(second.orphanZips);
+  });
+});
+
+/**
  * feat/arcade-ux-and-ledger (PR 2/2) — auto-hide rule + ledger
  * coverage. Same fake-mister fixture as the PR-1 block; this
  * block starts with auto-hide ENABLED (the V1 default) so the

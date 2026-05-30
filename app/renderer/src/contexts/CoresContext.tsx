@@ -319,6 +319,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     'entering' | 'restoring' | null
   >(null);
   const [updateModeOperationKey, setUpdateModeOperationKey] = useState(0);
+  const [arcadeOrphanZips, setArcadeOrphanZips] = useState<readonly string[]>([]);
 
   // Refs for stale-closure-safe reads inside async callbacks.
   const coresRef = useRef(cores);
@@ -462,11 +463,13 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
         // `total (hidden)` format on a null playability.
         let arcadeEntry: CoreEntry | null = null;
         try {
-          const [arcade, playability] = await Promise.all([
+          const [arcade, playability, orphans] = await Promise.all([
             window.mister.listArcadeMraEntries({ forceRefresh }),
             window.mister.getArcadePlayability().catch(() => null),
+            window.mister.getArcadeOrphans().catch(() => null),
           ]);
           arcadeEntry = synthesizeArcadeCoreEntry(arcade, playability);
+          setArcadeOrphanZips(orphans?.orphanZips ?? []);
         } catch {
           arcadeEntry = null;
         }
@@ -1105,8 +1108,8 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   );
 
   const auditResult = useMemo<CoreAuditResult | null>(
-    () => (cores !== null ? auditCores(cores) : null),
-    [cores],
+    () => (cores !== null ? auditCores(cores, arcadeOrphanZips) : null),
+    [cores, arcadeOrphanZips],
   );
 
   const value = useMemo<CoresContextValue>(
