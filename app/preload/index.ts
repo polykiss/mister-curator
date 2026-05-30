@@ -10,6 +10,7 @@ import {
 import type {
   ArcadeMraEntryWire,
   ArcadeMraVisibilityChangeWire,
+  ArcadeOrphansWire,
   ArcadePlayabilityWire,
   AutoScrapeProgressEvent,
   BulkCoreProgressEvent,
@@ -403,6 +404,9 @@ const api: MisterApi = {
   // feat/duplicate-detect-and-restore (#40)
   resolveDuplicateCores: (resolutions: readonly DuplicateResolution[]) =>
     invoke<DuplicateResolveResult>(IPC_CHANNELS.resolveDuplicateCores, resolutions),
+  // feat/arcade-orphan-detect (#46)
+  getArcadeOrphans: () =>
+    invoke<ArcadeOrphansWire>(IPC_CHANNELS.getArcadeOrphans),
 };
 
 contextBridge.exposeInMainWorld('mister', api);

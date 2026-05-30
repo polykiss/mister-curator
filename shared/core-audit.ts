@@ -3,6 +3,13 @@ import type { CoreEntry } from '@shared/types';
 export interface CoreAuditResult {
   readonly missingCoreFile: readonly CoreEntry[];
   readonly noRomsForCore: readonly CoreEntry[];
+  /**
+   * feat/arcade-orphan-detect (#46) — zip basenames found in
+   * games/mame/ or games/hbmame/ that are not referenced by any
+   * .mra launcher. These are taking up disk space but can't be
+   * launched from the MiSTer menu.
+   */
+  readonly orphanArcadeRoms: readonly string[];
 }
 
 /**
@@ -20,6 +27,10 @@ const ARCADE_INFRA_IDS = new Set(['MAME', 'mame', 'hbmame', 'HBMame']);
  *
  * For example: `/games/TGFX16` is played by `TurboGrafx16_YYYYMMDD.rbf`.
  * If that rbf is present, TGFX16 is not "missing" a core file.
+ *
+ * The inverse direction matters for noRomsForCore: if Minimig has no
+ * games dir, but Amiga does, Minimig is not "romless" — its ROMs live
+ * under the alias name. See REVERSE_CORE_ALIASES.
  */
 const CORE_ALIASES: Readonly<Record<string, readonly string[]>> = {
   TGFX16: ['TurboGrafx16'],
@@ -27,6 +38,22 @@ const CORE_ALIASES: Readonly<Record<string, readonly string[]>> = {
   PCE: ['TurboGrafx16'],
   Amiga: ['Minimig'],
 };
+
+/**
+ * Reverse of CORE_ALIASES: rbf-name → all games-dir names whose ROMs it plays.
+ * E.g. `{ Minimig: ['Amiga'], TurboGrafx16: ['TGFX16', 'TGFX16-CD', 'PCE'] }`.
+ * Used in noRomsForCore: if any of the aliasing cores has a visible games dir,
+ * the rbf core is not truly romless.
+ */
+const REVERSE_CORE_ALIASES: Readonly<Record<string, readonly string[]>> = (() => {
+  const out: Record<string, string[]> = {};
+  for (const [gamesDir, rbfNames] of Object.entries(CORE_ALIASES)) {
+    for (const rbf of rbfNames) {
+      (out[rbf] ??= []).push(gamesDir);
+    }
+  }
+  return out;
+})();
 
 /**
  * feature/core-audit (#38) — scan the already-loaded CoreEntry list for two
@@ -43,7 +70,10 @@ const CORE_ALIASES: Readonly<Record<string, readonly string[]>> = {
  * Pure local iteration — zero SSH calls. Results re-derive automatically
  * whenever the caller's CoreEntry list changes (e.g. after hide/show or Refresh).
  */
-export function auditCores(cores: readonly CoreEntry[]): CoreAuditResult {
+export function auditCores(
+  cores: readonly CoreEntry[],
+  orphanArcadeRoms: readonly string[] = [],
+): CoreAuditResult {
   const missingCoreFile: CoreEntry[] = [];
   const noRomsForCore: CoreEntry[] = [];
 
@@ -80,9 +110,17 @@ export function auditCores(cores: readonly CoreEntry[]): CoreAuditResult {
       if (coveredByAlias) continue;
       missingCoreFile.push(core);
     } else if (hasRbf && !hasGamesDir) {
+      // Check whether an alias games dir covers this rbf. E.g. Minimig is
+      // served by the Amiga games dir — if that dir exists and is visible,
+      // Minimig is not romless.
+      const aliasDirIds = REVERSE_CORE_ALIASES[core.id] ?? [];
+      const coveredByAliasDir = aliasDirIds.some((aliasId) =>
+        cores.some((c) => c.id === aliasId && c.gamesDirExists && !c.gamesDirHidden),
+      );
+      if (coveredByAliasDir) continue;
       noRomsForCore.push(core);
     }
   }
 
-  return { missingCoreFile, noRomsForCore };
+  return { missingCoreFile, noRomsForCore, orphanArcadeRoms };
 }

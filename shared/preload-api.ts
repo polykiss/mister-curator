@@ -154,6 +154,8 @@ export const IPC_CHANNELS = {
   updateModeProgress: 'mister:updateModeProgress',
   // feat/duplicate-detect-and-restore (#40)
   resolveDuplicateCores: 'mister:resolveDuplicateCores',
+  // feat/arcade-orphan-detect (#46)
+  getArcadeOrphans: 'mister:getArcadeOrphans',
 } as const;
 
 /** PR #15 prefetch progress kind. Discriminator for the wire event. */
@@ -813,6 +815,12 @@ export interface MisterApi {
   resolveDuplicateCores(
     resolutions: readonly DuplicateResolution[],
   ): Promise<DuplicateResolveResult>;
+  /**
+   * feat/arcade-orphan-detect (#46) — zip basenames in games/mame/
+   * or games/hbmame/ not referenced by any .mra launcher. Derives
+   * from the cached arcade snapshot — no additional SSH needed.
+   */
+  getArcadeOrphans(): Promise<ArcadeOrphansWire>;
 }
 
 /**
@@ -907,6 +915,11 @@ export interface ArcadePlayabilityWire {
   readonly missing: readonly string[];
   readonly noRomsNeeded: readonly string[];
   readonly autoHidden: readonly string[];
+}
+
+/** feat/arcade-orphan-detect (#46) — wire shape for orphan zip basenames. */
+export interface ArcadeOrphansWire {
+  readonly orphanZips: readonly string[];
 }
 
 const VALID_CONNECTION_ERROR_CODES: ReadonlySet<ConnectionErrorCode> = new Set([

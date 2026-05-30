@@ -885,6 +885,30 @@ export class ConnectionManager {
   }
 
   /**
+   * feat/arcade-orphan-detect (#46) — zip basenames in games/mame/
+   * or games/hbmame/ that are not referenced by any installed .mra
+   * launcher. Derives from the cached arcade snapshot; zero SSH.
+   */
+  async getArcadeOrphans(): Promise<{ readonly orphanZips: readonly string[] }> {
+    const snapshot =
+      this.arcadePlayabilityCache ?? (await this.loadArcadeData());
+    // Collect every zip referenced by at least one .mra (all fallback
+    // alternatives included — any of them would "cover" the file).
+    const referenced = new Set<string>();
+    for (const entry of snapshot.entries) {
+      for (const block of entry.requiredZips) {
+        for (const candidate of block) {
+          referenced.add(candidate);
+        }
+      }
+    }
+    const orphanZips = [...snapshot.zipBasenames].filter(
+      (z) => !referenced.has(z),
+    );
+    return { orphanZips };
+  }
+
+  /**
    * feat/arcade-ux-and-ledger (PR 2/2) — return the persisted
    * auto-hide preference for the active connection. Defaults to
    * `DEFAULT_ARCADE_AUTO_HIDE_ENABLED` when the ledger field is

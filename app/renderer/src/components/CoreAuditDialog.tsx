@@ -45,7 +45,11 @@ export function CoreAuditDialog({ open, onOpenChange }: Props): JSX.Element {
 
   const missingCoreFile = auditResult?.missingCoreFile ?? [];
   const noRomsForCore = auditResult?.noRomsForCore ?? [];
-  const hasIssues = missingCoreFile.length > 0 || noRomsForCore.length > 0;
+  const orphanArcadeRoms = auditResult?.orphanArcadeRoms ?? [];
+  const hasIssues =
+    missingCoreFile.length > 0 ||
+    noRomsForCore.length > 0 ||
+    orphanArcadeRoms.length > 0;
 
   const onHide = async (coreId: string): Promise<void> => {
     try {
@@ -63,7 +67,7 @@ export function CoreAuditDialog({ open, onOpenChange }: Props): JSX.Element {
         <DialogHeader>
           <DialogTitle>Core health</DialogTitle>
           <DialogDescription>
-            Audit of installed cores and ROM directories.
+            Audit of installed cores, ROM directories, and arcade ROMs.
           </DialogDescription>
         </DialogHeader>
 
@@ -162,6 +166,50 @@ export function CoreAuditDialog({ open, onOpenChange }: Props): JSX.Element {
                 </div>
                 <p className="mt-1.5 text-body-sm text-fg-muted">
                   Add ROMs or use <strong>Hide</strong> to remove from the MiSTer menu.
+                </p>
+              </section>
+            )}
+
+            {orphanArcadeRoms.length > 0 && (
+              <section>
+                <h3 className="mb-2 text-body font-medium text-fg">
+                  Orphan arcade ROMs ({String(orphanArcadeRoms.length)})
+                </h3>
+                <div className="max-h-48 overflow-auto rounded border border-default">
+                  <table className="w-full text-body-sm">
+                    <thead className="sticky top-0 bg-overlay">
+                      <tr className="border-b border-default text-left text-fg-muted">
+                        <th className="px-3 py-2 font-medium">File</th>
+                        <th className="px-3 py-2 font-medium">Location</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {orphanArcadeRoms.map((filename) => (
+                        <tr
+                          key={filename}
+                          className="border-b border-subtle last:border-0"
+                        >
+                          <td className="px-3 py-2 font-mono text-fg">
+                            {filename}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-fg-muted">
+                            games/mame/ or hbmame/
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="mt-1.5 text-body-sm text-fg-muted">
+                  These ROMs aren&apos;t referenced by any{' '}
+                  <code className="rounded border border-default bg-overlay px-1 font-mono text-body-sm">
+                    .mra
+                  </code>{' '}
+                  launcher. Run{' '}
+                  <code className="rounded border border-default bg-overlay px-1 font-mono text-body-sm">
+                    update_all.sh
+                  </code>{' '}
+                  on the MiSTer to install missing launchers, or delete the ROMs to reclaim space.
                 </p>
               </section>
             )}
