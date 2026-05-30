@@ -200,10 +200,10 @@ describe('CoresContext — Bug B/C/D/E renderer-cache-state-races fixes', () => 
     // Structural contract: the three moving parts must all exist.
     expect(ROMS_ADAPTER).toMatch(/scrollContainerRef/);
     expect(ROMS_ADAPTER).toMatch(/captureScrollAnchor/);
-    // useLayoutEffect runs AFTER presentableRoms is computed (declared via
-    // useMemo), so restore fires before the browser paints the re-ordered
-    // list.
-    expect(ROMS_ADAPTER).toMatch(/useLayoutEffect[\s\S]{0,600}presentableRoms\]/);
+    // useLayoutEffect depends on romScrollKey (ROM identity/order, no
+    // metadata), so scroll-restore fires only when the visible set changes
+    // (hide/unhide), not on every metadata update (fix/render-cascade).
+    expect(ROMS_ADAPTER).toMatch(/useLayoutEffect[\s\S]{0,600}romScrollKey\]/);
     // The anchor is captured before the SSH call in onSingleToggle.
     const toggleIdx = ROMS_ADAPTER.indexOf('const onSingleToggle');
     const toggleBlock = ROMS_ADAPTER.slice(toggleIdx, toggleIdx + 400);
