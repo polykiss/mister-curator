@@ -275,6 +275,51 @@ describe('auditCores', () => {
     expect(result.missingCoreFile).toHaveLength(0);
   });
 
+  it('alias core with only dotted rbfPaths → games dir surfaces in missingCoreFile', () => {
+    // Minimig is hidden (all paths dotted) — functionally unavailable from
+    // MiSTer's menu, so Amiga ROMs have nowhere to run. Surface as missing.
+    const cores: CoreEntry[] = [
+      makeCore({
+        id: 'Amiga',
+        rbfPaths: [],
+        gamesDirExists: true,
+        gamesDirName: 'Amiga',
+        romCount: 50,
+      }),
+      makeCore({
+        id: 'Minimig',
+        rbfPaths: ['/media/fat/_Computer/.Minimig_20240115.rbf'],
+        gamesDirExists: false,
+      }),
+    ];
+    const result = auditCores(cores);
+    expect(result.missingCoreFile).toHaveLength(1);
+    expect(result.missingCoreFile[0]?.id).toBe('Amiga');
+  });
+
+  it('alias core with at least one undotted rbfPath → games dir NOT in missingCoreFile', () => {
+    const cores: CoreEntry[] = [
+      makeCore({
+        id: 'Amiga',
+        rbfPaths: [],
+        gamesDirExists: true,
+        gamesDirName: 'Amiga',
+        romCount: 50,
+      }),
+      makeCore({
+        id: 'Minimig',
+        // Mix of dotted and undotted — the undotted one is the visible/active rbf.
+        rbfPaths: [
+          '/media/fat/_Computer/.Minimig_20240101.rbf',
+          '/media/fat/_Computer/Minimig_20240115.rbf',
+        ],
+        gamesDirExists: false,
+      }),
+    ];
+    const result = auditCores(cores);
+    expect(result.missingCoreFile).toHaveLength(0);
+  });
+
   it('TGFX16 games dir with no TurboGrafx16 rbf → still in missingCoreFile', () => {
     const cores: CoreEntry[] = [
       makeCore({

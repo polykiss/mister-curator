@@ -71,7 +71,11 @@ export function auditCores(cores: readonly CoreEntry[]): CoreAuditResult {
       // Check whether a known alias rbf covers this games dir.
       const aliases = CORE_ALIASES[core.id] ?? CORE_ALIASES[core.gamesDirName ?? ''] ?? [];
       const coveredByAlias = aliases.some((alias) =>
-        cores.some((c) => c.id === alias && c.rbfPaths.length > 0),
+        cores.some(
+          (c) =>
+            c.id === alias &&
+            c.rbfPaths.some((p) => !p.slice(p.lastIndexOf('/') + 1).startsWith('.')),
+        ),
       );
       if (coveredByAlias) continue;
       missingCoreFile.push(core);
