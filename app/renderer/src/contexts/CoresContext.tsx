@@ -19,6 +19,7 @@ import {
   countArcadeMraEntries,
   type ArcadeMraEntry,
 } from '@shared/arcade-mra';
+import { auditCores, type CoreAuditResult } from '@shared/core-audit';
 import { arcadeMraVisiblePath } from '@shared/ledger';
 import type { ArcadePlayabilityWire, UpdateModeRestoreResult } from '@shared/preload-api';
 import { EMPTY_SYSTEM_FILES_MARKS, isMarked } from '@shared/system-files-marks';
@@ -245,6 +246,12 @@ interface CoresContextValue {
    * not yet resolved, or device has no `.mra` content).
    */
   readonly adjustArcadeHiddenCount: (delta: number) => void;
+  /**
+   * feature/core-audit (#38) — audit result derived from the current cores
+   * list. Re-computed whenever `cores` changes (hide/show, Refresh, connect).
+   * Null before the first cores load completes.
+   */
+  readonly auditResult: CoreAuditResult | null;
   /** True while the pre-update hidden-file snapshot is active on the device. */
   readonly updateModeActive: boolean;
   /** Snapshot metadata shown in the update-mode banner. */
@@ -1097,6 +1104,11 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     [cores, selectedCoreId],
   );
 
+  const auditResult = useMemo<CoreAuditResult | null>(
+    () => (cores !== null ? auditCores(cores) : null),
+    [cores],
+  );
+
   const value = useMemo<CoresContextValue>(
     () => ({
       cores,
@@ -1125,6 +1137,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       setSystemFileMarks,
       setFolderClassification,
       adjustArcadeHiddenCount,
+      auditResult,
       updateModeActive,
       updateModeSnapshot,
       updateModeOperationPhase,
@@ -1159,6 +1172,7 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       setSystemFileMarks,
       setFolderClassification,
       adjustArcadeHiddenCount,
+      auditResult,
       updateModeActive,
       updateModeSnapshot,
       updateModeOperationPhase,
