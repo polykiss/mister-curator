@@ -4,6 +4,7 @@ import type { JSX } from 'react';
 import { toast } from 'sonner';
 
 import type { AutoScrapeProgressEvent } from '@shared/preload-api';
+import { decodeIpcError, isDestinationAlreadyExistsError } from '@shared/preload-api';
 import { coreDisplayName, isCoreHidden } from '@shared/core-matching';
 import type { CoreEntry } from '@shared/types';
 
@@ -116,9 +117,17 @@ export function CoresPane(): JSX.Element {
         duration: 10000,
       });
     } catch (err) {
-      toast.error(`Could not hide ${coreDisplayName(core.id)}`, {
-        description: err instanceof Error ? err.message : 'Unexpected error.',
-      });
+      const decoded = decodeIpcError(err);
+      if (isDestinationAlreadyExistsError(decoded)) {
+        toast.error(`Couldn't hide ${coreDisplayName(core.id)}`, {
+          description:
+            'A previous hidden copy already exists on the device — likely left by a MiSTer update. Manual cleanup via SSH is needed. (Restore flow coming in a future update.)',
+        });
+      } else {
+        toast.error(`Could not hide ${coreDisplayName(core.id)}`, {
+          description: decoded instanceof Error ? decoded.message : 'Unexpected error.',
+        });
+      }
     }
   };
 
@@ -141,9 +150,17 @@ export function CoresPane(): JSX.Element {
         duration: 10000,
       });
     } catch (err) {
-      toast.error(`Could not show ${coreDisplayName(core.id)}`, {
-        description: err instanceof Error ? err.message : 'Unexpected error.',
-      });
+      const decoded = decodeIpcError(err);
+      if (isDestinationAlreadyExistsError(decoded)) {
+        toast.error(`Couldn't show ${coreDisplayName(core.id)}`, {
+          description:
+            'A visible copy already exists on the device alongside the hidden one. Manual cleanup via SSH is needed. (Restore flow coming in a future update.)',
+        });
+      } else {
+        toast.error(`Could not show ${coreDisplayName(core.id)}`, {
+          description: decoded instanceof Error ? decoded.message : 'Unexpected error.',
+        });
+      }
     }
   };
 

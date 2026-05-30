@@ -4,9 +4,11 @@ import {
   __TEST_IPC_ERROR_MARKER,
   decodeIpcError,
   encodeIpcError,
+  isDestinationAlreadyExistsError,
+  setDestinationAlreadyExistsErrorFactory,
   setMisterConnectionErrorFactory,
 } from '@shared/preload-api';
-import { MisterConnectionError } from '@shared/types';
+import { DestinationAlreadyExistsError, MisterConnectionError } from '@shared/types';
 
 afterEach(() => {
   // Reset the factory so tests stay independent. The fallback path
@@ -14,6 +16,9 @@ afterEach(() => {
   // else installs the real one first.
   setMisterConnectionErrorFactory(
     (code, message) => new MisterConnectionError(code, message),
+  );
+  setDestinationAlreadyExistsErrorFactory(
+    (conflicts) => new DestinationAlreadyExistsError(conflicts),
   );
 });
 
@@ -147,5 +152,37 @@ describe('setMisterConnectionErrorFactory', () => {
     ]);
     expect(decoded.message).toBe('custom: No /media/fat/games');
     expect(decoded.code).toBe('not_a_mister');
+  });
+});
+
+describe('encodeIpcError / decodeIpcError — DestinationAlreadyExistsError', () => {
+  it('round-trips DestinationAlreadyExistsError with conflicts preserved', () => {
+    const conflicts = [
+      { from: '/media/fat/_Console/NES.rbf', to: '/media/fat/_Console/.NES.rbf' },
+    ];
+    const original = new DestinationAlreadyExistsError(conflicts);
+
+    const encoded = encodeIpcError(original);
+    expect(encoded).toBeInstanceOf(Error);
+
+    const decoded = decodeIpcError(encoded) as { name: string; conflicts: typeof conflicts };
+    expect(decoded).toMatchObject({
+      name: 'DestinationAlreadyExistsError',
+      conflicts,
+    });
+  });
+
+  it('isDestinationAlreadyExistsError returns true for the round-tripped error', () => {
+    const conflicts = [{ from: '/a', to: '/b' }];
+    const original = new DestinationAlreadyExistsError(conflicts);
+    const encoded = encodeIpcError(original);
+    const decoded = decodeIpcError(encoded);
+    expect(isDestinationAlreadyExistsError(decoded)).toBe(true);
+  });
+
+  it('isDestinationAlreadyExistsError returns false for unrelated errors', () => {
+    expect(isDestinationAlreadyExistsError(new Error('boom'))).toBe(false);
+    expect(isDestinationAlreadyExistsError(null)).toBe(false);
+    expect(isDestinationAlreadyExistsError({ name: 'MisterConnectionError' })).toBe(false);
   });
 });

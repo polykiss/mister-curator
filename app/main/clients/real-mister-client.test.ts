@@ -2322,6 +2322,101 @@ describe('RealMisterClient', () => {
 
       await expect(client.hideCore(makeCore())).rejects.toThrow(/hide core NES/);
     });
+
+    it('hideCore throws DestinationAlreadyExistsError when rbfPaths already contains the dotted destination', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      const core = makeCore({
+        rbfPaths: [
+          '/media/fat/_Console/NES_20240115.rbf',
+          '/media/fat/_Console/.NES_20240115.rbf', // dotted already present
+        ],
+      });
+      await expect(client.hideCore(core)).rejects.toMatchObject({
+        name: 'DestinationAlreadyExistsError',
+        conflicts: [
+          { from: '/media/fat/_Console/NES_20240115.rbf', to: '/media/fat/_Console/.NES_20240115.rbf' },
+        ],
+      });
+      // No SSH call should have been made (pure local check)
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+
+    it('showCore throws DestinationAlreadyExistsError when rbfPaths already contains the undotted destination', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      const core = makeCore({
+        gamesDirHidden: true,
+        rbfPaths: [
+          '/media/fat/_Console/.NES_20240115.rbf',
+          '/media/fat/_Console/NES_20240115.rbf', // undotted already present
+        ],
+      });
+      await expect(client.showCore(core)).rejects.toMatchObject({
+        name: 'DestinationAlreadyExistsError',
+        conflicts: [
+          { from: '/media/fat/_Console/.NES_20240115.rbf', to: '/media/fat/_Console/NES_20240115.rbf' },
+        ],
+      });
+      expect(mocks.execCommand).not.toHaveBeenCalled();
+    });
+
+    it('hideCore normal case (no duplicate) calls runRenameScript — no pre-flight error', async () => {
+      // This test verifies the pre-flight check does NOT fire when there is no duplicate.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      // Normal core: only undotted rbfs, no duplicate
+      await client.hideCore(makeCore());
+
+      expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+    });
+
+    it('runRenameScript detects DEST_EXISTS in stderr and throws DestinationAlreadyExistsError', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      // Simulate the SSH backstop firing: code=1, stderr has DEST_EXISTS line.
+      mocks.execCommand.mockResolvedValueOnce({
+        stdout: '',
+        stderr: 'DEST_EXISTS:/media/fat/_Console/.NES_20240115.rbf\n',
+        code: 1,
+      });
+
+      // Use a core with NO pre-existing duplicate in rbfPaths, so the pre-flight
+      // passes but the SSH backstop fires.
+      await expect(
+        client.hideCore(makeCore()),
+      ).rejects.toMatchObject({
+        name: 'DestinationAlreadyExistsError',
+        conflicts: [
+          { from: '/media/fat/_Console/NES_20240115.rbf', to: '/media/fat/_Console/.NES_20240115.rbf' },
+        ],
+      });
+    });
+
+    it('runRenameScript includes [ -e dst ] guard before each mv in the generated shell script', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+
+      await client.hideCore(makeCore({ gamesDirExists: false, rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'] }));
+
+      const script = mocks.execCommand.mock.calls[0]?.[0] as string;
+      // Should contain a destination-existence check before the mv.
+      expect(script).toContain("[ -e '/media/fat/_Console/.NES_20240115.rbf' ]");
+      expect(script).toContain('DEST_EXISTS');
+      // The mv should still be present.
+      expect(script).toContain(
+        "mv '/media/fat/_Console/NES_20240115.rbf' '/media/fat/_Console/.NES_20240115.rbf'",
+      );
+    });
   });
 
   describe('setBulkCoreVisibility', () => {

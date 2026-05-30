@@ -4,6 +4,7 @@ import type { ConnectionEvent } from '@shared/connection';
 import {
   decodeIpcError,
   IPC_CHANNELS,
+  setDestinationAlreadyExistsErrorFactory,
   setMisterConnectionErrorFactory,
 } from '@shared/preload-api';
 import type {
@@ -37,7 +38,7 @@ import type {
   BulkRomResult,
   MisterSecret,
 } from '@shared/mister-client';
-import { MisterConnectionError } from '@shared/types';
+import { DestinationAlreadyExistsError, MisterConnectionError } from '@shared/types';
 import type {
   ConnectionStatus,
   CoreEntry,
@@ -52,6 +53,9 @@ import type {
 // instances. The renderer relies on `instanceof` checks (and on
 // `error.code`) to render the friendly per-code failure copy.
 setMisterConnectionErrorFactory((code, message) => new MisterConnectionError(code, message));
+setDestinationAlreadyExistsErrorFactory(
+  (conflicts) => new DestinationAlreadyExistsError(conflicts),
+);
 
 async function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
   try {

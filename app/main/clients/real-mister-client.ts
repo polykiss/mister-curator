@@ -91,7 +91,7 @@ import {
   parseWitnessOutput,
   type SizeAndMtime,
 } from '@shared/prime-parse';
-import { MisterConnectionError } from '@shared/types';
+import { DestinationAlreadyExistsError, MisterConnectionError } from '@shared/types';
 import type {
   CoreCategory,
   CoreEntry,
@@ -1283,6 +1283,10 @@ export class RealMisterClient implements IMisterClient {
     }
     const renames = computeCoreRenames(core, true);
     if (renames.length === 0) return;
+    const conflicts = renames.filter((r) => core.rbfPaths.includes(r.to));
+    if (conflicts.length > 0) {
+      throw new DestinationAlreadyExistsError(conflicts);
+    }
     await this.runRenameScript(renames, `hide core ${core.id}`);
   }
 
@@ -1298,6 +1302,10 @@ export class RealMisterClient implements IMisterClient {
     }
     const renames = computeCoreRenames(core, false);
     if (renames.length === 0) return;
+    const conflicts = renames.filter((r) => core.rbfPaths.includes(r.to));
+    if (conflicts.length > 0) {
+      throw new DestinationAlreadyExistsError(conflicts);
+    }
     await this.runRenameScript(renames, `show core ${core.id}`);
   }
 
@@ -1325,6 +1333,10 @@ export class RealMisterClient implements IMisterClient {
       }
       const renames = computeCoreRenames(change.core, change.hidden);
       if (renames.length === 0) continue;
+      const conflicts = renames.filter((r) => change.core.rbfPaths.includes(r.to));
+      if (conflicts.length > 0) {
+        throw new DestinationAlreadyExistsError(conflicts);
+      }
       plans.push({ coreId: change.core.id, renames });
     }
     if (plans.length === 0) {
@@ -1965,13 +1977,28 @@ export class RealMisterClient implements IMisterClient {
   private async runRenameScript(renames: readonly CoreRename[], label: string): Promise<void> {
     const lines = ['set -e'];
     for (const r of renames) {
-      lines.push(`mv ${shellQuote(r.from)} ${shellQuote(r.to)}`);
+      lines.push(
+        `[ -e ${shellQuote(r.to)} ] && { printf 'DEST_EXISTS:%s\\n' ${shellQuote(r.to)} >&2; exit 1; }`,
+        `mv ${shellQuote(r.from)} ${shellQuote(r.to)}`,
+      );
     }
     const setMarksCmd = lines.join('\n');
     const result = await this.runSshOp(setMarksCmd, () =>
       this.ssh.execCommand(setMarksCmd),
     );
     if (result.code !== 0) {
+      const destExistsLines = result.stderr
+        .split('\n')
+        .filter((l) => l.startsWith('DEST_EXISTS:'));
+      if (destExistsLines.length > 0) {
+        const toSet = new Set(destExistsLines.map((l) => l.slice('DEST_EXISTS:'.length)));
+        const sshConflicts = renames.filter((r) => toSet.has(r.to));
+        throw new DestinationAlreadyExistsError(
+          sshConflicts.length > 0
+            ? sshConflicts
+            : destExistsLines.map((l) => ({ from: '?', to: l.slice('DEST_EXISTS:'.length) })),
+        );
+      }
       throw new Error(
         `Failed to ${label}: ${result.stderr.trim() || `exit code ${String(result.code)}`}`,
       );
