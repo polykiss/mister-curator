@@ -155,7 +155,7 @@ describe('auditCores', () => {
     expect(result.noRomsForCore).toHaveLength(0);
   });
 
-  it('mame core → included in noRomsForCore when no games dir', () => {
+  it('mame core (rbf-only) → excluded from audit entirely', () => {
     const cores: CoreEntry[] = [
       makeCore({
         id: 'mame',
@@ -165,8 +165,129 @@ describe('auditCores', () => {
       }),
     ];
     const result = auditCores(cores);
-    expect(result.noRomsForCore).toHaveLength(1);
-    expect(result.noRomsForCore[0]?.id).toBe('mame');
+    expect(result.noRomsForCore).toHaveLength(0);
+    expect(result.missingCoreFile).toHaveLength(0);
+  });
+
+  it('MAME games dir with no rbf → excluded from audit entirely', () => {
+    const cores: CoreEntry[] = [
+      makeCore({
+        id: 'MAME',
+        rbfPaths: [],
+        gamesDirExists: true,
+        gamesDirName: 'MAME',
+        romCount: 1000,
+      }),
+    ];
+    const result = auditCores(cores);
+    expect(result.missingCoreFile).toHaveLength(0);
+    expect(result.noRomsForCore).toHaveLength(0);
+  });
+
+  it('hbmame games dir → excluded from audit entirely', () => {
+    const cores: CoreEntry[] = [
+      makeCore({
+        id: 'hbmame',
+        rbfPaths: [],
+        gamesDirExists: true,
+        gamesDirName: 'hbmame',
+        romCount: 200,
+      }),
+    ];
+    const result = auditCores(cores);
+    expect(result.missingCoreFile).toHaveLength(0);
+    expect(result.noRomsForCore).toHaveLength(0);
+  });
+
+  it('TGFX16 games dir with TurboGrafx16 rbf installed → not in missingCoreFile', () => {
+    const cores: CoreEntry[] = [
+      makeCore({
+        id: 'TGFX16',
+        rbfPaths: [],
+        gamesDirExists: true,
+        gamesDirName: 'TGFX16',
+        romCount: 30,
+      }),
+      makeCore({
+        id: 'TurboGrafx16',
+        rbfPaths: ['/media/fat/_Console/TurboGrafx16_20240115.rbf'],
+        gamesDirExists: false,
+      }),
+    ];
+    const result = auditCores(cores);
+    expect(result.missingCoreFile).toHaveLength(0);
+  });
+
+  it('TGFX16-CD games dir with TurboGrafx16 rbf installed → not in missingCoreFile', () => {
+    const cores: CoreEntry[] = [
+      makeCore({
+        id: 'TGFX16-CD',
+        rbfPaths: [],
+        gamesDirExists: true,
+        gamesDirName: 'TGFX16-CD',
+        romCount: 5,
+      }),
+      makeCore({
+        id: 'TurboGrafx16',
+        rbfPaths: ['/media/fat/_Console/TurboGrafx16_20240115.rbf'],
+        gamesDirExists: false,
+      }),
+    ];
+    const result = auditCores(cores);
+    expect(result.missingCoreFile).toHaveLength(0);
+  });
+
+  it('PCE games dir with TurboGrafx16 rbf installed → not in missingCoreFile', () => {
+    const cores: CoreEntry[] = [
+      makeCore({
+        id: 'PCE',
+        rbfPaths: [],
+        gamesDirExists: true,
+        gamesDirName: 'PCE',
+        romCount: 10,
+      }),
+      makeCore({
+        id: 'TurboGrafx16',
+        rbfPaths: ['/media/fat/_Console/TurboGrafx16_20240115.rbf'],
+        gamesDirExists: false,
+      }),
+    ];
+    const result = auditCores(cores);
+    expect(result.missingCoreFile).toHaveLength(0);
+  });
+
+  it('Amiga games dir with Minimig rbf installed → not in missingCoreFile', () => {
+    const cores: CoreEntry[] = [
+      makeCore({
+        id: 'Amiga',
+        rbfPaths: [],
+        gamesDirExists: true,
+        gamesDirName: 'Amiga',
+        romCount: 50,
+      }),
+      makeCore({
+        id: 'Minimig',
+        rbfPaths: ['/media/fat/_Computer/Minimig_20240115.rbf'],
+        gamesDirExists: false,
+      }),
+    ];
+    const result = auditCores(cores);
+    expect(result.missingCoreFile).toHaveLength(0);
+  });
+
+  it('TGFX16 games dir with no TurboGrafx16 rbf → still in missingCoreFile', () => {
+    const cores: CoreEntry[] = [
+      makeCore({
+        id: 'TGFX16',
+        rbfPaths: [],
+        gamesDirExists: true,
+        gamesDirName: 'TGFX16',
+        romCount: 30,
+      }),
+    ];
+    const result = auditCores(cores);
+    expect(result.missingCoreFile).toHaveLength(1);
+    expect(result.missingCoreFile[0]?.id).toBe('TGFX16');
   });
 
   it('multiple cores with mixed states → categorized correctly', () => {

@@ -6,6 +6,29 @@ export interface CoreAuditResult {
 }
 
 /**
+ * ROM folders consumed by per-game `.mra` arcade cores — not installable
+ * cores in the MiSTer sense. They'll never have a matching `.rbf` and
+ * correctly showing them as "missing" would be misleading.
+ */
+const ARCADE_INFRA_IDS = new Set(['MAME', 'mame', 'hbmame', 'HBMame']);
+
+/**
+ * Games-dir names that don't match their corresponding `.rbf` prefix.
+ * When a games dir with one of these IDs has no matching rbf, check
+ * whether a rbf for any of the listed aliases is installed before
+ * reporting the core as missing.
+ *
+ * For example: `/games/TGFX16` is played by `TurboGrafx16_YYYYMMDD.rbf`.
+ * If that rbf is present, TGFX16 is not "missing" a core file.
+ */
+const CORE_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  TGFX16: ['TurboGrafx16'],
+  'TGFX16-CD': ['TurboGrafx16'],
+  PCE: ['TurboGrafx16'],
+  Amiga: ['Minimig'],
+};
+
+/**
  * feature/core-audit (#38) — scan the already-loaded CoreEntry list for two
  * categories of mismatch between installed cores and ROM directories:
  *
@@ -28,6 +51,9 @@ export function auditCores(cores: readonly CoreEntry[]): CoreAuditResult {
     // Arcade uses a different model (.mra files, no per-core games dir).
     if (core.category === 'Arcade') continue;
 
+    // MAME/hbmame are arcade ROM infrastructure — not installable cores.
+    if (ARCADE_INFRA_IDS.has(core.id) || ARCADE_INFRA_IDS.has(core.gamesDirName ?? '')) continue;
+
     const hasRbf = core.rbfPaths.length > 0;
     const hasGamesDir = core.gamesDirExists;
 
@@ -42,6 +68,12 @@ export function auditCores(cores: readonly CoreEntry[]): CoreAuditResult {
     }
 
     if (!hasRbf && hasGamesDir) {
+      // Check whether a known alias rbf covers this games dir.
+      const aliases = CORE_ALIASES[core.id] ?? CORE_ALIASES[core.gamesDirName ?? ''] ?? [];
+      const coveredByAlias = aliases.some((alias) =>
+        cores.some((c) => c.id === alias && c.rbfPaths.length > 0),
+      );
+      if (coveredByAlias) continue;
       missingCoreFile.push(core);
     } else if (hasRbf && !hasGamesDir) {
       noRomsForCore.push(core);
