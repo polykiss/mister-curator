@@ -1344,6 +1344,31 @@ describe('ConnectionManager — duplicate-detect-and-restore (#40)', () => {
     expect(pair?.kind).toBe('rbf');
   });
 
+  it('connect() with a gamesDir duplicate emits a duplicates-detected event (kind=gamesDir)', async () => {
+    // Simulate update_all reinstating the visible games dir alongside the
+    // already-hidden (dotted) version. Both NES and .NES will coexist.
+    await manager.connect(profile.id);
+    await manager.disconnect();
+
+    // Create games/.NES alongside the fixture's existing games/NES.
+    const gamesDotNes = path.join(workDir, 'games', '.NES');
+    await fs.mkdir(gamesDotNes, { recursive: true });
+
+    events.length = 0;
+    await manager.connect(profile.id);
+
+    const dupEvents = events.filter((e) => e.type === 'duplicates-detected');
+    expect(dupEvents).toHaveLength(1);
+    const event = dupEvents[0];
+    if (event?.type !== 'duplicates-detected') throw new Error('wrong type');
+    const pair = event.duplicates.find(
+      (p) => p.coreId === 'NES' && p.kind === 'gamesDir',
+    );
+    expect(pair).toBeDefined();
+    expect(pair?.visiblePath).toBe('/media/fat/games/NES');
+    expect(pair?.hiddenPath).toBe('/media/fat/games/.NES');
+  });
+
   it('resolveDuplicateCores keep-hidden deletes the visible path', async () => {
     // Setup: create a dotted + undotted NES rbf duplicate.
     await manager.connect(profile.id);

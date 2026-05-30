@@ -561,6 +561,7 @@ export function matchRbfsToGamesDirs(input: MatchInput): CoreEntry[] {
     gamesDirExists: e.gamesDirExists,
     gamesDirHidden: e.gamesDirHidden,
     gamesDirName: e.gamesDirName,
+    gamesDirDuplicate: e.gamesDirDuplicate,
     extraGamesDirNames:
       e.extraGamesDirNames && e.extraGamesDirNames.length > 0
         ? [...e.extraGamesDirNames]
