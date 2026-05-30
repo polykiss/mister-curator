@@ -370,6 +370,103 @@ describe('auditCores', () => {
   });
 });
 
+describe('auditCores — noRomsForCore alias suppression', () => {
+  it('Minimig rbf + Amiga games dir → Minimig NOT in noRomsForCore', () => {
+    const cores: CoreEntry[] = [
+      makeCore({
+        id: 'Minimig',
+        rbfPaths: ['/media/fat/_Computer/Minimig_20240115.rbf'],
+        gamesDirExists: false,
+      }),
+      makeCore({
+        id: 'Amiga',
+        rbfPaths: [],
+        gamesDirExists: true,
+        gamesDirName: 'Amiga',
+        romCount: 50,
+      }),
+    ];
+    const result = auditCores(cores);
+    expect(result.noRomsForCore).toHaveLength(0);
+    expect(result.missingCoreFile).toHaveLength(0);
+  });
+
+  it('Minimig rbf, no Amiga games dir → Minimig STILL in noRomsForCore', () => {
+    const cores: CoreEntry[] = [
+      makeCore({
+        id: 'Minimig',
+        rbfPaths: ['/media/fat/_Computer/Minimig_20240115.rbf'],
+        gamesDirExists: false,
+      }),
+    ];
+    const result = auditCores(cores);
+    expect(result.noRomsForCore).toHaveLength(1);
+    expect(result.noRomsForCore[0]?.id).toBe('Minimig');
+  });
+
+  it('Minimig rbf + Amiga games dir hidden → Minimig still in noRomsForCore', () => {
+    // A hidden games dir means the ROMs aren't accessible from the menu —
+    // Minimig is effectively romless from the user's perspective.
+    const cores: CoreEntry[] = [
+      makeCore({
+        id: 'Minimig',
+        rbfPaths: ['/media/fat/_Computer/Minimig_20240115.rbf'],
+        gamesDirExists: false,
+      }),
+      makeCore({
+        id: 'Amiga',
+        rbfPaths: [],
+        gamesDirExists: true,
+        gamesDirHidden: true,
+        gamesDirName: 'Amiga',
+        romCount: 50,
+      }),
+    ];
+    const result = auditCores(cores);
+    expect(result.noRomsForCore).toHaveLength(1);
+    expect(result.noRomsForCore[0]?.id).toBe('Minimig');
+  });
+
+  it('TurboGrafx16 rbf + TGFX16 games dir → TurboGrafx16 NOT in noRomsForCore', () => {
+    const cores: CoreEntry[] = [
+      makeCore({
+        id: 'TurboGrafx16',
+        rbfPaths: ['/media/fat/_Console/TurboGrafx16_20240115.rbf'],
+        gamesDirExists: false,
+      }),
+      makeCore({
+        id: 'TGFX16',
+        rbfPaths: [],
+        gamesDirExists: true,
+        gamesDirName: 'TGFX16',
+        romCount: 30,
+      }),
+    ];
+    const result = auditCores(cores);
+    expect(result.noRomsForCore).toHaveLength(0);
+    expect(result.missingCoreFile).toHaveLength(0);
+  });
+
+  it('TurboGrafx16 rbf + PCE games dir → TurboGrafx16 NOT in noRomsForCore', () => {
+    const cores: CoreEntry[] = [
+      makeCore({
+        id: 'TurboGrafx16',
+        rbfPaths: ['/media/fat/_Console/TurboGrafx16_20240115.rbf'],
+        gamesDirExists: false,
+      }),
+      makeCore({
+        id: 'PCE',
+        rbfPaths: [],
+        gamesDirExists: true,
+        gamesDirName: 'PCE',
+        romCount: 10,
+      }),
+    ];
+    const result = auditCores(cores);
+    expect(result.noRomsForCore).toHaveLength(0);
+  });
+});
+
 describe('auditCores — orphanArcadeRoms', () => {
   it('no orphans passed → empty array', () => {
     const result = auditCores([]);

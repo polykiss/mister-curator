@@ -201,11 +201,15 @@ export function CoreAuditDialog({ open, onOpenChange }: Props): JSX.Element {
                   </table>
                 </div>
                 <p className="mt-1.5 text-body-sm text-fg-muted">
-                  These zip files are not referenced by any{' '}
+                  These ROMs aren&apos;t referenced by any{' '}
                   <code className="rounded border border-default bg-overlay px-1 font-mono text-body-sm">
                     .mra
                   </code>{' '}
-                  launcher. Safe to delete from the MiSTer to free up disk space.
+                  launcher. Run{' '}
+                  <code className="rounded border border-default bg-overlay px-1 font-mono text-body-sm">
+                    update_all.sh
+                  </code>{' '}
+                  on the MiSTer to install missing launchers, or delete the ROMs to reclaim space.
                 </p>
               </section>
             )}
