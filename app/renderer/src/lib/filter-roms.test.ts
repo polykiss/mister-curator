@@ -193,12 +193,8 @@ describe('filterRoms', () => {
       makeRom({ filename: 'a.nes', displayName: 'Apple' }),
       makeRom({ filename: 'c.nes', displayName: 'Cherry' }),
     ];
-    const result = filterRoms(roms, 'a', {});
-    // All three match ('a' is in Banana, Apple, Cherry... actually only Apple and Banana)
-    // Let's pick a query that matches 2 out of 3 in order
-    const result2 = filterRoms(roms, 'e', {}); // Banana, Apple, Cherry — all have 'e' except... wait
     // 'e' in Banana? no. 'e' in Apple? yes. 'e' in Cherry? yes.
-    expect(result2.map((r) => r.filename)).toEqual(['a.nes', 'c.nes']);
+    expect(filterRoms(roms, 'e', {}).map((r) => r.filename)).toEqual(['a.nes', 'c.nes']);
   });
 
   it('performance smoke: 1500-entry list filters in <16ms', () => {

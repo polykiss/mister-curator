@@ -1179,16 +1179,18 @@ describe('MetadataOrchestrator', () => {
       expect(bindSpy).not.toHaveBeenCalled();
     });
 
-    it('bindArcadeManualMetadataOverride: returns null when the primary zip cannot be hashed even after on-demand retry', async () => {
-      // Both candidate paths miss the hash cache AND on-demand
-      // `computeHash` returns undefined (file doesn't exist on disk).
-      // Returning null lets the renderer surface a toast rather than
-      // silently writing a synthetic key the batch reader will never
-      // find.
+    it('bindArcadeManualMetadataOverride: falls back to synthetic key when primary zip cannot be hashed after on-demand retry', async () => {
+      // fix/#54 — both candidate paths miss the hash cache AND
+      // on-demand `computeHash` returns undefined (file doesn't
+      // exist on disk). Previously returned null (toast). Now falls
+      // back to a synthetic key so the user's chosen match is
+      // persisted and readable on reconnect.
       const { orchestrator, metadataService } = makeOrchestrator({
         hashEntries: new Map(),
       });
-      const bindSpy = vi.fn(async () => buildMeta('x', 'x'));
+      const bindSpy = vi.fn(
+        async (key: string, _game: unknown) => buildMeta(key, 'Foo'),
+      );
       (metadataService as unknown as {
         bindManualOverride: typeof bindSpy;
       }).bindManualOverride = bindSpy;
@@ -1210,8 +1212,11 @@ describe('MetadataOrchestrator', () => {
         'Foo.mra',
         buildSsGame(),
       );
-      expect(result).toBeNull();
-      expect(bindSpy).not.toHaveBeenCalled();
+      expect(result).not.toBeNull();
+      expect(bindSpy).toHaveBeenCalledTimes(1);
+      const [key] = bindSpy.mock.calls[0] ?? [''];
+      // Key must be a synthetic noss- hash, NOT a zip md5.
+      expect(key).toMatch(SYNTHETIC_KEY_RE);
     });
 
     it('bindArcadeManualMetadataOverride: hashes the primary zip on-demand when the cache misses (Devil Zone case)', async () => {
@@ -1910,6 +1915,76 @@ describe('MetadataOrchestrator', () => {
         },
       );
       expect(result['Donkey Kong.mra']).toBeNull();
+    });
+
+    it('getCachedArcadeMetadataBatch: returns synthetic-keyed record for a .mra whose zip is not yet hashed', async () => {
+      // fix/#54 — when the zip hash is absent from the cache, fall
+      // back to the per-mra synthetic key rather than returning null.
+      // This ensures a manual bind made before hashing is visible on
+      // reconnect.
+      const MRA_REL_PATH = 'Devil Zone.mra';
+      const syntheticMeta = buildMeta('noss-synthetic', 'Devil Zone');
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map(), // no zip hashed
+      });
+      (
+        metadataService as unknown as {
+          readCachedMetadata: ReturnType<typeof vi.fn>;
+        }
+      ).readCachedMetadata.mockImplementation(async (key: string) =>
+        key.startsWith('noss-') ? syntheticMeta : null,
+      );
+
+      const result = await orchestrator.getCachedArcadeMetadataBatch(
+        'host-1',
+        {
+          entries: [mra(MRA_REL_PATH, [['devilz.zip']])],
+          zipBasenames: new Set(['devilz.zip']),
+          byPath: new Map([[MRA_REL_PATH, 'playable' as const]]),
+        },
+      );
+
+      expect(result[MRA_REL_PATH]?.name).toBe('Devil Zone');
+    });
+
+    it('getCachedArcadeMetadataBatch: synthetic-keyed override wins over auto-scraped hash-keyed record', async () => {
+      // fix/#54 — manual overrides written under a synthetic key must
+      // survive a subsequent auto-scrape that populates the real zip
+      // md5. The per-mra synthetic check is consulted first; if a
+      // synthetic record exists it is returned regardless of whether
+      // a hash-keyed record is also present.
+      //
+      // NOTE: the ROM read path (`readCachedRomsMetadata`) has the
+      // inverse priority (hash wins). The asymmetry is intentional
+      // and documented in getCachedArcadeMetadataBatch's comment.
+      const MRA_REL_PATH = 'Donkey Kong.mra';
+      const ZIP_PATH = '/media/fat/games/mame/dkong.zip';
+      const autoScrapedMeta = buildMeta(HASH, 'Donkey Kong (auto)');
+      const manualMeta = buildMeta('noss-bound', 'Donkey Kong (my pick)');
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map([[ZIP_PATH, buildHashEntry(HASH)]]),
+      });
+      (
+        metadataService as unknown as {
+          readCachedMetadata: ReturnType<typeof vi.fn>;
+        }
+      ).readCachedMetadata.mockImplementation(async (key: string) => {
+        if (key === HASH) return autoScrapedMeta;
+        if (key.startsWith('noss-')) return manualMeta;
+        return null;
+      });
+
+      const result = await orchestrator.getCachedArcadeMetadataBatch(
+        'host-1',
+        {
+          entries: [mra(MRA_REL_PATH, [['dkong.zip']])],
+          zipBasenames: new Set(['dkong.zip']),
+          byPath: new Map([[MRA_REL_PATH, 'playable' as const]]),
+        },
+      );
+
+      // Manual override (synthetic key) beats the auto-scraped record.
+      expect(result[MRA_REL_PATH]?.name).toBe('Donkey Kong (my pick)');
     });
 
     it('getCachedArcadeMetadataBatch: skips missing .mras; surfaces no-roms-needed via the parallel override store', async () => {
