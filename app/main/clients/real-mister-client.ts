@@ -1844,7 +1844,17 @@ export class RealMisterClient implements IMisterClient {
 
   async walkHiddenFiles(): Promise<readonly string[]> {
     this.assertConnected();
+    // Category dirs (_Console, _Computer, _Other, _Utility): capture hidden
+    // .rbf/.mgl files and hidden subdirectories at depth 1. (#51)
+    const categoryFindCmds = MISTER_CATEGORY_DIRS
+      .filter(({ category }) => category !== 'Arcade')
+      .map(({ dir }) =>
+        `find ${shellQuote(dir)} -mindepth 1 -maxdepth 1 \\( -type f -o -type d \\) -name '.*' -printf '%p\\n' 2>/dev/null || true`,
+      );
     const script = [
+      ...categoryFindCmds,
+      // Depth-1 hidden game dirs (e.g. games/.NES) — mindepth 2 misses these. (#51)
+      `find ${shellQuote(MISTER_GAMES_DIR)} -mindepth 1 -maxdepth 1 -type d -name '.*' -printf '%p\\n' 2>/dev/null || true`,
       `find ${shellQuote(MISTER_GAMES_DIR)} -mindepth 2 -maxdepth 5 -type f -name '.*' -printf '%p\\n' 2>/dev/null || true`,
       `find ${shellQuote(MISTER_ARCADE_DIR)} -mindepth 1 -maxdepth 4 -type f -name '.*' -printf '%p\\n' 2>/dev/null || true`,
     ].join('\n');
@@ -1912,7 +1922,7 @@ export class RealMisterClient implements IMisterClient {
         const idQ = shellQuote(r.id);
         if (checkSrcExists) {
           lines.push(
-            `if [ ! -f ${shellQuote(r.src)} ]; then`,
+            `if [ ! -e ${shellQuote(r.src)} ]; then`,
             `  printf 'MISSING\\t%s\\n' ${idQ}`,
             `elif err=$(mv ${shellQuote(r.src)} ${shellQuote(r.dst)} 2>&1); then`,
             `  printf 'OK\\t%s\\n' ${idQ}`,
