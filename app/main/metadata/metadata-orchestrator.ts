@@ -373,15 +373,23 @@ export class MetadataOrchestrator {
    *      the auto-scrape never matched, so the user reaches for
    *      "Find on ScreenScraper" while the zip is unhashed — pre-
    *      this-fix, the bind silently returned null.
-   *   5. Call `MetadataService.bindManualOverride` keyed on that md5
-   *      so every .mra sharing the same primary zip picks up the
-   *      override on the next batched cache read.
+   *   5. fix/screenscraper-bind-arcade-synthetic-key (#54) — if the
+   *      on-demand hash also fails (zip missing from disk, SSH error),
+   *      fall back to a synthetic `(ARCADE_VIRTUAL_CORE_ID, mraPath)`
+   *      key rather than returning null. Mirrors the ROM bind path's
+   *      `makeSyntheticCacheKey` fallback. The batch reader
+   *      (`getCachedArcadeMetadataBatch`) checks the synthetic key
+   *      per-mra so the record survives reconnect. Manual overrides
+   *      take precedence over hash-keyed auto-scrape records at read
+   *      time — see step 5b there.
+   *   6. Call `MetadataService.bindManualOverride` keyed on the
+   *      resolved md5 (or synthetic key) so the record is readable
+   *      by the batch reader on reconnect.
    *
-   * Returns null only when the mra isn't in the snapshot, its primary
-   * zip can't be resolved at all (no requiredZips, or none of the
-   * alternatives are in zipBasenames), or the on-demand hash itself
-   * failed (file vanished between snapshot and bind). In those cases
-   * the renderer surfaces a "no record yet" toast.
+   * Returns null only when the mra isn't in the snapshot or its
+   * primary zip can't be resolved (no requiredZips, or none of the
+   * alternatives are in zipBasenames). Hash failures fall through to
+   * the synthetic key path rather than surfacing a toast.
    */
   async bindArcadeManualMetadataOverride(
     snapshot: ArcadeBindSnapshot,
@@ -400,12 +408,31 @@ export class MetadataOrchestrator {
         game,
       );
     }
+    // Hard-bail when the mra isn't in the snapshot or has no
+    // resolvable primary zip — a synthetic key for an unknown mra
+    // would be unreadable by the batch reader and mislead the user.
+    const mraEntry = snapshot.entries.find(
+      (e) => e.relativePath === mraRelativePath,
+    );
+    if (mraEntry === undefined) return null;
+    if (resolvePrimaryZipBasename(mraEntry, snapshot.zipBasenames) === null) {
+      return null;
+    }
     const md5 = await this.resolveOrComputeArcadePrimaryZipMd5(
       snapshot,
       mraRelativePath,
     );
-    if (md5 === null) return null;
-    return this.metadataService.bindManualOverride(md5, game);
+    // fix/#54 — mirror the ROM bind path: fall back to a synthetic key
+    // when the zip hash is unavailable instead of returning null.
+    const key =
+      md5 ?? makeSyntheticCacheKey(ARCADE_VIRTUAL_CORE_ID, mraRelativePath);
+    if (md5 === null) {
+      diagLog('info', 'arcade', '·', 'synthetic-key-fallback', {
+        mraRelativePath,
+        syntheticKey: key,
+      });
+    }
+    return this.metadataService.bindManualOverride(key, game);
   }
 
   /**
@@ -602,6 +629,17 @@ export class MetadataOrchestrator {
 
     // For each group: find the candidate path with a cached HashEntry,
     // read metadata by its md5, fan out to every .mra in the group.
+    //
+    // fix/#54 / step 5b — per-mra synthetic key check: manual binds
+    // written before the zip was hashed land under a synthetic
+    // `(ARCADE_VIRTUAL_CORE_ID, mraRelativePath)` key. Check that key
+    // first so user-chosen overrides are always surfaced, even if the
+    // auto-scrape later writes a different record under the real md5.
+    //
+    // NOTE: the ROM read path (`readCachedRomsMetadata`) has the
+    // inverse priority (hash wins over synthetic). That inconsistency
+    // is a latent issue to revisit — for arcade, sticky manual binds
+    // are the deliberately chosen semantic.
     for (const group of groups) {
       let md5: string | null = null;
       for (const dir of MISTER_ARCADE_ZIP_DIRS) {
@@ -611,14 +649,21 @@ export class MetadataOrchestrator {
           break;
         }
       }
-      const metadata =
-        md5 === null
-          ? null
-          : await this.metadataService.readCachedMetadata(md5);
+      const hashKeyedMetadata =
+        md5 !== null
+          ? await this.metadataService.readCachedMetadata(md5)
+          : null;
       // Fan out across every .mra in the group — they share the
-      // same SS record by virtue of sharing a zip md5.
+      // same SS record by virtue of sharing a zip md5, but each mra
+      // may carry its own synthetic-keyed manual override.
       for (const mra of group.mras) {
-        out[mra.relativePath] = metadata;
+        const syntheticKey = makeSyntheticCacheKey(
+          ARCADE_VIRTUAL_CORE_ID,
+          mra.relativePath,
+        );
+        const synthRecord =
+          await this.metadataService.readCachedMetadata(syntheticKey);
+        out[mra.relativePath] = synthRecord ?? hashKeyedMetadata;
       }
     }
     // Playable .mras whose primary zip couldn't be grouped (e.g.
