@@ -169,7 +169,7 @@ export class DestinationAlreadyExistsError extends Error {
   readonly conflicts: ReadonlyArray<CoreRenameConflict>;
   constructor(conflicts: ReadonlyArray<CoreRenameConflict>) {
     super(
-      `Hide aborted: ${conflicts.length} destination path(s) already exist on the device.`,
+      `Rename aborted: ${conflicts.length} destination path(s) already exist on the device.`,
     );
     this.name = 'DestinationAlreadyExistsError';
     this.conflicts = conflicts;
