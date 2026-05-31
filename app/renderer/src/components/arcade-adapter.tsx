@@ -1366,12 +1366,22 @@ export function useArcadeAdapter(): ItemListAdapter {
             const handlePrev = (): void => {
               if (idx <= 0) return;
               const prev = mraOnly[idx - 1];
-              if (prev !== undefined) openAtEntry(prev);
+              if (prev !== undefined) {
+                openAtEntry(prev);
+                arcadeScrollContainerRef.current
+                  ?.querySelector(`[data-arcade-row="${CSS.escape(prev.rom.filename)}"]`)
+                  ?.scrollIntoView({ block: 'nearest' });
+              }
             };
             const handleNext = (): void => {
               if (idx < 0 || idx >= mraOnly.length - 1) return;
               const next = mraOnly[idx + 1];
-              if (next !== undefined) openAtEntry(next);
+              if (next !== undefined) {
+                openAtEntry(next);
+                arcadeScrollContainerRef.current
+                  ?.querySelector(`[data-arcade-row="${CSS.escape(next.rom.filename)}"]`)
+                  ?.scrollIntoView({ block: 'nearest' });
+              }
             };
             const advanceOrClose = (): void => {
               if (idx >= 0 && idx < mraOnly.length - 1) {

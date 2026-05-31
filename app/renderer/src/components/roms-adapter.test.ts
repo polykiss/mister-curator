@@ -109,3 +109,25 @@ describe('fix/render-cascade-hide-unhide — Fix 3: scroll-restore isolation', (
     expect(dep).toBe('romScrollKey');
   });
 });
+
+// ─── #56 detail-dialog prev/next scroll-sync ─────────────────────────────────
+
+describe('fix/three-batched-fixes — #56 detail nav scroll-sync (roms pane)', () => {
+  it('handlePrev scrolls to the target row using CSS.escape on the filename', () => {
+    expect(SOURCE).toContain("CSS.escape(prev.filename)");
+    expect(SOURCE).toContain("[data-rom-row=\"");
+  });
+
+  it('handleNext scrolls to the target row using CSS.escape on the filename', () => {
+    expect(SOURCE).toContain("CSS.escape(next.filename)");
+  });
+
+  it('uses block nearest to avoid unnecessary motion', () => {
+    expect(SOURCE).toContain("scrollIntoView({ block: 'nearest' })");
+  });
+
+  it('reads from scrollContainerRef rather than a fresh querySelector', () => {
+    expect(SOURCE).toContain('scrollContainerRef.current');
+    expect(SOURCE).toContain('[data-rom-row="');
+  });
+});

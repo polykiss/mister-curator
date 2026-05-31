@@ -328,3 +328,25 @@ describe('arcade-adapter — sidebar-badge sync (feat/pre-beta-polish-batch)', (
     expect(ctx).toMatch(/if \(delta === 0\) return;/);
   });
 });
+
+// ─── #56 detail-dialog prev/next scroll-sync ─────────────────────────────────
+
+describe('fix/three-batched-fixes — #56 detail nav scroll-sync (arcade pane)', () => {
+  it('handlePrev scrolls to the target row using CSS.escape on rom.filename', () => {
+    expect(SOURCE).toContain("CSS.escape(prev.rom.filename)");
+    expect(SOURCE).toContain("[data-arcade-row=\"");
+  });
+
+  it('handleNext scrolls to the target row using CSS.escape on rom.filename', () => {
+    expect(SOURCE).toContain("CSS.escape(next.rom.filename)");
+  });
+
+  it('uses block nearest to avoid unnecessary motion', () => {
+    expect(SOURCE).toContain("scrollIntoView({ block: 'nearest' })");
+  });
+
+  it('reads from arcadeScrollContainerRef', () => {
+    expect(SOURCE).toContain('arcadeScrollContainerRef.current');
+    expect(SOURCE).toContain('[data-arcade-row="');
+  });
+});

@@ -199,7 +199,7 @@ class SshOpTimeoutError extends Error {
 }
 
 export class RealMisterClient implements IMisterClient {
-  private readonly ssh: NodeSSH;
+  private ssh: NodeSSH;
   /**
    * Listeners registered via `onUnexpectedDisconnect`. Fired at most
    * once per `connect()` call when the underlying SSH transport drops.
@@ -221,6 +221,12 @@ export class RealMisterClient implements IMisterClient {
         `Auth method '${profile.authMethod}' does not match supplied secret of type '${secret.type}'.`,
       );
     }
+
+    // Recreate the ssh instance so each connect attempt starts with a
+    // clean NodeSSH. A disposed instance cannot reconnect; without this
+    // reset the retry button silently fails after any connection error.
+    try { this.ssh.dispose(); } catch { /* already disposed or never connected */ }
+    this.ssh = new NodeSSH();
 
     const baseConfig = {
       host: profile.host,
@@ -2848,6 +2854,7 @@ function mapConnectError(err: unknown): MisterConnectionError {
   const networkCodes = new Set([
     'ECONNREFUSED',
     'EHOSTUNREACH',
+    'EHOSTDOWN',
     'ENETUNREACH',
     'ETIMEDOUT',
     'ENOTFOUND',

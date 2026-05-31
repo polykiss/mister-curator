@@ -218,6 +218,43 @@ describe('ConnectionManager — PR #12 disk cache', () => {
     await expect(fs.access(romsCachePath)).rejects.toThrow();
   });
 
+  describe('addSystemFileMark auto-unhide (#52)', () => {
+    it('auto-unhides a dot-prefixed file after marking it as a system file', async () => {
+      await manager.connect(profile.id);
+      const unhideSpy = vi
+        .spyOn(manager, 'setRomVisibility')
+        .mockImplementation(async () => {});
+
+      await manager.addSystemFileMark('NES', '.hidden-game.nes');
+
+      expect(unhideSpy).toHaveBeenCalledWith('NES', '.hidden-game.nes', false);
+      unhideSpy.mockRestore();
+    });
+
+    it('does not call setRomVisibility for a visible (non-dot) filename', async () => {
+      await manager.connect(profile.id);
+      const unhideSpy = vi
+        .spyOn(manager, 'setRomVisibility')
+        .mockImplementation(async () => {});
+
+      await manager.addSystemFileMark('NES', 'noise.bios');
+
+      expect(unhideSpy).not.toHaveBeenCalled();
+      unhideSpy.mockRestore();
+    });
+
+    it('mark is still written and returned even if auto-unhide throws', async () => {
+      await manager.connect(profile.id);
+      vi.spyOn(manager, 'setRomVisibility').mockRejectedValueOnce(
+        new Error('rename failed'),
+      );
+
+      const result = await manager.addSystemFileMark('NES', '.broken.nes');
+
+      expect(result).toBeDefined();
+    });
+  });
+
   it('clearCacheForCurrentHost wipes the entire host cache directory', async () => {
     await manager.connect(profile.id);
     await manager.listAllCoresWithFiles();

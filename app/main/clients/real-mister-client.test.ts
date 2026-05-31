@@ -175,6 +175,32 @@ describe('RealMisterClient', () => {
       });
     });
 
+    it('maps EHOSTDOWN to unreachable (#50)', async () => {
+      const err = Object.assign(new Error('Host is down'), { code: 'EHOSTDOWN' });
+      mocks.connect.mockRejectedValueOnce(err);
+
+      const client = new RealMisterClient();
+      await expect(client.connect(profile, secret)).rejects.toMatchObject({
+        code: 'unreachable',
+      });
+    });
+
+    it('creates a fresh NodeSSH instance on each connect attempt, enabling retry (#50)', async () => {
+      const client = new RealMisterClient();
+
+      // First connect fails.
+      mocks.connect.mockRejectedValueOnce(new Error('timeout'));
+      await expect(client.connect(profile, secret)).rejects.toThrow();
+
+      // Reset the dispose spy so we can assert cleanly on the second attempt.
+      mocks.dispose.mockClear();
+
+      // Retry: the new connect() must call dispose() at its start
+      // (cleaning up the old instance) before creating a fresh one.
+      await client.connect(profile, secret);
+      expect(mocks.dispose).toHaveBeenCalledTimes(1);
+    });
+
     it('throws not_a_mister when /media/fat/games is missing', async () => {
       mocks.execCommand.mockResolvedValueOnce(execFail(1));
 
@@ -3104,6 +3130,9 @@ describe('RealMisterClient', () => {
       const client = new RealMisterClient();
       try {
         await client.connect(profile, secret);
+        // connect() now calls dispose() internally before each attempt;
+        // clear the spy so we only assert on hash-timeout behavior below.
+        mocks.dispose.mockClear();
         const listener = vi.fn();
         client.onUnexpectedDisconnect(listener);
         // Hang the hash command forever.
