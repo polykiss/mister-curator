@@ -31,6 +31,7 @@ import {
 } from '@app/main/metadata/metadata-service';
 import { OpenVGDBService } from '@app/main/metadata/openvgdb-service';
 import { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
+import { SystemCatalogService } from '@app/main/metadata/system-catalog-service';
 import { AutoScrapeEngine } from '@app/main/services/auto-scrape-engine';
 import { groupByPrimaryZipBasename } from '@app/main/services/arcade-prefetch-paths';
 import { ARCADE_VIRTUAL_CORE_ID } from '@shared/arcade-mra';
@@ -211,6 +212,23 @@ void app.whenReady().then(async () => {
     },
   );
   const imageCache = new ImageCache(path.join(metadataRoot, 'images'));
+
+  // feat/system-catalog-data-layer (#30 PR-1) — dedicated SS instance
+  // for catalog fetches so catalog calls never queue-starve ROM scraping.
+  const screenScraperForCatalog = new ScreenScraperService({
+    devId: process.env['SCREENSCRAPER_DEV_ID'] ?? null,
+    devPassword: process.env['SCREENSCRAPER_DEV_PASSWORD'] ?? null,
+    ssid: process.env['SCREENSCRAPER_SSID'] ?? null,
+    sspassword: process.env['SCREENSCRAPER_SSPASSWORD'] ?? null,
+    logger: (msg) => { console.warn(msg); },
+  });
+  const systemLogoCache = new ImageCache(path.join(metadataRoot, 'system-logos'));
+  const systemCatalog = new SystemCatalogService(
+    screenScraperForCatalog,
+    systemLogoCache,
+    path.join(metadataRoot, 'system-catalog.json'),
+  );
+
   const metadataOrchestrator = new MetadataOrchestrator(
     hashService,
     metadataService,
@@ -419,6 +437,8 @@ void app.whenReady().then(async () => {
     // via a renderer-driven IPC; pass the SS service through.
     screenScraper,
     emitUpdateModeProgress,
+    // feat/system-catalog-data-layer (#30 PR-1)
+    systemCatalog,
   );
 
   const window = createWindow();
@@ -498,6 +518,10 @@ void app.whenReady().then(async () => {
       autoScrapeEngine.pause();
       return;
     }
+    // feat/system-catalog-data-layer (#30 PR-1) — load or fetch the
+    // system catalog on connect so sidebar names are available
+    // immediately. Best-effort: failure doesn't block the connect flow.
+    void systemCatalog.ensureCatalog().catch(() => { /* swallow */ });
     // fix/count-and-status-indicator commit 4 — lazy v3→v4 hash-cache
     // migration. Runs once per connect, before the first prefetch
     // queues anything. v3 entries with mtimes that still match get

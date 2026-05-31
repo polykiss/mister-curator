@@ -23,6 +23,7 @@ import type {
   PickedKeyFile,
   RomMetadataResolvedEvent,
   RomVisibilityChangeWire,
+  SystemCatalogWireEntry,
   SystemFileMarkChangeWire,
   UpdateModeProgressEvent,
   UpdateModeRestoreResult,
@@ -407,6 +408,15 @@ const api: MisterApi = {
   // feat/arcade-orphan-detect (#46)
   getArcadeOrphans: () =>
     invoke<ArcadeOrphansWire>(IPC_CHANNELS.getArcadeOrphans),
+  // feat/system-catalog-data-layer (#30 PR-1)
+  getSystemLogoBytes: (url: string) =>
+    invoke<Uint8Array | null>(IPC_CHANNELS.getSystemLogoBytes, url),
+  rescrapeSystemLogo: (url: string) =>
+    invoke<Uint8Array | null>(IPC_CHANNELS.rescrapeSystemLogo, url),
+  getSystemCatalog: () =>
+    invoke<Record<string, SystemCatalogWireEntry> | null>(IPC_CHANNELS.getSystemCatalog),
+  rescrapeSystemCatalog: () =>
+    invoke<void>(IPC_CHANNELS.rescrapeSystemCatalog),
 };
 
 contextBridge.exposeInMainWorld('mister', api);

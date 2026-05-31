@@ -38,6 +38,7 @@ import type { UpdateModeProgressEvent } from '@shared/preload-api';
 import type { MetadataOrchestrator } from '@app/main/metadata/metadata-orchestrator';
 import { lookupScreenScraperSystemId } from '@app/main/metadata/screenscraper-system-map';
 import type { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
+import type { SystemCatalogService } from '@app/main/metadata/system-catalog-service';
 import type { AutoScrapeEngine } from '@app/main/services/auto-scrape-engine';
 import type { ProfileStore } from '@app/main/storage/profile-store';
 
@@ -146,6 +147,8 @@ export function registerIpcHandlers(
   // handler can reach it.
   screenScraper: ScreenScraperService | null,
   emitUpdateModeProgress: UpdateModeProgressEmitter,
+  // feat/system-catalog-data-layer (#30 PR-1)
+  systemCatalog: SystemCatalogService | null,
 ): void {
   handle<[], MisterProfile[]>(IPC_CHANNELS.listProfiles, () => store.list());
 
@@ -637,5 +640,26 @@ export function registerIpcHandlers(
         throw encodeIpcError(err);
       }
     },
+  );
+
+  // feat/system-catalog-data-layer (#30 PR-1)
+  handle<[string], Uint8Array | null>(
+    IPC_CHANNELS.getSystemLogoBytes,
+    (url) => systemCatalog?.getSystemLogoBytes(url) ?? null,
+  );
+
+  handle<[string], Uint8Array | null>(
+    IPC_CHANNELS.rescrapeSystemLogo,
+    (url) => systemCatalog?.rescrapeSystemLogo(url) ?? null,
+  );
+
+  handle<[], Record<string, unknown> | null>(
+    IPC_CHANNELS.getSystemCatalog,
+    () => systemCatalog?.getWireCatalog() ?? null,
+  );
+
+  handle<[], void>(
+    IPC_CHANNELS.rescrapeSystemCatalog,
+    async () => { await systemCatalog?.rescrapeSystemCatalog(); },
   );
 }

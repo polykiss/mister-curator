@@ -156,6 +156,15 @@ export const IPC_CHANNELS = {
   resolveDuplicateCores: 'mister:resolveDuplicateCores',
   // feat/arcade-orphan-detect (#46)
   getArcadeOrphans: 'mister:getArcadeOrphans',
+  // feat/system-catalog-data-layer (#30 PR-1) — system logo + catalog IPC.
+  //   getSystemLogoBytes: fetch/cache a system logo, return bytes for Blob.
+  //   rescrapeSystemLogo: force re-download of one logo, return fresh bytes.
+  //   getSystemCatalog: return the cached coreId-keyed catalog wire map.
+  //   rescrapeSystemCatalog: force re-fetch of the full SS catalog.
+  getSystemLogoBytes: 'mister:getSystemLogoBytes',
+  rescrapeSystemLogo: 'mister:rescrapeSystemLogo',
+  getSystemCatalog: 'mister:getSystemCatalog',
+  rescrapeSystemCatalog: 'mister:rescrapeSystemCatalog',
 } as const;
 
 /** PR #15 prefetch progress kind. Discriminator for the wire event. */
@@ -821,6 +830,32 @@ export interface MisterApi {
    * from the cached arcade snapshot — no additional SSH needed.
    */
   getArcadeOrphans(): Promise<ArcadeOrphansWire>;
+  // ─── feat/system-catalog-data-layer (#30 PR-1) ────────────────────
+  /**
+   * Fetch/cache a system logo from `url` and return the bytes for the
+   * renderer to wrap in a Blob + objectURL. Mirrors `getBoxArtBytes`
+   * semantics. Returns null on failure or when `url` is empty.
+   */
+  getSystemLogoBytes(url: string): Promise<Uint8Array | null>;
+  /**
+   * Force re-download of the logo at `url` (clears the cache entry
+   * first). Returns the fresh bytes, or null on failure.
+   */
+  rescrapeSystemLogo(url: string): Promise<Uint8Array | null>;
+  /**
+   * Return the cached coreId-keyed system catalog built from the SS
+   * `systemesListe.php` response. Returns null when the catalog
+   * hasn't been fetched yet. The renderer uses this for display names
+   * and logo URLs in the sidebar.
+   */
+  getSystemCatalog(): Promise<Record<string, SystemCatalogWireEntry> | null>;
+  /**
+   * Force re-fetch of the full SS system catalog. Fire-and-forget from
+   * the renderer's perspective (no return value); the catalog is
+   * updated in the background and the renderer may poll
+   * `getSystemCatalog` to pick up changes.
+   */
+  rescrapeSystemCatalog(): Promise<void>;
 }
 
 /**
@@ -920,6 +955,19 @@ export interface ArcadePlayabilityWire {
 /** feat/arcade-orphan-detect (#46) — wire shape for orphan zip basenames. */
 export interface ArcadeOrphansWire {
   readonly orphanZips: readonly string[];
+}
+
+/**
+ * feat/system-catalog-data-layer (#30 PR-1) — one entry from the
+ * ScreenScraper system catalog, keyed by coreId in the wire map.
+ * Mirrors `SystemCatalogEntry` from `system-catalog-service.ts` but
+ * lives in shared so the renderer can import it without depending on
+ * main-process modules.
+ */
+export interface SystemCatalogWireEntry {
+  readonly id: number;
+  readonly displayName: string;
+  readonly logoUrl: string | null;
 }
 
 const VALID_CONNECTION_ERROR_CODES: ReadonlySet<ConnectionErrorCode> = new Set([
