@@ -146,6 +146,10 @@ const CART_EXTENSIONS: ReadonlySet<string> = new Set([
   '.n64', // N64 — little-endian (v64 format, re-swapped)
   '.z64', // N64 — big-endian (native byte order; most common dump format)
   '.v64', // N64 — byte-swapped (Doctor V64 format)
+  // #59/#60/#61 audit follow-ups from PR #98:
+  '.exe', // AO486 DOS — executables launchable directly by the core
+  '.nds', // Nintendo DS cartridge dump
+  '.sgx', // SuperGrafx (TurboGrafx-16 extended; distinct from .pce)
 ]);
 
 /**

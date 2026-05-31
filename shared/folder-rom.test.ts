@@ -963,6 +963,22 @@ describe('isLaunchableRomExtension — PR-B (PR #24) positive ROM filter', () =>
     });
   });
 
+  describe('#59/#60/#61 extension additions — true', () => {
+    it.each([
+      ['.exe', 'AO486 DOS executable'],
+      ['.nds', 'Nintendo DS cartridge dump'],
+      ['.sgx', 'SuperGrafx ROM'],
+    ])('counts %s files (%s)', (ext) => {
+      expect(isLaunchableRomExtension(`Game${ext}`)).toBe(true);
+    });
+
+    it('case-insensitive: .NDS, .EXE, .SGX all pass', () => {
+      expect(isLaunchableRomExtension('game.NDS')).toBe(true);
+      expect(isLaunchableRomExtension('Doom.EXE')).toBe(true);
+      expect(isLaunchableRomExtension('game.SGX')).toBe(true);
+    });
+  });
+
   describe('non-ROM extensions — false (this is the bug fix)', () => {
     it.each([
       ['.pal', 'NES palette file (Palettes/ folder content)'],

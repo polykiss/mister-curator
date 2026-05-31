@@ -202,6 +202,20 @@ describe('FakeMisterClient', () => {
     expect(names).toEqual(['game.n64', 'game.v64', 'game.z64']);
   });
 
+  it('.nds, .exe, .sgx all pass the listRoms extension filter (#59/#60/#61)', async () => {
+    // Guard that the three extensions added as #98 audit follow-ups are
+    // treated as launchable ROMs and not silently filtered out.
+    const dir = path.join(workDir, 'games', 'MultiExt');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'game.nds'), 'rom');
+    await fs.writeFile(path.join(dir, 'Doom.exe'), 'rom');
+    await fs.writeFile(path.join(dir, 'game.sgx'), 'rom');
+
+    const roms = await client.listRoms('MultiExt');
+    const names = roms.map((r) => r.filename).sort();
+    expect(names).toEqual(['Doom.exe', 'game.nds', 'game.sgx']);
+  });
+
   it('throws a clear error when listing ROMs for an unknown core', async () => {
     await expect(client.listRoms('TurboGrafx')).rejects.toThrow(/Unknown core/);
   });
