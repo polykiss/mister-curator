@@ -124,3 +124,47 @@ export function auditCores(
 
   return { missingCoreFile, noRomsForCore, orphanArcadeRoms };
 }
+
+/**
+ * feat/sidebar-alias-dedup (#48) — returns the set of canonical rbf-name
+ * core IDs (e.g. `TurboGrafx16`, `Minimig`) that should be suppressed from
+ * the sidebar because:
+ *
+ *   1. The canonical core has zero ROM content of its own
+ *      (`recursiveRomCount ?? romCount === 0`), AND
+ *   2. At least one of its alias source games dirs (e.g. `TGFX16`, `Amiga`)
+ *      has a visible, non-empty games dir.
+ *
+ * This is a pure display filter — the underlying `CoreEntry` data is
+ * unchanged. The sidebar uses this set to skip showing an empty
+ * "TurboGrafx16 · 0" row when the user's actual PC-Engine ROMs live under
+ * the `TGFX16` games dir.
+ *
+ * Mirrors the `noRomsForCore` alias suppression in `auditCores` (which
+ * uses `REVERSE_CORE_ALIASES[core.id]`) but inverted: instead of
+ * suppressing a diagnostics entry, we suppress a sidebar row.
+ */
+export function aliasTargetsToSuppress(
+  cores: readonly CoreEntry[],
+): ReadonlySet<string> {
+  const coreById = new Map(cores.map((c) => [c.id, c]));
+  const suppressed = new Set<string>();
+
+  for (const [canonicalId, sourceIds] of Object.entries(REVERSE_CORE_ALIASES)) {
+    const canonical = coreById.get(canonicalId);
+    if (!canonical) continue;
+    // Only suppress when the canonical core itself carries no content.
+    const canonicalCount = canonical.recursiveRomCount ?? canonical.romCount;
+    if (canonicalCount > 0) continue;
+    // Suppress if ANY alias source games dir has visible content.
+    const anySourceHasContent = sourceIds.some((srcId) => {
+      const src = coreById.get(srcId);
+      if (!src) return false;
+      if (!src.gamesDirExists || src.gamesDirHidden) return false;
+      return (src.recursiveRomCount ?? src.romCount) > 0;
+    });
+    if (anySourceHasContent) suppressed.add(canonicalId);
+  }
+
+  return suppressed;
+}
