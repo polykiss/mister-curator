@@ -1776,7 +1776,12 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
           const handlePrev = (): void => {
             if (presentableRoms === null || idx <= 0) return;
             const prev = presentableRoms[idx - 1];
-            if (prev !== undefined) openAtRom(prev);
+            if (prev !== undefined) {
+              openAtRom(prev);
+              scrollContainerRef.current
+                ?.querySelector(`[data-rom-row="${CSS.escape(prev.filename)}"]`)
+                ?.scrollIntoView({ block: 'nearest' });
+            }
           };
           const handleNext = (): void => {
             if (
@@ -1786,7 +1791,12 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
             )
               return;
             const next = presentableRoms[idx + 1];
-            if (next !== undefined) openAtRom(next);
+            if (next !== undefined) {
+              openAtRom(next);
+              scrollContainerRef.current
+                ?.querySelector(`[data-rom-row="${CSS.escape(next.filename)}"]`)
+                ?.scrollIntoView({ block: 'nearest' });
+            }
           };
           const advanceOrClose = (): void => {
             if (
