@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 import {
   backoffDelayMs,
   RECONNECT_BACKOFF_MS,
@@ -1457,6 +1459,17 @@ export class ConnectionManager {
   ): Promise<SystemFilesMarks> {
     this.assertConnected();
     await this.client.addSystemFileMark(coreId, filename);
+    // Auto-unhide if the file is currently dot-prefixed. The mark declares
+    // it as infrastructure — hiding it would be confusing. Removing a mark
+    // intentionally does NOT re-hide; that remains a manual user action.
+    if (path.basename(filename).startsWith('.')) {
+      try {
+        await this.setRomVisibility(coreId, filename, false);
+        diagLog('info', 'conn', '·', 'auto-unhid-after-mark', { coreId, filename });
+      } catch (err) {
+        diagLog('warn', 'conn', '✗', 'auto-unhide-after-mark-failed', { coreId, filename, err });
+      }
+    }
     this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
     await this.invalidateAfterMarksChange(coreId);
     return this.systemFilesMarksCache;
