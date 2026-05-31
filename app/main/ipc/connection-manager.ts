@@ -1467,7 +1467,11 @@ export class ConnectionManager {
         await this.setRomVisibility(coreId, filename, false);
         diagLog('info', 'conn', '·', 'auto-unhid-after-mark', { coreId, filename });
       } catch (err) {
-        diagLog('warn', 'conn', '✗', 'auto-unhide-after-mark-failed', { coreId, filename, err });
+        diagLog('warn', 'conn', '✗', 'auto-unhide-after-mark-failed', {
+          coreId,
+          filename,
+          err: err instanceof Error ? err.message : String(err),
+        });
       }
     }
     this.systemFilesMarksCache = await this.client.readSystemFilesMarks();
