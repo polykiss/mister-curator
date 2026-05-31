@@ -1476,12 +1476,12 @@ describe('MetadataOrchestrator', () => {
       expect(readSpy.mock.calls[0]?.[0]).toMatch(SYNTHETIC_KEY_RE);
     });
 
-    it('readCachedRomsMetadata: hash-keyed record wins when both records exist', async () => {
-      // Conflict-resolution policy: if a path gained an md5 after
-      // the user manual-bound a synthetic record, the auto-pipeline
-      // output supersedes the pre-hash synthetic. The orchestrator
-      // should never even try the synthetic key when the hash
-      // lookup succeeds.
+    it('readCachedRomsMetadata: synthetic-keyed manual-override wins over hash-keyed auto-scraped record', async () => {
+      // fix/#55 — mirroring getCachedArcadeMetadataBatch, synthetic
+      // records now take precedence over hash-keyed records so a
+      // manual bind made before hashing isn't silently overridden by
+      // a later auto-scrape. Both keys are read; synthetic wins when
+      // non-null.
       const hashMeta = buildMeta(HASH, 'AutoResolved');
       const syntheticMeta = buildMeta('noss-xxx', 'ManuallyBound');
       const { orchestrator, metadataService } = makeOrchestrator({
@@ -1500,11 +1500,39 @@ describe('MetadataOrchestrator', () => {
         PATH,
       ]);
 
-      expect(result[PATH]?.name).toBe('AutoResolved');
-      // Synthetic key MUST NOT be probed — short-circuit on the
-      // first hit.
-      expect(readSpy).toHaveBeenCalledTimes(1);
-      expect(readSpy.mock.calls[0]?.[0]).toBe(HASH);
+      // Manual override wins.
+      expect(result[PATH]?.name).toBe('ManuallyBound');
+      // Both the hash key and the synthetic key are probed.
+      expect(readSpy).toHaveBeenCalledTimes(2);
+      const keys = readSpy.mock.calls.map((c) => c[0] as string);
+      expect(keys).toContain(HASH);
+      expect(keys.some((k) => SYNTHETIC_KEY_RE.test(k))).toBe(true);
+    });
+
+    it('readCachedRomsMetadata: source=none sentinel under synthetic key does not shadow hash-keyed scraped record', async () => {
+      // Creator B (unmappable-core short-circuit in getRomsMetadata)
+      // writes source='none' sentinels under synthetic keys. Those
+      // sentinels must remain transparent: readCachedMetadata filters
+      // them to null, so hash-keyed scraped records still win.
+      const hashMeta = buildMeta(HASH, 'ScrapedResult');
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map([[PATH, buildHashEntry(HASH)]]),
+      });
+      // readCachedMetadata returns null for sentinel (mirrors real
+      // MetadataService behaviour at line ~971).
+      const readSpy = vi.fn(async (key: string) => {
+        if (key === HASH) return hashMeta;
+        return null; // synthetic key returns null (sentinel filtered)
+      });
+      (metadataService as unknown as {
+        readCachedMetadata: typeof readSpy;
+      }).readCachedMetadata = readSpy;
+
+      const result = await orchestrator.readCachedRomsMetadata(CORE_ID, [
+        PATH,
+      ]);
+
+      expect(result[PATH]?.name).toBe('ScrapedResult');
     });
 
     it('bindManualMetadataOverride: delegates verbatim to bindManualOverride under the synthetic key (merge logic owned by metadata-service)', async () => {
@@ -1566,6 +1594,177 @@ describe('MetadataOrchestrator', () => {
         unmappablePath,
       ]);
       expect(result[unmappablePath]?.name).toBe('mame placeholder');
+    });
+
+    it('bindManualMetadataOverride: invalidates synthetic key when binding under real md5', async () => {
+      // fix/#55 staleness mitigation — when a hash entry exists the
+      // bind must call metadataService.invalidate(syntheticKey) to
+      // evict any stale pre-hash manual override, so the new md5-
+      // keyed record wins on the next read.
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map([[PATH, buildHashEntry(HASH)]]),
+      });
+      const invalidateSpy = vi.fn(async () => undefined);
+      (metadataService as unknown as {
+        invalidate: typeof invalidateSpy;
+      }).invalidate = invalidateSpy;
+      (metadataService as unknown as {
+        bindManualOverride: ReturnType<typeof vi.fn>;
+      }).bindManualOverride = vi.fn(async () => buildMeta(HASH, 'x'));
+
+      await orchestrator.bindManualMetadataOverride(
+        CORE_ID,
+        PATH,
+        buildSsGame(),
+      );
+
+      expect(invalidateSpy).toHaveBeenCalledTimes(1);
+      const [romInvalidateKey] =
+        (invalidateSpy.mock.calls[0] as [string] | undefined) ?? [''];
+      expect(romInvalidateKey).toMatch(SYNTHETIC_KEY_RE);
+    });
+
+    it('bindManualMetadataOverride: does NOT invalidate when binding under synthetic key (no hash)', async () => {
+      // When no hash is available the bind writes under the synthetic
+      // key itself — nothing to evict.
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map(), // no hash
+      });
+      const invalidateSpy = vi.fn(async () => undefined);
+      (metadataService as unknown as {
+        invalidate: typeof invalidateSpy;
+      }).invalidate = invalidateSpy;
+      (metadataService as unknown as {
+        bindManualOverride: ReturnType<typeof vi.fn>;
+      }).bindManualOverride = vi.fn(async (k: string) => buildMeta(k, 'x'));
+
+      await orchestrator.bindManualMetadataOverride(
+        CORE_ID,
+        PATH,
+        buildSsGame(),
+      );
+
+      expect(invalidateSpy).not.toHaveBeenCalled();
+    });
+
+    it('readCachedRomsMetadata: re-bind under real md5 wins after staleness mitigation clears synthetic', async () => {
+      // End-to-end: first bind writes under synthetic (no hash).
+      // Second bind fires when hash IS available, which clears the
+      // synthetic via invalidate. Post-mitigation read returns the
+      // new hash-keyed record rather than the stale synthetic.
+      //
+      // Simulated by: bind with hash → metadataService.invalidate
+      // is called with the synthetic key → on next read, synthetic
+      // lookup returns null (file evicted) → hash-keyed record wins.
+      const newBindMeta = buildMeta(HASH, 'NewChoice');
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map([[PATH, buildHashEntry(HASH)]]),
+      });
+      // Bind under real md5; bind spy returns newBindMeta.
+      const bindSpy = vi.fn(async () => newBindMeta);
+      (metadataService as unknown as {
+        bindManualOverride: typeof bindSpy;
+      }).bindManualOverride = bindSpy;
+      // After invalidate fires, synthetic lookup returns null.
+      const readSpy = vi.fn(async (key: string) => {
+        if (key === HASH) return newBindMeta;
+        return null; // synthetic evicted
+      });
+      (metadataService as unknown as {
+        readCachedMetadata: typeof readSpy;
+      }).readCachedMetadata = readSpy;
+
+      await orchestrator.bindManualMetadataOverride(
+        CORE_ID,
+        PATH,
+        buildSsGame(),
+      );
+      const result = await orchestrator.readCachedRomsMetadata(CORE_ID, [
+        PATH,
+      ]);
+
+      expect(result[PATH]?.name).toBe('NewChoice');
+    });
+
+    it('bindArcadeManualMetadataOverride: invalidates synthetic key when binding under real md5', async () => {
+      // fix/#55 — same staleness mitigation as the ROM bind path.
+      // When the primary ZIP hash IS resolved, the old synthetic
+      // record (from a pre-hash bind) must be evicted so the new
+      // md5-keyed record wins in getCachedArcadeMetadataBatch.
+      const ZIP_BASENAME = 'dkong.zip';
+      const ZIP_PATH = `/media/fat/games/mame/${ZIP_BASENAME}`;
+      const ZIP_HASH = 'a'.repeat(32);
+      const MRA_REL_PATH = 'Donkey Kong.mra';
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map([[ZIP_PATH, buildHashEntry(ZIP_HASH)]]),
+      });
+      const invalidateSpy = vi.fn(async () => undefined);
+      (metadataService as unknown as {
+        invalidate: typeof invalidateSpy;
+      }).invalidate = invalidateSpy;
+      (metadataService as unknown as {
+        bindManualOverride: ReturnType<typeof vi.fn>;
+      }).bindManualOverride = vi.fn(async () => buildMeta(ZIP_HASH, 'Donkey Kong'));
+
+      await orchestrator.bindArcadeManualMetadataOverride(
+        {
+          entries: [
+            {
+              relativePath: MRA_REL_PATH,
+              requiredZips: [[ZIP_BASENAME]],
+              displayName: 'Donkey Kong',
+              hidden: false,
+              rbf: 'jtdkong',
+              setname: 'dkong',
+            },
+          ],
+          zipBasenames: new Set([ZIP_BASENAME]),
+          byPath: new Map([[MRA_REL_PATH, 'playable' as const]]),
+        },
+        MRA_REL_PATH,
+        buildSsGame(1234, 'Donkey Kong'),
+      );
+
+      expect(invalidateSpy).toHaveBeenCalledTimes(1);
+      const [arcadeInvalidateKey] =
+        (invalidateSpy.mock.calls[0] as [string] | undefined) ?? [''];
+      expect(arcadeInvalidateKey).toMatch(SYNTHETIC_KEY_RE);
+    });
+
+    it('bindArcadeManualMetadataOverride: does NOT invalidate when binding under synthetic key (no zip hash)', async () => {
+      // When the zip hash is unavailable, the bind writes under the
+      // synthetic key itself — nothing to evict.
+      const { orchestrator, metadataService } = makeOrchestrator({
+        hashEntries: new Map(), // no zip hash
+      });
+      const invalidateSpy = vi.fn(async () => undefined);
+      (metadataService as unknown as {
+        invalidate: typeof invalidateSpy;
+      }).invalidate = invalidateSpy;
+      (metadataService as unknown as {
+        bindManualOverride: ReturnType<typeof vi.fn>;
+      }).bindManualOverride = vi.fn(async (k: string) => buildMeta(k, 'Foo'));
+
+      await orchestrator.bindArcadeManualMetadataOverride(
+        {
+          entries: [
+            {
+              relativePath: 'Foo.mra',
+              requiredZips: [['foo.zip']],
+              displayName: 'Foo',
+              hidden: false,
+              rbf: 'jtfoo',
+              setname: 'foo',
+            },
+          ],
+          zipBasenames: new Set(['foo.zip']),
+          byPath: new Map([['Foo.mra', 'playable' as const]]),
+        },
+        'Foo.mra',
+        buildSsGame(),
+      );
+
+      expect(invalidateSpy).not.toHaveBeenCalled();
     });
   });
 
