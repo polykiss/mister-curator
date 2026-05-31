@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import { dirname } from 'node:path';
 
 import { diagLog } from '@shared/diag-log';
+import type { SystemCatalogRescrapeResult } from '@shared/preload-api';
 
 import type { ImageCache } from '@app/main/metadata/image-cache';
 import { SCREENSCRAPER_SYSTEM_ID_BY_CORE_ID } from '@app/main/metadata/screenscraper-system-map';
@@ -73,9 +74,14 @@ export class SystemCatalogService {
     return result;
   }
 
-  /** Force re-fetch the catalog from SS and update the disk cache. */
-  async rescrapeSystemCatalog(): Promise<void> {
-    await this.fetchAndStore();
+  /**
+   * fix/system-catalog-visibility-and-latch (#64) — force re-fetch.
+   * Calls `resetAuthState()` first so a previous 403 / rate-limit on
+   * the dedicated scraper instance doesn't block the retry.
+   */
+  async rescrapeSystemCatalog(): Promise<SystemCatalogRescrapeResult> {
+    this.scraper.resetAuthState();
+    return this.fetchAndStore();
   }
 
   /**
@@ -111,15 +117,17 @@ export class SystemCatalogService {
 
   // ─── internals ─────────────────────────────────────────────────────
 
-  private async fetchAndStore(): Promise<void> {
+  private async fetchAndStore(): Promise<SystemCatalogRescrapeResult> {
     const fresh = await this.scraper.fetchSystemCatalog();
     if (fresh === null) {
-      diagLog('warn', 'meta', '✗', 'system-catalog-fetch-failed');
-      return;
+      const serviceStatus = this.scraper.getStatus();
+      diagLog('warn', 'meta', '✗', 'system-catalog-fetch-failed', { serviceStatus });
+      return { success: false, status: serviceStatus };
     }
     this.catalog = fresh;
     diagLog('info', 'meta', '·', 'system-catalog-fetched', { count: fresh.size });
     await this.writeToDisk(fresh);
+    return { success: true, status: 'ok' };
   }
 
   private async loadFromDisk(): Promise<SystemCatalog | null> {

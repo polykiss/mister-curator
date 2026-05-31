@@ -11,6 +11,7 @@ import type {
   CoreVisibilityChangeWire,
   PickedKeyFile,
   RomVisibilityChangeWire,
+  SystemCatalogRescrapeResult,
   SystemFileMarkChangeWire,
 } from '@shared/preload-api';
 import type {
@@ -658,8 +659,10 @@ export function registerIpcHandlers(
     () => systemCatalog?.getWireCatalog() ?? null,
   );
 
-  handle<[], void>(
+  handle<[], SystemCatalogRescrapeResult>(
     IPC_CHANNELS.rescrapeSystemCatalog,
-    async () => { await systemCatalog?.rescrapeSystemCatalog(); },
+    () =>
+      systemCatalog?.rescrapeSystemCatalog() ??
+      Promise.resolve({ success: false, status: 'unavailable' }),
   );
 }

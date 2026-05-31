@@ -156,3 +156,53 @@ describe('feat/system-catalog-data-layer — SystemCatalogService.getSystemLogoB
     expect(await svc.getSystemLogoBytes('https://ss/logo.svg')).toBeNull();
   });
 });
+
+describe('fix/system-catalog-visibility-and-latch — SystemCatalogService.rescrapeSystemCatalog', () => {
+  let dir: string;
+  let catalogPath: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(join(tmpdir(), 'mc-rescrape-test-'));
+    catalogPath = join(dir, 'system-catalog.json');
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('calls resetAuthState before fetching', async () => {
+    const resetAuthState = vi.fn();
+    const mockScraper = {
+      fetchSystemCatalog: vi.fn(async () => null),
+      getStatus: vi.fn(() => 'available'),
+      resetAuthState,
+    } as never;
+    const svc = new SystemCatalogService(mockScraper, {} as never, catalogPath);
+    await svc.rescrapeSystemCatalog();
+    expect(resetAuthState).toHaveBeenCalledOnce();
+  });
+
+  it('returns { success: true, status: "ok" } on successful fetch', async () => {
+    const catalog = new Map([[4, { id: 4, displayName: 'SNES', logoUrl: null }]]);
+    const mockScraper = {
+      fetchSystemCatalog: vi.fn(async () => catalog),
+      getStatus: vi.fn(() => 'available'),
+      resetAuthState: vi.fn(),
+    } as never;
+    const svc = new SystemCatalogService(mockScraper, {} as never, catalogPath);
+    const result = await svc.rescrapeSystemCatalog();
+    expect(result).toMatchObject({ success: true, status: 'ok' });
+  });
+
+  it('returns { success: false } when fetch returns null', async () => {
+    const mockScraper = {
+      fetchSystemCatalog: vi.fn(async () => null),
+      getStatus: vi.fn(() => 'unavailable'),
+      resetAuthState: vi.fn(),
+    } as never;
+    const svc = new SystemCatalogService(mockScraper, {} as never, catalogPath);
+    const result = await svc.rescrapeSystemCatalog();
+    expect(result.success).toBe(false);
+    expect(result.status).toBe('unavailable');
+  });
+});

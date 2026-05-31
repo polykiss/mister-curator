@@ -1,3 +1,5 @@
+import { promises as fsPromises } from 'node:fs';
+
 /**
  * ScreenScraper API client (PR #16 round 1).
  *
@@ -135,7 +137,7 @@ const BOX_ART_TYPES = ['box-2D', 'box-3D', 'wheel'] as const;
  * game-cabinet art, not clean system logos — prefer the explicit logo
  * types first.
  */
-const SYSTEM_LOGO_MEDIA_TYPES = ['logo-monochrome', 'logo-svg', 'logo', 'wheel'] as const;
+const SYSTEM_LOGO_MEDIA_TYPES = ['logo-monochrome', 'logo-monochrome-svg', 'logo-svg', 'wheel'] as const;
 
 /**
  * feat/system-catalog-data-layer (#30 PR-1) — one entry from the
@@ -311,6 +313,12 @@ export interface ScreenScraperServiceOptions {
    * or the credential values.
    */
   readonly logger?: (message: string) => void;
+  /**
+   * When set, a raw response body that passes HTTP 200 but fails
+   * `parseSystemCatalog` is written here for post-mortem inspection.
+   * Credentials are redacted before writing.
+   */
+  readonly debugDumpPath?: string;
 }
 
 export class ScreenScraperService {
@@ -327,6 +335,7 @@ export class ScreenScraperService {
   private readonly sspassword: string | null;
   private readonly hasCredentials: boolean;
   private readonly logger: (message: string) => void;
+  private readonly debugDumpPath: string | null;
 
   /** Latched true after a real auth failure (403); never resets. */
   private authFailed = false;
@@ -346,6 +355,20 @@ export class ScreenScraperService {
   private rateLimitedUntil: number | null = null;
   /** Logged the "no creds" notice — suppress repeats. */
   private warnedNoCreds = false;
+
+  /**
+   * fix/system-catalog-visibility-and-latch (#64) — reset transient
+   * error latches so a caller can retry. Intended for the dedicated
+   * catalog-service instance; the ROM-scraping instance keeps its
+   * latched state to avoid hammering SS with wrong credentials.
+   *
+   * Clears: authFailed, rateLimitedUntil.
+   * Leaves: blacklisted, quotaExceeded (permanent/day-scoped).
+   */
+  resetAuthState(): void {
+    this.authFailed = false;
+    this.rateLimitedUntil = null;
+  }
 
   /** Promise chain serialising all live requests for the rate floor. */
   private queue: Promise<unknown> = Promise.resolve();
@@ -369,6 +392,7 @@ export class ScreenScraperService {
     this.logger = options.logger ?? ((): void => {
       /* default: no log */
     });
+    this.debugDumpPath = options.debugDumpPath ?? null;
   }
 
   /**
@@ -491,8 +515,19 @@ export class ScreenScraperService {
    * per-ROM scraping queue.
    */
   async fetchSystemCatalog(): Promise<SystemCatalog | null> {
-    if (!this.hasCredentials) return null;
-    if (this.getStatus() !== 'available') return null;
+    if (!this.hasCredentials) {
+      this.logger(
+        '[ScreenScraper] system-catalog: credentials not configured — set SCREENSCRAPER_DEV_ID and SCREENSCRAPER_DEV_PASSWORD.',
+      );
+      return null;
+    }
+    const status = this.getStatus();
+    if (status !== 'available') {
+      this.logger(
+        `[ScreenScraper] system-catalog: service not available (status=${status}); skipping fetch.`,
+      );
+      return null;
+    }
     return this.enqueue(() => this.doFetchSystemCatalog());
   }
 
@@ -566,11 +601,67 @@ export class ScreenScraperService {
     return { kind: 'ok', results };
   }
 
+  /**
+   * fix/system-catalog-visibility-and-latch (#64) — standalone fetch
+   * that bypasses `fetchWithRetries` so the catalog call never mutates
+   * `authFailed` / `rateLimitedUntil` / `quotaExceeded` on the
+   * dedicated catalog-service instance. Full request-level diagnostics
+   * via `this.logger` so failures are visible in the Terminal even when
+   * the renderer swallows the error.
+   */
   private async doFetchSystemCatalog(): Promise<SystemCatalog | null> {
     const url = this.buildSystemsUrl();
-    const outcome = await this.fetchWithRetries(url);
-    if (outcome.kind !== 'ok') return null;
-    return parseSystemCatalog(outcome.body);
+    const safeUrl = redactScreenScraperUrl(url);
+    this.logger(`[ScreenScraper] system-catalog: fetching ${safeUrl}`);
+
+    let res: Response;
+    try {
+      res = await this.fetchWithTimeout(url);
+    } catch (err) {
+      this.logger(
+        `[ScreenScraper] system-catalog: network error — ` +
+          `${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`,
+      );
+      return null;
+    }
+
+    this.logger(
+      `[ScreenScraper] system-catalog: response status=${String(res.status)} ok=${String(res.ok)}`,
+    );
+
+    let text: string;
+    try {
+      text = await res.text();
+    } catch {
+      this.logger('[ScreenScraper] system-catalog: failed to read response body');
+      return null;
+    }
+
+    if (!res.ok) {
+      this.logger(
+        `[ScreenScraper] system-catalog: non-2xx body (first 500)="${text.slice(0, 500)}"`,
+      );
+      return null;
+    }
+
+    let body: unknown;
+    try {
+      body = JSON.parse(text) as unknown;
+    } catch {
+      this.logger(
+        `[ScreenScraper] system-catalog: JSON parse failed body (first 500)="${text.slice(0, 500)}"`,
+      );
+      return null;
+    }
+
+    const catalog = parseSystemCatalog(body);
+    if (catalog === null) {
+      this.logger(
+        `[ScreenScraper] system-catalog: parseSystemCatalog returned null body (first 3000)="${text.slice(0, 3000)}"`,
+      );
+      await this.dumpDebugResponse(text);
+    }
+    return catalog;
   }
 
   /**
@@ -774,6 +865,28 @@ export class ScreenScraperService {
   }
 
   /**
+   * Write a parse-failed response body to `debugDumpPath` for post-mortem
+   * inspection. Credentials are scrubbed before writing. No-ops silently
+   * if `debugDumpPath` is null or the write fails.
+   */
+  private async dumpDebugResponse(rawBody: string): Promise<void> {
+    if (this.debugDumpPath === null) return;
+    const redacted = rawBody
+      .replace(/devid=[^&"\s]*/gi, 'devid=[redacted]')
+      .replace(/devpassword=[^&"\s]*/gi, 'devpassword=[redacted]');
+    try {
+      await fsPromises.writeFile(this.debugDumpPath, redacted, 'utf8');
+      this.logger(
+        `[ScreenScraper] system-catalog: wrote raw response to ${this.debugDumpPath} for inspection`,
+      );
+    } catch (err) {
+      this.logger(
+        `[ScreenScraper] system-catalog: failed to write debug dump — ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
    * Apply the SS auth + output-format params shared by every endpoint.
    * Extracted so the jeuInfos and jeuRecherche URL builders share a
    * single source for credential injection — adding a new SS endpoint
@@ -881,7 +994,7 @@ export function parseSystemCatalog(body: unknown): SystemCatalog | null {
           ? Number.parseInt(idRaw, 10)
           : NaN;
     if (!Number.isFinite(id)) continue;
-    const displayName = pickRegionalText(sys.noms);
+    const displayName = pickSystemName(sys.noms);
     if (displayName === null) continue;
     const logoUrl = pickMedia(sys.medias, SYSTEM_LOGO_MEDIA_TYPES);
     entries.set(id, { id, displayName, logoUrl });
@@ -956,6 +1069,24 @@ function readPath<T>(root: unknown, path: readonly string[]): T | null {
     cur = (cur as Record<string, unknown>)[seg];
   }
   return cur === undefined ? null : (cur as T);
+}
+
+/**
+ * fix/#65 — `systemesListe.php` returns `noms` as a flat object with
+ * region-suffixed keys (`nom_us`, `nom_eu`, …), not as the regional
+ * array used by `jeuInfos`. Priority: nom_us → nom_eu → any nom_* key.
+ */
+function pickSystemName(noms: unknown): string | null {
+  if (noms === null || typeof noms !== 'object' || Array.isArray(noms)) return null;
+  const obj = noms as Record<string, unknown>;
+  for (const key of ['nom_us', 'nom_eu']) {
+    const v = obj[key];
+    if (typeof v === 'string' && v.length > 0) return v;
+  }
+  for (const [k, v] of Object.entries(obj)) {
+    if (k.startsWith('nom_') && typeof v === 'string' && v.length > 0) return v;
+  }
+  return null;
 }
 
 /**

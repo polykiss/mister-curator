@@ -221,6 +221,7 @@ void app.whenReady().then(async () => {
     ssid: process.env['SCREENSCRAPER_SSID'] ?? null,
     sspassword: process.env['SCREENSCRAPER_SSPASSWORD'] ?? null,
     logger: (msg) => { console.warn(msg); },
+    debugDumpPath: path.join(metadataRoot, 'system-catalog-debug-response.json'),
   });
   const systemLogoCache = new ImageCache(path.join(metadataRoot, 'system-logos'));
   const systemCatalog = new SystemCatalogService(
@@ -521,7 +522,9 @@ void app.whenReady().then(async () => {
     // feat/system-catalog-data-layer (#30 PR-1) — load or fetch the
     // system catalog on connect so sidebar names are available
     // immediately. Best-effort: failure doesn't block the connect flow.
-    void systemCatalog.ensureCatalog().catch(() => { /* swallow */ });
+    void systemCatalog.ensureCatalog().catch((err: unknown) => {
+      console.warn('[system-catalog] ensureCatalog failed on connect:', err instanceof Error ? err.message : err);
+    });
     // fix/count-and-status-indicator commit 4 — lazy v3→v4 hash-cache
     // migration. Runs once per connect, before the first prefetch
     // queues anything. v3 entries with mtimes that still match get

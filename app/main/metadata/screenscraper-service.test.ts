@@ -1,3 +1,7 @@
+import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -1387,17 +1391,24 @@ describe('searchByName — PR-D1 jeuRecherche client', () => {
 
 // ─── feat/system-catalog-data-layer (#30 PR-1) ───────────────────────────────
 
+// Fixture matches the actual systemesListe.php response shape:
+// - noms is an object with nom_us / nom_eu / nom_* keys (not an array)
+// - medias is an array of { type, region, url, format }
+// - id is a number (though strings are also supported)
 const SAMPLE_SYSTEMES_RESPONSE = {
   response: {
     systemes: [
       {
-        id: '4',
-        noms: [{ region: 'us', text: 'Super Nintendo Entertainment System' }],
-        medias: [{ type: 'logo-monochrome', url: 'https://ss.example/snes-mono.svg', region: 'wor' }],
+        id: 4,
+        noms: { nom_us: 'Super Nintendo Entertainment System', nom_eu: 'Super Nintendo' },
+        medias: [
+          { type: 'logo-monochrome', region: 'wor', url: 'https://ss.example/snes-mono.png', format: 'png' },
+          { type: 'wheel', region: 'wor', url: 'https://ss.example/snes-wheel.png', format: 'png' },
+        ],
       },
       {
-        id: 21,
-        noms: [{ region: 'wor', text: 'Arcade' }],
+        id: 75,
+        noms: { nom_us: 'Arcade' },
         medias: [],
       },
     ],
@@ -1405,15 +1416,15 @@ const SAMPLE_SYSTEMES_RESPONSE = {
 };
 
 describe('feat/system-catalog-data-layer — parseSystemCatalog', () => {
-  it('parses a valid systemesListe response', () => {
+  it('parses a valid systemesListe response (actual API shape)', () => {
     const result = parseSystemCatalog(SAMPLE_SYSTEMES_RESPONSE);
     expect(result).not.toBeNull();
     expect(result!.size).toBe(2);
     const snes = result!.get(4);
     expect(snes).toMatchObject({ id: 4, displayName: 'Super Nintendo Entertainment System' });
-    expect(snes!.logoUrl).toBe('https://ss.example/snes-mono.svg');
-    const arcade = result!.get(21);
-    expect(arcade).toMatchObject({ id: 21, displayName: 'Arcade', logoUrl: null });
+    expect(snes!.logoUrl).toBe('https://ss.example/snes-mono.png');
+    const arcade = result!.get(75);
+    expect(arcade).toMatchObject({ id: 75, displayName: 'Arcade', logoUrl: null });
   });
 
   it('returns null for non-object body', () => {
@@ -1434,8 +1445,8 @@ describe('feat/system-catalog-data-layer — parseSystemCatalog', () => {
     const body = {
       response: {
         systemes: [
-          { id: 'notanumber', noms: [{ region: 'us', text: 'Bad' }], medias: [] },
-          { id: 4, noms: [{ region: 'us', text: 'SNES' }], medias: [] },
+          { id: 'notanumber', noms: { nom_us: 'Bad' }, medias: [] },
+          { id: 4, noms: { nom_us: 'SNES' }, medias: [] },
         ],
       },
     };
@@ -1448,8 +1459,8 @@ describe('feat/system-catalog-data-layer — parseSystemCatalog', () => {
     const body = {
       response: {
         systemes: [
-          { id: 4, noms: [], medias: [] },
-          { id: 21, noms: [{ region: 'us', text: 'Arcade' }], medias: [] },
+          { id: 4, noms: {}, medias: [] },
+          { id: 21, noms: { nom_us: 'Arcade' }, medias: [] },
         ],
       },
     };
@@ -1464,25 +1475,79 @@ describe('feat/system-catalog-data-layer — parseSystemCatalog', () => {
         systemes: [
           {
             id: 4,
-            noms: [{ region: 'us', text: 'SNES' }],
+            noms: { nom_us: 'SNES' },
             medias: [
-              { type: 'wheel', url: 'https://ss/wheel.png', region: 'wor' },
-              { type: 'logo-monochrome', url: 'https://ss/mono.svg', region: 'wor' },
+              { type: 'wheel', url: 'https://ss/wheel.png', region: 'wor', format: 'png' },
+              { type: 'logo-monochrome', url: 'https://ss/mono.png', region: 'wor', format: 'png' },
+              { type: 'logo-monochrome-svg', url: 'https://ss/mono.svg', region: 'wor', format: 'svg' },
             ],
           },
         ],
       },
     };
     const result = parseSystemCatalog(body)!;
-    // logo-monochrome outranks wheel
+    // logo-monochrome outranks logo-monochrome-svg and wheel
+    expect(result.get(4)!.logoUrl).toBe('https://ss/mono.png');
+  });
+
+  it('logo-monochrome-svg outranks logo-svg and wheel', () => {
+    const body = {
+      response: {
+        systemes: [
+          {
+            id: 4,
+            noms: { nom_us: 'SNES' },
+            medias: [
+              { type: 'wheel', url: 'https://ss/wheel.png', region: 'wor', format: 'png' },
+              { type: 'logo-svg', url: 'https://ss/logo.svg', region: 'wor', format: 'svg' },
+              { type: 'logo-monochrome-svg', url: 'https://ss/mono.svg', region: 'wor', format: 'svg' },
+            ],
+          },
+        ],
+      },
+    };
+    const result = parseSystemCatalog(body)!;
     expect(result.get(4)!.logoUrl).toBe('https://ss/mono.svg');
+  });
+
+  it('noms.nom_us takes priority over nom_eu', () => {
+    const body = {
+      response: {
+        systemes: [
+          { id: 4, noms: { nom_us: 'US Name', nom_eu: 'EU Name' }, medias: [] },
+        ],
+      },
+    };
+    expect(parseSystemCatalog(body)!.get(4)!.displayName).toBe('US Name');
+  });
+
+  it('falls back to nom_eu when nom_us is absent', () => {
+    const body = {
+      response: {
+        systemes: [
+          { id: 4, noms: { nom_eu: 'EU Name' }, medias: [] },
+        ],
+      },
+    };
+    expect(parseSystemCatalog(body)!.get(4)!.displayName).toBe('EU Name');
+  });
+
+  it('falls back to any nom_* key when primary keys absent', () => {
+    const body = {
+      response: {
+        systemes: [
+          { id: 4, noms: { nom_jp: 'JP Name' }, medias: [] },
+        ],
+      },
+    };
+    expect(parseSystemCatalog(body)!.get(4)!.displayName).toBe('JP Name');
   });
 
   it('coerces string ids to numbers', () => {
     const body = {
       response: {
         systemes: [
-          { id: '75', noms: [{ region: 'us', text: 'PC Engine' }], medias: [] },
+          { id: '75', noms: { nom_us: 'PC Engine' }, medias: [] },
         ],
       },
     };
@@ -1538,5 +1603,160 @@ describe('feat/system-catalog-data-layer — ScreenScraperService.fetchSystemCat
     const b = svc.lookup({ systemId: 4, md5: HASH_MD5 });
     await Promise.all([a, b]);
     expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('logs when credentials are not configured', async () => {
+    const log = vi.fn();
+    const svc = new ScreenScraperService({ sleep: () => Promise.resolve(), now: () => 0, logger: log });
+    await svc.fetchSystemCatalog();
+    expect(log).toHaveBeenCalled();
+    expect(log.mock.calls[0]?.[0]).toMatch(/credentials not configured/);
+  });
+
+  it('logs when service is not available (auth failed via lookup)', async () => {
+    const log = vi.fn();
+    const svc = makeService({
+      // 403 through lookup → fetchWithRetries latches authFailed (and throws)
+      fetch: (async () => emptyResponse(403)) as unknown as typeof globalThis.fetch,
+      logger: log,
+    });
+    await svc.lookup({ systemId: 4, md5: HASH_MD5 }).catch(() => { /* expected throw */ });
+    log.mockClear();
+    await svc.fetchSystemCatalog(); // should hit the "not available" guard
+    expect(log).toHaveBeenCalled();
+    expect(log.mock.calls[0]?.[0]).toMatch(/not available/);
+  });
+
+  it('doFetchSystemCatalog logs the request URL and response status', async () => {
+    const log = vi.fn();
+    const svc = makeService({
+      fetch: (async () => jsonResponse(SAMPLE_SYSTEMES_RESPONSE)) as unknown as typeof globalThis.fetch,
+      logger: log,
+    });
+    await svc.fetchSystemCatalog();
+    const messages = log.mock.calls.map((c) => c[0] as string);
+    expect(messages.some((m) => m.includes('system-catalog: fetching'))).toBe(true);
+    expect(messages.some((m) => m.includes('status=200'))).toBe(true);
+  });
+
+  it('doFetchSystemCatalog logs body snippet on non-2xx response', async () => {
+    const log = vi.fn();
+    const svc = makeService({
+      fetch: (async () => new Response('forbidden-body', { status: 403 })) as unknown as typeof globalThis.fetch,
+      logger: log,
+    });
+    await svc.fetchSystemCatalog();
+    const messages = log.mock.calls.map((c) => c[0] as string);
+    expect(messages.some((m) => m.includes('non-2xx body') && m.includes('forbidden-body'))).toBe(true);
+  });
+
+  it('doFetchSystemCatalog logs parse-failure snippet labeled first 3000', async () => {
+    const log = vi.fn();
+    const svc = makeService({
+      fetch: (async () => jsonResponse({ response: {} })) as unknown as typeof globalThis.fetch,
+      logger: log,
+    });
+    await svc.fetchSystemCatalog();
+    const messages = log.mock.calls.map((c) => c[0] as string);
+    expect(
+      messages.some((m) => m.includes('parseSystemCatalog returned null') && m.includes('3000')),
+    ).toBe(true);
+  });
+});
+
+describe('fix/system-catalog-visibility-and-latch — ScreenScraperService.resetAuthState', () => {
+  it('clears authFailed so getStatus returns available again', async () => {
+    const svc = makeService({
+      fetch: (async () => emptyResponse(403)) as unknown as typeof globalThis.fetch,
+    });
+    // 403 via lookup → fetchWithRetries sets authFailed and throws
+    await svc.lookup({ systemId: 4, md5: HASH_MD5 }).catch(() => { /* expected throw */ });
+    expect(svc.getStatus()).toBe('unavailable');
+    svc.resetAuthState();
+    expect(svc.getStatus()).toBe('available');
+  });
+
+  it('clears rate-limit so getStatus returns available again', async () => {
+    const svc = makeService({
+      fetch: (async () => emptyResponse(429)) as unknown as typeof globalThis.fetch,
+      rateLimitCooldownMs: 99999,
+    });
+    await svc.lookup({ systemId: 4, md5: HASH_MD5 }); // 429 through fetchWithRetries triggers rate-limit
+    expect(svc.getStatus()).toBe('rate-limited');
+    svc.resetAuthState();
+    expect(svc.getStatus()).toBe('available');
+  });
+
+  it('does not clear blacklist state', async () => {
+    const svc = makeService({
+      fetch: (async () => emptyResponse(426)) as unknown as typeof globalThis.fetch,
+    });
+    // 426 via lookup → fetchWithRetries sets blacklisted (getStatus collapses to 'unavailable')
+    await svc.lookup({ systemId: 4, md5: HASH_MD5 });
+    expect(svc.getStatus()).toBe('unavailable');
+    svc.resetAuthState();
+    // blacklisted is permanent — resetAuthState must not clear it
+    expect(svc.getStatus()).toBe('unavailable');
+  });
+});
+
+describe('fix/system-catalog-visibility-and-latch — doFetchSystemCatalog debug dump', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(join(tmpdir(), 'mc-catalog-dump-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('writes debug file when parseSystemCatalog returns null', async () => {
+    const dumpPath = join(dir, 'catalog-debug.json');
+    const svc = makeService({
+      fetch: (async () => jsonResponse({ response: {} })) as unknown as typeof globalThis.fetch,
+      debugDumpPath: dumpPath,
+    });
+    await svc.fetchSystemCatalog();
+    const content = await fs.readFile(dumpPath, 'utf8');
+    expect(content).toContain('"response"');
+  });
+
+  it('does not write debug file on a successful parse', async () => {
+    const dumpPath = join(dir, 'catalog-debug.json');
+    const svc = makeService({
+      fetch: (async () => jsonResponse(SAMPLE_SYSTEMES_RESPONSE)) as unknown as typeof globalThis.fetch,
+      debugDumpPath: dumpPath,
+    });
+    await svc.fetchSystemCatalog();
+    await expect(fs.access(dumpPath)).rejects.toThrow();
+  });
+
+  it('redacts devid and devpassword URL params from the dumped body', async () => {
+    const dumpPath = join(dir, 'catalog-debug.json');
+    // Simulate a body that echoes back URL-style credential params (edge-case safety)
+    const bodyWithCreds = '{"note":"devid=my-secret-id&devpassword=my-secret-pw","response":{}}';
+    const svc = makeService({
+      fetch: (async () => new Response(bodyWithCreds, { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof globalThis.fetch,
+      debugDumpPath: dumpPath,
+    });
+    await svc.fetchSystemCatalog();
+    const content = await fs.readFile(dumpPath, 'utf8');
+    expect(content).not.toContain('my-secret-id');
+    expect(content).not.toContain('my-secret-pw');
+    expect(content).toContain('[redacted]');
+  });
+
+  it('logs the dump path via logger', async () => {
+    const log = vi.fn();
+    const dumpPath = join(dir, 'catalog-debug.json');
+    const svc = makeService({
+      fetch: (async () => jsonResponse({ response: {} })) as unknown as typeof globalThis.fetch,
+      debugDumpPath: dumpPath,
+      logger: log,
+    });
+    await svc.fetchSystemCatalog();
+    const messages = log.mock.calls.map((c) => c[0] as string);
+    expect(messages.some((m) => m.includes('wrote raw response') && m.includes(dumpPath))).toBe(true);
   });
 });
