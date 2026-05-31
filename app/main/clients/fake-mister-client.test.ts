@@ -170,6 +170,38 @@ describe('FakeMisterClient', () => {
     expect(names).not.toContain('.AppleDouble');
   });
 
+  it('filters non-ROM extensions — save files, cheats, etc. do not appear (#57)', async () => {
+    // Simulate a games dir that contains the game ROM alongside the
+    // save data, save state, and cheat files that accumulate during play.
+    // Only the .z64 ROM should appear in listRoms output.
+    const n64Dir = path.join(workDir, 'games', 'N64');
+    await fs.mkdir(n64Dir, { recursive: true });
+    await fs.writeFile(path.join(n64Dir, 'Star Fox 64.z64'), 'rom');
+    await fs.writeFile(path.join(n64Dir, 'Star Fox 64.srm'), 'save');
+    await fs.writeFile(path.join(n64Dir, 'Star Fox 64.state'), 'state');
+    await fs.writeFile(path.join(n64Dir, 'Star Fox 64.eep'), 'eeprom');
+    await fs.writeFile(path.join(n64Dir, 'cheats.cht'), 'cheat');
+
+    const roms = await client.listRoms('N64');
+    const names = roms.map((r) => r.filename);
+    expect(names).toEqual(['Star Fox 64.z64']);
+  });
+
+  it('all three N64 byte-order variants pass through listRoms (#57)', async () => {
+    // .n64, .z64, .v64 were absent from CART_EXTENSIONS before #57.
+    // Adding the extension filter without fixing CART_EXTENSIONS would
+    // have silently dropped all N64 ROMs — this test guards that regression.
+    const n64Dir = path.join(workDir, 'games', 'N64ext');
+    await fs.mkdir(n64Dir, { recursive: true });
+    await fs.writeFile(path.join(n64Dir, 'game.n64'), 'rom');
+    await fs.writeFile(path.join(n64Dir, 'game.z64'), 'rom');
+    await fs.writeFile(path.join(n64Dir, 'game.v64'), 'rom');
+
+    const roms = await client.listRoms('N64ext');
+    const names = roms.map((r) => r.filename).sort();
+    expect(names).toEqual(['game.n64', 'game.v64', 'game.z64']);
+  });
+
   it('throws a clear error when listing ROMs for an unknown core', async () => {
     await expect(client.listRoms('TurboGrafx')).rejects.toThrow(/Unknown core/);
   });

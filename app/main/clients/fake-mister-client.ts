@@ -31,6 +31,7 @@ import {
   type RawRbfInput,
   type RawSubFolderInput,
 } from '@shared/core-matching';
+import { diagLog } from '@shared/diag-log';
 import { displayRomName } from '@shared/display';
 import { isOsMetadataDir, isOsMetadataFile } from '@shared/library-filter';
 import {
@@ -441,6 +442,13 @@ export class FakeMisterClient implements IMisterClient {
       const onDevicePath = `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`;
 
       if (entry.isFile()) {
+        if (!isLaunchableRomExtension(visibleBase)) {
+          diagLog('info', 'roms-pane', '·', 'skip-non-rom-extension', {
+            coreId,
+            name: filename,
+          });
+          continue;
+        }
         const stat = await fs.stat(fullPath);
         roms.push({
           coreId,

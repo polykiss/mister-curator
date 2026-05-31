@@ -952,6 +952,17 @@ describe('isLaunchableRomExtension — PR-B (PR #24) positive ROM filter', () =>
     });
   });
 
+  describe('#57 extension additions — true', () => {
+    it.each([
+      ['.n64', 'N64 little-endian / v64 re-swapped'],
+      ['.z64', 'N64 big-endian (native, most common dump format)'],
+      ['.v64', 'N64 byte-swapped (Doctor V64 format)'],
+      ['.img', 'Generic disk image (AO486 DOS hard-disk images)'],
+    ])('counts %s files (%s)', (ext) => {
+      expect(isLaunchableRomExtension(`Game${ext}`)).toBe(true);
+    });
+  });
+
   describe('non-ROM extensions — false (this is the bug fix)', () => {
     it.each([
       ['.pal', 'NES palette file (Palettes/ folder content)'],

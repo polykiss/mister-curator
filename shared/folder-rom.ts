@@ -136,6 +136,16 @@ const CART_EXTENSIONS: ReadonlySet<string> = new Set([
   '.atr', // Atari 8-bit disk image
   '.atx', // Atari 8-bit disk image (extended)
   '.xex', // Atari 8-bit executable
+  '.img', // Generic disk image — used by AO486 (DOS hard-disk images) and
+          // other computer cores. Was absent pre-#57; adding alongside the
+          // extension filter so AO486 ROMs are not silently dropped.
+  // N64 byte-order variants — all three are valid ROM formats accepted
+  // by the MiSTer N64 core. Previously absent, causing `.n64`/`.z64`/
+  // `.v64` files to be silently suppressed once listRoms gained its
+  // extension filter (#57).
+  '.n64', // N64 — little-endian (v64 format, re-swapped)
+  '.z64', // N64 — big-endian (native byte order; most common dump format)
+  '.v64', // N64 — byte-swapped (Doctor V64 format)
 ]);
 
 /**
