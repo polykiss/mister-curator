@@ -1391,17 +1391,24 @@ describe('searchByName — PR-D1 jeuRecherche client', () => {
 
 // ─── feat/system-catalog-data-layer (#30 PR-1) ───────────────────────────────
 
+// Fixture matches the actual systemesListe.php response shape:
+// - noms is an object with nom_us / nom_eu / nom_* keys (not an array)
+// - medias is an array of { type, region, url, format }
+// - id is a number (though strings are also supported)
 const SAMPLE_SYSTEMES_RESPONSE = {
   response: {
     systemes: [
       {
-        id: '4',
-        noms: [{ region: 'us', text: 'Super Nintendo Entertainment System' }],
-        medias: [{ type: 'logo-monochrome', url: 'https://ss.example/snes-mono.svg', region: 'wor' }],
+        id: 4,
+        noms: { nom_us: 'Super Nintendo Entertainment System', nom_eu: 'Super Nintendo' },
+        medias: [
+          { type: 'logo-monochrome', region: 'wor', url: 'https://ss.example/snes-mono.png', format: 'png' },
+          { type: 'wheel', region: 'wor', url: 'https://ss.example/snes-wheel.png', format: 'png' },
+        ],
       },
       {
-        id: 21,
-        noms: [{ region: 'wor', text: 'Arcade' }],
+        id: 75,
+        noms: { nom_us: 'Arcade' },
         medias: [],
       },
     ],
@@ -1409,15 +1416,15 @@ const SAMPLE_SYSTEMES_RESPONSE = {
 };
 
 describe('feat/system-catalog-data-layer — parseSystemCatalog', () => {
-  it('parses a valid systemesListe response', () => {
+  it('parses a valid systemesListe response (actual API shape)', () => {
     const result = parseSystemCatalog(SAMPLE_SYSTEMES_RESPONSE);
     expect(result).not.toBeNull();
     expect(result!.size).toBe(2);
     const snes = result!.get(4);
     expect(snes).toMatchObject({ id: 4, displayName: 'Super Nintendo Entertainment System' });
-    expect(snes!.logoUrl).toBe('https://ss.example/snes-mono.svg');
-    const arcade = result!.get(21);
-    expect(arcade).toMatchObject({ id: 21, displayName: 'Arcade', logoUrl: null });
+    expect(snes!.logoUrl).toBe('https://ss.example/snes-mono.png');
+    const arcade = result!.get(75);
+    expect(arcade).toMatchObject({ id: 75, displayName: 'Arcade', logoUrl: null });
   });
 
   it('returns null for non-object body', () => {
@@ -1438,8 +1445,8 @@ describe('feat/system-catalog-data-layer — parseSystemCatalog', () => {
     const body = {
       response: {
         systemes: [
-          { id: 'notanumber', noms: [{ region: 'us', text: 'Bad' }], medias: [] },
-          { id: 4, noms: [{ region: 'us', text: 'SNES' }], medias: [] },
+          { id: 'notanumber', noms: { nom_us: 'Bad' }, medias: [] },
+          { id: 4, noms: { nom_us: 'SNES' }, medias: [] },
         ],
       },
     };
@@ -1452,8 +1459,8 @@ describe('feat/system-catalog-data-layer — parseSystemCatalog', () => {
     const body = {
       response: {
         systemes: [
-          { id: 4, noms: [], medias: [] },
-          { id: 21, noms: [{ region: 'us', text: 'Arcade' }], medias: [] },
+          { id: 4, noms: {}, medias: [] },
+          { id: 21, noms: { nom_us: 'Arcade' }, medias: [] },
         ],
       },
     };
@@ -1468,25 +1475,79 @@ describe('feat/system-catalog-data-layer — parseSystemCatalog', () => {
         systemes: [
           {
             id: 4,
-            noms: [{ region: 'us', text: 'SNES' }],
+            noms: { nom_us: 'SNES' },
             medias: [
-              { type: 'wheel', url: 'https://ss/wheel.png', region: 'wor' },
-              { type: 'logo-monochrome', url: 'https://ss/mono.svg', region: 'wor' },
+              { type: 'wheel', url: 'https://ss/wheel.png', region: 'wor', format: 'png' },
+              { type: 'logo-monochrome', url: 'https://ss/mono.png', region: 'wor', format: 'png' },
+              { type: 'logo-monochrome-svg', url: 'https://ss/mono.svg', region: 'wor', format: 'svg' },
             ],
           },
         ],
       },
     };
     const result = parseSystemCatalog(body)!;
-    // logo-monochrome outranks wheel
+    // logo-monochrome outranks logo-monochrome-svg and wheel
+    expect(result.get(4)!.logoUrl).toBe('https://ss/mono.png');
+  });
+
+  it('logo-monochrome-svg outranks logo-svg and wheel', () => {
+    const body = {
+      response: {
+        systemes: [
+          {
+            id: 4,
+            noms: { nom_us: 'SNES' },
+            medias: [
+              { type: 'wheel', url: 'https://ss/wheel.png', region: 'wor', format: 'png' },
+              { type: 'logo-svg', url: 'https://ss/logo.svg', region: 'wor', format: 'svg' },
+              { type: 'logo-monochrome-svg', url: 'https://ss/mono.svg', region: 'wor', format: 'svg' },
+            ],
+          },
+        ],
+      },
+    };
+    const result = parseSystemCatalog(body)!;
     expect(result.get(4)!.logoUrl).toBe('https://ss/mono.svg');
+  });
+
+  it('noms.nom_us takes priority over nom_eu', () => {
+    const body = {
+      response: {
+        systemes: [
+          { id: 4, noms: { nom_us: 'US Name', nom_eu: 'EU Name' }, medias: [] },
+        ],
+      },
+    };
+    expect(parseSystemCatalog(body)!.get(4)!.displayName).toBe('US Name');
+  });
+
+  it('falls back to nom_eu when nom_us is absent', () => {
+    const body = {
+      response: {
+        systemes: [
+          { id: 4, noms: { nom_eu: 'EU Name' }, medias: [] },
+        ],
+      },
+    };
+    expect(parseSystemCatalog(body)!.get(4)!.displayName).toBe('EU Name');
+  });
+
+  it('falls back to any nom_* key when primary keys absent', () => {
+    const body = {
+      response: {
+        systemes: [
+          { id: 4, noms: { nom_jp: 'JP Name' }, medias: [] },
+        ],
+      },
+    };
+    expect(parseSystemCatalog(body)!.get(4)!.displayName).toBe('JP Name');
   });
 
   it('coerces string ids to numbers', () => {
     const body = {
       response: {
         systemes: [
-          { id: '75', noms: [{ region: 'us', text: 'PC Engine' }], medias: [] },
+          { id: '75', noms: { nom_us: 'PC Engine' }, medias: [] },
         ],
       },
     };

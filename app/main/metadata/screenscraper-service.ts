@@ -137,7 +137,7 @@ const BOX_ART_TYPES = ['box-2D', 'box-3D', 'wheel'] as const;
  * game-cabinet art, not clean system logos — prefer the explicit logo
  * types first.
  */
-const SYSTEM_LOGO_MEDIA_TYPES = ['logo-monochrome', 'logo-svg', 'logo', 'wheel'] as const;
+const SYSTEM_LOGO_MEDIA_TYPES = ['logo-monochrome', 'logo-monochrome-svg', 'logo-svg', 'wheel'] as const;
 
 /**
  * feat/system-catalog-data-layer (#30 PR-1) — one entry from the
@@ -994,7 +994,7 @@ export function parseSystemCatalog(body: unknown): SystemCatalog | null {
           ? Number.parseInt(idRaw, 10)
           : NaN;
     if (!Number.isFinite(id)) continue;
-    const displayName = pickRegionalText(sys.noms);
+    const displayName = pickSystemName(sys.noms);
     if (displayName === null) continue;
     const logoUrl = pickMedia(sys.medias, SYSTEM_LOGO_MEDIA_TYPES);
     entries.set(id, { id, displayName, logoUrl });
@@ -1069,6 +1069,24 @@ function readPath<T>(root: unknown, path: readonly string[]): T | null {
     cur = (cur as Record<string, unknown>)[seg];
   }
   return cur === undefined ? null : (cur as T);
+}
+
+/**
+ * fix/#65 — `systemesListe.php` returns `noms` as a flat object with
+ * region-suffixed keys (`nom_us`, `nom_eu`, …), not as the regional
+ * array used by `jeuInfos`. Priority: nom_us → nom_eu → any nom_* key.
+ */
+function pickSystemName(noms: unknown): string | null {
+  if (noms === null || typeof noms !== 'object' || Array.isArray(noms)) return null;
+  const obj = noms as Record<string, unknown>;
+  for (const key of ['nom_us', 'nom_eu']) {
+    const v = obj[key];
+    if (typeof v === 'string' && v.length > 0) return v;
+  }
+  for (const [k, v] of Object.entries(obj)) {
+    if (k.startsWith('nom_') && typeof v === 'string' && v.length > 0) return v;
+  }
+  return null;
 }
 
 /**
