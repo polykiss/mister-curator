@@ -351,6 +351,16 @@ export class MetadataOrchestrator {
       entry !== undefined && entry !== null
         ? entry.md5
         : makeSyntheticCacheKey(coreId, path);
+    // fix/#55 staleness mitigation: if we're binding under the real
+    // md5 (hash was available), drop any stale synthetic record for
+    // the same (coreId, path). Without this, a prior pre-hash bind
+    // under the synthetic key would shadow this newer md5-keyed bind
+    // in readCachedRomsMetadata's synthetic-wins read path.
+    if (entry !== undefined && entry !== null) {
+      await this.metadataService.invalidate(
+        makeSyntheticCacheKey(coreId, path),
+      );
+    }
     return this.metadataService.bindManualOverride(cacheKey, game);
   }
 
@@ -430,6 +440,19 @@ export class MetadataOrchestrator {
       diagLog('info', 'arcade', '·', 'synthetic-key-fallback', {
         mraRelativePath,
         syntheticKey: key,
+      });
+    } else {
+      // fix/#55 staleness mitigation: binding under real md5 — drop
+      // any stale synthetic record so it doesn't shadow this bind in
+      // getCachedArcadeMetadataBatch's synthetic-wins read path.
+      const staleKey = makeSyntheticCacheKey(
+        ARCADE_VIRTUAL_CORE_ID,
+        mraRelativePath,
+      );
+      await this.metadataService.invalidate(staleKey);
+      diagLog('info', 'arcade', '·', 'invalidating-synthetic-after-real-bind', {
+        mraRelativePath,
+        staleSyntheticKey: staleKey,
       });
     }
     return this.metadataService.bindManualOverride(key, game);
@@ -535,25 +558,23 @@ export class MetadataOrchestrator {
       session.host,
       romPaths,
     );
+    // fix/#55 — mirror getCachedArcadeMetadataBatch's synthetic-wins
+    // pattern. Per-path synthetic key check runs alongside the hash
+    // lookup; if a synthetic record exists it wins (manual bind takes
+    // precedence over auto-scraped). Source='none' unmappable-core
+    // sentinels are also stored under synthetic keys but are filtered
+    // to null by readCachedMetadata (line ~971), so they remain
+    // transparent and never suppress a hash-keyed scraped result.
     for (const p of romPaths) {
       const entry = hashEntries.get(p);
-      if (entry !== null && entry !== undefined) {
-        // Hash-keyed record wins when both exist — the conflict-
-        // resolution rule for paths that gained a hash *after* a
-        // manual bind. Auto-pipeline output supersedes pre-hash
-        // synthetic records; revisit if real users want stickier
-        // manual binds.
-        out[p] = await this.metadataService.readCachedMetadata(entry.md5);
-        continue;
-      }
-      // feat/manual-bind-without-hash: no hash on file — check for
-      // a synthetic-keyed record (manual bind on an un-hashable
-      // path, or an unmappable-core sentinel). Incidentally
-      // surfaces unmappable-core sentinels in the optimistic read
-      // for the first time; before, only `getRomsMetadata` saw
-      // them.
+      const hashKeyedRecord =
+        entry !== null && entry !== undefined
+          ? await this.metadataService.readCachedMetadata(entry.md5)
+          : null;
       const syntheticKey = makeSyntheticCacheKey(coreId, p);
-      out[p] = await this.metadataService.readCachedMetadata(syntheticKey);
+      const synthRecord =
+        await this.metadataService.readCachedMetadata(syntheticKey);
+      out[p] = synthRecord ?? hashKeyedRecord;
     }
     return out;
   }
