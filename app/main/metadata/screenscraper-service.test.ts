@@ -5,6 +5,7 @@ import {
   ScreenScraperAuthError,
   ScreenScraperService,
   parseScreenScraperResponse,
+  parseSystemCatalog,
   redactScreenScraperUrl,
   type ScreenScraperLookupQuery,
   type ScreenScraperServiceOptions,
@@ -1381,5 +1382,161 @@ describe('searchByName — PR-D1 jeuRecherche client', () => {
     const b = svc.searchByName({ systemId: 75, searchTerm: 'x' });
     await Promise.all([a, b]);
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ─── feat/system-catalog-data-layer (#30 PR-1) ───────────────────────────────
+
+const SAMPLE_SYSTEMES_RESPONSE = {
+  response: {
+    systemes: [
+      {
+        id: '4',
+        noms: [{ region: 'us', text: 'Super Nintendo Entertainment System' }],
+        medias: [{ type: 'logo-monochrome', url: 'https://ss.example/snes-mono.svg', region: 'wor' }],
+      },
+      {
+        id: 21,
+        noms: [{ region: 'wor', text: 'Arcade' }],
+        medias: [],
+      },
+    ],
+  },
+};
+
+describe('feat/system-catalog-data-layer — parseSystemCatalog', () => {
+  it('parses a valid systemesListe response', () => {
+    const result = parseSystemCatalog(SAMPLE_SYSTEMES_RESPONSE);
+    expect(result).not.toBeNull();
+    expect(result!.size).toBe(2);
+    const snes = result!.get(4);
+    expect(snes).toMatchObject({ id: 4, displayName: 'Super Nintendo Entertainment System' });
+    expect(snes!.logoUrl).toBe('https://ss.example/snes-mono.svg');
+    const arcade = result!.get(21);
+    expect(arcade).toMatchObject({ id: 21, displayName: 'Arcade', logoUrl: null });
+  });
+
+  it('returns null for non-object body', () => {
+    expect(parseSystemCatalog(null)).toBeNull();
+    expect(parseSystemCatalog('string')).toBeNull();
+    expect(parseSystemCatalog(42)).toBeNull();
+  });
+
+  it('returns null when response.systemes is missing', () => {
+    expect(parseSystemCatalog({ response: {} })).toBeNull();
+  });
+
+  it('returns null when systemes is empty', () => {
+    expect(parseSystemCatalog({ response: { systemes: [] } })).toBeNull();
+  });
+
+  it('skips entries with non-finite id', () => {
+    const body = {
+      response: {
+        systemes: [
+          { id: 'notanumber', noms: [{ region: 'us', text: 'Bad' }], medias: [] },
+          { id: 4, noms: [{ region: 'us', text: 'SNES' }], medias: [] },
+        ],
+      },
+    };
+    const result = parseSystemCatalog(body);
+    expect(result!.size).toBe(1);
+    expect(result!.has(4)).toBe(true);
+  });
+
+  it('skips entries with no parseable display name', () => {
+    const body = {
+      response: {
+        systemes: [
+          { id: 4, noms: [], medias: [] },
+          { id: 21, noms: [{ region: 'us', text: 'Arcade' }], medias: [] },
+        ],
+      },
+    };
+    const result = parseSystemCatalog(body);
+    expect(result!.size).toBe(1);
+    expect(result!.has(21)).toBe(true);
+  });
+
+  it('picks logo URL by SYSTEM_LOGO_MEDIA_TYPES preference order', () => {
+    const body = {
+      response: {
+        systemes: [
+          {
+            id: 4,
+            noms: [{ region: 'us', text: 'SNES' }],
+            medias: [
+              { type: 'wheel', url: 'https://ss/wheel.png', region: 'wor' },
+              { type: 'logo-monochrome', url: 'https://ss/mono.svg', region: 'wor' },
+            ],
+          },
+        ],
+      },
+    };
+    const result = parseSystemCatalog(body)!;
+    // logo-monochrome outranks wheel
+    expect(result.get(4)!.logoUrl).toBe('https://ss/mono.svg');
+  });
+
+  it('coerces string ids to numbers', () => {
+    const body = {
+      response: {
+        systemes: [
+          { id: '75', noms: [{ region: 'us', text: 'PC Engine' }], medias: [] },
+        ],
+      },
+    };
+    const result = parseSystemCatalog(body)!;
+    expect(result.has(75)).toBe(true);
+  });
+});
+
+describe('feat/system-catalog-data-layer — ScreenScraperService.fetchSystemCatalog', () => {
+  it('returns a catalog map on a successful response', async () => {
+    const svc = makeService({
+      fetch: (async () => jsonResponse(SAMPLE_SYSTEMES_RESPONSE)) as unknown as typeof globalThis.fetch,
+    });
+    const catalog = await svc.fetchSystemCatalog();
+    expect(catalog).not.toBeNull();
+    expect(catalog!.get(4)?.displayName).toBe('Super Nintendo Entertainment System');
+  });
+
+  it('returns null when credentials are absent', async () => {
+    const svc = new ScreenScraperService({ sleep: () => Promise.resolve(), now: () => 0 });
+    expect(await svc.fetchSystemCatalog()).toBeNull();
+  });
+
+  it('returns null when service is rate-limited', async () => {
+    const svc = makeService({
+      fetch: (async () => emptyResponse(429)) as unknown as typeof globalThis.fetch,
+      rateLimitCooldownMs: 99999,
+    });
+    await svc.fetchSystemCatalog(); // exhausts budget, enters cooldown
+    expect(await svc.fetchSystemCatalog()).toBeNull();
+  });
+
+  it('returns null on a fetch failure (404)', async () => {
+    const svc = makeService({
+      fetch: (async () => emptyResponse(404)) as unknown as typeof globalThis.fetch,
+    });
+    expect(await svc.fetchSystemCatalog()).toBeNull();
+  });
+
+  it('returns null when response body is unparseable', async () => {
+    const svc = makeService({
+      fetch: (async () => jsonResponse({ response: {} })) as unknown as typeof globalThis.fetch,
+    });
+    expect(await svc.fetchSystemCatalog()).toBeNull();
+  });
+
+  it('uses the same rate-limit queue as lookup (sequential calls)', async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(SAMPLE_SYSTEMES_RESPONSE))
+      .mockResolvedValueOnce(jsonResponse({ response: { jeu: undefined } }));
+    const svc = makeService({ fetch: fetchFn as unknown as typeof globalThis.fetch });
+    const a = svc.fetchSystemCatalog();
+    const b = svc.lookup({ systemId: 4, md5: HASH_MD5 });
+    await Promise.all([a, b]);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 });

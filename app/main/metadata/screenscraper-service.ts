@@ -69,6 +69,7 @@
  */
 
 const ENDPOINT = 'https://api.screenscraper.fr/api2/jeuInfos.php';
+const SYSTEMS_ENDPOINT = 'https://api.screenscraper.fr/api2/systemesListe.php';
 
 /**
  * MD5 of zero bytes. A zip file whose inner content extracts to
@@ -126,6 +127,33 @@ const REGION_ORDER = ['us', 'wor', 'eu', 'jp', 'ss'] as const;
 
 /** Box-art media types in fallback order. */
 const BOX_ART_TYPES = ['box-2D', 'box-3D', 'wheel'] as const;
+
+/**
+ * System logo media type preference order for `systemesListe.php`.
+ * Monochrome SVG logos look cleanest in a dark-themed sidebar; coloured
+ * PNG 'logo' is a decent fallback. The wheel/marquee types are
+ * game-cabinet art, not clean system logos — prefer the explicit logo
+ * types first.
+ */
+const SYSTEM_LOGO_MEDIA_TYPES = ['logo-monochrome', 'logo-svg', 'logo', 'wheel'] as const;
+
+/**
+ * feat/system-catalog-data-layer (#30 PR-1) — one entry from the
+ * `systemesListe.php` catalog: the system's SS id, the best English
+ * display name, and the URL of the best available logo (null when SS
+ * has no logo for this system).
+ */
+export interface SystemCatalogEntry {
+  readonly id: number;
+  readonly displayName: string;
+  readonly logoUrl: string | null;
+}
+
+/**
+ * Full catalog keyed by SS system id. Returned by
+ * `ScreenScraperService.fetchSystemCatalog()`.
+ */
+export type SystemCatalog = ReadonlyMap<number, SystemCatalogEntry>;
 
 export type ScreenScraperStatus =
   | 'available'
@@ -448,6 +476,26 @@ export class ScreenScraperService {
     return this.enqueue(() => this.doSearchByName(args.systemId, term));
   }
 
+  /**
+   * feat/system-catalog-data-layer (#30 PR-1) — fetch the full SS
+   * system catalog from `systemesListe.php`. Returns a Map of all
+   * systems (SS system id → display name + logo URL), or null when:
+   *   - credentials are absent
+   *   - the service is rate-limited / unavailable
+   *   - the request fails after retries
+   *   - the response is unparseable
+   *
+   * Uses the same rate-limit queue and retry logic as `lookup` and
+   * `searchByName` — callers should use a dedicated
+   * `ScreenScraperService` instance so this fetch doesn't stall the
+   * per-ROM scraping queue.
+   */
+  async fetchSystemCatalog(): Promise<SystemCatalog | null> {
+    if (!this.hasCredentials) return null;
+    if (this.getStatus() !== 'available') return null;
+    return this.enqueue(() => this.doFetchSystemCatalog());
+  }
+
   // ─── internals ─────────────────────────────────────────────────────
 
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
@@ -516,6 +564,13 @@ export class ScreenScraperService {
         : { kind: 'empty', reason: 'all-parsed-dropped' };
     }
     return { kind: 'ok', results };
+  }
+
+  private async doFetchSystemCatalog(): Promise<SystemCatalog | null> {
+    const url = this.buildSystemsUrl();
+    const outcome = await this.fetchWithRetries(url);
+    if (outcome.kind !== 'ok') return null;
+    return parseSystemCatalog(outcome.body);
   }
 
   /**
@@ -712,6 +767,12 @@ export class ScreenScraperService {
     return u.toString();
   }
 
+  private buildSystemsUrl(): string {
+    const u = new URL(SYSTEMS_ENDPOINT);
+    this.applyAuthAndOutputParams(u);
+    return u.toString();
+  }
+
   /**
    * Apply the SS auth + output-format params shared by every endpoint.
    * Extracted so the jeuInfos and jeuRecherche URL builders share a
@@ -795,6 +856,37 @@ export function parseScreenScraperSearchResponse(
     if (parsed !== null) out.push(parsed);
   }
   return out;
+}
+
+/**
+ * feat/system-catalog-data-layer (#30 PR-1) — parse a
+ * `systemesListe.php` response. Returns a Map of all systems keyed
+ * by SS system id, or null when the body is unparseable / empty.
+ *
+ * Exported for direct test access without a full client + mock fetch.
+ */
+export function parseSystemCatalog(body: unknown): SystemCatalog | null {
+  if (body === null || typeof body !== 'object') return null;
+  const systemes = readPath<unknown>(body, ['response', 'systemes']);
+  if (!Array.isArray(systemes)) return null;
+  const entries = new Map<number, SystemCatalogEntry>();
+  for (const s of systemes) {
+    if (s === null || typeof s !== 'object') continue;
+    const sys = s as Record<string, unknown>;
+    const idRaw = sys.id;
+    const id =
+      typeof idRaw === 'number'
+        ? idRaw
+        : typeof idRaw === 'string'
+          ? Number.parseInt(idRaw, 10)
+          : NaN;
+    if (!Number.isFinite(id)) continue;
+    const displayName = pickRegionalText(sys.noms);
+    if (displayName === null) continue;
+    const logoUrl = pickMedia(sys.medias, SYSTEM_LOGO_MEDIA_TYPES);
+    entries.set(id, { id, displayName, logoUrl });
+  }
+  return entries.size > 0 ? entries : null;
 }
 
 /**
