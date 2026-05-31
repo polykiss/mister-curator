@@ -991,6 +991,13 @@ export class RealMisterClient implements IMisterClient {
     for (const f of topLevelFiles) {
       const hidden = f.name.startsWith('.');
       const visibleBase = hidden ? f.name.slice(1) : f.name;
+      if (!isLaunchableRomExtension(visibleBase)) {
+        diagLog('info', 'roms-pane', '·', 'skip-non-rom-extension', {
+          coreId,
+          name: f.name,
+        });
+        continue;
+      }
       const relativePath = `${relPrefix}${f.name}`;
       roms.push({
         coreId,
