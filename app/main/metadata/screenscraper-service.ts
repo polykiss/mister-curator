@@ -1,3 +1,5 @@
+import { promises as fsPromises } from 'node:fs';
+
 /**
  * ScreenScraper API client (PR #16 round 1).
  *
@@ -311,6 +313,12 @@ export interface ScreenScraperServiceOptions {
    * or the credential values.
    */
   readonly logger?: (message: string) => void;
+  /**
+   * When set, a raw response body that passes HTTP 200 but fails
+   * `parseSystemCatalog` is written here for post-mortem inspection.
+   * Credentials are redacted before writing.
+   */
+  readonly debugDumpPath?: string;
 }
 
 export class ScreenScraperService {
@@ -327,6 +335,7 @@ export class ScreenScraperService {
   private readonly sspassword: string | null;
   private readonly hasCredentials: boolean;
   private readonly logger: (message: string) => void;
+  private readonly debugDumpPath: string | null;
 
   /** Latched true after a real auth failure (403); never resets. */
   private authFailed = false;
@@ -383,6 +392,7 @@ export class ScreenScraperService {
     this.logger = options.logger ?? ((): void => {
       /* default: no log */
     });
+    this.debugDumpPath = options.debugDumpPath ?? null;
   }
 
   /**
@@ -647,8 +657,9 @@ export class ScreenScraperService {
     const catalog = parseSystemCatalog(body);
     if (catalog === null) {
       this.logger(
-        `[ScreenScraper] system-catalog: parseSystemCatalog returned null body (first 500)="${text.slice(0, 500)}"`,
+        `[ScreenScraper] system-catalog: parseSystemCatalog returned null body (first 3000)="${text.slice(0, 3000)}"`,
       );
+      await this.dumpDebugResponse(text);
     }
     return catalog;
   }
@@ -851,6 +862,28 @@ export class ScreenScraperService {
     const u = new URL(SYSTEMS_ENDPOINT);
     this.applyAuthAndOutputParams(u);
     return u.toString();
+  }
+
+  /**
+   * Write a parse-failed response body to `debugDumpPath` for post-mortem
+   * inspection. Credentials are scrubbed before writing. No-ops silently
+   * if `debugDumpPath` is null or the write fails.
+   */
+  private async dumpDebugResponse(rawBody: string): Promise<void> {
+    if (this.debugDumpPath === null) return;
+    const redacted = rawBody
+      .replace(/devid=[^&"\s]*/gi, 'devid=[redacted]')
+      .replace(/devpassword=[^&"\s]*/gi, 'devpassword=[redacted]');
+    try {
+      await fsPromises.writeFile(this.debugDumpPath, redacted, 'utf8');
+      this.logger(
+        `[ScreenScraper] system-catalog: wrote raw response to ${this.debugDumpPath} for inspection`,
+      );
+    } catch (err) {
+      this.logger(
+        `[ScreenScraper] system-catalog: failed to write debug dump — ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**

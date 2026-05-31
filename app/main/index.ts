@@ -221,6 +221,7 @@ void app.whenReady().then(async () => {
     ssid: process.env['SCREENSCRAPER_SSID'] ?? null,
     sspassword: process.env['SCREENSCRAPER_SSPASSWORD'] ?? null,
     logger: (msg) => { console.warn(msg); },
+    debugDumpPath: path.join(metadataRoot, 'system-catalog-debug-response.json'),
   });
   const systemLogoCache = new ImageCache(path.join(metadataRoot, 'system-logos'));
   const systemCatalog = new SystemCatalogService(

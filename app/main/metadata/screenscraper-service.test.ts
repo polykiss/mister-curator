@@ -1,3 +1,7 @@
+import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -1584,6 +1588,19 @@ describe('feat/system-catalog-data-layer — ScreenScraperService.fetchSystemCat
     const messages = log.mock.calls.map((c) => c[0] as string);
     expect(messages.some((m) => m.includes('non-2xx body') && m.includes('forbidden-body'))).toBe(true);
   });
+
+  it('doFetchSystemCatalog logs parse-failure snippet labeled first 3000', async () => {
+    const log = vi.fn();
+    const svc = makeService({
+      fetch: (async () => jsonResponse({ response: {} })) as unknown as typeof globalThis.fetch,
+      logger: log,
+    });
+    await svc.fetchSystemCatalog();
+    const messages = log.mock.calls.map((c) => c[0] as string);
+    expect(
+      messages.some((m) => m.includes('parseSystemCatalog returned null') && m.includes('3000')),
+    ).toBe(true);
+  });
 });
 
 describe('fix/system-catalog-visibility-and-latch — ScreenScraperService.resetAuthState', () => {
@@ -1619,5 +1636,66 @@ describe('fix/system-catalog-visibility-and-latch — ScreenScraperService.reset
     svc.resetAuthState();
     // blacklisted is permanent — resetAuthState must not clear it
     expect(svc.getStatus()).toBe('unavailable');
+  });
+});
+
+describe('fix/system-catalog-visibility-and-latch — doFetchSystemCatalog debug dump', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(join(tmpdir(), 'mc-catalog-dump-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('writes debug file when parseSystemCatalog returns null', async () => {
+    const dumpPath = join(dir, 'catalog-debug.json');
+    const svc = makeService({
+      fetch: (async () => jsonResponse({ response: {} })) as unknown as typeof globalThis.fetch,
+      debugDumpPath: dumpPath,
+    });
+    await svc.fetchSystemCatalog();
+    const content = await fs.readFile(dumpPath, 'utf8');
+    expect(content).toContain('"response"');
+  });
+
+  it('does not write debug file on a successful parse', async () => {
+    const dumpPath = join(dir, 'catalog-debug.json');
+    const svc = makeService({
+      fetch: (async () => jsonResponse(SAMPLE_SYSTEMES_RESPONSE)) as unknown as typeof globalThis.fetch,
+      debugDumpPath: dumpPath,
+    });
+    await svc.fetchSystemCatalog();
+    await expect(fs.access(dumpPath)).rejects.toThrow();
+  });
+
+  it('redacts devid and devpassword URL params from the dumped body', async () => {
+    const dumpPath = join(dir, 'catalog-debug.json');
+    // Simulate a body that echoes back URL-style credential params (edge-case safety)
+    const bodyWithCreds = '{"note":"devid=my-secret-id&devpassword=my-secret-pw","response":{}}';
+    const svc = makeService({
+      fetch: (async () => new Response(bodyWithCreds, { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof globalThis.fetch,
+      debugDumpPath: dumpPath,
+    });
+    await svc.fetchSystemCatalog();
+    const content = await fs.readFile(dumpPath, 'utf8');
+    expect(content).not.toContain('my-secret-id');
+    expect(content).not.toContain('my-secret-pw');
+    expect(content).toContain('[redacted]');
+  });
+
+  it('logs the dump path via logger', async () => {
+    const log = vi.fn();
+    const dumpPath = join(dir, 'catalog-debug.json');
+    const svc = makeService({
+      fetch: (async () => jsonResponse({ response: {} })) as unknown as typeof globalThis.fetch,
+      debugDumpPath: dumpPath,
+      logger: log,
+    });
+    await svc.fetchSystemCatalog();
+    const messages = log.mock.calls.map((c) => c[0] as string);
+    expect(messages.some((m) => m.includes('wrote raw response') && m.includes(dumpPath))).toBe(true);
   });
 });
