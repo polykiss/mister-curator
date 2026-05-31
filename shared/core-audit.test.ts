@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { auditCores } from '@shared/core-audit';
+import { aliasTargetsToSuppress, auditCores } from '@shared/core-audit';
 import type { CoreEntry } from '@shared/types';
 
 function makeCore(partial: Partial<CoreEntry> & { id: string }): CoreEntry {
@@ -496,5 +496,176 @@ describe('auditCores — orphanArcadeRoms', () => {
     expect(result.orphanArcadeRoms).toEqual(['orphan.zip']);
     expect(result.missingCoreFile).toHaveLength(0);
     expect(result.noRomsForCore).toHaveLength(0);
+  });
+});
+
+describe('aliasTargetsToSuppress (#48)', () => {
+  it('(a) target empty + source has content → target suppressed', () => {
+    const cores = [
+      makeCore({
+        id: 'TurboGrafx16',
+        rbfPaths: ['/media/fat/_Console/TurboGrafx16_20240115.rbf'],
+        gamesDirExists: false,
+        romCount: 0,
+      }),
+      makeCore({
+        id: 'TGFX16',
+        gamesDirExists: true,
+        romCount: 116,
+      }),
+    ];
+    const suppressed = aliasTargetsToSuppress(cores);
+    expect(suppressed.has('TurboGrafx16')).toBe(true);
+  });
+
+  it('(b) target empty + source also empty → target NOT suppressed', () => {
+    const cores = [
+      makeCore({
+        id: 'TurboGrafx16',
+        rbfPaths: ['/media/fat/_Console/TurboGrafx16_20240115.rbf'],
+        gamesDirExists: false,
+        romCount: 0,
+      }),
+      makeCore({
+        id: 'TGFX16',
+        gamesDirExists: true,
+        romCount: 0,
+      }),
+    ];
+    const suppressed = aliasTargetsToSuppress(cores);
+    expect(suppressed.has('TurboGrafx16')).toBe(false);
+  });
+
+  it('(c) target has content → NOT suppressed even if source also has content', () => {
+    const cores = [
+      makeCore({
+        id: 'TurboGrafx16',
+        rbfPaths: ['/media/fat/_Console/TurboGrafx16_20240115.rbf'],
+        gamesDirExists: true,
+        romCount: 5,
+      }),
+      makeCore({
+        id: 'TGFX16',
+        gamesDirExists: true,
+        romCount: 116,
+      }),
+    ];
+    const suppressed = aliasTargetsToSuppress(cores);
+    expect(suppressed.has('TurboGrafx16')).toBe(false);
+  });
+
+  it('(d) target has content + no source in list → NOT suppressed', () => {
+    const cores = [
+      makeCore({
+        id: 'TurboGrafx16',
+        rbfPaths: ['/media/fat/_Console/TurboGrafx16_20240115.rbf'],
+        gamesDirExists: true,
+        romCount: 5,
+      }),
+    ];
+    const suppressed = aliasTargetsToSuppress(cores);
+    expect(suppressed.has('TurboGrafx16')).toBe(false);
+  });
+
+  it('(e) non-aliased empty core → NOT in set (control)', () => {
+    const cores = [
+      makeCore({
+        id: 'NES',
+        rbfPaths: ['/media/fat/_Console/NES_20240115.rbf'],
+        gamesDirExists: false,
+        romCount: 0,
+      }),
+    ];
+    const suppressed = aliasTargetsToSuppress(cores);
+    expect(suppressed.has('NES')).toBe(false);
+    expect(suppressed.size).toBe(0);
+  });
+
+  it('(f) source gamesDirHidden → NOT suppressed', () => {
+    const cores = [
+      makeCore({
+        id: 'TurboGrafx16',
+        rbfPaths: ['/media/fat/_Console/TurboGrafx16_20240115.rbf'],
+        gamesDirExists: false,
+        romCount: 0,
+      }),
+      makeCore({
+        id: 'TGFX16',
+        gamesDirExists: true,
+        gamesDirHidden: true,
+        romCount: 116,
+      }),
+    ];
+    const suppressed = aliasTargetsToSuppress(cores);
+    expect(suppressed.has('TurboGrafx16')).toBe(false);
+  });
+
+  it('(g) TGFX16-CD has content, TGFX16 absent → TurboGrafx16 still suppressed (any-match)', () => {
+    const cores = [
+      makeCore({
+        id: 'TurboGrafx16',
+        rbfPaths: ['/media/fat/_Console/TurboGrafx16_20240115.rbf'],
+        gamesDirExists: false,
+        romCount: 0,
+      }),
+      makeCore({
+        id: 'TGFX16-CD',
+        gamesDirExists: true,
+        romCount: 49,
+      }),
+      // TGFX16 intentionally absent
+    ];
+    const suppressed = aliasTargetsToSuppress(cores);
+    expect(suppressed.has('TurboGrafx16')).toBe(true);
+  });
+
+  it('(h) stale alias — canonical not in cores list → no throw, no entry', () => {
+    // If CORE_ALIASES gains an entry whose canonical core ID is not present
+    // in the current device's cores list, the function must skip silently.
+    const cores = [
+      makeCore({ id: 'TGFX16', gamesDirExists: true, romCount: 116 }),
+      // TurboGrafx16 absent
+    ];
+    expect(() => aliasTargetsToSuppress(cores)).not.toThrow();
+    const suppressed = aliasTargetsToSuppress(cores);
+    expect(suppressed.has('TurboGrafx16')).toBe(false);
+  });
+
+  it('Minimig suppressed when Amiga has content', () => {
+    const cores = [
+      makeCore({
+        id: 'Minimig',
+        rbfPaths: ['/media/fat/_Computer/Minimig_20240115.rbf'],
+        gamesDirExists: false,
+        romCount: 0,
+      }),
+      makeCore({
+        id: 'Amiga',
+        gamesDirExists: true,
+        romCount: 80,
+      }),
+    ];
+    const suppressed = aliasTargetsToSuppress(cores);
+    expect(suppressed.has('Minimig')).toBe(true);
+  });
+
+  it('recursiveRomCount used when present — target suppressed via recursive count', () => {
+    const cores = [
+      makeCore({
+        id: 'TurboGrafx16',
+        rbfPaths: ['/media/fat/_Console/TurboGrafx16_20240115.rbf'],
+        gamesDirExists: false,
+        romCount: 0,
+        recursiveRomCount: 0,
+      }),
+      makeCore({
+        id: 'TGFX16',
+        gamesDirExists: true,
+        romCount: 0,
+        recursiveRomCount: 116, // recursive walk found content
+      }),
+    ];
+    const suppressed = aliasTargetsToSuppress(cores);
+    expect(suppressed.has('TurboGrafx16')).toBe(true);
   });
 });

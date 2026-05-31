@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 
 import type { AutoScrapeProgressEvent } from '@shared/preload-api';
 import { decodeIpcError, isDestinationAlreadyExistsError } from '@shared/preload-api';
+import { aliasTargetsToSuppress } from '@shared/core-audit';
 import { coreDisplayName, isCoreHidden } from '@shared/core-matching';
 import type { CoreEntry } from '@shared/types';
 
@@ -60,14 +61,26 @@ export function CoresPane(): JSX.Element {
   );
   const [bulkOpen, setBulkOpen] = useState(false);
 
+  // feat/sidebar-alias-dedup (#48) — canonical rbf-name cores (e.g.
+  // TurboGrafx16, Minimig) that are empty while an alias source
+  // (TGFX16, Amiga, etc.) has content. Computed once and shared by
+  // both visibleCores and emptyHideableCores so the count stays in sync.
+  const suppressedAliasTargetIds = useMemo(
+    () => aliasTargetsToSuppress(cores ?? []),
+    [cores],
+  );
+
   const visibleCores = useMemo(() => {
     if (!cores) return null;
     const hiddenFiltered = showHidden
       ? cores
       : cores.filter((c) => c.category === 'Arcade' || !isCoreHidden(c));
-    if (showMameAsCores) return hiddenFiltered;
-    return hiddenFiltered.filter((c) => c.id !== 'mame' && c.id !== 'hbmame');
-  }, [cores, showHidden, showMameAsCores]);
+    const aliasFiltered = hiddenFiltered.filter(
+      (c) => !suppressedAliasTargetIds.has(c.id),
+    );
+    if (showMameAsCores) return aliasFiltered;
+    return aliasFiltered.filter((c) => c.id !== 'mame' && c.id !== 'hbmame');
+  }, [cores, showHidden, showMameAsCores, suppressedAliasTargetIds]);
 
   const emptyHideableCores = useMemo(
     () =>
@@ -75,9 +88,10 @@ export function CoresPane(): JSX.Element {
         (c) =>
           c.romCount === 0 &&
           c.category !== 'Arcade' &&
-          !isCoreHidden(c),
+          !isCoreHidden(c) &&
+          !suppressedAliasTargetIds.has(c.id),
       ),
-    [cores],
+    [cores, suppressedAliasTargetIds],
   );
 
   // "Unhide all (N)" only targets cores in the on-MiSTer ledger — the
