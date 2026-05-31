@@ -850,12 +850,12 @@ export interface MisterApi {
    */
   getSystemCatalog(): Promise<Record<string, SystemCatalogWireEntry> | null>;
   /**
-   * Force re-fetch of the full SS system catalog. Fire-and-forget from
-   * the renderer's perspective (no return value); the catalog is
-   * updated in the background and the renderer may poll
-   * `getSystemCatalog` to pick up changes.
+   * Force re-fetch of the full SS system catalog. Returns a result
+   * indicating whether the fetch succeeded and, on failure, the SS
+   * service status that explains why. The renderer can surface this in
+   * a toast or diagnostic panel.
    */
-  rescrapeSystemCatalog(): Promise<void>;
+  rescrapeSystemCatalog(): Promise<SystemCatalogRescrapeResult>;
 }
 
 /**
@@ -955,6 +955,18 @@ export interface ArcadePlayabilityWire {
 /** feat/arcade-orphan-detect (#46) — wire shape for orphan zip basenames. */
 export interface ArcadeOrphansWire {
   readonly orphanZips: readonly string[];
+}
+
+/**
+ * fix/system-catalog-visibility-and-latch (#64) — result returned by
+ * `rescrapeSystemCatalog`. `success` is true only when the catalog was
+ * fetched from SS and written to disk. `status` mirrors the SS service
+ * status when `success` is false ('unavailable', 'rate-limited',
+ * 'quota-exceeded', or 'fetch-failed' for network/parse errors).
+ */
+export interface SystemCatalogRescrapeResult {
+  readonly success: boolean;
+  readonly status: string;
 }
 
 /**

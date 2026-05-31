@@ -23,6 +23,7 @@ import type {
   PickedKeyFile,
   RomMetadataResolvedEvent,
   RomVisibilityChangeWire,
+  SystemCatalogRescrapeResult,
   SystemCatalogWireEntry,
   SystemFileMarkChangeWire,
   UpdateModeProgressEvent,
@@ -416,7 +417,7 @@ const api: MisterApi = {
   getSystemCatalog: () =>
     invoke<Record<string, SystemCatalogWireEntry> | null>(IPC_CHANNELS.getSystemCatalog),
   rescrapeSystemCatalog: () =>
-    invoke<void>(IPC_CHANNELS.rescrapeSystemCatalog),
+    invoke<SystemCatalogRescrapeResult>(IPC_CHANNELS.rescrapeSystemCatalog),
 };
 
 contextBridge.exposeInMainWorld('mister', api);

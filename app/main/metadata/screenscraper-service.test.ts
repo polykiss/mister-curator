@@ -1539,4 +1539,85 @@ describe('feat/system-catalog-data-layer — ScreenScraperService.fetchSystemCat
     await Promise.all([a, b]);
     expect(fetchFn).toHaveBeenCalledTimes(2);
   });
+
+  it('logs when credentials are not configured', async () => {
+    const log = vi.fn();
+    const svc = new ScreenScraperService({ sleep: () => Promise.resolve(), now: () => 0, logger: log });
+    await svc.fetchSystemCatalog();
+    expect(log).toHaveBeenCalled();
+    expect(log.mock.calls[0]?.[0]).toMatch(/credentials not configured/);
+  });
+
+  it('logs when service is not available (auth failed via lookup)', async () => {
+    const log = vi.fn();
+    const svc = makeService({
+      // 403 through lookup → fetchWithRetries latches authFailed (and throws)
+      fetch: (async () => emptyResponse(403)) as unknown as typeof globalThis.fetch,
+      logger: log,
+    });
+    await svc.lookup({ systemId: 4, md5: HASH_MD5 }).catch(() => { /* expected throw */ });
+    log.mockClear();
+    await svc.fetchSystemCatalog(); // should hit the "not available" guard
+    expect(log).toHaveBeenCalled();
+    expect(log.mock.calls[0]?.[0]).toMatch(/not available/);
+  });
+
+  it('doFetchSystemCatalog logs the request URL and response status', async () => {
+    const log = vi.fn();
+    const svc = makeService({
+      fetch: (async () => jsonResponse(SAMPLE_SYSTEMES_RESPONSE)) as unknown as typeof globalThis.fetch,
+      logger: log,
+    });
+    await svc.fetchSystemCatalog();
+    const messages = log.mock.calls.map((c) => c[0] as string);
+    expect(messages.some((m) => m.includes('system-catalog: fetching'))).toBe(true);
+    expect(messages.some((m) => m.includes('status=200'))).toBe(true);
+  });
+
+  it('doFetchSystemCatalog logs body snippet on non-2xx response', async () => {
+    const log = vi.fn();
+    const svc = makeService({
+      fetch: (async () => new Response('forbidden-body', { status: 403 })) as unknown as typeof globalThis.fetch,
+      logger: log,
+    });
+    await svc.fetchSystemCatalog();
+    const messages = log.mock.calls.map((c) => c[0] as string);
+    expect(messages.some((m) => m.includes('non-2xx body') && m.includes('forbidden-body'))).toBe(true);
+  });
+});
+
+describe('fix/system-catalog-visibility-and-latch — ScreenScraperService.resetAuthState', () => {
+  it('clears authFailed so getStatus returns available again', async () => {
+    const svc = makeService({
+      fetch: (async () => emptyResponse(403)) as unknown as typeof globalThis.fetch,
+    });
+    // 403 via lookup → fetchWithRetries sets authFailed and throws
+    await svc.lookup({ systemId: 4, md5: HASH_MD5 }).catch(() => { /* expected throw */ });
+    expect(svc.getStatus()).toBe('unavailable');
+    svc.resetAuthState();
+    expect(svc.getStatus()).toBe('available');
+  });
+
+  it('clears rate-limit so getStatus returns available again', async () => {
+    const svc = makeService({
+      fetch: (async () => emptyResponse(429)) as unknown as typeof globalThis.fetch,
+      rateLimitCooldownMs: 99999,
+    });
+    await svc.lookup({ systemId: 4, md5: HASH_MD5 }); // 429 through fetchWithRetries triggers rate-limit
+    expect(svc.getStatus()).toBe('rate-limited');
+    svc.resetAuthState();
+    expect(svc.getStatus()).toBe('available');
+  });
+
+  it('does not clear blacklist state', async () => {
+    const svc = makeService({
+      fetch: (async () => emptyResponse(426)) as unknown as typeof globalThis.fetch,
+    });
+    // 426 via lookup → fetchWithRetries sets blacklisted (getStatus collapses to 'unavailable')
+    await svc.lookup({ systemId: 4, md5: HASH_MD5 });
+    expect(svc.getStatus()).toBe('unavailable');
+    svc.resetAuthState();
+    // blacklisted is permanent — resetAuthState must not clear it
+    expect(svc.getStatus()).toBe('unavailable');
+  });
 });

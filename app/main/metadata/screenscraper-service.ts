@@ -347,6 +347,20 @@ export class ScreenScraperService {
   /** Logged the "no creds" notice — suppress repeats. */
   private warnedNoCreds = false;
 
+  /**
+   * fix/system-catalog-visibility-and-latch (#64) — reset transient
+   * error latches so a caller can retry. Intended for the dedicated
+   * catalog-service instance; the ROM-scraping instance keeps its
+   * latched state to avoid hammering SS with wrong credentials.
+   *
+   * Clears: authFailed, rateLimitedUntil.
+   * Leaves: blacklisted, quotaExceeded (permanent/day-scoped).
+   */
+  resetAuthState(): void {
+    this.authFailed = false;
+    this.rateLimitedUntil = null;
+  }
+
   /** Promise chain serialising all live requests for the rate floor. */
   private queue: Promise<unknown> = Promise.resolve();
   /** Wall-clock at the start of the most recent request, or null. */
@@ -491,8 +505,19 @@ export class ScreenScraperService {
    * per-ROM scraping queue.
    */
   async fetchSystemCatalog(): Promise<SystemCatalog | null> {
-    if (!this.hasCredentials) return null;
-    if (this.getStatus() !== 'available') return null;
+    if (!this.hasCredentials) {
+      this.logger(
+        '[ScreenScraper] system-catalog: credentials not configured — set SCREENSCRAPER_DEV_ID and SCREENSCRAPER_DEV_PASSWORD.',
+      );
+      return null;
+    }
+    const status = this.getStatus();
+    if (status !== 'available') {
+      this.logger(
+        `[ScreenScraper] system-catalog: service not available (status=${status}); skipping fetch.`,
+      );
+      return null;
+    }
     return this.enqueue(() => this.doFetchSystemCatalog());
   }
 
@@ -566,11 +591,66 @@ export class ScreenScraperService {
     return { kind: 'ok', results };
   }
 
+  /**
+   * fix/system-catalog-visibility-and-latch (#64) — standalone fetch
+   * that bypasses `fetchWithRetries` so the catalog call never mutates
+   * `authFailed` / `rateLimitedUntil` / `quotaExceeded` on the
+   * dedicated catalog-service instance. Full request-level diagnostics
+   * via `this.logger` so failures are visible in the Terminal even when
+   * the renderer swallows the error.
+   */
   private async doFetchSystemCatalog(): Promise<SystemCatalog | null> {
     const url = this.buildSystemsUrl();
-    const outcome = await this.fetchWithRetries(url);
-    if (outcome.kind !== 'ok') return null;
-    return parseSystemCatalog(outcome.body);
+    const safeUrl = redactScreenScraperUrl(url);
+    this.logger(`[ScreenScraper] system-catalog: fetching ${safeUrl}`);
+
+    let res: Response;
+    try {
+      res = await this.fetchWithTimeout(url);
+    } catch (err) {
+      this.logger(
+        `[ScreenScraper] system-catalog: network error — ` +
+          `${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`,
+      );
+      return null;
+    }
+
+    this.logger(
+      `[ScreenScraper] system-catalog: response status=${String(res.status)} ok=${String(res.ok)}`,
+    );
+
+    let text: string;
+    try {
+      text = await res.text();
+    } catch {
+      this.logger('[ScreenScraper] system-catalog: failed to read response body');
+      return null;
+    }
+
+    if (!res.ok) {
+      this.logger(
+        `[ScreenScraper] system-catalog: non-2xx body (first 500)="${text.slice(0, 500)}"`,
+      );
+      return null;
+    }
+
+    let body: unknown;
+    try {
+      body = JSON.parse(text) as unknown;
+    } catch {
+      this.logger(
+        `[ScreenScraper] system-catalog: JSON parse failed body (first 500)="${text.slice(0, 500)}"`,
+      );
+      return null;
+    }
+
+    const catalog = parseSystemCatalog(body);
+    if (catalog === null) {
+      this.logger(
+        `[ScreenScraper] system-catalog: parseSystemCatalog returned null body (first 500)="${text.slice(0, 500)}"`,
+      );
+    }
+    return catalog;
   }
 
   /**
