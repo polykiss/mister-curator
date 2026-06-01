@@ -17,6 +17,12 @@ export interface SystemCatalogWireEntry {
   readonly id: number;
   readonly displayName: string;
   readonly logoUrl: string | null;
+  readonly company: string | null;
+  readonly type: string | null;
+  readonly yearStart: number | null;
+  readonly yearEnd: number | null;
+  readonly supportType: string | null;
+  readonly extensions: readonly string[];
 }
 
 /** Disk-cache envelope written to `metadata/system-catalog.json`. */
@@ -26,6 +32,12 @@ interface CatalogDiskRecord {
     readonly id: number;
     readonly displayName: string;
     readonly logoUrl: string | null;
+    readonly company?: string | null;
+    readonly type?: string | null;
+    readonly yearStart?: number | null;
+    readonly yearEnd?: number | null;
+    readonly supportType?: string | null;
+    readonly extensions?: readonly string[];
   }>;
 }
 
@@ -68,7 +80,17 @@ export class SystemCatalogService {
     for (const [coreId, ssId] of SCREENSCRAPER_SYSTEM_ID_BY_CORE_ID) {
       const entry = this.catalog.get(ssId);
       if (entry !== undefined) {
-        result[coreId] = { id: entry.id, displayName: entry.displayName, logoUrl: entry.logoUrl };
+        result[coreId] = {
+          id: entry.id,
+          displayName: entry.displayName,
+          logoUrl: entry.logoUrl,
+          company: entry.company,
+          type: entry.type,
+          yearStart: entry.yearStart,
+          yearEnd: entry.yearEnd,
+          supportType: entry.supportType,
+          extensions: entry.extensions,
+        };
       }
     }
     return result;
@@ -150,7 +172,17 @@ export class SystemCatalogService {
       const map = new Map<number, SystemCatalogEntry>();
       for (const s of record.systems) {
         if (typeof s.id === 'number' && typeof s.displayName === 'string') {
-          map.set(s.id, { id: s.id, displayName: s.displayName, logoUrl: s.logoUrl ?? null });
+          map.set(s.id, {
+            id: s.id,
+            displayName: s.displayName,
+            logoUrl: s.logoUrl ?? null,
+            company: s.company ?? null,
+            type: s.type ?? null,
+            yearStart: s.yearStart ?? null,
+            yearEnd: s.yearEnd ?? null,
+            supportType: s.supportType ?? null,
+            extensions: s.extensions ?? [],
+          });
         }
       }
       return map.size > 0 ? map : null;
@@ -166,6 +198,12 @@ export class SystemCatalogService {
         id: e.id,
         displayName: e.displayName,
         logoUrl: e.logoUrl,
+        company: e.company,
+        type: e.type,
+        yearStart: e.yearStart,
+        yearEnd: e.yearEnd,
+        supportType: e.supportType,
+        extensions: e.extensions,
       })),
     };
     const json = JSON.stringify(record, null, 2);

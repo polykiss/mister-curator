@@ -149,6 +149,12 @@ export interface SystemCatalogEntry {
   readonly id: number;
   readonly displayName: string;
   readonly logoUrl: string | null;
+  readonly company: string | null;
+  readonly type: string | null;
+  readonly yearStart: number | null;
+  readonly yearEnd: number | null;
+  readonly supportType: string | null;
+  readonly extensions: readonly string[];
 }
 
 /**
@@ -997,7 +1003,13 @@ export function parseSystemCatalog(body: unknown): SystemCatalog | null {
     const displayName = pickSystemName(sys.noms);
     if (displayName === null) continue;
     const logoUrl = pickMedia(sys.medias, SYSTEM_LOGO_MEDIA_TYPES);
-    entries.set(id, { id, displayName, logoUrl });
+    const company = pickScalarString(sys.compagnie);
+    const type = pickScalarString(sys.type);
+    const yearStart = pickYear(sys.datedebut);
+    const yearEnd = pickYear(sys.datefin);
+    const supportType = pickScalarString(sys.supporttype);
+    const extensions = pickExtensionList(sys.extensions);
+    entries.set(id, { id, displayName, logoUrl, company, type, yearStart, yearEnd, supportType, extensions });
   }
   return entries.size > 0 ? entries : null;
 }
@@ -1087,6 +1099,27 @@ function pickSystemName(noms: unknown): string | null {
     if (k.startsWith('nom_') && typeof v === 'string' && v.length > 0) return v;
   }
   return null;
+}
+
+function pickScalarString(val: unknown): string | null {
+  return typeof val === 'string' && val.length > 0 ? val : null;
+}
+
+function pickYear(val: unknown): number | null {
+  const s = typeof val === 'string' ? val : typeof val === 'number' ? String(val) : null;
+  if (s === null) return null;
+  const n = Number.parseInt(s, 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function pickExtensionList(val: unknown): readonly string[] {
+  if (typeof val === 'string') {
+    return val.split(',').map((e) => e.trim()).filter(Boolean);
+  }
+  if (Array.isArray(val)) {
+    return (val as unknown[]).filter((e): e is string => typeof e === 'string').map((e) => e.trim()).filter(Boolean);
+  }
+  return [];
 }
 
 /**

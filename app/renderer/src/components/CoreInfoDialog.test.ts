@@ -76,6 +76,41 @@ describe('CoreInfoDialog — structural contract', () => {
     expect(SOURCE).toContain('catalogEntry.logoUrl');
   });
 
+  it('shows system logo image when logoUrl is present', () => {
+    expect(SOURCE).toContain('logoObjectUrl');
+    expect(SOURCE).toContain('<img');
+    expect(SOURCE).toContain('<Skeleton');
+    expect(SOURCE).toContain('getSystemLogoBytes');
+  });
+
+  it('shows manufacturer when company is non-null', () => {
+    expect(SOURCE).toContain('catalogEntry.company');
+    expect(SOURCE).toContain('"Manufacturer"');
+  });
+
+  it('shows type when type is non-null', () => {
+    expect(SOURCE).toContain('catalogEntry.type');
+    expect(SOURCE).toContain('"Type"');
+  });
+
+  it('shows years formatted via formatYears', () => {
+    expect(SOURCE).toContain('formatYears');
+    expect(SOURCE).toContain('catalogEntry.yearStart');
+    expect(SOURCE).toContain('catalogEntry.yearEnd');
+    expect(SOURCE).toContain('"Years"');
+  });
+
+  it('shows supportType as Format', () => {
+    expect(SOURCE).toContain('catalogEntry.supportType');
+    expect(SOURCE).toContain('"Format"');
+  });
+
+  it('shows extensions joined by comma', () => {
+    expect(SOURCE).toContain('catalogEntry.extensions');
+    expect(SOURCE).toContain('.join(');
+    expect(SOURCE).toContain('"Extensions"');
+  });
+
   it('shows fallback text when no catalog entry', () => {
     expect(SOURCE).toContain('No ScreenScraper mapping for this core');
   });
@@ -97,6 +132,17 @@ describe('CoreInfoDialog — structural contract', () => {
   it('renders null for core content when core prop is null', () => {
     // Guard: content only renders when core !== null
     expect(SOURCE).toContain('core !== null');
+  });
+});
+
+describe('CoreInfoDialog — formatYears logic', () => {
+  it('contains "–present" for open-ended year ranges', () => {
+    expect(SOURCE).toContain('–present');
+  });
+
+  it('formats a closed range with en-dash', () => {
+    // The implementation joins start and end with –
+    expect(SOURCE).toMatch(/\$\{.*start.*\}–\$\{|'–'/);
   });
 });
 

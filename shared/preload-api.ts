@@ -980,6 +980,12 @@ export interface SystemCatalogWireEntry {
   readonly id: number;
   readonly displayName: string;
   readonly logoUrl: string | null;
+  readonly company: string | null;
+  readonly type: string | null;
+  readonly yearStart: number | null;
+  readonly yearEnd: number | null;
+  readonly supportType: string | null;
+  readonly extensions: readonly string[];
 }
 
 const VALID_CONNECTION_ERROR_CODES: ReadonlySet<ConnectionErrorCode> = new Set([
