@@ -234,3 +234,31 @@ describe('CoreInfoDialog v2.0 — CountDisplay logic', () => {
     expect(SOURCE).toContain('rec.');
   });
 });
+
+describe('CoreInfoDialog v2.0 — defensive localCatalog self-fetch', () => {
+  it('declares localCatalog state', () => {
+    expect(SOURCE).toContain('localCatalog');
+  });
+
+  it('fetches catalog from getSystemCatalog when prop is null', () => {
+    expect(SOURCE).toContain('getSystemCatalog');
+    expect(SOURCE).toContain('setLocalCatalog');
+  });
+
+  it('merges prop and local catalog with prop winning', () => {
+    expect(SOURCE).toContain('effectiveCatalog');
+    expect(SOURCE).toContain('catalog ?? localCatalog');
+  });
+});
+
+describe('CoreInfoDialog v2.0 — accessibility', () => {
+  it('renders DialogTitle for screen readers', () => {
+    expect(SOURCE).toContain('DialogTitle');
+    expect(SOURCE).toMatch(/<DialogTitle[^>]*sr-only/);
+  });
+
+  it('renders DialogDescription for screen readers', () => {
+    expect(SOURCE).toContain('DialogDescription');
+    expect(SOURCE).toMatch(/<DialogDescription[^>]*sr-only/);
+  });
+});

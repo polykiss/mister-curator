@@ -10,6 +10,8 @@ import { Button } from '@app/renderer/src/components/ui/button';
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogTitle,
 } from '@app/renderer/src/components/ui/dialog';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
 
@@ -26,7 +28,26 @@ export function CoreInfoDialog({
   open,
   onOpenChange,
 }: Props): JSX.Element {
-  const catalogEntry = core !== null ? (catalog?.[core.id] ?? null) : null;
+  // fix/core-info-dialog-v2-regressions — defensive self-fetch so the
+  // dialog works even when the parent's systemCatalog state is still null
+  // (cold-cache scenario: ensureCatalog() on the main side is still
+  // fetching when CoresPane's useEffect first fires). We merge the
+  // parent-prop catalog with a locally-fetched fallback; parent wins
+  // once it populates.
+  const [localCatalog, setLocalCatalog] = useState<Record<string, SystemCatalogWireEntry> | null>(null);
+
+  useEffect(() => {
+    if (!open || catalog !== null) return;
+    let cancelled = false;
+    void window.mister.getSystemCatalog().then((result) => {
+      if (cancelled || result === null) return;
+      setLocalCatalog(result);
+    });
+    return () => { cancelled = true; };
+  }, [open, catalog]);
+
+  const effectiveCatalog = catalog ?? localCatalog;
+  const catalogEntry = core !== null ? (effectiveCatalog?.[core.id] ?? null) : null;
 
   // ── logo fetch ─────────────────────────────────────────────────────
   const logoUrlRef = useRef<string | null>(null);
@@ -112,11 +133,15 @@ export function CoreInfoDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-[1060px] gap-0 overflow-hidden p-0" hideDefaultClose>
+        <DialogTitle className="sr-only">{displayName} — Core info</DialogTitle>
+        <DialogDescription className="sr-only">
+          Details and metadata for the {displayName} core.
+        </DialogDescription>
         {core !== null ? (
           <>
             {/* ── header ─────────────────────────────────────────── */}
             <div className="px-9 pb-6 pt-[30px]">
-              <div className="mb-4 text-[11px] font-bold uppercase tracking-[0.19em] text-fg-muted">
+              <div className="mb-4 text-caption font-bold uppercase tracking-[0.19em] text-fg-muted">
                 Core info
               </div>
               <div className="flex flex-wrap items-center gap-[14px]">
@@ -133,7 +158,7 @@ export function CoreInfoDialog({
                       <Skeleton className="h-[34px] w-[100px]" />
                     )
                   ) : (
-                    <span className="text-[18px] font-bold tracking-[-0.01em] text-fg">
+                    <span className="text-heading-sm font-bold tracking-[-0.01em] text-fg">
                       {displayName}
                     </span>
                   )}
@@ -141,7 +166,7 @@ export function CoreInfoDialog({
                 {catalogEntry?.logoUrl !== null && catalogEntry !== null && (
                   <>
                     <span className="h-4 w-px bg-border-default" />
-                    <span className="text-[18px] font-bold tracking-[-0.01em] text-fg">
+                    <span className="text-heading-sm font-bold tracking-[-0.01em] text-fg">
                       {displayName}
                     </span>
                   </>
@@ -177,7 +202,7 @@ export function CoreInfoDialog({
                   <StatGrid>
                     <StatCell label="Core ID" span={1}>
                       <span className="flex items-center gap-1.5">
-                        <span className="font-mono text-[13.5px] text-fg">{core.id}</span>
+                        <span className="font-mono text-body text-fg">{core.id}</span>
                         <Button
                           variant="ghost"
                           size="icon"
@@ -291,7 +316,7 @@ export function CoreInfoDialog({
                   <>
                     <div className="mb-3 flex items-center gap-[9px]">
                       <span className="inline-block h-[6px] w-[6px] rounded-[2px] bg-accent" />
-                      <span className="text-[12px] font-bold uppercase tracking-[0.15em] text-fg-muted">
+                      <span className="text-body-sm font-bold uppercase tracking-[0.15em] text-fg-muted">
                         About
                       </span>
                     </div>
@@ -304,7 +329,7 @@ export function CoreInfoDialog({
                         <Skeleton className="h-3 w-[70%]" />
                       </div>
                     ) : wikipedia !== null ? (
-                      <p className="text-[13.5px] leading-[1.62] text-[#bcc4d0] [text-wrap:pretty]">
+                      <p className="text-body leading-[1.62] text-[#bcc4d0] [text-wrap:pretty]">
                         {wikipedia.extract}
                       </p>
                     ) : (
@@ -349,7 +374,7 @@ export function CoreInfoDialog({
 
 function Chip({ dot, children }: { dot?: boolean; children: ReactNode }): JSX.Element {
   return (
-    <span className="inline-flex items-center gap-[6px] rounded-full border border-border-default bg-elevated px-[10px] py-[4px] text-[12.5px] font-medium text-fg">
+    <span className="inline-flex items-center gap-[6px] rounded-full border border-border-default bg-elevated px-[10px] py-[4px] text-body-sm font-medium text-fg">
       {dot && <span className="inline-block h-[5px] w-[5px] rounded-full bg-accent" />}
       {children}
     </span>
@@ -361,7 +386,7 @@ function StatSection({ title, children }: { title: string; children: ReactNode }
     <div>
       <div className="mb-5 flex items-center gap-[9px]">
         <span className="inline-block h-[6px] w-[6px] rounded-[2px] bg-accent" />
-        <span className="text-[12px] font-bold uppercase tracking-[0.15em] text-fg-muted">
+        <span className="text-body-sm font-bold uppercase tracking-[0.15em] text-fg-muted">
           {title}
         </span>
       </div>
@@ -391,14 +416,14 @@ function StatCell({
 }): JSX.Element {
   return (
     <div style={span !== undefined ? { gridColumn: `span ${String(span)}` } : undefined}>
-      <div className="mb-[7px] text-[11px] font-semibold uppercase tracking-[0.12em] text-fg-muted">
+      <div className="mb-[7px] text-caption font-semibold uppercase tracking-[0.12em] text-fg-muted">
         {label}
       </div>
       <div
         className={
           mono
-            ? 'break-all font-mono text-[13.5px] tracking-[-0.01em] text-fg'
-            : 'text-[16px] font-medium leading-[1.35] text-fg'
+            ? 'break-all font-mono text-body tracking-[-0.01em] text-fg'
+            : 'text-heading-sm font-medium leading-[1.35] text-fg'
         }
       >
         {children}
@@ -409,7 +434,7 @@ function StatCell({
 
 function FactRow({ k, v }: { k: string; v: string }): JSX.Element {
   return (
-    <div className="flex justify-between gap-4 border-t border-border-subtle py-[10px] text-[14px]">
+    <div className="flex justify-between gap-4 border-t border-border-subtle py-[10px] text-body-lg">
       <span className="text-fg-muted">{k}</span>
       <span className="font-medium text-fg">{v}</span>
     </div>

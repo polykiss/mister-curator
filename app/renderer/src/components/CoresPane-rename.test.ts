@@ -36,11 +36,11 @@ describe('CoresPane — sidebar logos and naming', () => {
     expect(SOURCE).toContain('setRenameFor');
   });
 
-  it('loads catalog eagerly on mount (empty deps effect)', () => {
+  it('loads catalog with bounded retry pattern', () => {
     expect(SOURCE).toContain('getSystemCatalog');
-    // The effect must use empty deps [], not depend on menuFor.
-    // Check that 'getSystemCatalog' does not appear inside an
-    // if-block that guards on menuFor (line-local check, not cross-file).
+    expect(SOURCE).toContain('MAX_CATALOG_ATTEMPTS');
+    expect(SOURCE).toContain('CATALOG_RETRY_MS');
+    // retries on connection transitions, not on menuFor
     expect(SOURCE).not.toContain('menuFor !== null && systemCatalog === null');
   });
 
