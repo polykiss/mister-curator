@@ -1028,8 +1028,17 @@ export class HashService {
         mtimesMatch(current, entry.mtime)
       ) {
         result.set(p, entry);
-        if (current === entry.mtime) exactCount += 1;
+        const exact = current === entry.mtime;
+        if (exact) exactCount += 1;
         else toleranceCount += 1;
+        diagLog('info', 'meta', '·', 'hash-decision', {
+          path: pathBasename(p),
+          action: 'use-cache',
+          reason: exact ? 'mtime-match' : 'mtime-match-tolerance',
+          mtime: current,
+          cachedMtime: exact ? undefined : entry.mtime,
+          deltaSec: exact ? undefined : Math.abs(current - entry.mtime),
+        });
       } else if (
         entry !== undefined &&
         entry.sampleMd5 !== undefined &&
@@ -1137,6 +1146,13 @@ export class HashService {
       claimed.add(oldKey);
       migrated.push({ from: oldKey, to: p, entry });
       result.set(p, entry);
+      diagLog('info', 'meta', '·', 'hash-decision', {
+        path: pathBasename(p),
+        action: 'use-cache',
+        reason: 'rename-migrated',
+        mtime: current,
+        oldKey: pathBasename(oldKey),
+      });
     }
     if (migrated.length > 0) {
       const next = ensureMutable();
