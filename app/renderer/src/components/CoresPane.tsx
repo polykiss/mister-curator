@@ -1,13 +1,17 @@
 import { Eye, EyeOff, Loader2, Sparkles, Undo2 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
-import type { AutoScrapeProgressEvent } from '@shared/preload-api';
+import type { AutoScrapeProgressEvent, SystemCatalogWireEntry } from '@shared/preload-api';
 import { decodeIpcError, isDestinationAlreadyExistsError } from '@shared/preload-api';
 import { aliasTargetsToSuppress } from '@shared/core-audit';
 import { coreDisplayName, isCoreHidden } from '@shared/core-matching';
 import type { CoreEntry } from '@shared/types';
+
+import { CoreInfoDialog } from '@app/renderer/src/components/CoreInfoDialog';
+import type { RomRowMenuItem } from '@app/renderer/src/components/RomRowMenu';
+import { RomRowMenu } from '@app/renderer/src/components/RomRowMenu';
 
 import { Button } from '@app/renderer/src/components/ui/button';
 import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
@@ -60,6 +64,80 @@ export function CoresPane(): JSX.Element {
     false,
   );
   const [bulkOpen, setBulkOpen] = useState(false);
+
+  // feat/core-context-menu-and-info-dialog (#30 PR-2)
+  const [menuFor, setMenuFor] = useState<{
+    core: CoreEntry;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [infoFor, setInfoFor] = useState<CoreEntry | null>(null);
+  const [systemCatalog, setSystemCatalog] = useState<Record<
+    string,
+    SystemCatalogWireEntry
+  > | null>(null);
+  const [rescrapeInFlight, setRescrapeInFlight] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
+
+  // Lazy-load the system catalog the first time a context menu opens.
+  // Empty-object fallback prevents hammering IPC on repeated failures.
+  useEffect(() => {
+    if (menuFor !== null && systemCatalog === null) {
+      void window.mister
+        .getSystemCatalog()
+        .then(setSystemCatalog)
+        .catch(() => { setSystemCatalog({}); });
+    }
+  }, [menuFor, systemCatalog]);
+
+  const buildMenuItems = (core: CoreEntry): readonly RomRowMenuItem[] => {
+    const entry = systemCatalog?.[core.id] ?? null;
+    const hasLogo = entry !== null && entry.logoUrl !== null;
+    const isInFlight = rescrapeInFlight.has(core.id);
+
+    return [
+      {
+        label: 'Show core info…',
+        onSelect: () => {
+          setInfoFor(core);
+          setMenuFor(null);
+        },
+      },
+      {
+        label: isInFlight ? 'Rescraping…' : 'Rescrape system',
+        disabled: !hasLogo || isInFlight,
+        title: !hasLogo ? 'No ScreenScraper coverage for this system' : undefined,
+        onSelect: () => {
+          if (!entry || entry.logoUrl === null) return;
+          setMenuFor(null);
+          setRescrapeInFlight((s) => new Set([...s, core.id]));
+          void (async () => {
+            try {
+              const result = await window.mister.rescrapeSystemLogo(entry.logoUrl!);
+              if (result === null) {
+                toast.error('Rescrape failed', {
+                  description: 'Could not fetch logo — check your network.',
+                });
+              } else {
+                toast.success(`Rescraped ${entry.displayName}`);
+              }
+            } catch (err) {
+              toast.error('Rescrape failed', {
+                description: err instanceof Error ? err.message : String(err),
+              });
+            } finally {
+              setRescrapeInFlight((s) => {
+                const next = new Set(s);
+                next.delete(core.id);
+                return next;
+              });
+            }
+          })();
+        },
+      },
+    ];
+  };
 
   // feat/sidebar-alias-dedup (#48) — canonical rbf-name cores (e.g.
   // TurboGrafx16, Minimig) that are empty while an alias source
@@ -290,12 +368,29 @@ export function CoresPane(): JSX.Element {
         onSelect: selectCore,
         onHide,
         onShow,
+        onContextMenu: (core, x, y) => { setMenuFor({ core, x, y }); },
       })}
 
       <HideEmptyCoresDialog
         open={bulkOpen}
         onOpenChange={setBulkOpen}
         candidates={emptyHideableCores}
+      />
+
+      {menuFor !== null ? (
+        <RomRowMenu
+          x={menuFor.x}
+          y={menuFor.y}
+          items={buildMenuItems(menuFor.core)}
+          onClose={() => { setMenuFor(null); }}
+        />
+      ) : null}
+
+      <CoreInfoDialog
+        core={infoFor}
+        catalog={systemCatalog}
+        open={infoFor !== null}
+        onOpenChange={(open) => { if (!open) setInfoFor(null); }}
       />
     </div>
   );
@@ -320,6 +415,7 @@ interface RenderArgs {
   readonly onSelect: (id: string | null) => void;
   readonly onHide: (core: CoreEntry) => Promise<void>;
   readonly onShow: (core: CoreEntry) => Promise<void>;
+  readonly onContextMenu: (core: CoreEntry, x: number, y: number) => void;
 }
 
 /**
@@ -414,6 +510,10 @@ function renderCoreList(args: RenderArgs): JSX.Element {
               // italic + a darker text color.
               isHiddenCore && 'opacity-50 italic text-fg-disabled',
             )}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              args.onContextMenu(core, e.clientX, e.clientY);
+            }}
           >
             {/* Active row: 2px accent edge per SYSTEM.md §5. Renders
                 inside the row container so it doesn't shift content. */}
