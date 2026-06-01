@@ -13,8 +13,8 @@ const SOURCE = readFileSync(
 );
 
 describe('CoreInfoDialog v2.0 — dialog size and layout', () => {
-  it('uses max-w-[1060px] (not the old max-w-2xl)', () => {
-    expect(SOURCE).toContain('max-w-[1060px]');
+  it('uses max-w-[920px] (narrower than original 1060px)', () => {
+    expect(SOURCE).toContain('max-w-[920px]');
     expect(SOURCE).not.toContain('max-w-2xl');
   });
 
@@ -252,17 +252,6 @@ describe('CoreInfoDialog v2.0 — defensive localCatalog self-fetch', () => {
 });
 
 describe('CoreInfoDialog v2.0 — visual polish (phase 2)', () => {
-  it('sorts sidebar by display name via localeCompare', () => {
-    // This dialog test asserts the *dialog* StatCell value size is text-body
-    expect(SOURCE).not.toContain("'text-heading-sm font-medium leading-[1.35] text-fg'");
-    expect(SOURCE).toContain("'text-body font-medium leading-[1.35] text-fg'");
-  });
-
-  it('Wikipedia text is wrapped in a scrollable container', () => {
-    expect(SOURCE).toContain('overflow-y-auto');
-    expect(SOURCE).toContain('max-h-[220px]');
-  });
-
   it('grid gives left pane more room (1.4fr) and right strip 320px', () => {
     expect(SOURCE).toContain("'1.4fr 320px'");
     expect(SOURCE).not.toContain("'1fr 340px'");
@@ -271,6 +260,45 @@ describe('CoreInfoDialog v2.0 — visual polish (phase 2)', () => {
   it('photo card uses object-contain to prevent cropping', () => {
     expect(SOURCE).toContain('object-contain');
     expect(SOURCE).toContain('ConsolePhotoCard');
+  });
+});
+
+describe('CoreInfoDialog v2.0 — visual polish (phase 2 round 2)', () => {
+  it('dialog is narrower (max-w-[920px]) and bounded by screen height', () => {
+    expect(SOURCE).toContain('max-w-[920px]');
+    expect(SOURCE).toContain('max-h-[calc(100vh-4rem)]');
+    expect(SOURCE).not.toContain('max-w-[1060px]');
+  });
+
+  it('dialog body uses flex layout so right strip is height-bounded', () => {
+    expect(SOURCE).toContain('flex-col');
+    expect(SOURCE).toContain('min-h-0');
+    expect(SOURCE).toContain('flex-1');
+  });
+
+  it('right strip scrolls as a unit (overflow-y-auto, no Wikipedia-only scroll)', () => {
+    expect(SOURCE).toContain('overflow-y-auto border-l');
+    expect(SOURCE).not.toContain('max-h-[220px]');
+  });
+
+  it('section headers use text-caption (not text-body-sm)', () => {
+    expect(SOURCE).toContain('text-caption font-bold uppercase tracking-[0.15em]');
+    expect(SOURCE).not.toContain('text-body-sm font-bold uppercase tracking-[0.15em]');
+  });
+
+  it('stat values use text-body-sm', () => {
+    expect(SOURCE).toContain("'text-body-sm font-medium leading-[1.35] text-fg'");
+    expect(SOURCE).not.toContain("'text-body font-medium leading-[1.35] text-fg'");
+  });
+
+  it('system title uses text-heading (20px) as the focal point', () => {
+    expect(SOURCE).toContain('text-heading font-bold');
+    expect(SOURCE).not.toContain('text-heading-sm font-bold');
+  });
+
+  it('StatGrid uses tighter row gap (gap-y-4)', () => {
+    expect(SOURCE).toContain('gap-y-4');
+    expect(SOURCE).not.toContain('gap-y-[22px]');
   });
 });
 

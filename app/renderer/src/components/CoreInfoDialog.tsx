@@ -132,7 +132,7 @@ export function CoreInfoDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[1060px] gap-0 overflow-hidden p-0" hideDefaultClose>
+      <DialogContent className="flex max-h-[calc(100vh-4rem)] max-w-[920px] flex-col gap-0 overflow-hidden p-0" hideDefaultClose>
         <DialogTitle className="sr-only">{displayName} — Core info</DialogTitle>
         <DialogDescription className="sr-only">
           Details and metadata for the {displayName} core.
@@ -140,8 +140,8 @@ export function CoreInfoDialog({
         {core !== null ? (
           <>
             {/* ── header ─────────────────────────────────────────── */}
-            <div className="px-9 pb-6 pt-[30px]">
-              <div className="mb-4 text-caption font-bold uppercase tracking-[0.19em] text-fg-muted">
+            <div className="px-7 pb-5 pt-6">
+              <div className="mb-2 text-caption font-bold uppercase tracking-[0.19em] text-fg-muted">
                 Core info
               </div>
               <div className="flex flex-wrap items-center gap-[14px]">
@@ -158,7 +158,7 @@ export function CoreInfoDialog({
                       <Skeleton className="h-12 w-[120px]" />
                     )
                   ) : (
-                    <span className="text-heading-sm font-bold tracking-[-0.01em] text-fg">
+                    <span className="text-heading font-bold tracking-[-0.01em] text-fg">
                       {displayName}
                     </span>
                   )}
@@ -166,7 +166,7 @@ export function CoreInfoDialog({
                 {catalogEntry?.logoUrl !== null && catalogEntry !== null && (
                   <>
                     <span className="h-4 w-px bg-border-default" />
-                    <span className="text-heading-sm font-bold tracking-[-0.01em] text-fg">
+                    <span className="text-heading font-bold tracking-[-0.01em] text-fg">
                       {displayName}
                     </span>
                   </>
@@ -193,16 +193,16 @@ export function CoreInfoDialog({
             <hr className="border-border-default" />
 
             {/* ── body ───────────────────────────────────────────── */}
-            <div className="grid" style={{ gridTemplateColumns: '1.4fr 320px' }}>
+            <div className="min-h-0 flex-1 grid overflow-hidden" style={{ gridTemplateColumns: '1.4fr 320px' }}>
 
               {/* LEFT — stat sections */}
-              <div className="px-9 pb-[34px] pt-[30px]">
+              <div className="overflow-y-auto px-7 py-6">
 
                 <StatSection title="Core">
                   <StatGrid>
                     <StatCell label="Core ID" span={1}>
                       <span className="flex items-center gap-1.5">
-                        <span className="font-mono text-body text-fg">{core.id}</span>
+                        <span className="font-mono text-body-sm text-fg">{core.id}</span>
                         <Button
                           variant="ghost"
                           size="icon"
@@ -233,7 +233,7 @@ export function CoreInfoDialog({
                   </StatGrid>
                 </StatSection>
 
-                <hr className="my-7 border-border-default" />
+                <hr className="my-5 border-border-default" />
 
                 <StatSection title="ROM library">
                   <StatGrid>
@@ -262,7 +262,7 @@ export function CoreInfoDialog({
 
                 {catalogEntry !== null && (
                   <>
-                    <hr className="my-7 border-border-default" />
+                    <hr className="my-5 border-border-default" />
 
                     <StatSection title="ScreenScraper">
                       <StatGrid>
@@ -295,12 +295,12 @@ export function CoreInfoDialog({
 
               {/* RIGHT — console image + about + facts */}
               <div
-                className="flex flex-col border-l border-border-default px-7 pb-8 pt-[30px]"
+                className="overflow-y-auto border-l border-border-default px-6 py-6"
                 style={{ background: '#1c2531' }}
               >
                 {/* console photo */}
                 {(catalogEntry?.photoUrl !== null || (wikipedia !== 'loading' && wikipedia?.thumbnailUrl)) ? (
-                  <div className="mb-[22px]">
+                  <div className="mb-4">
                     {photoLoading ? (
                       <Skeleton className="h-[196px] w-full rounded-[11px]" />
                     ) : photoSrc !== null ? (
@@ -308,15 +308,15 @@ export function CoreInfoDialog({
                     ) : null}
                   </div>
                 ) : catalogEntry === null ? null : (
-                  <div className="mb-[22px] h-[196px] w-full rounded-[11px] border border-border-default bg-elevated" />
+                  <div className="mb-4 h-[196px] w-full rounded-[11px] border border-border-default bg-elevated" />
                 )}
 
                 {/* About section */}
                 {catalogEntry !== null && (
                   <>
-                    <div className="mb-3 flex items-center gap-[9px]">
+                    <div className="mb-2 flex items-center gap-[9px]">
                       <span className="inline-block h-[6px] w-[6px] rounded-[2px] bg-accent" />
-                      <span className="text-body-sm font-bold uppercase tracking-[0.15em] text-fg-muted">
+                      <span className="text-caption font-bold uppercase tracking-[0.15em] text-fg-muted">
                         About
                       </span>
                     </div>
@@ -329,11 +329,9 @@ export function CoreInfoDialog({
                         <Skeleton className="h-3 w-[70%]" />
                       </div>
                     ) : wikipedia !== null ? (
-                      <div className="max-h-[220px] overflow-y-auto">
-                        <p className="text-body leading-[1.62] text-[#bcc4d0] [text-wrap:pretty]">
-                          {wikipedia.extract}
-                        </p>
-                      </div>
+                      <p className="text-body leading-[1.62] text-[#bcc4d0] [text-wrap:pretty]">
+                        {wikipedia.extract}
+                      </p>
                     ) : (
                       <p className="text-body-sm text-fg-muted">
                         No Wikipedia article available.
@@ -341,7 +339,7 @@ export function CoreInfoDialog({
                     )}
 
                     {/* Facts table */}
-                    <div className="mt-[22px]">
+                    <div className="mt-4">
                       {catalogEntry.company !== null && (
                         <FactRow k="Manufacturer" v={catalogEntry.company} />
                       )}
@@ -386,9 +384,9 @@ function Chip({ dot, children }: { dot?: boolean; children: ReactNode }): JSX.El
 function StatSection({ title, children }: { title: string; children: ReactNode }): JSX.Element {
   return (
     <div>
-      <div className="mb-5 flex items-center gap-[9px]">
+      <div className="mb-3 flex items-center gap-[9px]">
         <span className="inline-block h-[6px] w-[6px] rounded-[2px] bg-accent" />
-        <span className="text-body-sm font-bold uppercase tracking-[0.15em] text-fg-muted">
+        <span className="text-caption font-bold uppercase tracking-[0.15em] text-fg-muted">
           {title}
         </span>
       </div>
@@ -399,7 +397,7 @@ function StatSection({ title, children }: { title: string; children: ReactNode }
 
 function StatGrid({ children }: { children: ReactNode }): JSX.Element {
   return (
-    <div className="grid grid-cols-3 gap-x-[30px] gap-y-[22px]">
+    <div className="grid grid-cols-3 gap-x-6 gap-y-4">
       {children}
     </div>
   );
@@ -424,8 +422,8 @@ function StatCell({
       <div
         className={
           mono
-            ? 'break-all font-mono text-body tracking-[-0.01em] text-fg'
-            : 'text-body font-medium leading-[1.35] text-fg'
+            ? 'break-all font-mono text-body-sm tracking-[-0.01em] text-fg'
+            : 'text-body-sm font-medium leading-[1.35] text-fg'
         }
       >
         {children}
@@ -436,7 +434,7 @@ function StatCell({
 
 function FactRow({ k, v }: { k: string; v: string }): JSX.Element {
   return (
-    <div className="flex justify-between gap-4 border-t border-border-subtle py-[10px] text-body-lg">
+    <div className="flex justify-between gap-4 border-t border-border-subtle py-2 text-body-sm">
       <span className="text-fg-muted">{k}</span>
       <span className="font-medium text-fg">{v}</span>
     </div>
