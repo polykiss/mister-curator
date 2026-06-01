@@ -102,6 +102,27 @@ describe('isOsMetadataDir — well-known directories', () => {
     expect(isOsMetadataDir('recycle.bin')).toBe(false); // missing leading $
     expect(isOsMetadataDir('lost-found')).toBe(false); // hyphen, not plus
   });
+
+  it('matches System Volume Information (Windows FAT32 artifact on SD cards)', () => {
+    expect(isOsMetadataDir('System Volume Information')).toBe(true);
+    expect(isOsMetadataDir('SYSTEM VOLUME INFORMATION')).toBe(true);
+    expect(isOsMetadataDir('system volume information')).toBe(true);
+  });
+
+  it('does NOT match partial System Volume Information names', () => {
+    expect(isOsMetadataDir('System')).toBe(false);
+    expect(isOsMetadataDir('System Volume')).toBe(false);
+  });
+
+  it('matches .git (git repos synced to SD card)', () => {
+    expect(isOsMetadataDir('.git')).toBe(true);
+    expect(isOsMetadataDir('.GIT')).toBe(true);
+  });
+
+  it('does NOT match git- prefixed directory names', () => {
+    expect(isOsMetadataDir('git-repos')).toBe(false);
+    expect(isOsMetadataDir('git')).toBe(false); // missing leading dot
+  });
 });
 
 describe('isOsMetadataFile — chore/search-and-filter-cleanup commit 4 four-case matrix', () => {

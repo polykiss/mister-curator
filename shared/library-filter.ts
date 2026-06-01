@@ -45,6 +45,8 @@ const OS_METADATA_DIR_EXACT: ReadonlySet<string> = new Set([
   '.fseventsd',
   '$recycle.bin',
   'lost+found',
+  'system volume information', // Windows FAT32 artifact on SD cards
+  '.git',                      // git repos synced to SD card
 ]);
 
 /**
