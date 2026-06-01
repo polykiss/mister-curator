@@ -2765,18 +2765,45 @@ function parseDiscoveryShellOutput(
 }
 
 /**
- * PR-D1 (PR #27): pick the alphabetical-first launchable ROM file
- * inside an atomic folder. Used to populate `Rom.containedRomPath`
- * so the renderer can bind metadata to the folder row by looking
- * up the file's hash.
+ * Priority order for picking the primary file in an atomic folder.
+ * Lower number = higher priority. Drives `pickPrimaryRomFile`.
+ *
+ * fix/cd-hash-prefer-cue-over-bin: plain alphabetical order caused
+ * `(Track 01).bin` to sort before `.cue` (space 0x20 < period 0x2E),
+ * so audio lead-in tracks were hashed instead of the unique .cue.
+ * Many PCE-CD / MegaCD games share identical-length silence on
+ * Track 01, producing the same MD5 for completely different titles.
+ *
+ * Priority rationale:
+ *   0  .chd / .iso / .gdi — single-file disc images, inherently unique
+ *   0  all other formats (cart, archive) — single-file per game, fine
+ *   1  .cue — text launcher for multi-track sets, unique per disc layout
+ *   2  .bin — raw track data, often shared CD-DA silence (collision risk)
+ */
+const ROM_FILE_EXT_PRIORITY: Readonly<Record<string, number>> = {
+  '.cue': 1,
+  '.bin': 2,
+};
+
+function romFilePriority(filename: string): number {
+  const dot = filename.lastIndexOf('.');
+  const ext = dot < 0 ? '' : filename.slice(dot).toLowerCase();
+  return ROM_FILE_EXT_PRIORITY[ext] ?? 0;
+}
+
+/**
+ * PR-D1 (PR #27): pick the primary launchable ROM file inside an
+ * atomic folder. Used to populate `Rom.containedRomPath` so the
+ * renderer can bind metadata to the folder row by looking up the
+ * file's hash.
+ *
+ * fix/cd-hash-prefer-cue-over-bin: sorts by extension priority first
+ * (prefers .cue over .bin for multi-track CD sets), then alphabetically
+ * as a tiebreaker within the same priority tier.
  *
  * Returns undefined when no immediate-child file has a launchable
- * extension — the renderer falls back to the ImageOff + folder
- * badge presentation in that case. Doesn't recurse: the spec
- * requires "first file alphabetically whose extension is in
- * CART_EXTENSIONS ∪ DISC_EXTENSIONS" at the immediate level only;
- * deeply-nested ROMs inside an atomic folder are unusual and would
- * confuse the metadata binding (which file is "the game"?).
+ * extension. Doesn't recurse: deeply-nested ROMs inside an atomic
+ * folder are unusual and would confuse the metadata binding.
  */
 function pickPrimaryRomFile(
   immediateFiles: readonly string[],
@@ -2784,7 +2811,11 @@ function pickPrimaryRomFile(
 ): string | undefined {
   const launchable = [...immediateFiles].filter(isLaunchableRomExtension);
   if (launchable.length === 0) return undefined;
-  launchable.sort((a, b) => a.localeCompare(b));
+  launchable.sort((a, b) => {
+    const pd = romFilePriority(a) - romFilePriority(b);
+    if (pd !== 0) return pd;
+    return a.localeCompare(b);
+  });
   return `${folderPath}/${launchable[0]!}`;
 }
 

@@ -1533,7 +1533,7 @@ describe('RealMisterClient', () => {
       expect(gdi?.kind).toBe('folder-atomic');
     });
 
-    it('PR-D1 (PR #27): atomic folders carry containedRomPath = alphabetical-first launchable file', async () => {
+    it('PR-D1 (PR #27): atomic folders carry containedRomPath = priority-then-alphabetical launchable file', async () => {
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -1591,6 +1591,146 @@ describe('RealMisterClient', () => {
       // Container folders don't carry a contained-rom-path; they're
       // drilled into to enumerate their contents.
       expect(container?.containedRomPath).toBeUndefined();
+    });
+
+    it('fix/cd-hash-prefer-cue-over-bin: .cue + (Track 01).bin → picks .cue (collision-fix scenario)', async () => {
+      // Root cause: alphabetical sort put "(Track 01).bin" before ".cue"
+      // (space 0x20 < period 0x2E). PCE-CD Track 01 is a CD-DA audio
+      // track with identical silence across many games → same MD5.
+      // Fix: .cue has priority 1, .bin has priority 2 → .cue wins.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'd\tAi Chou Aniki (Japan) (SADS)\t0',
+            'f\tAi Chou Aniki (Japan) (SADS)/Ai Chou Aniki (Japan) (SADS).cue\t2360',
+            'f\tAi Chou Aniki (Japan) (SADS)/Ai Chou Aniki (Japan) (SADS) (Track 01).bin\t7914480',
+            'f\tAi Chou Aniki (Japan) (SADS)/Ai Chou Aniki (Japan) (SADS) (Track 02).bin\t7914480',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('TGFX16-CD');
+      const game = roms.find((r) => r.filename === 'Ai Chou Aniki (Japan) (SADS)');
+      expect(game?.kind).toBe('folder-atomic');
+      expect(game?.containedRomPath).toBe(
+        '/media/fat/games/TGFX16-CD/Ai Chou Aniki (Japan) (SADS)/Ai Chou Aniki (Japan) (SADS).cue',
+      );
+    });
+
+    it('fix/cd-hash-prefer-cue-over-bin: .chd beats .cue (single-file format wins)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'd\tFinal Fantasy VII\t0',
+            'f\tFinal Fantasy VII/Final Fantasy VII (Disc 1).chd\t700000000',
+            'f\tFinal Fantasy VII/Final Fantasy VII (Disc 1).cue\t512',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('PSX');
+      const game = roms.find((r) => r.filename === 'Final Fantasy VII');
+      expect(game?.kind).toBe('folder-atomic');
+      expect(game?.containedRomPath).toContain('.chd');
+    });
+
+    it('fix/cd-hash-prefer-cue-over-bin: .bin only (no .cue) → picks alphabetical-first .bin', async () => {
+      // No .cue present — .bin is the only choice. Alphabetical tiebreaker
+      // picks the first track, which is acceptable (at minimum, no
+      // regression from prior behavior, no collision across the same folder).
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'd\tGameWithoutCue\t0',
+            'f\tGameWithoutCue/Track 01.bin\t5000000',
+            'f\tGameWithoutCue/Track 02.bin\t3000000',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('TGFX16-CD');
+      const game = roms.find((r) => r.filename === 'GameWithoutCue');
+      expect(game?.kind).toBe('folder-atomic');
+      expect(game?.containedRomPath).toContain('Track 01.bin');
+    });
+
+    it('fix/cd-hash-prefer-cue-over-bin: .gdi + .bin → picks .gdi (Dreamcast format)', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'd\tShenmue (USA)\t0',
+            'f\tShenmue (USA)/Shenmue (USA).gdi\t1024',
+            'f\tShenmue (USA)/track01.bin\t2048000',
+            'f\tShenmue (USA)/track02.raw\t40960',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('Dreamcast');
+      const game = roms.find((r) => r.filename === 'Shenmue (USA)');
+      expect(game?.kind).toBe('folder-atomic');
+      expect(game?.containedRomPath).toContain('.gdi');
+    });
+
+    it('fix/cd-hash-prefer-cue-over-bin: multiple .cue files → alphabetical-first .cue wins', async () => {
+      // Multi-disc folder where a shared-prefix check doesn't fire:
+      // alphabetical tiebreaker within .cue priority tier.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'd\tGameCollection\t0',
+            'f\tGameCollection/Beta.cue\t512',
+            'f\tGameCollection/Alpha.cue\t512',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('TGFX16-CD');
+      const game = roms.find((r) => r.filename === 'GameCollection');
+      // Both are .cue (priority 1); alphabetical picks Alpha.
+      expect(game?.containedRomPath).toContain('Alpha.cue');
+    });
+
+    it('fix/cd-hash-prefer-cue-over-bin: cartridge folder (.nes) — priority defaults to 0, alphabetical tiebreaker unchanged', async () => {
+      // Regression guard: cart formats are priority 0, same as .chd/.iso/.gdi.
+      // Alphabetical sort within priority 0 still works as before.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'd\tGameFolder\t0',
+            'f\tGameFolder/z-variant.zip\t40960',
+            'f\tGameFolder/a-variant.zip\t40960',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('NES');
+      const game = roms.find((r) => r.filename === 'GameFolder');
+      expect(game?.containedRomPath).toContain('a-variant.zip');
     });
 
     it('fix/folder-atomic-rom-path-stability: containedRomPath for a hidden folder-atomic uses the undotted parent (canonical cache key)', async () => {

@@ -35,6 +35,18 @@ const HASH_CACHE_SCHEMA_VERSION = 1 as const;
  *                           extracted `size`. For non-archive paths
  *                           the two are identical; for `.zip` they
  *                           differ.
+ *   v5 (fix/cd-hash-prefer-cue-over-bin):
+ *                           `pickPrimaryRomFile` now prefers `.cue`
+ *                           over `.bin` for CD folder-atomics. Audio
+ *                           track (.bin) hashes for PCE-CD / MegaCD
+ *                           collide across games sharing identical
+ *                           CD-DA silence; the .cue is unique per
+ *                           disc layout. All v4 hashes.json files are
+ *                           invalidated; users see a full re-hash on
+ *                           next connect. Manual-overrides keyed by
+ *                           v4 hashes are orphaned (stale but harmless
+ *                           by-hash/*.json files — they will not match
+ *                           the new .cue-based hashes).
  *
  * fix/count-and-status-indicator commit 4: a v3-shaped entry has a
  * valid hash + mtime; only `diskSizeBytes` is missing. The lazy
@@ -44,7 +56,7 @@ const HASH_CACHE_SCHEMA_VERSION = 1 as const;
  * the v3→v4 strategy bump from PR #42 commit 1 would otherwise
  * force on every existing user.
  */
-const HASH_STRATEGY_VERSION = 4 as const;
+const HASH_STRATEGY_VERSION = 5 as const;
 const HASH_STRATEGY_VERSION_V3 = 3 as const;
 
 /** Cap per SSH round-trip. Larger inputs chunk in JS. */
