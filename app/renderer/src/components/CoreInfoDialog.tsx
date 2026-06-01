@@ -7,6 +7,7 @@ import type { SystemCatalogWireEntry, WikipediaSummary } from '@shared/preload-a
 import type { CoreEntry } from '@shared/types';
 
 import { Button } from '@app/renderer/src/components/ui/button';
+import { formatSupportType, formatSystemType } from '@app/renderer/src/lib/system-catalog-format';
 import {
   Dialog,
   DialogContent,
@@ -182,7 +183,7 @@ export function CoreInfoDialog({
                         <Chip>{formatYears(catalogEntry!.yearStart, catalogEntry!.yearEnd)}</Chip>
                       )}
                       {catalogEntry!.supportType !== null && (
-                        <Chip>{catalogEntry!.supportType}</Chip>
+                        <Chip>{formatSupportType(catalogEntry!.supportType)}</Chip>
                       )}
                     </div>
                   </>
@@ -272,7 +273,7 @@ export function CoreInfoDialog({
                           <StatCell label="Manufacturer">{catalogEntry.company}</StatCell>
                         )}
                         {catalogEntry.type !== null && (
-                          <StatCell label="Type">{catalogEntry.type}</StatCell>
+                          <StatCell label="Type">{formatSystemType(catalogEntry.type)}</StatCell>
                         )}
                         {(catalogEntry.yearStart !== null || catalogEntry.yearEnd !== null) && (
                           <StatCell label="Years">
@@ -280,7 +281,7 @@ export function CoreInfoDialog({
                           </StatCell>
                         )}
                         {catalogEntry.supportType !== null && (
-                          <StatCell label="Format">{catalogEntry.supportType}</StatCell>
+                          <StatCell label="Format">{formatSupportType(catalogEntry.supportType)}</StatCell>
                         )}
                         {catalogEntry.extensions.length > 0 && (
                           <StatCell label="Extensions" mono span={3}>
@@ -347,10 +348,10 @@ export function CoreInfoDialog({
                         <FactRow k="Released" v={formatYears(catalogEntry.yearStart, catalogEntry.yearEnd)} />
                       )}
                       {catalogEntry.supportType !== null && (
-                        <FactRow k="Media" v={catalogEntry.supportType} />
+                        <FactRow k="Media" v={formatSupportType(catalogEntry.supportType) ?? ''} />
                       )}
                       {catalogEntry.type !== null && (
-                        <FactRow k="Type" v={catalogEntry.type} />
+                        <FactRow k="Type" v={formatSystemType(catalogEntry.type) ?? ''} />
                       )}
                     </div>
                   </>
