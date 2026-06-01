@@ -17,6 +17,7 @@ export interface SystemCatalogWireEntry {
   readonly id: number;
   readonly displayName: string;
   readonly logoUrl: string | null;
+  readonly photoUrl: string | null;
   readonly company: string | null;
   readonly type: string | null;
   readonly yearStart: number | null;
@@ -32,6 +33,7 @@ interface CatalogDiskRecord {
     readonly id: number;
     readonly displayName: string;
     readonly logoUrl: string | null;
+    readonly photoUrl?: string | null;
     readonly company?: string | null;
     readonly type?: string | null;
     readonly yearStart?: number | null;
@@ -84,6 +86,7 @@ export class SystemCatalogService {
           id: entry.id,
           displayName: entry.displayName,
           logoUrl: entry.logoUrl,
+          photoUrl: entry.photoUrl,
           company: entry.company,
           type: entry.type,
           yearStart: entry.yearStart,
@@ -176,6 +179,7 @@ export class SystemCatalogService {
             id: s.id,
             displayName: s.displayName,
             logoUrl: s.logoUrl ?? null,
+            photoUrl: s.photoUrl ?? null,
             company: s.company ?? null,
             type: s.type ?? null,
             yearStart: s.yearStart ?? null,
@@ -198,6 +202,7 @@ export class SystemCatalogService {
         id: e.id,
         displayName: e.displayName,
         logoUrl: e.logoUrl,
+        photoUrl: e.photoUrl,
         company: e.company,
         type: e.type,
         yearStart: e.yearStart,

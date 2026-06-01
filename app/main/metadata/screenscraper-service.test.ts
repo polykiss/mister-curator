@@ -1404,6 +1404,7 @@ const SAMPLE_SYSTEMES_RESPONSE = {
         medias: [
           { type: 'logo-monochrome', region: 'wor', url: 'https://ss.example/snes-mono.png', format: 'png' },
           { type: 'wheel', region: 'wor', url: 'https://ss.example/snes-wheel.png', format: 'png' },
+          { type: 'photo', region: 'us', url: 'https://ss.example/snes-photo.png', format: 'png' },
         ],
         compagnie: 'Nintendo',
         type: 'Console',
@@ -1435,6 +1436,7 @@ describe('feat/system-catalog-data-layer — parseSystemCatalog', () => {
     const snes = result!.get(4);
     expect(snes).toMatchObject({ id: 4, displayName: 'Super Nintendo Entertainment System' });
     expect(snes!.logoUrl).toBe('https://ss.example/snes-mono.png');
+    expect(snes!.photoUrl).toBe('https://ss.example/snes-photo.png');
     expect(snes!.company).toBe('Nintendo');
     expect(snes!.type).toBe('Console');
     expect(snes!.yearStart).toBe(1990);
@@ -1443,11 +1445,49 @@ describe('feat/system-catalog-data-layer — parseSystemCatalog', () => {
     expect(snes!.extensions).toEqual(['sfc', 'smc', 'fig']);
     const arcade = result!.get(75);
     expect(arcade).toMatchObject({ id: 75, displayName: 'Arcade', logoUrl: null });
+    expect(arcade!.photoUrl).toBeNull();
     expect(arcade!.company).toBeNull();
     expect(arcade!.type).toBe('Arcade');
     expect(arcade!.yearStart).toBe(1971);
     expect(arcade!.yearEnd).toBeNull();
     expect(arcade!.extensions).toEqual([]);
+  });
+
+  it('extracts photoUrl from photo media type', () => {
+    const body = {
+      response: {
+        systemes: [
+          {
+            id: 4,
+            noms: { nom_us: 'SNES' },
+            medias: [
+              { type: 'photo', region: 'us', url: 'https://ss/snes-photo.png', format: 'png' },
+              { type: 'logo-monochrome', region: 'wor', url: 'https://ss/snes-logo.png', format: 'png' },
+            ],
+          },
+        ],
+      },
+    };
+    const result = parseSystemCatalog(body)!;
+    expect(result.get(4)!.photoUrl).toBe('https://ss/snes-photo.png');
+  });
+
+  it('photoUrl is null when no photo media exists', () => {
+    const body = {
+      response: {
+        systemes: [
+          {
+            id: 4,
+            noms: { nom_us: 'SNES' },
+            medias: [
+              { type: 'logo-monochrome', region: 'wor', url: 'https://ss/snes-logo.png', format: 'png' },
+            ],
+          },
+        ],
+      },
+    };
+    const result = parseSystemCatalog(body)!;
+    expect(result.get(4)!.photoUrl).toBeNull();
   });
 
   it('returns null for non-object body', () => {

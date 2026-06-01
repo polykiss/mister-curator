@@ -32,6 +32,7 @@ import {
 import { OpenVGDBService } from '@app/main/metadata/openvgdb-service';
 import { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
 import { SystemCatalogService } from '@app/main/metadata/system-catalog-service';
+import { WikipediaService } from '@app/main/metadata/wikipedia-service';
 import { AutoScrapeEngine } from '@app/main/services/auto-scrape-engine';
 import { groupByPrimaryZipBasename } from '@app/main/services/arcade-prefetch-paths';
 import { ARCADE_VIRTUAL_CORE_ID } from '@shared/arcade-mra';
@@ -229,6 +230,10 @@ void app.whenReady().then(async () => {
     systemLogoCache,
     path.join(metadataRoot, 'system-catalog.json'),
   );
+  const wikipedia = new WikipediaService({
+    rootDir: metadataRoot,
+    userAgent: 'MiSTerCurator/0.1 (https://github.com/polykiss/mister-curator)',
+  });
 
   const metadataOrchestrator = new MetadataOrchestrator(
     hashService,
@@ -440,6 +445,8 @@ void app.whenReady().then(async () => {
     emitUpdateModeProgress,
     // feat/system-catalog-data-layer (#30 PR-1)
     systemCatalog,
+    // feat/core-info-dialog-v2
+    wikipedia,
   );
 
   const window = createWindow();

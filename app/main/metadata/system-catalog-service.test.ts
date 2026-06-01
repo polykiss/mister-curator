@@ -18,7 +18,7 @@ function makeEntry(
   displayName: string,
   logoUrl: string | null = null,
 ): SystemCatalogEntry {
-  return { id, displayName, logoUrl, company: null, type: null, yearStart: null, yearEnd: null, supportType: null, extensions: [] };
+  return { id, displayName, logoUrl, photoUrl: null, company: null, type: null, yearStart: null, yearEnd: null, supportType: null, extensions: [] };
 }
 
 const SNES_ENTRY = makeEntry(4, 'Super Nintendo Entertainment System', 'https://ss/snes.svg');
@@ -114,7 +114,7 @@ describe('feat/system-catalog-data-layer — SystemCatalogService.getWireCatalog
   });
 
   it('loads old-format disk cache (missing new fields) with null/[] fallbacks', async () => {
-    // Simulates a catalog written by an older version without the new fields
+    // Simulates a catalog written by an older version without photoUrl or other new fields
     const oldFormat = JSON.stringify({
       fetchedAt: new Date().toISOString(),
       systems: [{ id: 4, displayName: 'Super Nintendo Entertainment System', logoUrl: 'https://ss/snes.svg' }],
@@ -126,12 +126,33 @@ describe('feat/system-catalog-data-layer — SystemCatalogService.getWireCatalog
     expect(wire).not.toBeNull();
     const entry = wire!['SNES'];
     expect(entry).toBeDefined();
+    expect(entry!.photoUrl).toBeNull();
     expect(entry!.company).toBeNull();
     expect(entry!.type).toBeNull();
     expect(entry!.yearStart).toBeNull();
     expect(entry!.yearEnd).toBeNull();
     expect(entry!.supportType).toBeNull();
     expect(entry!.extensions).toEqual([]);
+  });
+
+  it('getWireCatalog includes photoUrl from catalog entry', async () => {
+    const entryWithPhoto: SystemCatalogEntry = {
+      id: 4,
+      displayName: 'Super Nintendo Entertainment System',
+      logoUrl: 'https://ss/snes-logo.svg',
+      photoUrl: 'https://ss/snes-photo.png',
+      company: 'Nintendo',
+      type: 'Console',
+      yearStart: 1990,
+      yearEnd: 2003,
+      supportType: 'Cartridge',
+      extensions: ['sfc', 'smc'],
+    };
+    const catalog = makeCatalog([[4, entryWithPhoto]]);
+    const svc = makeService({ fetchResult: catalog });
+    await svc.ensureCatalog();
+    const wire = svc.getWireCatalog();
+    expect(wire!['SNES']!.photoUrl).toBe('https://ss/snes-photo.png');
   });
 });
 
@@ -204,7 +225,7 @@ describe('fix/system-catalog-visibility-and-latch — SystemCatalogService.rescr
   });
 
   it('returns { success: true, status: "ok" } on successful fetch', async () => {
-    const catalog = new Map([[4, { id: 4, displayName: 'SNES', logoUrl: null, company: null, type: null, yearStart: null, yearEnd: null, supportType: null, extensions: [] as readonly string[] }]]);
+    const catalog = new Map([[4, { id: 4, displayName: 'SNES', logoUrl: null, photoUrl: null, company: null, type: null, yearStart: null, yearEnd: null, supportType: null, extensions: [] as readonly string[] }]]);
     const mockScraper = {
       fetchSystemCatalog: vi.fn(async () => catalog),
       getStatus: vi.fn(() => 'available'),

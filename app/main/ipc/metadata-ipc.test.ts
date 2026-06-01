@@ -138,6 +138,8 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
       () => undefined,
       // feat/system-catalog-data-layer (#30 PR-1): not exercised here.
       null,
+      // feat/core-info-dialog-v2: not exercised here.
+      null,
     );
   });
 
@@ -310,6 +312,8 @@ describe('IPC bridge — metadata pipeline (PR #15)', () => {
       () => undefined,
       // feat/system-catalog-data-layer (#30 PR-1): not exercised here.
       null,
+      // feat/core-info-dialog-v2: not exercised here.
+      null,
     );
     const h = handlers.get(IPC_CHANNELS.ensureMetadataDatabase);
     await h!.handler({});
@@ -374,6 +378,8 @@ describe('IPC bridge — searchScreenScraperByName diag logs', () => {
       { setFocus: () => undefined } as never,
       (opts.withSS ?? true ? stubScreenScraper : null) as never,
       () => undefined,
+      null,
+      // feat/core-info-dialog-v2: not exercised here.
       null,
     );
   }
@@ -522,6 +528,8 @@ describe('IPC bridge — setAutoScrapeFocus passes ARCADE_VIRTUAL_CORE_ID throug
       stubEngine as never,
       null,
       () => undefined,
+      null,
+      // feat/core-info-dialog-v2: not exercised here.
       null,
     );
   });
