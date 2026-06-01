@@ -10,8 +10,11 @@ import { coreDisplayName, isCoreHidden } from '@shared/core-matching';
 import type { CoreEntry } from '@shared/types';
 
 import { CoreInfoDialog } from '@app/renderer/src/components/CoreInfoDialog';
+import { CoreLogo } from '@app/renderer/src/components/CoreLogo';
+import { CoreRenameDialog } from '@app/renderer/src/components/CoreRenameDialog';
 import type { RomRowMenuItem } from '@app/renderer/src/components/RomRowMenu';
 import { RomRowMenu } from '@app/renderer/src/components/RomRowMenu';
+import { useCoreCustomNames } from '@app/renderer/src/lib/use-core-custom-names';
 
 import { Button } from '@app/renderer/src/components/ui/button';
 import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
@@ -72,6 +75,7 @@ export function CoresPane(): JSX.Element {
     y: number;
   } | null>(null);
   const [infoFor, setInfoFor] = useState<CoreEntry | null>(null);
+  const [renameFor, setRenameFor] = useState<CoreEntry | null>(null);
   const [systemCatalog, setSystemCatalog] = useState<Record<
     string,
     SystemCatalogWireEntry
@@ -80,23 +84,44 @@ export function CoresPane(): JSX.Element {
     new Set(),
   );
 
-  // Lazy-load the system catalog the first time a context menu opens.
-  // Empty-object fallback prevents hammering IPC on repeated failures.
+  // feat/sidebar-logos-and-naming (#30 PR-3) — eager catalog load on
+  // mount so every row can render its logo + SS displayName without
+  // waiting for a first right-click.
   useEffect(() => {
-    if (menuFor !== null && systemCatalog === null) {
+    if (systemCatalog === null) {
       void window.mister
         .getSystemCatalog()
         .then(setSystemCatalog)
         .catch(() => { setSystemCatalog({}); });
     }
-  }, [menuFor, systemCatalog]);
+  }, []); // empty deps — run once on mount
+
+  const customNames = useCoreCustomNames();
 
   const buildMenuItems = (core: CoreEntry): readonly RomRowMenuItem[] => {
     const entry = systemCatalog?.[core.id] ?? null;
     const hasLogo = entry !== null && entry.logoUrl !== null;
     const isInFlight = rescrapeInFlight.has(core.id);
+    const hasCustom = customNames.customName(core.id) !== null;
 
     return [
+      {
+        label: 'Rename…',
+        onSelect: () => {
+          setMenuFor(null);
+          setRenameFor(core);
+        },
+      },
+      ...(hasCustom
+        ? [{
+            label: 'Reset name',
+            onSelect: () => {
+              setMenuFor(null);
+              customNames.clearCustomName(core.id);
+              toast.success('Name reset');
+            },
+          }]
+        : []),
       {
         label: 'Show core info…',
         onSelect: () => {
@@ -365,6 +390,8 @@ export function CoresPane(): JSX.Element {
         pendingCoreIds,
         autoScrapeProgress,
         canMutate,
+        catalog: systemCatalog,
+        customNames,
         onSelect: selectCore,
         onHide,
         onShow,
@@ -392,6 +419,24 @@ export function CoresPane(): JSX.Element {
         open={infoFor !== null}
         onOpenChange={(open) => { if (!open) setInfoFor(null); }}
       />
+
+      <CoreRenameDialog
+        key={renameFor?.id ?? 'none'}
+        core={renameFor}
+        ssDisplayName={renameFor !== null ? (systemCatalog?.[renameFor.id]?.displayName ?? null) : null}
+        currentCustomName={renameFor !== null ? customNames.customName(renameFor.id) : null}
+        open={renameFor !== null}
+        onOpenChange={(open) => { if (!open) setRenameFor(null); }}
+        onSave={(name) => {
+          if (renameFor === null) return;
+          if (name.trim().length === 0) {
+            customNames.clearCustomName(renameFor.id);
+          } else {
+            customNames.setCustomName(renameFor.id, name.trim());
+          }
+          setRenameFor(null);
+        }}
+      />
     </div>
   );
 }
@@ -412,6 +457,12 @@ interface RenderArgs {
    */
   readonly autoScrapeProgress: AutoScrapeProgressEvent;
   readonly canMutate: boolean;
+  readonly catalog: Record<string, SystemCatalogWireEntry> | null;
+  readonly customNames: {
+    customName: (coreId: string) => string | null;
+    setCustomName: (coreId: string, name: string) => void;
+    clearCustomName: (coreId: string) => void;
+  };
   readonly onSelect: (id: string | null) => void;
   readonly onHide: (core: CoreEntry) => Promise<void>;
   readonly onShow: (core: CoreEntry) => Promise<void>;
@@ -444,7 +495,7 @@ function renderCoreList(args: RenderArgs): JSX.Element {
     return (
       <div className="space-y-1 p-3">
         {Array.from({ length: 6 }).map((_, i) => (
-          <Skeleton key={i} className="h-10 w-full" />
+          <Skeleton key={i} className="h-14 w-full" />
         ))}
       </div>
     );
@@ -497,13 +548,17 @@ function renderCoreList(args: RenderArgs): JSX.Element {
         const isHiddenCore = isCoreHidden(core);
         const isArcade = core.category === 'Arcade';
         const isPending = args.pendingCoreIds.has(core.id);
-        const displayName = coreDisplayName(core.id);
+        const catalogEntry = args.catalog?.[core.id] ?? null;
+        const technicalId = coreDisplayName(core.id);
+        const customName = args.customNames.customName(core.id);
+        const displayName = customName ?? catalogEntry?.displayName ?? technicalId;
+        const showSubtitle = displayName !== technicalId;
 
         return (
           <li
             key={core.id}
             className={cn(
-              'group/row relative flex h-10 items-center gap-2 border-b border-subtle pl-4 text-body transition-colors',
+              'group/row relative flex h-14 items-center gap-3 border-b border-subtle pl-4 text-body transition-colors',
               !isSelected && 'hover:bg-elevated',
               isSelected && 'bg-overlay',
               // Hidden rows lean entirely on dimming: opacity +
@@ -529,31 +584,36 @@ function renderCoreList(args: RenderArgs): JSX.Element {
               role="option"
               aria-selected={isSelected}
               onClick={() => args.onSelect(core.id)}
-              className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left focus-visible:outline-none"
+              className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none"
             >
-              <span className="flex min-w-0 items-center gap-2">
-                {/* fix/count-and-status-indicator commit 2 — always
-                    renders. Cold blue when the engine hasn't started,
-                    mid-gradient while scraping, full signal-green
-                    with halo once done. Placed before the name so
-                    the indicator stays in a fixed column regardless
-                    of name length. */}
-                <StatusIndicator
-                  progress={progressForCore(core.id, args.autoScrapeProgress)}
-                  sizePx={12}
-                  ariaLabel={`Scrape progress for ${displayName}`}
-                />
+              {/* fix/count-and-status-indicator commit 2 — placed before
+                  the logo so the indicator column stays fixed. */}
+              <StatusIndicator
+                progress={progressForCore(core.id, args.autoScrapeProgress)}
+                sizePx={12}
+                ariaLabel={`Scrape progress for ${displayName}`}
+              />
+
+              <CoreLogo url={catalogEntry?.logoUrl ?? null} />
+
+              <div className="flex min-w-0 flex-col items-start">
                 <span
                   className={cn(
-                    'truncate',
+                    'w-full truncate',
                     isSelected && !isHiddenCore && 'font-medium text-fg',
                   )}
+                  title={displayName}
                 >
                   {displayName}
                 </span>
-              </span>
+                {showSubtitle && (
+                  <span className="w-full truncate text-body-sm text-fg-muted">
+                    {technicalId}
+                  </span>
+                )}
+              </div>
 
-              <span className="flex shrink-0 items-center gap-2 font-mono text-body-sm text-fg-muted tabular">
+              <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-body-sm text-fg-muted tabular">
                 <CoreCountSummary core={core} />
               </span>
             </button>
