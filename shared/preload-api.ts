@@ -165,6 +165,8 @@ export const IPC_CHANNELS = {
   rescrapeSystemLogo: 'mister:rescrapeSystemLogo',
   getSystemCatalog: 'mister:getSystemCatalog',
   rescrapeSystemCatalog: 'mister:rescrapeSystemCatalog',
+  // feat/core-info-dialog-v2 — Wikipedia summary for the Core info dialog right strip.
+  getSystemWikipediaSummary: 'mister:getSystemWikipediaSummary',
 } as const;
 
 /** PR #15 prefetch progress kind. Discriminator for the wire event. */
@@ -856,6 +858,13 @@ export interface MisterApi {
    * a toast or diagnostic panel.
    */
   rescrapeSystemCatalog(): Promise<SystemCatalogRescrapeResult>;
+  /**
+   * Return a cached Wikipedia page summary for the system with the
+   * given SS system ID. Fetches from Wikipedia and caches on disk when
+   * missing or stale (30-day TTL). Returns null when the system has no
+   * Wikipedia article or the fetch fails.
+   */
+  getSystemWikipediaSummary(ssId: number): Promise<WikipediaSummary | null>;
 }
 
 /**
@@ -980,12 +989,19 @@ export interface SystemCatalogWireEntry {
   readonly id: number;
   readonly displayName: string;
   readonly logoUrl: string | null;
+  readonly photoUrl: string | null;
   readonly company: string | null;
   readonly type: string | null;
   readonly yearStart: number | null;
   readonly yearEnd: number | null;
   readonly supportType: string | null;
   readonly extensions: readonly string[];
+}
+
+/** Wikipedia page summary for a system, cached on disk keyed by SS system ID. */
+export interface WikipediaSummary {
+  readonly extract: string;
+  readonly thumbnailUrl: string | null;
 }
 
 const VALID_CONNECTION_ERROR_CODES: ReadonlySet<ConnectionErrorCode> = new Set([

@@ -85,16 +85,48 @@ export function CoresPane(): JSX.Element {
   );
 
   // feat/sidebar-logos-and-naming (#30 PR-3) — eager catalog load on
-  // mount so every row can render its logo + SS displayName without
-  // waiting for a first right-click.
+  // mount, with retry logic so a cold-cache scenario (catalog being
+  // freshly fetched from SS on the main side) doesn't strand the
+  // sidebar on null forever.
+  //
+  // fix/core-info-dialog-v2-regressions — added status dep + bounded
+  // retry. The original one-shot fetch returned null when ensureCatalog()
+  // was still in-flight; now we also retry on each 'connected' transition
+  // and back-off-retry up to MAX_ATTEMPTS times.
+  const MAX_CATALOG_ATTEMPTS = 10;
+  const CATALOG_RETRY_MS = 1500;
+
   useEffect(() => {
-    if (systemCatalog === null) {
-      void window.mister
-        .getSystemCatalog()
-        .then(setSystemCatalog)
-        .catch(() => { setSystemCatalog({}); });
-    }
-  }, []); // empty deps — run once on mount
+    if (systemCatalog !== null) return;
+    let cancelled = false;
+    let attempt = 0;
+
+    const fetchOnce = async (): Promise<void> => {
+      if (cancelled || systemCatalog !== null) return;
+      attempt += 1;
+      try {
+        const result = await window.mister.getSystemCatalog();
+        if (cancelled) return;
+        if (result !== null) {
+          setSystemCatalog(result);
+          return;
+        }
+      } catch {
+        // network/ipc error — fall through to retry
+      }
+      if (attempt < MAX_CATALOG_ATTEMPTS) {
+        setTimeout(() => { void fetchOnce(); }, CATALOG_RETRY_MS);
+      } else if (!cancelled) {
+        setSystemCatalog({});
+      }
+    };
+
+    void fetchOnce();
+    return () => { cancelled = true; };
+  // Re-trigger on every 'connected' transition so reconnects pick up
+  // the catalog even if it wasn't ready on the initial mount.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]); // intentionally omit systemCatalog to avoid restart loop
 
   const customNames = useCoreCustomNames();
 
@@ -181,21 +213,29 @@ export function CoresPane(): JSX.Element {
     const aliasFiltered = hiddenFiltered.filter(
       (c) => !suppressedAliasTargetIds.has(c.id),
     );
-    if (showMameAsCores) return aliasFiltered;
-    return aliasFiltered.filter((c) => c.id !== 'mame' && c.id !== 'hbmame');
-  }, [cores, showHidden, showMameAsCores, suppressedAliasTargetIds]);
+    const mameFiltered = showMameAsCores
+      ? aliasFiltered
+      : aliasFiltered.filter((c) => c.id !== 'mame' && c.id !== 'hbmame');
+    const resolveName = (c: CoreEntry): string =>
+      customNames.customName(c.id) ?? systemCatalog?.[c.id]?.displayName ?? coreDisplayName(c.id);
+    return [...mameFiltered].sort((a, b) =>
+      resolveName(a).localeCompare(resolveName(b), undefined, { sensitivity: 'base' }),
+    );
+  }, [cores, showHidden, showMameAsCores, suppressedAliasTargetIds, customNames, systemCatalog]);
 
-  const emptyHideableCores = useMemo(
-    () =>
-      (cores ?? []).filter(
+  const emptyHideableCores = useMemo(() => {
+    const resolveName = (c: CoreEntry): string =>
+      customNames.customName(c.id) ?? systemCatalog?.[c.id]?.displayName ?? coreDisplayName(c.id);
+    return (cores ?? [])
+      .filter(
         (c) =>
           c.romCount === 0 &&
           c.category !== 'Arcade' &&
           !isCoreHidden(c) &&
           !suppressedAliasTargetIds.has(c.id),
-      ),
-    [cores, suppressedAliasTargetIds],
-  );
+      )
+      .sort((a, b) => resolveName(a).localeCompare(resolveName(b), undefined, { sensitivity: 'base' }));
+  }, [cores, suppressedAliasTargetIds, customNames, systemCatalog]);
 
   // "Unhide all (N)" only targets cores in the on-MiSTer ledger — the
   // ones we hid ourselves. Other dot-prefixed cores (firmware system

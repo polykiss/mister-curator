@@ -149,6 +149,7 @@ export interface SystemCatalogEntry {
   readonly id: number;
   readonly displayName: string;
   readonly logoUrl: string | null;
+  readonly photoUrl: string | null;
   readonly company: string | null;
   readonly type: string | null;
   readonly yearStart: number | null;
@@ -1003,13 +1004,14 @@ export function parseSystemCatalog(body: unknown): SystemCatalog | null {
     const displayName = pickSystemName(sys.noms);
     if (displayName === null) continue;
     const logoUrl = pickMedia(sys.medias, SYSTEM_LOGO_MEDIA_TYPES);
+    const photoUrl = pickMedia(sys.medias, ['photo']);
     const company = pickScalarString(sys.compagnie);
     const type = pickScalarString(sys.type);
     const yearStart = pickYear(sys.datedebut);
     const yearEnd = pickYear(sys.datefin);
     const supportType = pickScalarString(sys.supporttype);
     const extensions = pickExtensionList(sys.extensions);
-    entries.set(id, { id, displayName, logoUrl, company, type, yearStart, yearEnd, supportType, extensions });
+    entries.set(id, { id, displayName, logoUrl, photoUrl, company, type, yearStart, yearEnd, supportType, extensions });
   }
   return entries.size > 0 ? entries : null;
 }

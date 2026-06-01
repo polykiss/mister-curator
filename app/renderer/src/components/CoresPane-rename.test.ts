@@ -36,12 +36,23 @@ describe('CoresPane — sidebar logos and naming', () => {
     expect(SOURCE).toContain('setRenameFor');
   });
 
-  it('loads catalog eagerly on mount (empty deps effect)', () => {
+  it('loads catalog with bounded retry pattern', () => {
     expect(SOURCE).toContain('getSystemCatalog');
-    // The effect must use empty deps [], not depend on menuFor.
-    // Check that 'getSystemCatalog' does not appear inside an
-    // if-block that guards on menuFor (line-local check, not cross-file).
+    expect(SOURCE).toContain('MAX_CATALOG_ATTEMPTS');
+    expect(SOURCE).toContain('CATALOG_RETRY_MS');
+    // retries on connection transitions, not on menuFor
     expect(SOURCE).not.toContain('menuFor !== null && systemCatalog === null');
+  });
+
+  it('sorts visibleCores by resolved display name (custom → SS → technical)', () => {
+    // Sort must use the three-tier name so renaming a core re-positions it
+    expect(SOURCE).toContain('localeCompare');
+    expect(SOURCE).toContain('sensitivity');
+    expect(SOURCE).toMatch(/customNames\.customName.*systemCatalog.*\?.*\[.*\].*displayName.*coreDisplayName/s);
+  });
+
+  it('includes customNames and systemCatalog in visibleCores useMemo deps', () => {
+    expect(SOURCE).toMatch(/\[cores.*customNames.*systemCatalog|customNames.*systemCatalog.*cores/s);
   });
 
   it('threads catalog through RenderArgs', () => {

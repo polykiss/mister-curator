@@ -40,6 +40,7 @@ import type { MetadataOrchestrator } from '@app/main/metadata/metadata-orchestra
 import { lookupScreenScraperSystemId } from '@app/main/metadata/screenscraper-system-map';
 import type { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
 import type { SystemCatalogService } from '@app/main/metadata/system-catalog-service';
+import type { WikipediaService } from '@app/main/metadata/wikipedia-service';
 import type { AutoScrapeEngine } from '@app/main/services/auto-scrape-engine';
 import type { ProfileStore } from '@app/main/storage/profile-store';
 
@@ -150,6 +151,8 @@ export function registerIpcHandlers(
   emitUpdateModeProgress: UpdateModeProgressEmitter,
   // feat/system-catalog-data-layer (#30 PR-1)
   systemCatalog: SystemCatalogService | null,
+  // feat/core-info-dialog-v2
+  wikipedia: WikipediaService | null,
 ): void {
   handle<[], MisterProfile[]>(IPC_CHANNELS.listProfiles, () => store.list());
 
@@ -664,5 +667,17 @@ export function registerIpcHandlers(
     () =>
       systemCatalog?.rescrapeSystemCatalog() ??
       Promise.resolve({ success: false, status: 'unavailable' }),
+  );
+
+  handle<[number], unknown>(
+    IPC_CHANNELS.getSystemWikipediaSummary,
+    async (ssId) => {
+      if (wikipedia === null || systemCatalog === null) return null;
+      const wire = systemCatalog.getWireCatalog();
+      if (wire === null) return null;
+      const entry = Object.values(wire).find((e) => e.id === ssId);
+      if (entry === undefined) return null;
+      return wikipedia.ensureSummary(ssId, entry.displayName);
+    },
   );
 }

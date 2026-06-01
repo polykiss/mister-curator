@@ -25,6 +25,7 @@ import type {
   RomVisibilityChangeWire,
   SystemCatalogRescrapeResult,
   SystemCatalogWireEntry,
+  WikipediaSummary,
   SystemFileMarkChangeWire,
   UpdateModeProgressEvent,
   UpdateModeRestoreResult,
@@ -418,6 +419,8 @@ const api: MisterApi = {
     invoke<Record<string, SystemCatalogWireEntry> | null>(IPC_CHANNELS.getSystemCatalog),
   rescrapeSystemCatalog: () =>
     invoke<SystemCatalogRescrapeResult>(IPC_CHANNELS.rescrapeSystemCatalog),
+  getSystemWikipediaSummary: (ssId: number) =>
+    invoke<WikipediaSummary | null>(IPC_CHANNELS.getSystemWikipediaSummary, ssId),
 };
 
 contextBridge.exposeInMainWorld('mister', api);
