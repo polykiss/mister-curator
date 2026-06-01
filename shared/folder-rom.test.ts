@@ -759,6 +759,87 @@ describe('classifyFolder — fix/scrape-and-count-correctness commit 3 (disc col
   });
 });
 
+describe('classifyFolder — generic track-naming disc folders (PR D)', () => {
+  // Root cause: countRomGroups() counted each unclaimed .bin track as
+  // its own group, so a single TGFX16-CD game with generic "Track NN.bin"
+  // naming tripped DISC_COLLECTION_THRESHOLD and misclassified as
+  // container. Fix: use countDiscImageGroups() which only counts primary
+  // launcher files (.cue/.iso/.chd/.gdi), ignoring raw track/companion files.
+
+  it('cue + 8 generic-named bins → atomic', () => {
+    const files: string[] = ['Akumajou X.cue'];
+    for (let i = 1; i <= 8; i += 1) {
+      files.push(`Track ${String(i).padStart(2, '0')}.bin`);
+    }
+    expect(classifyFolder({ files, dirs: [], folderName: 'Akumajou X' })).toBe('atomic');
+  });
+
+  it('8 generic-named bins only (no cue) → atomic', () => {
+    const files: string[] = [];
+    for (let i = 1; i <= 8; i += 1) {
+      files.push(`Track ${String(i).padStart(2, '0')}.bin`);
+    }
+    expect(classifyFolder({ files, dirs: [], folderName: 'Akumajou X' })).toBe('atomic');
+  });
+
+  it('flat .iso collection above threshold (30 files) → container (regression guard)', () => {
+    // Distinct real-world titles — no shared prefix — so the
+    // shared-prefix-atomic rule does not fire before we reach the
+    // disc-image threshold check.
+    const files = [
+      'Final Fantasy VII.iso', 'Chrono Cross.iso', 'Suikoden II.iso',
+      'Xenogears.iso', 'Vagrant Story.iso', 'Parasite Eve.iso',
+      'Silent Hill.iso', 'Metal Gear Solid.iso', 'Castlevania SOTN.iso',
+      'Resident Evil 2.iso', 'Tekken 3.iso', 'Crash Bandicoot 3.iso',
+      'Spyro the Dragon.iso', 'Gran Turismo 2.iso', 'Twisted Metal 2.iso',
+      'Ridge Racer Type 4.iso', 'Wild Arms 2.iso', 'Star Ocean Second Story.iso',
+      'Valkyrie Profile.iso', 'Threads of Fate.iso', 'SaGa Frontier.iso',
+      'Brave Fencer Musashi.iso', 'Front Mission 3.iso', 'Bushido Blade.iso',
+      'Crash Team Racing.iso', 'PaRappa the Rapper.iso', 'LSD Dream Emulator.iso',
+      'Vib-Ribbon.iso', 'Persona 2 Innocent Sin.iso', 'Tales of Destiny.iso',
+    ];
+    expect(classifyFolder({ files, dirs: [] })).toBe('container');
+  });
+
+  it('flat .chd collection above threshold (6 files) → container (regression guard)', () => {
+    const files = [
+      'Sonic CD.chd', 'Popful Mail.chd', 'Lunar Silver Star.chd',
+      'Vay.chd', 'Shining Force CD.chd', 'Batman Returns.chd',
+    ];
+    expect(classifyFolder({ files, dirs: [] })).toBe('container');
+  });
+
+  it('2 cues + named tracks (low count) → atomic (multi-game below threshold)', () => {
+    const files = [
+      'Game1.cue', 'Game1 (Track 01).bin',
+      'Game2.cue', 'Game2 (Track 01).bin',
+    ];
+    expect(classifyFolder({ files, dirs: [] })).toBe('atomic');
+  });
+
+  it('threshold boundary — exactly 5 disc images → atomic', () => {
+    const files = ['a.cue', 'b.cue', 'c.iso', 'd.chd', 'e.gdi'];
+    expect(classifyFolder({ files, dirs: [] })).toBe('atomic');
+  });
+
+  it('threshold boundary — exactly 6 disc images → container', () => {
+    const files = ['a.cue', 'b.cue', 'c.iso', 'd.chd', 'e.gdi', 'f.iso'];
+    expect(classifyFolder({ files, dirs: [] })).toBe('container');
+  });
+
+  it('.cue + named tracks (Redbook/Redump style) → atomic (shared-prefix catches first)', () => {
+    // hasSharedPrefixAtomic fires before the threshold check for this
+    // shape, but the result must remain atomic regardless.
+    const files = [
+      'Final Fantasy VII.cue',
+      'Final Fantasy VII (Track 01).bin',
+      'Final Fantasy VII (Track 02).bin',
+      'Final Fantasy VII (Track 03).bin',
+    ];
+    expect(classifyFolder({ files, dirs: [], folderName: 'Final Fantasy VII' })).toBe('atomic');
+  });
+});
+
 describe('groupRomFiles — fix/scrape-and-count-correctness commit 2', () => {
   // Disc-set grouping: a `.cue` claims sibling `.bin` files whose
   // basename starts at a name boundary with the cue's stem. Other

@@ -297,6 +297,22 @@ const SHARED_PREFIX_MIN_RATIO = 0.4;
 const SHARED_PREFIX_RATIO_MIN_LENGTH = 3;
 
 /**
+ * Count primary disc-image launchers in a flat file list.
+ * Tracks (.bin), index files (.sub, .wav, .toc), and other companion
+ * files don't count. Used by classifyFolder to distinguish a single
+ * game's folder (1 disc image + N tracks) from a flat collection of
+ * discs.
+ */
+function countDiscImageGroups(files: readonly string[]): number {
+  let count = 0;
+  for (const f of files) {
+    const ext = extensionOf(f).toLowerCase();
+    if (DISC_EXTENSIONS.has(ext)) count += 1;
+  }
+  return count;
+}
+
+/**
  * Content-based classifier. Pure: feed it the files / dirs listing for
  * a folder, get back the call. Rule order matters; PR #11 round 5
  * reorders the rules so the X68000 single-game-folder shape
@@ -338,13 +354,15 @@ export function classifyFolder(contents: FolderContents): FolderClassification {
     return 'atomic';
   }
   // Disc-marker / track-pattern: atomic in the typical Saturn /
-  // MegaCD shape, container when the folder is a flat collection
-  // (commit 3). The threshold check uses `countRomGroups` so a
-  // single `.cue + .bin` set counts as one group, not many.
+  // MegaCD shape, container when the folder is a flat collection.
+  // We count primary disc images (.cue/.iso/.chd/.gdi), not all file
+  // groups. This lets a single game folder with many companion .bin
+  // tracks classify as atomic even when track names don't share the
+  // .cue stem (generic "Track 01.bin" naming, e.g. TGFX16-CD dumps).
   if (hasDiscMarker(contents.files) || hasTrackPattern(contents.files)) {
     if (
       contents.dirs.length === 0 &&
-      countRomGroups(contents.files) > DISC_COLLECTION_THRESHOLD
+      countDiscImageGroups(contents.files) > DISC_COLLECTION_THRESHOLD
     ) {
       return 'container';
     }
