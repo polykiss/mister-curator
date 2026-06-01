@@ -1,5 +1,6 @@
 import { Copy } from 'lucide-react';
 import type { JSX, ReactNode } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import type { SystemCatalogWireEntry } from '@shared/preload-api';
@@ -12,6 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@app/renderer/src/components/ui/dialog';
+import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
 
 interface Props {
   readonly core: CoreEntry | null;
@@ -27,6 +29,36 @@ export function CoreInfoDialog({
   onOpenChange,
 }: Props): JSX.Element {
   const catalogEntry = core !== null ? (catalog?.[core.id] ?? null) : null;
+
+  const logoObjectUrlRef = useRef<string | null>(null);
+  const [logoObjectUrl, setLogoObjectUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (logoObjectUrlRef.current !== null) {
+        URL.revokeObjectURL(logoObjectUrlRef.current);
+        logoObjectUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const url = catalogEntry?.logoUrl ?? null;
+    if (url === null) {
+      setLogoObjectUrl(null);
+      return;
+    }
+    let cancelled = false;
+    void window.mister.getSystemLogoBytes(url).then((bytes) => {
+      if (cancelled || bytes === null) return;
+      const blob = new Blob([new Uint8Array(bytes)]);
+      if (logoObjectUrlRef.current !== null) URL.revokeObjectURL(logoObjectUrlRef.current);
+      const created = URL.createObjectURL(blob);
+      logoObjectUrlRef.current = created;
+      setLogoObjectUrl(created);
+    });
+    return () => { cancelled = true; };
+  }, [catalogEntry?.logoUrl]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -116,11 +148,38 @@ export function CoreInfoDialog({
             <InfoSection title="ScreenScraper">
               {catalogEntry !== null ? (
                 <>
+                  {catalogEntry.logoUrl !== null && (
+                    <div className="mb-3">
+                      {logoObjectUrl !== null ? (
+                        <img
+                          src={logoObjectUrl}
+                          alt={catalogEntry.displayName}
+                          className="h-16 max-w-[200px] object-contain"
+                        />
+                      ) : (
+                        <Skeleton className="h-16 w-[200px]" />
+                      )}
+                    </div>
+                  )}
                   <InfoRow label="System ID">{String(catalogEntry.id)}</InfoRow>
                   <InfoRow label="Display name">{catalogEntry.displayName}</InfoRow>
-                  <InfoRow label="Has logo">
-                    {catalogEntry.logoUrl !== null ? 'Yes' : 'No'}
-                  </InfoRow>
+                  {catalogEntry.company !== null && (
+                    <InfoRow label="Manufacturer">{catalogEntry.company}</InfoRow>
+                  )}
+                  {catalogEntry.type !== null && (
+                    <InfoRow label="Type">{catalogEntry.type}</InfoRow>
+                  )}
+                  {(catalogEntry.yearStart !== null || catalogEntry.yearEnd !== null) && (
+                    <InfoRow label="Years">
+                      {formatYears(catalogEntry.yearStart, catalogEntry.yearEnd)}
+                    </InfoRow>
+                  )}
+                  {catalogEntry.supportType !== null && (
+                    <InfoRow label="Format">{catalogEntry.supportType}</InfoRow>
+                  )}
+                  {catalogEntry.extensions.length > 0 && (
+                    <InfoRow label="Extensions">{catalogEntry.extensions.join(', ')}</InfoRow>
+                  )}
                 </>
               ) : (
                 <p className="text-body-sm text-fg-muted">
@@ -169,6 +228,13 @@ function InfoRow({
       </span>
     </div>
   );
+}
+
+function formatYears(start: number | null, end: number | null): string {
+  if (start === null) return end !== null ? String(end) : '—';
+  if (end === null) return `${String(start)}–present`;
+  if (start === end) return String(start);
+  return `${String(start)}–${String(end)}`;
 }
 
 function CountDisplay({

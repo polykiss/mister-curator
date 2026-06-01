@@ -1405,11 +1405,23 @@ const SAMPLE_SYSTEMES_RESPONSE = {
           { type: 'logo-monochrome', region: 'wor', url: 'https://ss.example/snes-mono.png', format: 'png' },
           { type: 'wheel', region: 'wor', url: 'https://ss.example/snes-wheel.png', format: 'png' },
         ],
+        compagnie: 'Nintendo',
+        type: 'Console',
+        datedebut: '1990',
+        datefin: '2003',
+        supporttype: 'Cartridge',
+        extensions: 'sfc,smc,fig',
       },
       {
         id: 75,
         noms: { nom_us: 'Arcade' },
         medias: [],
+        compagnie: null,
+        type: 'Arcade',
+        datedebut: '1971',
+        datefin: '0',
+        supporttype: null,
+        extensions: '',
       },
     ],
   },
@@ -1423,8 +1435,19 @@ describe('feat/system-catalog-data-layer — parseSystemCatalog', () => {
     const snes = result!.get(4);
     expect(snes).toMatchObject({ id: 4, displayName: 'Super Nintendo Entertainment System' });
     expect(snes!.logoUrl).toBe('https://ss.example/snes-mono.png');
+    expect(snes!.company).toBe('Nintendo');
+    expect(snes!.type).toBe('Console');
+    expect(snes!.yearStart).toBe(1990);
+    expect(snes!.yearEnd).toBe(2003);
+    expect(snes!.supportType).toBe('Cartridge');
+    expect(snes!.extensions).toEqual(['sfc', 'smc', 'fig']);
     const arcade = result!.get(75);
     expect(arcade).toMatchObject({ id: 75, displayName: 'Arcade', logoUrl: null });
+    expect(arcade!.company).toBeNull();
+    expect(arcade!.type).toBe('Arcade');
+    expect(arcade!.yearStart).toBe(1971);
+    expect(arcade!.yearEnd).toBeNull();
+    expect(arcade!.extensions).toEqual([]);
   });
 
   it('returns null for non-object body', () => {

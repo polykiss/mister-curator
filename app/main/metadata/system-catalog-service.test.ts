@@ -18,7 +18,7 @@ function makeEntry(
   displayName: string,
   logoUrl: string | null = null,
 ): SystemCatalogEntry {
-  return { id, displayName, logoUrl };
+  return { id, displayName, logoUrl, company: null, type: null, yearStart: null, yearEnd: null, supportType: null, extensions: [] };
 }
 
 const SNES_ENTRY = makeEntry(4, 'Super Nintendo Entertainment System', 'https://ss/snes.svg');
@@ -112,6 +112,27 @@ describe('feat/system-catalog-data-layer — SystemCatalogService.getWireCatalog
     await svc.ensureCatalog();
     expect(svc.getWireCatalog()).toBeNull();
   });
+
+  it('loads old-format disk cache (missing new fields) with null/[] fallbacks', async () => {
+    // Simulates a catalog written by an older version without the new fields
+    const oldFormat = JSON.stringify({
+      fetchedAt: new Date().toISOString(),
+      systems: [{ id: 4, displayName: 'Super Nintendo Entertainment System', logoUrl: 'https://ss/snes.svg' }],
+    });
+    await fs.writeFile(catalogPath, oldFormat, 'utf8');
+    const svc = makeService({ fetchResult: null });
+    await svc.ensureCatalog();
+    const wire = svc.getWireCatalog();
+    expect(wire).not.toBeNull();
+    const entry = wire!['SNES'];
+    expect(entry).toBeDefined();
+    expect(entry!.company).toBeNull();
+    expect(entry!.type).toBeNull();
+    expect(entry!.yearStart).toBeNull();
+    expect(entry!.yearEnd).toBeNull();
+    expect(entry!.supportType).toBeNull();
+    expect(entry!.extensions).toEqual([]);
+  });
 });
 
 describe('feat/system-catalog-data-layer — SystemCatalogService.getSystemLogoBytes', () => {
@@ -183,7 +204,7 @@ describe('fix/system-catalog-visibility-and-latch — SystemCatalogService.rescr
   });
 
   it('returns { success: true, status: "ok" } on successful fetch', async () => {
-    const catalog = new Map([[4, { id: 4, displayName: 'SNES', logoUrl: null }]]);
+    const catalog = new Map([[4, { id: 4, displayName: 'SNES', logoUrl: null, company: null, type: null, yearStart: null, yearEnd: null, supportType: null, extensions: [] as readonly string[] }]]);
     const mockScraper = {
       fetchSystemCatalog: vi.fn(async () => catalog),
       getStatus: vi.fn(() => 'available'),
