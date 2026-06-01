@@ -232,6 +232,81 @@ describe('sortRoms — by rating', () => {
   });
 });
 
+describe('sortRoms — by size (feat/rom-list-polish)', () => {
+  // sizeBytes is always a number on Rom — no 'missing' case. Numeric
+  // sort via the `n` field in extractFor. folder-container rows pin to
+  // top regardless; folder-atomic rows sort alongside files.
+
+  function makeRomWithSize(filename: string, sizeBytes: number, kind: Rom['kind'] = 'file'): Rom {
+    return {
+      coreId: 'TGFX16-CD',
+      filename,
+      displayName: filename,
+      sizeBytes,
+      hidden: false,
+      path: `/media/fat/games/TGFX16-CD/${filename}`,
+      kind,
+      relativePath: filename,
+    };
+  }
+
+  it('asc: files sort smallest-first', () => {
+    const rows = [
+      row(makeRomWithSize('big.chd', 1_000_000)),
+      row(makeRomWithSize('small.chd', 100_000)),
+      row(makeRomWithSize('medium.chd', 500_000)),
+    ];
+    const out = sortRoms(rows, { key: 'size', dir: 'asc' });
+    expect(out.map((r) => r.rom.sizeBytes)).toEqual([100_000, 500_000, 1_000_000]);
+  });
+
+  it('desc: files sort largest-first', () => {
+    const rows = [
+      row(makeRomWithSize('big.chd', 1_000_000)),
+      row(makeRomWithSize('small.chd', 100_000)),
+      row(makeRomWithSize('medium.chd', 500_000)),
+    ];
+    const out = sortRoms(rows, { key: 'size', dir: 'desc' });
+    expect(out.map((r) => r.rom.sizeBytes)).toEqual([1_000_000, 500_000, 100_000]);
+  });
+
+  it('folder-container rows stay pinned at top regardless of size sort direction', () => {
+    const rows = [
+      row(makeRomWithSize('huge-container', 99_000_000, 'folder-container')),
+      row(makeRomWithSize('medium.chd', 500_000)),
+      row(makeRomWithSize('small.chd', 100_000)),
+    ];
+    const outAsc = sortRoms(rows, { key: 'size', dir: 'asc' });
+    const outDesc = sortRoms(rows, { key: 'size', dir: 'desc' });
+    // folder-container always first regardless of its sizeBytes
+    expect(outAsc[0]?.rom.kind).toBe('folder-container');
+    expect(outDesc[0]?.rom.kind).toBe('folder-container');
+    // file rows below follow the sort direction
+    expect(outAsc[1]?.rom.sizeBytes).toBe(100_000);
+    expect(outDesc[1]?.rom.sizeBytes).toBe(500_000);
+  });
+
+  it('folder-atomic rows participate in size sort by aggregate sizeBytes', () => {
+    const rows = [
+      row(makeRomWithSize('Sonic.chd', 700_000_000)),
+      row(makeRomWithSize('SmallGame', 50_000_000, 'folder-atomic')),
+      row(makeRomWithSize('TinyRom.chd', 1_000_000)),
+    ];
+    const out = sortRoms(rows, { key: 'size', dir: 'asc' });
+    expect(out.map((r) => r.rom.sizeBytes)).toEqual([1_000_000, 50_000_000, 700_000_000]);
+  });
+
+  it('zero-size rows sort correctly (0 is a value, not missing)', () => {
+    const rows = [
+      row(makeRomWithSize('norom.chd', 0)),
+      row(makeRomWithSize('normal.chd', 100_000)),
+    ];
+    const out = sortRoms(rows, { key: 'size', dir: 'asc' });
+    // 0 is the smallest value — sorts first in asc
+    expect(out.map((r) => r.rom.sizeBytes)).toEqual([0, 100_000]);
+  });
+});
+
 describe('sortRoms — DEFAULT_SORT is name asc', () => {
   it('matches the spec default', () => {
     expect(DEFAULT_SORT).toEqual({ key: 'name', dir: 'asc' });

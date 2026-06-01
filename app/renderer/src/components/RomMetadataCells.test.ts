@@ -13,6 +13,7 @@ import {
   RomNameInner,
   shouldShowFilenameSubline,
 } from '@app/renderer/src/components/RomMetadataCells';
+import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
 
 /**
  * PR #23 round 4 — regression coverage for the density+eye cell. The
@@ -126,6 +127,56 @@ describe('RomDensityEyeCell — render shape', () => {
     expect(sysCell.props.children.props.className).toBe(
       DENSITY_EYE_CELL_CLASSNAMES.wrapper,
     );
+  });
+});
+
+describe('RomDensityEyeCell — folder rows hide density bar (feat/rom-list-polish)', () => {
+  // DensityBar renders for file rows; folder rows (atomic + container)
+  // skip it. The Eye toggle still renders on all non-system rows so
+  // hide/show works regardless of kind.
+
+  // Walk the JSX element tree to count how many DensityBar component
+  // elements are present. React JSX keeps components as their function
+  // reference in `el.type`, so we compare against the imported DensityBar.
+  function countDensityBars(node: unknown, depth = 0): number {
+    if (depth > 20 || node === null || typeof node !== 'object') return 0;
+    const el = node as Record<string, unknown>;
+    if (el.type === DensityBar) return 1;
+    const props = el.props as Record<string, unknown> | undefined;
+    const children = props?.children;
+    if (Array.isArray(children)) {
+      return children.reduce(
+        (sum: number, c: unknown) => sum + countDensityBars(c, depth + 1),
+        0,
+      );
+    }
+    return countDensityBars(children, depth + 1);
+  }
+
+  function renderCell(kind: Rom['kind']): ReturnType<typeof RomDensityEyeCell> {
+    return RomDensityEyeCell({
+      rom: rom({ kind }),
+      isSystem: false,
+      maxSizeBytes: 100 * 1024 * 1024,
+      canMutate: true,
+      disconnectedTooltip: 'Reconnect to make changes.',
+      onSingleToggle: noop,
+    });
+  }
+
+  it('file rows render the DensityBar (regression guard)', () => {
+    const cell = renderCell('file');
+    expect(countDensityBars(cell)).toBe(1);
+  });
+
+  it('folder-atomic rows do NOT render the DensityBar', () => {
+    const cell = renderCell('folder-atomic');
+    expect(countDensityBars(cell)).toBe(0);
+  });
+
+  it('folder-container rows do NOT render the DensityBar', () => {
+    const cell = renderCell('folder-container');
+    expect(countDensityBars(cell)).toBe(0);
   });
 });
 

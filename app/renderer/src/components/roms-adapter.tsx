@@ -641,15 +641,15 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     return () => document.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Density-bar denominator for the size column — peer max across the
-  // rows actually being rendered. SYSTEM.md §10: ROMs use file size /
-  // max visible.
+  // Density-bar denominator for the size column — peer max across file
+  // rows only. Folder rows are excluded: their aggregate sizeBytes
+  // (sum of all child files) would dominate the scale and compress all
+  // the individual-file bars toward zero.
   const maxSizeBytes = useMemo(() => {
     if (!presentableRoms) return 0;
-    return presentableRoms.reduce(
-      (acc, r) => (r.sizeBytes > acc ? r.sizeBytes : acc),
-      0,
-    );
+    return presentableRoms
+      .filter((r) => r.kind === 'file')
+      .reduce((acc, r) => (r.sizeBytes > acc ? r.sizeBytes : acc), 0);
   }, [presentableRoms]);
 
   // Counts shown in the header — non-system ROMs only.
@@ -1364,17 +1364,21 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
                     right-edge stack so the row's primary visibility
                     toggle owns the far-right slot. */}
                 <TableHead className="w-10" aria-label="Actions" />
-                {/* Combined density + eye column. Round 5: the two
-                    used to live in separate cells with default cell
-                    padding between them, which left a too-wide gap
-                    versus the cores pane. One cell + a flex stack
-                    inside lets density sit flush against the eye
-                    icon and the whole stack hugs the row's far edge.
-                    Width = 20 (density) + 32 (eye) + a hair of
-                    right padding ≈ 52px. */}
-                <TableHead
+                {/* Combined density + eye column. The DensityBar IS
+                    the visual representation of file size; "Size" is
+                    the column label and makes it sortable. Width =
+                    20 (density) + 32 (eye) + a hair ≈ 52px — same
+                    as before; the SortableHeader replaces the plain
+                    TableHead but preserves the column footprint. */}
+                <SortableHeader
+                  label="Size"
+                  sortKey="size"
+                  align="right"
                   className="w-[3.25rem] p-0"
-                  aria-label="Intensity / visibility"
+                  sortState={sortState}
+                  onSort={(k) =>
+                    setSortState((prev) => nextSortState(prev, k))
+                  }
                 />
               </TableRow>
             </TableHeader>

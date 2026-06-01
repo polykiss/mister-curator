@@ -25,7 +25,7 @@ import {
  * cores resets to default (`name asc`).
  */
 
-export type SortKey = 'name' | 'year' | 'genre' | 'rating';
+export type SortKey = 'name' | 'year' | 'genre' | 'rating' | 'size';
 export type SortDir = 'asc' | 'desc';
 
 export interface SortState {
@@ -125,6 +125,10 @@ function extractFor(
       if (r === null) return { kind: 'missing' };
       return { kind: 'value', s: formatRating(r) ?? String(r), n: r };
     }
+    case 'size':
+      // sizeBytes is always present (0 for empty folders counts as a
+      // value, not missing). Numeric sort via `n` field.
+      return { kind: 'value', s: String(rom.sizeBytes), n: rom.sizeBytes };
   }
 }
 
