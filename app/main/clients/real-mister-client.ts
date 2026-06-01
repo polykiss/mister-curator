@@ -1840,8 +1840,11 @@ export class RealMisterClient implements IMisterClient {
       WITNESS_CHUNK_SIZE,
       async (chunk) => {
         const script = buildSampleScript(chunk);
-        const result = await this.runSshOp(script, () =>
-          this.ssh.execCommand(script),
+        const result = await this.runSshOp(
+          script,
+          () => this.ssh.execCommand(script),
+          SSH_HASH_OP_TIMEOUT_MS,
+          false, // disposeOnTimeout — keep session alive; a single slow ISO shouldn't tear down the connection
         );
         if (result.code !== 0) {
           throw new Error(

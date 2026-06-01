@@ -3739,6 +3739,45 @@ describe('RealMisterClient', () => {
       ).rejects.toThrow(/Failed to compute sample md5s/);
     });
 
+    it('uses the 120s hash timeout AND preserves the SSH session on timeout', async () => {
+      vi.useFakeTimers();
+      const client = new RealMisterClient();
+      try {
+        await client.connect(profile, secret);
+        mocks.dispose.mockClear();
+        const listener = vi.fn();
+        client.onUnexpectedDisconnect(listener);
+        // Hang the sample-MD5 command forever.
+        mocks.execCommand.mockImplementationOnce(
+          () => new Promise(() => { /* never resolves */ }),
+        );
+
+        const promise = client
+          .computeSampleMd5s(['/media/fat/games/Saturn/Policenauts.zip'])
+          .catch((err: unknown) => err);
+
+        // 60s (the old default) must NOT fire.
+        await vi.advanceTimersByTimeAsync(60_001);
+        expect(listener).not.toHaveBeenCalled();
+
+        // 120s does.
+        await vi.advanceTimersByTimeAsync(60_000);
+        const result = await promise;
+
+        expect(result).toBeInstanceOf(MisterConnectionError);
+        if (result instanceof MisterConnectionError) {
+          expect(result.message).toMatch(
+            /Command timed out after 120s; SSH session preserved\./,
+          );
+        }
+        // disposeOnTimeout: false — transport stays alive.
+        expect(listener).not.toHaveBeenCalled();
+        expect(mocks.dispose).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     // feat/sample-based-hashing — chunking math. `buildSampleScript`
     // builds a `set --` line per call; un-chunked, that argv list
     // approaches busybox's argv limit on large cores (the same
