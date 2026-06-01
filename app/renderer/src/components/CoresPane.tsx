@@ -213,21 +213,29 @@ export function CoresPane(): JSX.Element {
     const aliasFiltered = hiddenFiltered.filter(
       (c) => !suppressedAliasTargetIds.has(c.id),
     );
-    if (showMameAsCores) return aliasFiltered;
-    return aliasFiltered.filter((c) => c.id !== 'mame' && c.id !== 'hbmame');
-  }, [cores, showHidden, showMameAsCores, suppressedAliasTargetIds]);
+    const mameFiltered = showMameAsCores
+      ? aliasFiltered
+      : aliasFiltered.filter((c) => c.id !== 'mame' && c.id !== 'hbmame');
+    const resolveName = (c: CoreEntry): string =>
+      customNames.customName(c.id) ?? systemCatalog?.[c.id]?.displayName ?? coreDisplayName(c.id);
+    return [...mameFiltered].sort((a, b) =>
+      resolveName(a).localeCompare(resolveName(b), undefined, { sensitivity: 'base' }),
+    );
+  }, [cores, showHidden, showMameAsCores, suppressedAliasTargetIds, customNames, systemCatalog]);
 
-  const emptyHideableCores = useMemo(
-    () =>
-      (cores ?? []).filter(
+  const emptyHideableCores = useMemo(() => {
+    const resolveName = (c: CoreEntry): string =>
+      customNames.customName(c.id) ?? systemCatalog?.[c.id]?.displayName ?? coreDisplayName(c.id);
+    return (cores ?? [])
+      .filter(
         (c) =>
           c.romCount === 0 &&
           c.category !== 'Arcade' &&
           !isCoreHidden(c) &&
           !suppressedAliasTargetIds.has(c.id),
-      ),
-    [cores, suppressedAliasTargetIds],
-  );
+      )
+      .sort((a, b) => resolveName(a).localeCompare(resolveName(b), undefined, { sensitivity: 'base' }));
+  }, [cores, suppressedAliasTargetIds, customNames, systemCatalog]);
 
   // "Unhide all (N)" only targets cores in the on-MiSTer ledger — the
   // ones we hid ourselves. Other dot-prefixed cores (firmware system

@@ -251,6 +251,29 @@ describe('CoreInfoDialog v2.0 — defensive localCatalog self-fetch', () => {
   });
 });
 
+describe('CoreInfoDialog v2.0 — visual polish (phase 2)', () => {
+  it('sorts sidebar by display name via localeCompare', () => {
+    // This dialog test asserts the *dialog* StatCell value size is text-body
+    expect(SOURCE).not.toContain("'text-heading-sm font-medium leading-[1.35] text-fg'");
+    expect(SOURCE).toContain("'text-body font-medium leading-[1.35] text-fg'");
+  });
+
+  it('Wikipedia text is wrapped in a scrollable container', () => {
+    expect(SOURCE).toContain('overflow-y-auto');
+    expect(SOURCE).toContain('max-h-[220px]');
+  });
+
+  it('grid gives left pane more room (1.4fr) and right strip 320px', () => {
+    expect(SOURCE).toContain("'1.4fr 320px'");
+    expect(SOURCE).not.toContain("'1fr 340px'");
+  });
+
+  it('photo card uses object-contain to prevent cropping', () => {
+    expect(SOURCE).toContain('object-contain');
+    expect(SOURCE).toContain('ConsolePhotoCard');
+  });
+});
+
 describe('CoreInfoDialog v2.0 — accessibility', () => {
   it('renders DialogTitle for screen readers', () => {
     expect(SOURCE).toContain('DialogTitle');

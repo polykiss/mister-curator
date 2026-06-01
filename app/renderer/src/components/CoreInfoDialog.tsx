@@ -146,16 +146,16 @@ export function CoreInfoDialog({
               </div>
               <div className="flex flex-wrap items-center gap-[14px]">
                 {/* logo */}
-                <div className="flex h-[34px] items-center">
+                <div className="flex h-12 items-center">
                   {catalogEntry?.logoUrl !== null && catalogEntry !== null ? (
                     logoObjectUrl !== null ? (
                       <img
                         src={logoObjectUrl}
                         alt={displayName}
-                        className="max-h-[34px] max-w-[140px] object-contain invert"
+                        className="max-h-12 max-w-[160px] object-contain invert"
                       />
                     ) : (
-                      <Skeleton className="h-[34px] w-[100px]" />
+                      <Skeleton className="h-12 w-[120px]" />
                     )
                   ) : (
                     <span className="text-heading-sm font-bold tracking-[-0.01em] text-fg">
@@ -193,7 +193,7 @@ export function CoreInfoDialog({
             <hr className="border-border-default" />
 
             {/* ── body ───────────────────────────────────────────── */}
-            <div className="grid" style={{ gridTemplateColumns: '1fr 340px' }}>
+            <div className="grid" style={{ gridTemplateColumns: '1.4fr 320px' }}>
 
               {/* LEFT — stat sections */}
               <div className="px-9 pb-[34px] pt-[30px]">
@@ -329,9 +329,11 @@ export function CoreInfoDialog({
                         <Skeleton className="h-3 w-[70%]" />
                       </div>
                     ) : wikipedia !== null ? (
-                      <p className="text-body leading-[1.62] text-[#bcc4d0] [text-wrap:pretty]">
-                        {wikipedia.extract}
-                      </p>
+                      <div className="max-h-[220px] overflow-y-auto">
+                        <p className="text-body leading-[1.62] text-[#bcc4d0] [text-wrap:pretty]">
+                          {wikipedia.extract}
+                        </p>
+                      </div>
                     ) : (
                       <p className="text-body-sm text-fg-muted">
                         No Wikipedia article available.
@@ -423,7 +425,7 @@ function StatCell({
         className={
           mono
             ? 'break-all font-mono text-body tracking-[-0.01em] text-fg'
-            : 'text-heading-sm font-medium leading-[1.35] text-fg'
+            : 'text-body font-medium leading-[1.35] text-fg'
         }
       >
         {children}
@@ -444,10 +446,14 @@ function FactRow({ k, v }: { k: string; v: string }): JSX.Element {
 function ConsolePhotoCard({ src, alt }: { src: string; alt: string }): JSX.Element {
   return (
     <div
-      className="grid h-[196px] w-full place-items-center overflow-hidden rounded-[11px] border border-border-default px-[14px] py-[8px]"
+      className="relative h-[196px] w-full overflow-hidden rounded-[11px] border border-border-default"
       style={{ background: 'linear-gradient(158deg, #f6f8fa 0%, #e4e9ee 100%)' }}
     >
-      <img src={src} alt={alt} className="max-h-full max-w-full object-contain" />
+      <img
+        src={src}
+        alt={alt}
+        className="absolute inset-0 h-full w-full object-contain p-3"
+      />
     </div>
   );
 }

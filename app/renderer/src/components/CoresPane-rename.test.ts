@@ -44,6 +44,17 @@ describe('CoresPane — sidebar logos and naming', () => {
     expect(SOURCE).not.toContain('menuFor !== null && systemCatalog === null');
   });
 
+  it('sorts visibleCores by resolved display name (custom → SS → technical)', () => {
+    // Sort must use the three-tier name so renaming a core re-positions it
+    expect(SOURCE).toContain('localeCompare');
+    expect(SOURCE).toContain('sensitivity');
+    expect(SOURCE).toMatch(/customNames\.customName.*systemCatalog.*\?.*\[.*\].*displayName.*coreDisplayName/s);
+  });
+
+  it('includes customNames and systemCatalog in visibleCores useMemo deps', () => {
+    expect(SOURCE).toMatch(/\[cores.*customNames.*systemCatalog|customNames.*systemCatalog.*cores/s);
+  });
+
   it('threads catalog through RenderArgs', () => {
     expect(SOURCE).toContain('catalog: systemCatalog');
     expect(SOURCE).toMatch(/readonly catalog:.*SystemCatalogWireEntry/s);
