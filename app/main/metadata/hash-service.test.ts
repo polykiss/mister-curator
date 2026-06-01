@@ -182,10 +182,10 @@ describe('HashService', () => {
       entries: Record<string, FixtureHash & { hashedAt: string }>;
     };
     expect(raw.version).toBe(1);
-    // fix/scrape-and-count-correctness commit 1: bump from v3 to v4
-    // when `diskSizeBytes` was added. v3 entries get re-hashed on
-    // first read so the new field populates.
-    expect(raw.hashStrategyVersion).toBe(4);
+    // fix/cd-hash-prefer-cue-over-bin: bump to v5 so all existing
+    // hashes.json files are invalidated and CD folder-atomics are
+    // re-hashed against the .cue file instead of Track 01.bin.
+    expect(raw.hashStrategyVersion).toBe(5);
     expect(raw.host).toBe('host-1');
     expect(raw.entries['/media/fat/games/A.sfc']?.md5).toBe('a'.repeat(32));
     expect(raw.entries['/media/fat/games/A.sfc']?.sha1).toBe('a'.repeat(40));
@@ -372,9 +372,9 @@ describe('HashService', () => {
       );
     }
 
-    it('writes hashStrategyVersion: 4 alongside the v1 schema field', async () => {
-      // fix/scrape-and-count-correctness commit 1 bumped to v4 when
-      // `diskSizeBytes` was added to HashEntry.
+    it('writes hashStrategyVersion: 5 alongside the v1 schema field', async () => {
+      // fix/cd-hash-prefer-cue-over-bin bumped to v5 so all existing
+      // hashes.json files are invalidated on next connect.
       const svc = new HashService(dir);
       const hashes = new Map([['/p/a', fix('a', 1, 1)]]);
       await svc.getHash(makeClient({ hashes }), 'host-1', ['/p/a']);
@@ -382,7 +382,34 @@ describe('HashService', () => {
         await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
       ) as { version: number; hashStrategyVersion: number };
       expect(raw.version).toBe(1);
-      expect(raw.hashStrategyVersion).toBe(4);
+      expect(raw.hashStrategyVersion).toBe(5);
+    });
+
+    it('fix/cd-hash-prefer-cue-over-bin: treats a v4 cache as invalid and re-hashes', async () => {
+      // A hashes.json with hashStrategyVersion: 4 must be rejected wholesale
+      // so all CD folder-atomics get re-hashed against the .cue file.
+      await seedCache('host-1', {
+        version: 1,
+        hashStrategyVersion: 4,
+        host: 'host-1',
+        entries: {
+          '/p/a': {
+            md5: 'a'.repeat(32),
+            sha1: 'a'.repeat(40),
+            size: 100,
+            diskSizeBytes: 100,
+            mtime: 100,
+            hashedAt: '2025-01-01T00:00:00.000Z',
+          },
+        },
+      });
+      const svc = new HashService(dir);
+      const hashes = new Map([['/p/a', fix('z', 1, 100)]]);
+      const client = makeClient({ hashes });
+      const result = await svc.getHash(client, 'host-1', ['/p/a']);
+      // v4 cache is rejected → re-hashed → gets the new value
+      expect(result.get('/p/a')?.md5).toBe('z'.repeat(32));
+      expect(client.hashCalls).toHaveLength(1);
     });
 
     it('treats a v2 (md5-only) cache as invalid and re-hashes', async () => {
@@ -457,7 +484,7 @@ describe('HashService', () => {
     it('serves a current-version cache with full quad without re-hashing', async () => {
       await seedCache('host-1', {
         version: 1,
-        hashStrategyVersion: 4,
+        hashStrategyVersion: 5,
         host: 'host-1',
         entries: {
           '/p/a': {
@@ -614,7 +641,7 @@ describe('HashService', () => {
       const result = await svc.migrateV3Entries(client, 'host-1');
       expect(result).toEqual({ migrated: 1, needsRehash: 0 });
       expect(client.hashCalls).toEqual([]);
-      // Cache file is now v4 with diskSizeBytes populated from
+      // Cache file is now v5 with diskSizeBytes populated from
       // stat. Hash + sha1 + size are preserved verbatim from v3.
       const raw = JSON.parse(
         await fs.readFile(join(dir, 'host-1', 'hashes.json'), 'utf-8'),
@@ -631,7 +658,7 @@ describe('HashService', () => {
           }
         >;
       };
-      expect(raw.hashStrategyVersion).toBe(4);
+      expect(raw.hashStrategyVersion).toBe(5);
       const e = raw.entries['/p/Game.zip'];
       expect(e?.md5).toBe('a'.repeat(32));
       expect(e?.size).toBe(36700160);
@@ -1101,7 +1128,7 @@ describe('HashService', () => {
       // The missing-file sentinel is preserved across the tolerance —
       // 0 vs 0 still returns null (the file is gone).
       const svc = new HashService(dir);
-      // Synthetic v4 cache entry with mtime 0 (degenerate but valid
+      // Synthetic v5 cache entry with mtime 0 (degenerate but valid
       // shape). We can't seed via getHash because hashPaths returns
       // a non-zero mtime; write the cache file directly.
       const cacheDir = join(dir, 'host-1');
@@ -1110,7 +1137,7 @@ describe('HashService', () => {
         join(cacheDir, 'hashes.json'),
         JSON.stringify({
           version: 1,
-          hashStrategyVersion: 4,
+          hashStrategyVersion: 5,
           host: 'host-1',
           entries: {
             '/p/a': {
@@ -1274,15 +1301,15 @@ describe('HashService', () => {
     });
 
     it('legacy entry without sampleMd5 → no fast path, falls through to full rehash', async () => {
-      // Stage a legacy hash cache file on disk that lacks sampleMd5
-      // entirely (modelling a pre-PR cache).
+      // Stage a current-version hash cache file on disk that lacks
+      // sampleMd5 entirely (modelling a pre-PR entry in a v5 file).
       const cacheDir = join(dir, 'host-1');
       await fs.mkdir(cacheDir, { recursive: true });
       await fs.writeFile(
         join(cacheDir, 'hashes.json'),
         JSON.stringify({
           version: 1,
-          hashStrategyVersion: 4,
+          hashStrategyVersion: 5,
           host: 'host-1',
           entries: {
             '/p/a': {
@@ -1320,7 +1347,7 @@ describe('HashService', () => {
         join(cacheDir, 'hashes.json'),
         JSON.stringify({
           version: 1,
-          hashStrategyVersion: 4,
+          hashStrategyVersion: 5,
           host: 'host-1',
           entries: {
             '/p/a': {
@@ -1417,7 +1444,7 @@ describe('HashService', () => {
         join(cacheDir, 'hashes.json'),
         JSON.stringify({
           version: 1,
-          hashStrategyVersion: 4,
+          hashStrategyVersion: 5,
           host: 'host-1',
           entries: {
             '/p/match.zip': {
@@ -1606,7 +1633,7 @@ describe('HashService', () => {
         join(cacheDir, 'hashes.json'),
         JSON.stringify({
           version: 1,
-          hashStrategyVersion: 4,
+          hashStrategyVersion: 5,
           host: 'host-1',
           entries: {
             '/p/legacy.bin': {
