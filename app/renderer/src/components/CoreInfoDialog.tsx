@@ -150,11 +150,12 @@ export function CoreInfoDialog({
                 <>
                   {catalogEntry.logoUrl !== null && (
                     <div className="mb-3">
+                      {/* logo-monochrome — invert for dark theme */}
                       {logoObjectUrl !== null ? (
                         <img
                           src={logoObjectUrl}
                           alt={catalogEntry.displayName}
-                          className="h-16 max-w-[200px] object-contain"
+                          className="h-16 max-w-[200px] object-contain invert"
                         />
                       ) : (
                         <Skeleton className="h-16 w-[200px]" />
