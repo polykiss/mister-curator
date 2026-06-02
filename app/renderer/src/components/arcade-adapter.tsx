@@ -1,4 +1,3 @@
-import { MoreHorizontal } from 'lucide-react';
 import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
@@ -13,14 +12,6 @@ import type {
   ArcadePlayabilityWire,
 } from '@shared/preload-api';
 import type { ItemListAdapter } from '@app/renderer/src/components/item-list-adapter';
-import {
-  BackThumbnailCell,
-  RomDensityEyeCell,
-  RomMetadataInfoCells,
-  RomNameInner,
-  RomThumbnailCell,
-  RomYearCell,
-} from '@app/renderer/src/components/RomMetadataCells';
 import { RomDetailDialog } from '@app/renderer/src/components/RomDetailDialog';
 import { RomEditMetadataDialog } from '@app/renderer/src/components/RomEditMetadataDialog';
 import {
@@ -28,17 +19,8 @@ import {
   type RomRowMenuItem,
 } from '@app/renderer/src/components/RomRowMenu';
 import { RomSearchScreenScraperDialog } from '@app/renderer/src/components/RomSearchScreenScraperDialog';
-import { SortableHeader } from '@app/renderer/src/components/SortableHeader';
 import { Button } from '@app/renderer/src/components/ui/button';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@app/renderer/src/components/ui/table';
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { entriesAtDepth, makeArcadeRom } from '@app/renderer/src/lib/arcade-row';
@@ -47,18 +29,19 @@ import {
   computeBreadcrumb,
   subPathAtDepth,
 } from '@app/renderer/src/lib/breadcrumb';
-import { cn } from '@app/renderer/src/lib/cn';
 import { summarizeBulkResult } from '@app/renderer/src/lib/format';
 import {
   DEFAULT_SORT,
   nextSortState,
   sortRoms,
+  type SortKey,
   type SortState,
 } from '@app/renderer/src/lib/rom-sort';
-import { classifyRow } from '@app/renderer/src/lib/row-type';
 import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
 import { filterArcadeEntries } from '@app/renderer/src/lib/filter-arcade';
 import { FilterInput } from '@app/renderer/src/components/FilterInput';
+import { RomListView } from '@app/renderer/src/components/RomListView';
+import type { ArcadeRowContext } from '@app/renderer/src/lib/roms-view-props';
 
 /**
  * feat/arcade-phase-1.5 — pane for managing `.mra` files under
@@ -369,6 +352,29 @@ export function useArcadeAdapter(): ItemListAdapter {
 
   const visibleCount = mraRows.filter((e) => !e.hidden).length;
   const hiddenCount = mraRows.filter((e) => e.hidden).length;
+
+  // refactor/arcade-under-rom-list-view: sort-change callback and
+  // metadataByPath conversion needed by RomListView.
+  const onSortChange = useCallback((key: SortKey) => {
+    setSortState((prev) => nextSortState(prev, key));
+  }, []);
+
+  // metadataByPath for RomListView: convert metadataByMra (keyed by
+  // relativePath) to the {metadata, error} shape keyed by rom.path
+  // (/media/fat/_Arcade/${relativePath}).
+  const metadataByPathForView = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(metadataByMra).map(([k, v]) => [
+          `/media/fat/_Arcade/${k}`,
+          { metadata: v, error: false as const },
+        ]),
+      ),
+    [metadataByMra],
+  );
+
+  // systemFlags: arcade has no system-file concept; use a stable empty map.
+  const EMPTY_SYSTEM_FLAGS = useMemo(() => new Map<string, boolean>(), []);
   // feat/filter-as-you-type (#21) — count of .mra entries in the
   // filtered view at the current depth (used for "Showing N of M").
   const filteredMraCount = filteredPresentable.filter((e) => e.kind === 'mra').length;
@@ -490,6 +496,55 @@ export function useArcadeAdapter(): ItemListAdapter {
         },
       );
     });
+  };
+
+  // refactor/arcade-under-rom-list-view: ArcadeRowContext bundles the 6
+  // arcade/ROM behavioral differences so RomListView stays generic.
+  const arcadeRowContext: ArcadeRowContext = {
+    isFolderRow: (rom) => rom.kind === 'folder-container',
+    playabilityByPath,
+    checkboxKey: (rom) => arcadeMraVisiblePath(rom.filename),
+    openDetail: (rom, metadata) => {
+      const classification = playabilityByPath.get(rom.filename) ?? null;
+      const canManageMetadata =
+        classification === 'playable' || classification === 'no-roms-needed';
+      setDetailDialogFor({
+        relativePath: rom.filename,
+        displayName: metadata?.name ?? rom.displayName,
+        filename: rom.filename,
+        canManageMetadata,
+        playability: classification,
+      });
+    },
+    openMenu: (rom, metadata, x, y) => {
+      const classification = playabilityByPath.get(rom.filename) ?? null;
+      const canManageMetadata =
+        classification === 'playable' || classification === 'no-roms-needed';
+      setMenuFor({
+        entry: {
+          relativePath: rom.filename,
+          displayName: metadata?.name ?? rom.displayName,
+          filename: rom.filename,
+        },
+        canManageMetadata,
+        hasMetadata: metadata !== null,
+        x,
+        y,
+      });
+    },
+    singleToggle: (rom) =>
+      onToggleSingle({
+        relativePath: rom.filename,
+        displayName: rom.displayName,
+        kind: 'mra',
+        hidden: rom.hidden,
+      }),
+  };
+
+  // onRowActivate for RomListView: drills into arcade subfolder rows
+  // (isFolder rows get row-level onClick → onRowActivate in RomListView).
+  const onRowActivateArcade = (rom: { readonly filename: string }): void => {
+    setSubPath(rom.filename);
   };
 
   const runBulk = async (target: 'hide' | 'show'): Promise<void> => {
@@ -907,376 +962,67 @@ export function useArcadeAdapter(): ItemListAdapter {
           clear of the scrollbar. Without these, arcade rows extended
           to a slightly different right edge than RomsPane rows because
           the macOS overlay scrollbar shifted them inward. */}
-      <div ref={arcadeScrollContainerRef} className="scroll-themed flex-1 overflow-auto pr-2.5">
-        {loading && entries === null ? (
+      {loading && entries === null ? (
+        <div className="scroll-themed flex-1 overflow-auto pr-2.5">
           <div className="space-y-1 p-4">
             {Array.from({ length: 8 }).map((_, i) => (
               <Skeleton key={i} className="h-10 w-full" />
             ))}
           </div>
-        ) : error !== null ? (
+        </div>
+      ) : error !== null ? (
+        <div ref={arcadeScrollContainerRef} className="scroll-themed flex-1 overflow-auto pr-2.5">
           <div className="p-4 text-body-sm text-destructive">{error}</div>
-        ) : entries === null || mraRows.length === 0 ? (
+        </div>
+      ) : entries === null || mraRows.length === 0 ? (
+        <div ref={arcadeScrollContainerRef} className="scroll-themed flex-1 overflow-auto pr-2.5">
           <div className="p-4 text-body-sm text-fg-muted">
             No .mra files found in _Arcade/.
           </div>
-        ) : enrichedPresentable.length === 0 && backRow === null ? (
+        </div>
+      ) : enrichedPresentable.length === 0 && backRow === null ? (
+        <div ref={arcadeScrollContainerRef} className="scroll-themed flex-1 overflow-auto pr-2.5">
           <div className="p-4 text-body-sm text-fg-muted">
-            {deferredFilter !== ''
-              ? (
-                <>
-                  No MRAs match &ldquo;{deferredFilter}&rdquo;.{' '}
-                  <button
-                    type="button"
-                    onClick={() => setFilterText('')}
-                    className="underline hover:text-fg"
-                  >
-                    Clear filter
-                  </button>
-                </>
-              )
-              : 'All .mra files are hidden — toggle “Show hidden” to manage them.'}
-          </div>
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow className="hover:bg-transparent">
-                <TableHead className="w-10 pl-4">
-                  <input
-                    type="checkbox"
-                    className="accent-accent"
-                    aria-label="Select all"
-                    checked={
-                      sortedRows.filter((r) => r.kind === 'mra').length > 0 &&
-                      sortedRows
-                        .filter((r) => r.kind === 'mra')
-                        .every((r) =>
-                          selectedKeys.has(arcadeMraVisiblePath(r.relativePath)),
-                        )
-                    }
-                    onChange={(e) => onToggleAll(e.target.checked)}
-                  />
-                </TableHead>
-                <TableHead className="w-16" aria-label="Box art" />
-                <SortableHeader
-                  label="Name"
-                  sortKey="name"
-                  sortState={sortState}
-                  onSort={(k) =>
-                    setSortState((prev) => nextSortState(prev, k))
-                  }
-                />
-                <SortableHeader
-                  label="Year"
-                  sortKey="year"
-                  align="right"
-                  className="w-16"
-                  sortState={sortState}
-                  onSort={(k) =>
-                    setSortState((prev) => nextSortState(prev, k))
-                  }
-                />
-                <SortableHeader
-                  label="Genre"
-                  sortKey="genre"
-                  className="w-28 normal-case"
-                  sortState={sortState}
-                  onSort={(k) =>
-                    setSortState((prev) => nextSortState(prev, k))
-                  }
-                />
-                <SortableHeader
-                  label="Rating"
-                  sortKey="rating"
-                  align="right"
-                  className="w-14"
-                  sortState={sortState}
-                  onSort={(k) =>
-                    setSortState((prev) => nextSortState(prev, k))
-                  }
-                />
-                {/* MoreHorizontal column. Sits left of the
-                    density+eye stack so the per-row context-menu
-                    affordance lives at a fixed screen position
-                    matching RomsPane. */}
-                <TableHead className="w-10" aria-label="Actions" />
-                {/* Size sort header — matches RomsPane. Left-aligned
-                    so the label sits above the density bar portion
-                    of the combined density+eye cell. */}
-                <SortableHeader
-                  label="Size"
-                  sortKey="size"
-                  className="w-[3.25rem] p-0"
-                  sortState={sortState}
-                  onSort={(k) =>
-                    setSortState((prev) => nextSortState(prev, k))
-                  }
-                />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {backRow !== null ? (
-                <TableRow
-                  className="cursor-pointer bg-overlay/40 hover:bg-overlay"
-                  onClick={() => setSubPath(backRow.targetSubPath)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      setSubPath(backRow.targetSubPath);
-                    }
-                  }}
-                  tabIndex={0}
-                  role="button"
-                  aria-label={`Back to ${backRow.parentLabel}`}
-                  title={`Back to ${backRow.parentLabel}`}
+            {deferredFilter !== '' ? (
+              <>
+                No MRAs match &ldquo;{deferredFilter}&rdquo;.{' '}
+                <button
+                  type="button"
+                  onClick={() => setFilterText('')}
+                  className="underline hover:text-fg"
                 >
-                  <TableCell className="w-10 pl-4" />
-                  <BackThumbnailCell />
-                  <TableCell className="max-w-0 truncate">
-                    <span
-                      className="font-mono text-body-sm text-fg-muted"
-                      title={`../ ${backRow.parentLabel}`}
-                    >
-                      ../ {backRow.parentLabel}
-                    </span>
-                  </TableCell>
-                  <TableCell className="w-16" />
-                  <TableCell className="w-28" />
-                  <TableCell className="w-14" />
-                  <TableCell className="w-10" />
-                  <TableCell className="w-[3.25rem] p-0" />
-                </TableRow>
-              ) : null}
-              {enrichedPresentable.length === 0 ? (
-                <TableRow>
-                  <TableCell
-                    colSpan={8}
-                    className="p-4 text-body-sm text-fg-muted"
-                  >
-                    This folder is empty.
-                  </TableCell>
-                </TableRow>
-              ) : null}
-              {sortedRows.map((entry) => {
-                const rom = entry.rom;
-                const metadata = entry.metadata;
-                const classification =
-                  playabilityByPath.get(entry.relativePath) ?? null;
-                const isMissing = classification === 'missing';
-                const isFolder = entry.kind !== 'mra';
-                // feat/arcade-noromsneeded-overrides — metadata
-                // mutations (Find on ScreenScraper / Edit Metadata)
-                // need SOME stable cache key:
-                //   • playable      → primary zip's md5 (by-hash)
-                //   • no-roms-needed→ sanitized .mra path
-                //                     (arcade-mra-overrides)
-                //   • missing       → nothing; the zip's not on disk
-                //                     and the .mra needs ROMs.
-                // Allow management for playable + no-roms-needed; grey
-                // out only the missing case.
-                const canManageMetadata =
-                  classification === 'playable' ||
-                  classification === 'no-roms-needed';
-                const hasMetadata = metadata !== null;
-                const rowType = classifyRow({ kind: 'rom', rom });
-                const arcadeEntry: ArcadeMraEntry = {
-                  relativePath: entry.relativePath,
-                  displayName: entry.displayName,
-                  kind: entry.kind,
-                  hidden: entry.hidden,
-                };
-                return (
-                  <TableRow
-                    key={entry.relativePath}
-                    data-arcade-row={rom.filename}
-                    className={cn(
-                      'group/row',
-                      entry.hidden &&
-                        'opacity-50 italic text-fg-disabled',
-                      isFolder && 'cursor-pointer hover:bg-overlay/40',
-                    )}
-                    onClick={
-                      isFolder
-                        ? () => setSubPath(entry.relativePath)
-                        : undefined
-                    }
-                    onKeyDown={
-                      isFolder
-                        ? (e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault();
-                              setSubPath(entry.relativePath);
-                            }
-                          }
-                        : undefined
-                    }
-                    tabIndex={isFolder ? 0 : undefined}
-                    role={isFolder ? 'button' : undefined}
-                    aria-label={
-                      isFolder ? `Open ${entry.displayName}` : undefined
-                    }
-                  >
-                    {isFolder ? (
-                      <TableCell className="w-10 pl-4" />
-                    ) : (
-                      <TableCell className="w-10 pl-4">
-                        <input
-                          type="checkbox"
-                          className="accent-accent"
-                          aria-label={`Select ${entry.displayName}`}
-                          checked={selectedKeys.has(
-                            arcadeMraVisiblePath(entry.relativePath),
-                          )}
-                          onChange={(e) => {
-                            e.stopPropagation();
-                            onToggleSelect(
-                              arcadeMraVisiblePath(entry.relativePath),
-                              e.target.checked,
-                            );
-                          }}
-                          onClick={(e) => e.stopPropagation()}
-                        />
-                      </TableCell>
-                    )}
-                    {/* feat/pre-beta-polish-batch (F) — thumbnail
-                        mirrors the title cell's onClick. Folder rows
-                        drill (same as the parent TableRow's onClick);
-                        .mra rows open the detail dialog with the
-                        same args the title's onClick uses. */}
-                    <RomThumbnailCell
-                      rom={rom}
-                      metadata={metadata}
-                      error={false}
-                      dimmed={entry.hidden}
-                      rowType={rowType}
-                      onClick={
-                        isFolder
-                          ? () => setSubPath(entry.relativePath)
-                          : () =>
-                              setDetailDialogFor({
-                                relativePath: entry.relativePath,
-                                displayName:
-                                  metadata?.name ?? rom.displayName,
-                                filename: rom.filename,
-                                canManageMetadata,
-                                playability: classification,
-                              })
-                      }
-                      clickLabel={
-                        isFolder
-                          ? `Open ${entry.displayName}`
-                          : 'View details'
-                      }
-                    />
-                    <TableCell
-                      className={cn(
-                        'max-w-0',
-                        entry.hidden && 'opacity-50 italic',
-                        !isFolder && 'cursor-pointer',
-                      )}
-                      onClick={
-                        isFolder
-                          ? undefined
-                          : (e) => {
-                              e.stopPropagation();
-                              setDetailDialogFor({
-                                relativePath: entry.relativePath,
-                                displayName:
-                                  metadata?.name ?? rom.displayName,
-                                filename: rom.filename,
-                                canManageMetadata,
-                                playability: classification,
-                              });
-                            }
-                      }
-                      title={!isFolder ? 'View details' : undefined}
-                    >
-                      <div className="flex min-w-0 items-center gap-2">
-                        <div className="min-w-0 flex-1">
-                          <RomNameInner
-                            rom={rom}
-                            metadata={metadata}
-                            error={false}
-                            dimmed={entry.hidden}
-                          />
-                        </div>
-                        {isMissing ? (
-                          <span
-                            className="inline-block shrink-0 rounded border border-destructive/40 bg-destructive/15 px-1 text-caption uppercase tracking-[0.06em] text-destructive"
-                            title="At least one ROM zip referenced by this .mra is not present in games/mame/ or games/hbmame/."
-                          >
-                            Missing ROMs
-                          </span>
-                        ) : null}
-                      </div>
-                    </TableCell>
-                    <RomYearCell
-                      rom={rom}
-                      metadata={metadata}
-                      error={false}
-                      dimmed={entry.hidden}
-                    />
-                    <RomMetadataInfoCells
-                      rom={rom}
-                      metadata={metadata}
-                      error={false}
-                      dimmed={entry.hidden}
-                    />
-                    {/* MoreHorizontal cell — context menu with "Find
-                        on ScreenScraper..." + "Edit Metadata...".
-                        Folder rows skip the menu; the row's click
-                        handler drives drill-in instead. py-0 keeps the
-                        row at h-10 (the icon button is h-8). */}
-                    {isFolder ? (
-                      <TableCell className="w-10" />
-                    ) : (
-                      <TableCell className="w-10 py-0">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          title="More actions"
-                          aria-label={`More actions for ${entry.displayName}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            const r =
-                              e.currentTarget.getBoundingClientRect();
-                            setMenuFor({
-                              entry: {
-                                relativePath: entry.relativePath,
-                                displayName:
-                                  metadata?.name ?? rom.displayName,
-                                filename: rom.filename,
-                              },
-                              canManageMetadata,
-                              hasMetadata,
-                              x: r.left,
-                              y: r.bottom,
-                            });
-                          }}
-                        >
-                          <MoreHorizontal strokeWidth={1.5} />
-                        </Button>
-                      </TableCell>
-                    )}
-                    {isFolder ? (
-                      <TableCell className="w-[3.25rem] p-0" />
-                    ) : (
-                      <RomDensityEyeCell
-                        rom={rom}
-                        isSystem={false}
-                        maxSizeBytes={maxSizeBytes}
-                        canMutate={canMutate}
-                        disconnectedTooltip="Reconnect to make changes."
-                        onSingleToggle={() => onToggleSingle(arcadeEntry)}
-                      />
-                    )}
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        )}
-      </div>
+                  Clear filter
+                </button>
+              </>
+            ) : 'All .mra files are hidden \u2014 toggle "Show hidden" to manage them.'}
+          </div>
+        </div>
+      ) : (
+        <RomListView
+          loading={false}
+          roms={enrichedPresentable.map((e) => e.rom)}
+          presentableRoms={sortedRows.map((e) => e.rom)}
+          deferredFilter={deferredFilter}
+          onClearFilter={() => setFilterText('')}
+          scrollContainerRef={arcadeScrollContainerRef}
+          sortState={sortState}
+          onSortChange={onSortChange}
+          selected={selectedKeys}
+          metadataByPath={metadataByPathForView}
+          systemFlags={EMPTY_SYSTEM_FLAGS}
+          maxSizeBytes={maxSizeBytes}
+          canMutate={canMutate}
+          backRow={backRow}
+          onToggleAll={onToggleAll}
+          onToggleSelect={onToggleSelect}
+          onSingleToggle={arcadeRowContext.singleToggle}
+          onRowActivate={onRowActivateArcade}
+          setSubPath={setSubPath}
+          setMenuFor={() => { /* no-op: handled by arcadeContext.openMenu */ }}
+          setDetailDialogFor={() => { /* no-op: handled by arcadeContext.openDetail */ }}
+          arcadeContext={arcadeRowContext}
+        />
+      )}
       </>
     ),
     // feat/arcade-parity-3-ui — metadata detail modal. Opens on click

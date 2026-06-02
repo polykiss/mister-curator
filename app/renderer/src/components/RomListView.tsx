@@ -27,7 +27,10 @@ const DISCONNECTED_TOOLTIP = 'Reconnect to make changes.';
  * the inline rendering block in roms-adapter.tsx (PR I-1 refactor) to
  * enable PR I-2's swappable view modes (detailed list, poster grid).
  *
- * JSX is identical to the pre-refactor inline block — zero behavior change.
+ * When `arcadeContext` is supplied the component renders arcade-specific
+ * variants (Missing ROMs badge, empty cells for subfolder rows, etc.).
+ * When absent every arcade conditional is a no-op and ROM-pane behavior
+ * is unchanged.
  */
 export function RomListView({
   loading,
@@ -51,6 +54,7 @@ export function RomListView({
   setSubPath,
   setMenuFor,
   setDetailDialogFor,
+  arcadeContext,
 }: RomsViewProps): JSX.Element {
   return (
     /* PR #23 round 5 commit 1: `scroll-themed` reserves a stable
@@ -207,7 +211,16 @@ export function RomListView({
               </TableRow>
             ) : null}
             {presentableRoms.map((rom) => {
-              const isSelected = selected.has(rom.filename);
+              // ── Arcade-specific per-row values ────────────────────────
+              // All default to the ROM-pane behavior when arcadeContext
+              // is absent. The ROM pane never sees arcade-specific state.
+              const isFolder = arcadeContext?.isFolderRow(rom) ?? false;
+              const classification =
+                arcadeContext?.playabilityByPath.get(rom.filename) ?? null;
+              const isMissing = classification === 'missing';
+              const checkboxKey = arcadeContext?.checkboxKey(rom) ?? rom.filename;
+              // ─────────────────────────────────────────────────────────
+              const isSelected = selected.has(checkboxKey);
               const isSystem = systemFlags.get(rom.filename) === true;
               const isDimmed = rom.hidden || isSystem;
               // PR #23 round 3 part 2: visual row type drives the
@@ -241,11 +254,15 @@ export function RomListView({
               // event-shape: preventDefault + ignore hidden
               // containers).
               const openDetail = (): void => {
-                setDetailDialogFor({
-                  path: metadataLookupPath,
-                  displayName: metadata?.name ?? rom.displayName,
-                  filename: rom.filename,
-                });
+                if (arcadeContext) {
+                  arcadeContext.openDetail(rom, metadata ?? null);
+                } else {
+                  setDetailDialogFor({
+                    path: metadataLookupPath,
+                    displayName: metadata?.name ?? rom.displayName,
+                    filename: rom.filename,
+                  });
+                }
               };
               const thumbActivate =
                 rom.kind === 'folder-container' && !rom.hidden
@@ -264,11 +281,38 @@ export function RomListView({
                   key={rom.filename}
                   data-rom-row={rom.filename}
                   data-state={isSelected ? 'selected' : undefined}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setMenuFor({ rom, x: e.clientX, y: e.clientY });
-                  }}
+                  onContextMenu={
+                    arcadeContext
+                      ? undefined
+                      : (e) => {
+                          e.preventDefault();
+                          setMenuFor({ rom, x: e.clientX, y: e.clientY });
+                        }
+                  }
+                  // Arcade subfolder rows are drillable via a row-level
+                  // click (mirrors the arcade-adapter's pre-refactor
+                  // behavior). ROM pane folder-containers drill via the
+                  // name cell onClick — the TableRow itself stays inert.
+                  onClick={
+                    isFolder ? () => onRowActivate(rom) : undefined
+                  }
+                  onKeyDown={
+                    isFolder
+                      ? (e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            onRowActivate(rom);
+                          }
+                        }
+                      : undefined
+                  }
+                  tabIndex={isFolder ? 0 : undefined}
+                  role={isFolder ? 'button' : undefined}
+                  aria-label={
+                    isFolder ? `Open ${rom.displayName}` : undefined
+                  }
                   className={cn(
+                    'group/row',
                     // Hidden + system rows lean entirely on dimming
                     // (Round 2 design pass): opacity + italic + a
                     // darker text color. The HIDDEN/SYSTEM badges
@@ -276,17 +320,30 @@ export function RomListView({
                     // the gear icon below is the only chrome a
                     // system row carries.
                     isDimmed && 'opacity-50 italic text-fg-disabled',
+                    // Arcade folder rows get cursor + hover treatment
+                    // on the entire row (the row IS the drill action).
+                    isFolder && 'cursor-pointer hover:bg-overlay/40',
                   )}
                 >
-                  <TableCell className="pl-4">
-                    <input
-                      type="checkbox"
-                      className="accent-accent"
-                      aria-label={`Select ${rom.displayName}`}
-                      checked={isSelected}
-                      onChange={(e) => onToggleSelect(rom.filename, e.target.checked)}
-                    />
-                  </TableCell>
+                  {/* Arcade subfolder rows skip the checkbox and use an
+                      empty spacer so column widths stay consistent. */}
+                  {isFolder ? (
+                    <TableCell className="w-10 pl-4" />
+                  ) : (
+                    <TableCell className="pl-4">
+                      <input
+                        type="checkbox"
+                        className="accent-accent"
+                        aria-label={`Select ${rom.displayName}`}
+                        checked={isSelected}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          onToggleSelect(checkboxKey, e.target.checked);
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    </TableCell>
+                  )}
                   {/* PR #20 round 2: thumbnail cell. Metadata
                       streamed from the parent prefetch; box-art
                       bytes still fetched per-row via useBoxArt
@@ -342,11 +399,9 @@ export function RomListView({
                         rom.kind === 'folder-atomic'
                       ) {
                         e.preventDefault();
-                        setDetailDialogFor({
-                          path: metadataLookupPath,
-                          displayName: metadata?.name ?? rom.displayName,
-                          filename: rom.filename,
-                        });
+                        // Routes through arcadeContext.openDetail when in
+                        // arcade pane; otherwise uses the standard ROM shape.
+                        openDetail();
                       }
                     }}
                     title={
@@ -375,21 +430,35 @@ export function RomListView({
                         the thumbnail column, so the inline glyph
                         was repeating the same signal next to the
                         name and breaking the column rhythm. */}
-                    <RomNameInner
-                      rom={rom}
-                      dimmed={isDimmed}
-                      metadata={metadata}
-                      error={fetchError}
-                      leadingIcon={
-                        isSystem ? (
-                          <Settings
-                            className="size-3.5 shrink-0"
-                            strokeWidth={1.5}
-                            aria-label="system file"
-                          />
-                        ) : null
-                      }
-                    />
+                    <div className="flex min-w-0 items-center gap-2">
+                      <div className="min-w-0 flex-1">
+                        <RomNameInner
+                          rom={rom}
+                          dimmed={isDimmed}
+                          metadata={metadata}
+                          error={fetchError}
+                          leadingIcon={
+                            isSystem ? (
+                              <Settings
+                                className="size-3.5 shrink-0"
+                                strokeWidth={1.5}
+                                aria-label="system file"
+                              />
+                            ) : null
+                          }
+                        />
+                      </div>
+                      {/* Arcade-only: "Missing ROMs" badge shown when
+                          the .mra's required ZIP is absent on disk. */}
+                      {isMissing ? (
+                        <span
+                          className="inline-block shrink-0 rounded border border-destructive/40 bg-destructive/15 px-1 text-caption uppercase tracking-[0.06em] text-destructive"
+                          title="At least one ROM zip referenced by this .mra is not present in games/mame/ or games/hbmame/."
+                        >
+                          Missing ROMs
+                        </span>
+                      ) : null}
+                    </div>
                   </TableCell>
                   {/* PR-A item 8: year promoted out of the name
                       stack into its own column for sort. */}
@@ -418,20 +487,35 @@ export function RomListView({
                       keeps the button vertically centered — same
                       result the cores pane gets from `flex
                       items-center` on the row. */}
-                  <TableCell className="w-10 py-0">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      title="More actions"
-                      aria-label={`More actions for ${rom.displayName}`}
-                      onClick={(e) => {
-                        const r = e.currentTarget.getBoundingClientRect();
-                        setMenuFor({ rom, x: r.left, y: r.bottom });
-                      }}
-                    >
-                      <MoreHorizontal strokeWidth={1.5} />
-                    </Button>
-                  </TableCell>
+                  {/* Arcade subfolder rows skip the kebab menu. */}
+                  {isFolder ? (
+                    <TableCell className="w-10" />
+                  ) : (
+                    <TableCell className="w-10 py-0">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        title="More actions"
+                        aria-label={`More actions for ${rom.displayName}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const r = e.currentTarget.getBoundingClientRect();
+                          if (arcadeContext) {
+                            arcadeContext.openMenu(
+                              rom,
+                              metadata ?? null,
+                              r.left,
+                              r.bottom,
+                            );
+                          } else {
+                            setMenuFor({ rom, x: r.left, y: r.bottom });
+                          }
+                        }}
+                      >
+                        <MoreHorizontal strokeWidth={1.5} />
+                      </Button>
+                    </TableCell>
+                  )}
                   {/* Combined density + eye column. PR #23 round 4
                       extracted the cell into RomDensityEyeCell to
                       give the absolute-positioning workaround a
@@ -441,15 +525,22 @@ export function RomListView({
                       only reliable way to fill the row's actual
                       height when the `<tr>` height is
                       content-driven (the 48px thumbnail makes the
-                      actual row ~56px, not the declared 40px). */}
-                  <RomDensityEyeCell
-                    rom={rom}
-                    isSystem={isSystem}
-                    maxSizeBytes={maxSizeBytes}
-                    canMutate={canMutate}
-                    disconnectedTooltip={DISCONNECTED_TOOLTIP}
-                    onSingleToggle={onSingleToggle}
-                  />
+                      actual row ~56px, not the declared 40px).
+                      Arcade subfolder rows skip this cell too. */}
+                  {isFolder ? (
+                    <TableCell className="w-[3.25rem] p-0" />
+                  ) : (
+                    <RomDensityEyeCell
+                      rom={rom}
+                      isSystem={isSystem}
+                      maxSizeBytes={maxSizeBytes}
+                      canMutate={canMutate}
+                      disconnectedTooltip={DISCONNECTED_TOOLTIP}
+                      onSingleToggle={
+                        arcadeContext?.singleToggle ?? onSingleToggle
+                      }
+                    />
+                  )}
                 </TableRow>
               );
             })}

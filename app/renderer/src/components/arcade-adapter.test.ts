@@ -21,6 +21,11 @@ const SOURCE = readFileSync(
   resolve(__dirname, 'arcade-adapter.tsx'),
   'utf8',
 );
+// refactor/arcade-under-rom-list-view: table JSX moved to RomListView.
+const ROM_LIST_VIEW = readFileSync(
+  resolve(__dirname, 'RomListView.tsx'),
+  'utf8',
+);
 
 describe('arcade-adapter — optimistic single-toggle (feat/pre-beta-polish-batch)', () => {
   it('imports the ledger path helpers so the predicted relativePath matches what a fresh listing would return', () => {
@@ -179,18 +184,21 @@ describe('arcade-adapter — bulk-select (feat/arcade-bulk-select-and-toolbar)',
   });
 
   it('header checkbox is rendered in the w-10 pl-4 slot and is wired to onToggleAll', () => {
-    expect(SOURCE).toMatch(
+    // refactor/arcade-under-rom-list-view: header moved to RomListView.
+    expect(ROM_LIST_VIEW).toMatch(
       /<TableHead className="w-10 pl-4">\s*<input[\s\S]{0,200}aria-label="Select all"/,
     );
-    expect(SOURCE).toMatch(/onChange=\{\(e\) => onToggleAll\(e\.target\.checked\)\}/);
+    expect(ROM_LIST_VIEW).toMatch(/onChange=\{\(e\) => onToggleAll\(e\.target\.checked\)\}/);
   });
 
   it('each mra row renders a checkbox wired to onToggleSelect — folder rows get an empty cell', () => {
     // Folder rows: <TableCell className="w-10 pl-4" /> (no checkbox).
-    // MRA rows: <TableCell className="w-10 pl-4"><input ... /></TableCell>.
-    expect(SOURCE).toMatch(/isFolder \? \(\s*<TableCell className="w-10 pl-4" \/>/);
-    expect(SOURCE).toMatch(/aria-label=\{`Select \$\{entry\.displayName\}`\}/);
-    expect(SOURCE).toMatch(/onToggleSelect\(\s*arcadeMraVisiblePath\(entry\.relativePath\),/);
+    // MRA rows: checkbox with arcade's stable key via arcadeContext.checkboxKey.
+    // refactor/arcade-under-rom-list-view: row rendering moved to RomListView.
+    expect(ROM_LIST_VIEW).toMatch(/isFolder \? \(\s*<TableCell className="w-10 pl-4" \/>/);
+    // Checkbox key now goes through arcadeContext.checkboxKey(rom) in RomListView;
+    // arcade-adapter wires it to arcadeMraVisiblePath.
+    expect(SOURCE).toMatch(/arcadeMraVisiblePath\(rom\.filename\)/);
   });
 
   it('"Hide selected (N)" button is disabled when visibleSelectedCount === 0', () => {
