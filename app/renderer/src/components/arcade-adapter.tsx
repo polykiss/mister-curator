@@ -45,7 +45,8 @@ import { RomListView } from '@app/renderer/src/components/RomListView';
 import { RomDetailedListView } from '@app/renderer/src/components/RomDetailedListView';
 import { RomPosterView } from '@app/renderer/src/components/RomPosterView';
 import { ViewModeToggle } from '@app/renderer/src/components/ViewModeToggle';
-import type { ArcadeRowContext, ViewMode } from '@app/renderer/src/lib/roms-view-props';
+import { SizeControl } from '@app/renderer/src/components/SizeControl';
+import type { ArcadeRowContext, ViewMode, ViewSize } from '@app/renderer/src/lib/roms-view-props';
 
 /**
  * feat/arcade-phase-1.5 — pane for managing `.mra` files under
@@ -84,6 +85,11 @@ export function useArcadeAdapter(): ItemListAdapter {
     `mistercurator.viewMode.arcade.${host}`,
     'list',
     ['list', 'detailed', 'poster'],
+  );
+  const [viewSize, setViewSize] = usePersistedString<ViewSize>(
+    `mistercurator.viewSize.arcade.${host}`,
+    'M',
+    ['S', 'M', 'L', 'XL'],
   );
   // feat/pre-beta-polish-batch — single-toggle hide/show writes
   // through to the sidebar Arcade row's hidden-count badge via this
@@ -908,6 +914,9 @@ export function useArcadeAdapter(): ItemListAdapter {
             inputRef={filterInputRef}
           />
           <ViewModeToggle value={viewMode} onChange={setViewMode} />
+          {viewMode !== 'list' ? (
+            <SizeControl value={viewSize} onChange={setViewSize} />
+          ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button
@@ -1035,6 +1044,7 @@ export function useArcadeAdapter(): ItemListAdapter {
             setMenuFor: () => { /* no-op: handled by arcadeContext.openMenu */ },
             setDetailDialogFor: () => { /* no-op: handled by arcadeContext.openDetail */ },
             arcadeContext: arcadeRowContext,
+            viewSize,
           } as const;
           if (viewMode === 'detailed') return <RomDetailedListView {...sharedProps} />;
           if (viewMode === 'poster') return <RomPosterView {...sharedProps} />;

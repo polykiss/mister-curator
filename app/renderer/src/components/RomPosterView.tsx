@@ -10,7 +10,9 @@ import { Button } from '@app/renderer/src/components/ui/button';
 import { Skeleton } from '@app/renderer/src/components/ui/skeleton';
 import { cn } from '@app/renderer/src/lib/cn';
 import { isPinnedRow } from '@app/renderer/src/lib/rom-sort';
-import type { RomsViewProps } from '@app/renderer/src/lib/roms-view-props';
+import type { RomsViewProps, ViewSize } from '@app/renderer/src/lib/roms-view-props';
+
+const TILE_MIN_WIDTH: Record<ViewSize, number> = { S: 100, M: 160, L: 220, XL: 280 };
 import {
   displayGenre as displayGenreOf,
   displayName as displayNameOf,
@@ -226,11 +228,14 @@ export function RomPosterView({
   setSubPath,
   setDetailDialogFor,
   arcadeContext,
+  viewSize = 'M',
 }: RomsViewProps): JSX.Element {
+  const tileMinWidth = TILE_MIN_WIDTH[viewSize];
+  const gridStyle = { gridTemplateColumns: `repeat(auto-fill, minmax(${tileMinWidth}px, 1fr))` };
   if (loading && !roms) {
     return (
       <div ref={scrollContainerRef} className="scroll-themed flex-1 overflow-auto pr-2.5">
-        <div className="grid grid-cols-4 gap-4 p-4 sm:grid-cols-5 lg:grid-cols-6">
+        <div className="grid gap-4 p-4" style={gridStyle}>
           {Array.from({ length: 12 }).map((_, i) => (
             <div key={i} className="flex flex-col gap-1">
               <Skeleton className="aspect-[3/4] w-full rounded-md" />
@@ -328,12 +333,12 @@ export function RomPosterView({
     <div ref={scrollContainerRef} className="scroll-themed flex-1 overflow-auto pr-2.5">
       {pinned.length > 0 ? (
         <div className="border-b border-subtle px-4 py-3">
-          <div className="grid grid-cols-4 gap-3 sm:grid-cols-6 lg:grid-cols-8">
+          <div className="grid gap-3" style={gridStyle}>
             {pinned.map(renderTile)}
           </div>
         </div>
       ) : null}
-      <div className="grid grid-cols-4 gap-4 p-4 sm:grid-cols-5 lg:grid-cols-6">
+      <div className="grid gap-4 p-4" style={gridStyle}>
         {unpinned.map(renderTile)}
       </div>
     </div>

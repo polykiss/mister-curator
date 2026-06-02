@@ -298,9 +298,18 @@ function FolderTile(props: {
  *     to filename → showing both is duplicated noise).
  */
 export function RomNameInner(
-  props: RomMetadataCellProps & { readonly leadingIcon?: ReactNode },
+  props: RomMetadataCellProps & {
+    readonly leadingIcon?: ReactNode;
+    /**
+     * Optional extra content rendered inside the title column (after
+     * the name and filename subline). Used by RomDetailedListView to
+     * inject a description excerpt that aligns with the title text
+     * rather than the status dot.
+     */
+    readonly descriptionContent?: ReactNode;
+  },
 ): JSX.Element {
-  const { rom, dimmed, leadingIcon, metadata } = props;
+  const { rom, dimmed, leadingIcon, descriptionContent, metadata } = props;
   // PR-D2 (PR #29): route through `displayNameOf` so the user-set
   // `userOverride.name` wins over the source-resolved name. Falls
   // back to the on-disk filename when no metadata record exists
@@ -364,6 +373,10 @@ export function RomNameInner(
             </span>
           </span>
         ) : null}
+        {/* Optional extra content (e.g. description) injected by the
+            caller. Lives inside the title column so it aligns with
+            the name and filename text, not with the status dot. */}
+        {descriptionContent ?? null}
       </span>
       <RomTagPills tags={tags} />
     </span>
