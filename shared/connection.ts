@@ -177,6 +177,37 @@ export type ConnectionEvent =
       readonly type: 'duplicates-detected';
       readonly profileId: string;
       readonly duplicates: readonly DuplicatePair[];
+    }
+  | {
+      /**
+       * feat/optimistic-connect — fired when background arcade
+       * validation starts (isValidating: true) and when it finishes or
+       * fails (isValidating: false). The renderer uses this to show /
+       * hide a "Validating library…" indicator in the status bar.
+       */
+      readonly type: 'background-validating';
+      readonly isValidating: boolean;
+    }
+  | {
+      /**
+       * feat/optimistic-connect — fired after background arcade
+       * validation completes AND the on-device arcade data has changed
+       * (witnesses drifted since the last cache write). The arcade pane
+       * listens for this and triggers a soft re-fetch so the user sees
+       * fresh data without a manual refresh.
+       */
+      readonly type: 'arcade-refreshed';
+    }
+  | {
+      /**
+       * feat/optimistic-connect — emitted from background validation
+       * when the auto-hide rule fires for the first time (the
+       * empty→non-empty ledger edge). Replaces the old
+       * `ConnectResult.firstConnectArcadeAutoHidden` field now that
+       * auto-hide runs in the background rather than blocking connect.
+       */
+      readonly type: 'arcade-auto-hide-applied';
+      readonly count: number;
     };
 
 /**

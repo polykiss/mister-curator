@@ -172,6 +172,7 @@ export function registerIpcHandlers(
   handle<[], void>(IPC_CHANNELS.disconnect, () => manager.disconnect());
 
   handle(IPC_CHANNELS.getConnectionStatus, () => manager.getStatus());
+  handle(IPC_CHANNELS.getBackgroundValidating, () => manager.getBackgroundValidating());
 
   handle<[{ readonly forceRefresh?: boolean } | undefined], unknown>(
     IPC_CHANNELS.listAllCoresWithFiles,

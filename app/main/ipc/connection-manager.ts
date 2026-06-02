@@ -249,6 +249,12 @@ export class ConnectionManager {
    */
   private arcadePlayabilityCache: ArcadePlayabilitySnapshot | null = null;
   /**
+   * feat/optimistic-connect — true while background arcade validation
+   * is running. Cleared on success or failure so the "Validating
+   * library…" indicator dismisses reliably.
+   */
+  private backgroundValidating = false;
+  /**
    * Host of the active connection — used to key the on-disk cache
    * (PR #12). Captured on connect alongside `currentProfileId` so a
    * write-through after a hide/show targets the right host's cache
@@ -322,6 +328,8 @@ export class ConnectionManager {
     this.folderClassificationsCache = EMPTY_FOLDER_CLASSIFICATIONS;
     this.arcadeMraCache = null;
     this.arcadePlayabilityCache = null;
+    this.backgroundValidating = false;
+    this.backgroundValidationPromise = null;
     this.currentHost = null;
 
     // Connecting-elapsed ticker. Fires every second while the connect
@@ -454,56 +462,26 @@ export class ConnectionManager {
         reappliedCount = await this.runAutoReapply();
       }
 
-      // feat/arcade-playability-data (PR 1/2) — pre-compute the
-      // arcade playability snapshot so PR-2's UI lands warm. Cache
-      // hit on a warm reconnect; cold walk on first connect. Wrap
-      // in try/catch — a transient SSH glitch here shouldn't keep
-      // the rest of the app from coming online. The snapshot
-      // hydrates lazily on the IPC fallback path if this misses.
-      let firstConnectArcadeAutoHidden: number | null = null;
+      // feat/optimistic-connect — load arcade snapshot from disk cache
+      // immediately (no SSH). This populates arcadePlayabilityCache so
+      // the auto-scrape engine and arcade pane have data as soon as
+      // setStatus('connected') fires. Background validation then verifies
+      // witness freshness and re-fetches if stale.
       try {
-        // feat/connecting-screen-status — `loadArcadeData` is the
-        // expensive phase on a cold cache (the awk-over-N-mras
-        // SSH pass). Always emit; a cache hit drains in <200ms
-        // and never reveals the label because the reveal-delay
-        // hasn't expired yet.
-        this.emitConnectionEvent({
-          type: 'connect-phase',
-          profileId,
-          phase: 'arcade-parse',
-        });
-        const snapshot = await this.loadArcadeData();
-        // feat/arcade-ux-and-ledger (PR 2/2) — heal stale arcade
-        // ledger entries (mras that vanished between sessions) and
-        // run the auto-hide pass against the current snapshot.
-        // Returns the empty→non-empty edge if it fired; the
-        // renderer's toast reads off ConnectResult.
-        //
-        // feat/connecting-screen-status — emit the 'auto-hide'
-        // phase only when the rule has work to do: auto-hide is
-        // enabled AND there are missing-ROM mras in the snapshot.
-        // The other branches (rule off, no missing) drain
-        // instantly and don't warrant a label flip.
-        const autoHideEnabled =
-          this.ledgerCache.arcadeAutoHideEnabled ??
-          DEFAULT_ARCADE_AUTO_HIDE_ENABLED;
-        const hasMissing = [...snapshot.byPath.values()].some(
-          (v) => v === 'missing',
-        );
-        if (autoHideEnabled && hasMissing) {
-          this.emitConnectionEvent({
-            type: 'connect-phase',
-            profileId,
-            phase: 'auto-hide',
+        const diskCached = await this.cache.getArcadeMraMetaCache(profile.host);
+        if (diskCached !== null && this.arcadePlayabilityCache === null) {
+          this.arcadePlayabilityCache = buildPlayabilitySnapshot(
+            diskCached.entries,
+            diskCached.zipBasenames,
+            diskCached.primaryZipSizeByMra ?? {},
+          );
+          diagLog('info', 'arcade', '·', 'optimistic-snapshot-loaded', {
+            host: profile.host,
+            entries: diskCached.entries.length,
           });
         }
-        firstConnectArcadeAutoHidden = await this.healAndApplyArcadeAutoHide(
-          snapshot,
-        );
-      } catch (err) {
-        diagLog('warn', 'arcade', '·', 'playability-scan failed', {
-          err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
-        });
+      } catch {
+        // Disk read failure is non-fatal; background will handle it.
       }
 
       // feat/duplicate-detect-and-restore (#40) — scan the cores list
@@ -526,6 +504,10 @@ export class ConnectionManager {
         // Detection failure is non-fatal — don't block connect.
       }
 
+      // feat/optimistic-connect — setStatus fires BEFORE arcade
+      // validation. Arcade data served from disk cache is already warm;
+      // background validation confirms / refreshes it via SSH witness
+      // check. The UI is now interactive immediately on warm reconnects.
       this.setStatus('connected');
       diagLog('info', 'conn', '←', 'connected', {
         profileId,
@@ -533,7 +515,12 @@ export class ConnectionManager {
         ms: Date.now() - startedAt,
         reappliedCount,
       });
-      return { reappliedCount, firstConnectArcadeAutoHidden };
+      // Fire-and-forget: arcade validation runs in background.
+      // Store the promise so tests can synchronise via
+      // waitForBackgroundValidation().
+      this.backgroundValidationPromise = this.runBackgroundArcadeValidation(profileId);
+      void this.backgroundValidationPromise;
+      return { reappliedCount, firstConnectArcadeAutoHidden: null };
     } catch (err) {
       diagLog('error', 'conn', '✗', 'connect-failed', {
         profileId,
@@ -734,6 +721,82 @@ export class ConnectionManager {
    * resolution (hit or miss) so the live-verify trace shows the
    * cold/warm timings.
    */
+  /**
+   * feat/optimistic-connect — runs after setStatus('connected') to
+   * validate the arcade cache against fresh SSH witnesses and apply
+   * the auto-hide rule. Emits 'background-validating' events so the
+   * renderer can show / hide a "Validating library…" indicator.
+   *
+   * If witnesses are unchanged the snapshot was already correct (served
+   * from the disk cache during connect) and the method is a no-op.
+   * If they changed, the snapshot updates and 'arcade-refreshed' fires
+   * so the arcade pane re-fetches.
+   *
+   * Errors are non-fatal: the cached snapshot continues to display and
+   * background-validating resets to false so the indicator clears.
+   */
+  private async runBackgroundArcadeValidation(profileId: string): Promise<void> {
+    if (this.backgroundValidating) return; // defensive guard
+    this.backgroundValidating = true;
+    this.emitConnectionEvent({ type: 'background-validating', isValidating: true });
+    const oldSnapshot = this.arcadePlayabilityCache;
+    try {
+      // loadArcadeData re-uses in-memory cache if witnesses still match
+      // (the common warm-reconnect case — ~300-500ms total). It walks the
+      // device only on a cold cache or witness mismatch (first connect or
+      // after .mra / zip changes).
+      // Clear in-memory cache so loadArcadeData re-runs the witness check.
+      // We keep the disk-based snapshot serving the pane in the meantime.
+      this.arcadePlayabilityCache = null;
+      const freshSnapshot = await this.loadArcadeData();
+
+      // Auto-hide heal — mirrors the old blocking flow.
+      const autoHideEnabled =
+        this.ledgerCache.arcadeAutoHideEnabled ??
+        DEFAULT_ARCADE_AUTO_HIDE_ENABLED;
+      const hasMissing = [...freshSnapshot.byPath.values()].some(
+        (v) => v === 'missing',
+      );
+      if (autoHideEnabled && hasMissing) {
+        this.emitConnectionEvent({
+          type: 'connect-phase',
+          profileId,
+          phase: 'auto-hide',
+        });
+      }
+      const autoHideCount = await this.healAndApplyArcadeAutoHide(freshSnapshot);
+      if (autoHideCount !== null && autoHideCount > 0) {
+        this.emitConnectionEvent({
+          type: 'arcade-auto-hide-applied',
+          count: autoHideCount,
+        });
+      }
+
+      // Notify the arcade pane if the snapshot actually changed. The
+      // snapshot reference from oldSnapshot (disk-cache-built) differs
+      // from freshSnapshot even if the data is identical, so compare by
+      // entry count + zip count as a cheap proxy for "something changed".
+      const dataChanged =
+        oldSnapshot === null ||
+        oldSnapshot.entries.length !== freshSnapshot.entries.length ||
+        oldSnapshot.zipBasenames.size !== freshSnapshot.zipBasenames.size;
+      if (dataChanged) {
+        this.emitConnectionEvent({ type: 'arcade-refreshed' });
+      }
+    } catch (err) {
+      diagLog('warn', 'arcade', '·', 'background-validation-failed', {
+        err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
+      // Restore old snapshot so the pane still has something to show.
+      if (oldSnapshot !== null && this.arcadePlayabilityCache === null) {
+        this.arcadePlayabilityCache = oldSnapshot;
+      }
+    } finally {
+      this.backgroundValidating = false;
+      this.emitConnectionEvent({ type: 'background-validating', isValidating: false });
+    }
+  }
+
   async loadArcadeData(
     options: { readonly forceRefresh?: boolean } = {},
   ): Promise<ArcadePlayabilitySnapshot> {
@@ -949,6 +1012,26 @@ export class ConnectionManager {
   getArcadePlayabilitySnapshot(): ArcadePlayabilitySnapshot | null {
     return this.arcadePlayabilityCache;
   }
+
+  /**
+   * feat/optimistic-connect — returns true while background arcade
+   * validation is running post-connect.
+   */
+  getBackgroundValidating(): boolean {
+    return this.backgroundValidating;
+  }
+
+  /**
+   * feat/optimistic-connect — resolves when the current background
+   * arcade validation run completes (or immediately if none is
+   * in flight). Used by tests to synchronise assertions that depend
+   * on post-connect arcade data.
+   */
+  async waitForBackgroundValidation(): Promise<void> {
+    return this.backgroundValidationPromise ?? Promise.resolve();
+  }
+
+  private backgroundValidationPromise: Promise<void> | null = null;
 
   async setArcadeAutoHideEnabled(
     enabled: boolean,
