@@ -1365,16 +1365,14 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
                     right-edge stack so the row's primary visibility
                     toggle owns the far-right slot. */}
                 <TableHead className="w-10" aria-label="Actions" />
-                {/* Combined density + eye column. The DensityBar IS
-                    the visual representation of file size; "Size" is
-                    the column label and makes it sortable. Width =
-                    20 (density) + 32 (eye) + a hair ≈ 52px — same
-                    as before; the SortableHeader replaces the plain
-                    TableHead but preserves the column footprint. */}
+                {/* Combined density + eye column. "Size" label is
+                    left-aligned so it sits above the density bar
+                    (the left-hand portion of the cell) rather than
+                    above the eye icon (the right-hand portion).
+                    Width = 20 (density) + 32 (eye) ≈ 52px. */}
                 <SortableHeader
                   label="Size"
                   sortKey="size"
-                  align="right"
                   className="w-[3.25rem] p-0"
                   sortState={sortState}
                   onSort={(k) =>

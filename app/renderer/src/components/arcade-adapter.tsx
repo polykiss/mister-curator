@@ -1044,9 +1044,17 @@ export function useArcadeAdapter(): ItemListAdapter {
                     affordance lives at a fixed screen position
                     matching RomsPane. */}
                 <TableHead className="w-10" aria-label="Actions" />
-                <TableHead
+                {/* Size sort header — matches RomsPane. Left-aligned
+                    so the label sits above the density bar portion
+                    of the combined density+eye cell. */}
+                <SortableHeader
+                  label="Size"
+                  sortKey="size"
                   className="w-[3.25rem] p-0"
-                  aria-label="Visibility"
+                  sortState={sortState}
+                  onSort={(k) =>
+                    setSortState((prev) => nextSortState(prev, k))
+                  }
                 />
               </TableRow>
             </TableHeader>
