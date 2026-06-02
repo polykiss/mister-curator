@@ -76,7 +76,8 @@ describe('RomPosterView — structure (feat/view-modes)', () => {
   );
 
   it('renders a grid container (not a table)', () => {
-    expect(POSTER).toMatch(/grid\s+grid-cols/);
+    // feat/view-size-control: grid uses auto-fill minmax instead of fixed cols
+    expect(POSTER).toMatch(/grid/);
     expect(POSTER).not.toContain('<Table>');
     expect(POSTER).not.toContain('<TableBody>');
   });
@@ -121,8 +122,9 @@ describe('RomDetailedListView — structure (feat/view-modes)', () => {
     expect(DETAILED).toMatch(/description/);
   });
 
-  it('uses a taller thumbnail (h-20 or larger)', () => {
-    expect(DETAILED).toMatch(/h-20/);
+  it('uses a taller thumbnail (size driven by thumbPx)', () => {
+    // feat/view-size-control: h-20 replaced by dynamic inline style via thumbPx
+    expect(DETAILED).toMatch(/thumbPx/);
   });
 
   it('Missing ROMs badge preserved', () => {

@@ -74,7 +74,8 @@ import { FilterInput } from '@app/renderer/src/components/FilterInput';
 import { RomDetailedListView } from '@app/renderer/src/components/RomDetailedListView';
 import { RomPosterView } from '@app/renderer/src/components/RomPosterView';
 import { ViewModeToggle } from '@app/renderer/src/components/ViewModeToggle';
-import type { ViewMode } from '@app/renderer/src/lib/roms-view-props';
+import { SizeControl } from '@app/renderer/src/components/SizeControl';
+import type { ViewMode, ViewSize } from '@app/renderer/src/lib/roms-view-props';
 
 /**
  * fix/render-cascade-hide-unhide Fix 1: returns a copy of `prev`
@@ -141,6 +142,11 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     `mistercurator.viewMode.roms.${host}`,
     'list',
     ['list', 'detailed', 'poster'],
+  );
+  const [viewSize, setViewSize] = usePersistedString<ViewSize>(
+    `mistercurator.viewSize.roms.${host}`,
+    'M',
+    ['S', 'M', 'L', 'XL'],
   );
   // Mid-session disconnect / pre-reconnect state — every mutating
   // button gates on this. Reads (browse, drill, filter) stay enabled
@@ -1169,6 +1175,9 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
             inputRef={filterInputRef}
           />
           <ViewModeToggle value={viewMode} onChange={setViewMode} />
+          {viewMode !== 'list' ? (
+            <SizeControl value={viewSize} onChange={setViewSize} />
+          ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button
@@ -1279,6 +1288,7 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
           setSubPath,
           setMenuFor,
           setDetailDialogFor,
+          viewSize,
         } as const;
         if (viewMode === 'detailed') return <RomDetailedListView {...sharedProps} />;
         if (viewMode === 'poster') return <RomPosterView {...sharedProps} />;

@@ -16,6 +16,13 @@ import type { SortKey, SortState } from '@app/renderer/src/lib/rom-sort';
 export type ViewMode = 'list' | 'detailed' | 'poster';
 
 /**
+ * Size preset for Detailed and Poster views. Controls thumbnail height
+ * in Detailed mode and tile min-width in Poster mode. Persisted per-host
+ * + per-pane in localStorage; defaults to 'M'.
+ */
+export type ViewSize = 'S' | 'M' | 'L' | 'XL';
+
+/**
  * Arcade-specific row context, bundled into one optional prop so the
  * view component stays self-contained. When arcadeContext is defined
  * the component uses arcade-specific behavior; when absent (ROM pane)
@@ -149,4 +156,10 @@ export interface RomsViewProps {
    * applies unchanged.
    */
   readonly arcadeContext?: ArcadeRowContext;
+  /**
+   * Size preset for Detailed and Poster views. Ignored by RomListView.
+   * Controls thumbnail height (Detailed) and tile min-width (Poster).
+   * Defaults to 'M' when absent.
+   */
+  readonly viewSize?: ViewSize;
 }

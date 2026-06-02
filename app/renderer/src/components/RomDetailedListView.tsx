@@ -17,8 +17,16 @@ import {
   TableRow,
 } from '@app/renderer/src/components/ui/table';
 import { cn } from '@app/renderer/src/lib/cn';
-import type { RomsViewProps } from '@app/renderer/src/lib/roms-view-props';
+import type { RomsViewProps, ViewSize } from '@app/renderer/src/lib/roms-view-props';
 import { classifyRow } from '@app/renderer/src/lib/row-type';
+
+const THUMB_PX: Record<ViewSize, number> = { S: 60, M: 80, L: 120, XL: 160 };
+const DESCRIPTION_LINE_CLAMP: Record<ViewSize, string> = {
+  S: 'line-clamp-2',
+  M: 'line-clamp-2',
+  L: 'line-clamp-3',
+  XL: 'line-clamp-4',
+};
 
 const DISCONNECTED_TOOLTIP = 'Reconnect to make changes.';
 
@@ -27,12 +35,14 @@ function DetailedThumbnailCell({
   boxArtUrl,
   altText,
   rowType,
+  thumbPx,
   onClick,
   clickLabel,
 }: {
   readonly boxArtUrl: string | null;
   readonly altText: string;
   readonly rowType: ReturnType<typeof classifyRow>;
+  readonly thumbPx: number;
   readonly onClick?: () => void;
   readonly clickLabel?: string;
 }): JSX.Element {
@@ -74,31 +84,34 @@ function DetailedThumbnailCell({
     'aria-label': clickLabel,
   } : {};
 
+  const tileStyle = { height: `${thumbPx}px`, width: `${Math.round(thumbPx * 0.75)}px` };
   const imgContent = rowType === 'explorable-folder' ? (
-    <div className="flex h-20 w-16 items-center justify-center rounded-sm bg-overlay/40 text-fg-muted">
+    <div className="flex items-center justify-center rounded-sm bg-overlay/40 text-fg-muted" style={tileStyle}>
       <FolderOpen className="size-6" strokeWidth={1.5} aria-hidden />
     </div>
   ) : rowType === 'back' ? (
-    <div className="flex h-20 w-16 items-center justify-center rounded-sm bg-overlay/40 text-fg-muted">
+    <div className="flex items-center justify-center rounded-sm bg-overlay/40 text-fg-muted" style={tileStyle}>
       <CornerUpLeft className="size-6" strokeWidth={1.5} aria-hidden />
     </div>
   ) : objectUrl !== null ? (
     <img
       src={objectUrl}
       alt={altText}
-      className="h-20 w-auto max-w-[4rem] rounded-sm object-contain"
+      className="rounded-sm object-contain"
+      style={{ height: `${thumbPx}px`, width: 'auto', maxWidth: `${Math.round(thumbPx * 0.75)}px` }}
       loading="lazy"
       decoding="async"
     />
   ) : (
-    <div className="flex h-20 w-16 items-center justify-center rounded-sm bg-overlay/40 text-fg-disabled">
+    <div className="flex items-center justify-center rounded-sm bg-overlay/40 text-fg-disabled" style={tileStyle}>
       <ImageOff className="size-4" strokeWidth={1.5} aria-hidden />
     </div>
   );
 
   return (
     <TableCell
-      className={cn('w-20 p-1', onClick !== undefined && 'cursor-pointer')}
+      className={cn('p-1', onClick !== undefined && 'cursor-pointer')}
+      style={{ width: `${Math.round(thumbPx * 0.75) + 8}px` }}
       {...interactiveProps}
     >
       {imgContent}
@@ -135,13 +148,18 @@ export function RomDetailedListView({
   setMenuFor,
   setDetailDialogFor,
   arcadeContext,
+  viewSize = 'M',
 }: RomsViewProps): JSX.Element {
+  const thumbPx = THUMB_PX[viewSize];
+  const clampClass = DESCRIPTION_LINE_CLAMP[viewSize];
+  const skeletonH = thumbPx + 8; // + p-1 top + p-1 bottom
+
   return (
     <div ref={scrollContainerRef} className="scroll-themed flex-1 overflow-auto pr-2.5">
       {loading && !roms ? (
         <div className="space-y-1 p-4">
           {Array.from({ length: 8 }).map((_, i) => (
-            <Skeleton key={i} className="h-[88px] w-full" />
+            <Skeleton key={i} style={{ height: `${skeletonH}px` }} className="w-full" />
           ))}
         </div>
       ) : !presentableRoms || presentableRoms.length === 0 ? (
@@ -172,7 +190,7 @@ export function RomDetailedListView({
                   onChange={(e) => onToggleAll(e.target.checked)}
                 />
               </TableHead>
-              <TableHead className="w-20" aria-label="Box art" />
+              <TableHead style={{ width: `${Math.round(thumbPx * 0.75) + 8}px` }} aria-label="Box art" />
               <SortableHeader label="Name" sortKey="name" sortState={sortState} onSort={onSortChange} />
               <SortableHeader label="Year" sortKey="year" align="right" className="w-16" sortState={sortState} onSort={onSortChange} />
               <SortableHeader label="Genre" sortKey="genre" className="w-28" sortState={sortState} onSort={onSortChange} />
@@ -270,6 +288,7 @@ export function RomDetailedListView({
                     boxArtUrl={metadata?.boxArtUrl ?? null}
                     altText={metadata?.name ?? rom.displayName}
                     rowType={rowType}
+                    thumbPx={thumbPx}
                     onClick={thumbActivate}
                     clickLabel={rowType === 'explorable-folder' ? `Open ${rom.displayName}` : 'View details'}
                   />
@@ -294,12 +313,12 @@ export function RomDetailedListView({
                           metadata={metadata}
                           error={fetchError}
                           leadingIcon={isSystem ? <Settings className="size-3.5 shrink-0" strokeWidth={1.5} aria-label="system file" /> : null}
+                          descriptionContent={description && !isFolder ? (
+                            <p className={cn('mt-1 overflow-hidden text-caption text-fg-muted', clampClass)}>
+                              {description}
+                            </p>
+                          ) : null}
                         />
-                        {description && !isFolder ? (
-                          <p className="mt-1 line-clamp-2 text-caption text-fg-muted overflow-hidden">
-                            {description}
-                          </p>
-                        ) : null}
                       </div>
                       {isMissing ? (
                         <span className="inline-block shrink-0 rounded border border-destructive/40 bg-destructive/15 px-1 text-caption uppercase tracking-[0.06em] text-destructive" title="At least one ROM zip referenced by this .mra is not present in games/mame/ or games/hbmame/.">
