@@ -254,11 +254,24 @@ export function autoScrapeMessageFor(
     return `Probing ROM directories: ${String(current)}/${String(event.totalCoreCount)} · ${event.coreLabel}`;
   }
   if (event.state !== 'active') return null;
+  // fix/validation-not-scraping — when done=0 the engine is still in
+  // the mtime-batch validation phase (or all paths were cache hits).
+  // Show "Validating" instead of "Scraping 0/N" so the user sees an
+  // accurate label: no ticking counter, no false impression of
+  // 649 ROMs being re-scraped.
+  if (event.done === 0) {
+    const base = `Validating ${event.coreLabel}…`;
+    const doneCount = event.completedCoreIds.length;
+    const queuedCount = event.remainingCount;
+    const tail: string[] = [];
+    if (doneCount > 0) tail.push(`${String(doneCount)} done`);
+    if (queuedCount > 0) tail.push(`${String(queuedCount)} queued`);
+    return tail.length > 0 ? `${base} · ${tail.join(' · ')}` : base;
+  }
   // feat/auto-scrape-persistence: extend the footer with the
   // session completion counts so the user sees the FULL picture,
   // not just the current core. Tail segments drop when their
-  // count is zero so the message stays short on the common case
-  // (just connected, nothing done yet → "Scraping mame (12/680)").
+  // count is zero so the message stays short on the common case.
   const base = `Scraping ${event.coreLabel} (${String(event.done)}/${String(event.total)})`;
   const doneCount = event.completedCoreIds.length;
   const queuedCount = event.remainingCount;
