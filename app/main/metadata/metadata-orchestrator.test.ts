@@ -2243,5 +2243,93 @@ describe('MetadataOrchestrator', () => {
       // "no metadata yet" with a Find on ScreenScraper button).
       expect(result['TTL Fresh.mra']).toBeNull();
     });
+
+    // ── fix/validation-not-scraping: arcade fromCache coverage ────────
+    // Mirror of the runScrapeLoop tests: mtime-validated arcade zips
+    // should carry fromCache: true so the guarded onPathResolved
+    // callback in index.ts does NOT tick the engine's done counter.
+
+    it('arcade mtime-validated zip emits fromCache: true and does not tick a guarded counter', async () => {
+      const entry = mra('Galaga.mra', [['galaga.zip']]);
+      const { orchestrator } = makeOrchestrator({
+        hashEntries: new Map([
+          ['/media/fat/games/mame/galaga.zip', buildHashEntry(HASH, 2048, 100)],
+        ]),
+        meta: buildMeta(HASH, 'Galaga'),
+      });
+      const session = (orchestrator as unknown as {
+        getActiveSession: () => ActiveSession | null;
+      }).getActiveSession();
+      if (session === null) throw new Error('test setup: session null');
+      (session.client.statPathsWithSize as ReturnType<typeof vi.fn>)
+        .mockImplementation(async (paths: readonly string[]) => {
+          const out: Record<string, { size: number; mtime: number }> = {};
+          for (const p of paths) {
+            out[p] = p === '/media/fat/games/mame/galaga.zip'
+              ? { size: 2048, mtime: 100 }  // stat matches cached mtime → cache hit
+              : { size: 0, mtime: 0 };
+          }
+          return out;
+        });
+
+      const events: RomMetadataResolvedEvent[] = [];
+      let guardedTicks = 0;
+      await orchestrator.getArcadeMetadata(
+        [entry],
+        new Set(['galaga.zip']),
+        // Simulate the index.ts guarded callback: only tick for !fromCache
+        (event) => {
+          events.push(event);
+          if (!event.fromCache) guardedTicks += 1;
+        },
+      );
+
+      expect(events).toHaveLength(1);
+      // The mtime matched → cache hit → fromCache must be true.
+      expect(events[0]?.fromCache).toBe(true);
+      // The guarded counter never ticked — dots stay green.
+      expect(guardedTicks).toBe(0);
+    });
+
+    it('arcade zip requiring real hash work emits fromCache: false and ticks the guarded counter', async () => {
+      // Hash entry absent from cache → computeHash will be called.
+      const entry = mra('Galaga.mra', [['galaga.zip']]);
+      const { orchestrator } = makeOrchestrator({
+        hashEntries: new Map(), // ← no cached hash → needs compute
+        meta: buildMeta(HASH, 'Galaga'),
+      });
+      const session = (orchestrator as unknown as {
+        getActiveSession: () => ActiveSession | null;
+      }).getActiveSession();
+      if (session === null) throw new Error('test setup: session null');
+      (session.client.statPathsWithSize as ReturnType<typeof vi.fn>)
+        .mockImplementation(async (paths: readonly string[]) => {
+          const out: Record<string, { size: number; mtime: number }> = {};
+          for (const p of paths) {
+            out[p] = p === '/media/fat/games/mame/galaga.zip'
+              ? { size: 2048, mtime: 100 }
+              : { size: 0, mtime: 0 };
+          }
+          return out;
+        });
+
+      const events: RomMetadataResolvedEvent[] = [];
+      let guardedTicks = 0;
+      await orchestrator.getArcadeMetadata(
+        [entry],
+        new Set(['galaga.zip']),
+        (event) => {
+          events.push(event);
+          if (!event.fromCache) guardedTicks += 1;
+        },
+      );
+
+      expect(events).toHaveLength(1);
+      // No cached hash → computeHash called → fromCache must be false.
+      expect(events[0]?.fromCache).toBe(false);
+      // The guarded counter ticked once — dot may briefly show gradient.
+      expect(guardedTicks).toBe(1);
+    });
+
   });
 });
