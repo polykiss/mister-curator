@@ -411,7 +411,9 @@ void app.whenReady().then(async () => {
         await metadataOrchestrator.getArcadeMetadata(
           playable,
           snapshot.zipBasenames,
-          () => onPathResolved(),
+          // fix/validation-not-scraping: same guard as the ROM path —
+          // only tick the engine counter for real (non-cache) zip work.
+          (event) => { if (!event.fromCache) onPathResolved(); },
           shouldAbort,
         );
         return;

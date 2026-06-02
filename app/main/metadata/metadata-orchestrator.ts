@@ -859,10 +859,13 @@ export class MetadataOrchestrator {
         // Synthesize a path from the first dir for the event payload;
         // the value doesn't have to match a real path since the
         // engine matches by event count, not path identity.
+        // fix/validation-not-scraping: zip vanished at stat time —
+        // no real work done, so fromCache: true keeps the dot green.
         onResolved({
           path: `${MISTER_ARCADE_ZIP_DIRS[0]}/${group.zipBasename}`,
           metadata: null,
           error: false,
+          fromCache: true,
         });
         continue;
       }
@@ -928,15 +931,22 @@ export class MetadataOrchestrator {
           path: basename(zipPath),
           reason: 'cached-hash-failed',
         });
-        onResolved({ path: zipPath, metadata: null, error: false });
+        // fix/validation-not-scraping: hash-failure-sentinel skip —
+        // same as runScrapeLoop's equivalent path.
+        onResolved({ path: zipPath, metadata: null, error: false, fromCache: true });
         hashSkipped += 1;
         resolvedCount += 1;
         continue;
       }
+      // fix/validation-not-scraping: track whether this zip had a
+      // mtime-validated hash hit (fromCache: true) or required actual
+      // computeHash SSH work (fromCache: false).
+      let arcadePathFromCache = false;
       let entry: HashEntry | undefined;
       const cachedEntry = mtimeMap.get(zipPath);
       if (cachedEntry !== null && cachedEntry !== undefined) {
         entry = cachedEntry;
+        arcadePathFromCache = true;
       } else {
         try {
           entry = await this.hashService.computeHash(
@@ -958,7 +968,7 @@ export class MetadataOrchestrator {
       }
       if (entry === undefined) {
         // hashPaths dropped the row (vanished mid-flight).
-        onResolved({ path: zipPath, metadata: null, error: false });
+        onResolved({ path: zipPath, metadata: null, error: false, fromCache: arcadePathFromCache });
         resolvedCount += 1;
         continue;
       }
@@ -1001,7 +1011,7 @@ export class MetadataOrchestrator {
           source: metadata?.source ?? 'none',
           ms: Date.now() - perZipStart,
         });
-        onResolved({ path: zipPath, metadata, error: false });
+        onResolved({ path: zipPath, metadata, error: false, fromCache: arcadePathFromCache });
         resolvedCount += 1;
       } catch (err) {
         diagLog('error', 'prefetch', '✗', 'arcade-lookup failed', {
@@ -1010,7 +1020,7 @@ export class MetadataOrchestrator {
           ms: Date.now() - perZipStart,
           err: err instanceof Error ? err.message : String(err),
         });
-        onResolved({ path: zipPath, metadata: null, error: true });
+        onResolved({ path: zipPath, metadata: null, error: true, fromCache: arcadePathFromCache });
         errorCount += 1;
       }
     }
@@ -1098,7 +1108,8 @@ export class MetadataOrchestrator {
     if (session === null) {
       diagLog('warn', 'prefetch', '·', 'no-session', { coreId });
       for (const path of romPaths) {
-        onResolved({ path, metadata: null, error: false });
+        // fix/validation-not-scraping: no session = no real work done.
+        onResolved({ path, metadata: null, error: false, fromCache: true });
       }
       return;
     }

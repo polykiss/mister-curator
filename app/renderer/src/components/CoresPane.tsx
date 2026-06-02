@@ -513,7 +513,11 @@ export function progressForCore(
     if (ratio > 1) return 1;
     return ratio;
   }
-  return 0;
+  // Optimistic default: dots stay green for every non-active,
+  // non-completed core. Cold-blue only while a core is actively doing
+  // real (non-cache) hash work. Restores the PR #122 intent that was
+  // never merged before #123 branched off main.
+  return 1;
 }
 
 function renderCoreList(args: RenderArgs): JSX.Element {
