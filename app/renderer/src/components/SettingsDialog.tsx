@@ -67,7 +67,7 @@ export function SettingsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl">
+      <DialogContent className="max-w-5xl">
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
           {host !== undefined ? (
@@ -78,7 +78,9 @@ export function SettingsDialog({
           ) : null}
         </DialogHeader>
 
-        <div className="max-h-[70vh] overflow-y-auto space-y-6 pt-2 pr-1">
+        <div className="grid grid-cols-1 gap-6 pt-2 md:grid-cols-3">
+          {/* Left column: settings controls */}
+          <div className="col-span-1 space-y-6 overflow-y-auto max-h-[70vh] pr-1">
           {/* ── Display ───────────────────────────────────────────── */}
           <section>
             <h3 className="mb-3 text-caption font-semibold uppercase tracking-wider text-fg-muted">
@@ -170,7 +172,10 @@ export function SettingsDialog({
               ) : null}
             </div>
           </section>
+          </div>{/* end left column */}
 
+          {/* Right column: diagnostics */}
+          <div className="col-span-1 overflow-y-auto max-h-[70vh] md:col-span-2">
           {/* ── Diagnostics ───────────────────────────────────────── */}
           <section>
             <h3 className="mb-3 text-caption font-semibold uppercase tracking-wider text-fg-muted">
@@ -336,7 +341,8 @@ export function SettingsDialog({
               </div>
             )}
           </section>
-        </div>
+          </div>{/* end right column */}
+        </div>{/* end grid */}
       </DialogContent>
     </Dialog>
   );
