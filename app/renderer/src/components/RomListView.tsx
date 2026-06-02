@@ -1,5 +1,8 @@
-import { MoreHorizontal, Settings } from 'lucide-react';
+import { CornerUpLeft, FolderOpen, ImageOff, MoreHorizontal, Settings } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import type { JSX } from 'react';
+
+import { diagLog } from '@shared/diag-log';
 
 import { BackThumbnailCell, RomDensityEyeCell, RomMetadataInfoCells, RomNameInner, RomThumbnailCell, RomYearCell } from '@app/renderer/src/components/RomMetadataCells';
 import { SortableHeader } from '@app/renderer/src/components/SortableHeader';
@@ -15,8 +18,100 @@ import {
 } from '@app/renderer/src/components/ui/table';
 import { cn } from '@app/renderer/src/lib/cn';
 import { nextSortState } from '@app/renderer/src/lib/rom-sort';
-import type { RomsViewProps } from '@app/renderer/src/lib/roms-view-props';
+import type { RomsViewProps, ViewSize } from '@app/renderer/src/lib/roms-view-props';
 import { classifyRow } from '@app/renderer/src/lib/row-type';
+
+// ── Size-aware rendering (PR I-4 unification) ──────────────────────────────
+// S = minimal compact rows (original RomListView behaviour, 48px thumb)
+// M/L/XL = growing rows with box art + description (absorb RomDetailedListView)
+const THUMB_PX: Record<ViewSize, number> = { S: 48, M: 80, L: 120, XL: 160 };
+const DESCRIPTION_LINE_CLAMP: Record<ViewSize, string | null> = {
+  S: null, M: 'line-clamp-2', L: 'line-clamp-3', XL: 'line-clamp-4',
+};
+
+/** Larger thumbnail cell used at M/L/XL sizes — fetches boxArtUrl directly. */
+function DetailedThumbnailCell({
+  boxArtUrl,
+  altText,
+  rowType,
+  thumbPx,
+  onClick,
+  clickLabel,
+}: {
+  readonly boxArtUrl: string | null;
+  readonly altText: string;
+  readonly rowType: ReturnType<typeof classifyRow>;
+  readonly thumbPx: number;
+  readonly onClick?: () => void;
+  readonly clickLabel?: string;
+}): JSX.Element {
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+  const lastFetchRef = useRef<{ url: string; objectUrl: string } | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (lastFetchRef.current) {
+        URL.revokeObjectURL(lastFetchRef.current.objectUrl);
+        lastFetchRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!boxArtUrl) return;
+    const last = lastFetchRef.current;
+    if (last?.url === boxArtUrl) { setObjectUrl(last.objectUrl); return; }
+    if (last) { URL.revokeObjectURL(last.objectUrl); lastFetchRef.current = null; }
+    let cancelled = false;
+    void window.mister.getBoxArtBytes(boxArtUrl).then((bytes) => {
+      if (cancelled || !bytes || bytes.byteLength === 0) return;
+      const blob = new Blob([new Uint8Array(bytes)]);
+      const created = URL.createObjectURL(blob);
+      lastFetchRef.current = { url: boxArtUrl, objectUrl: created };
+      setObjectUrl(created);
+    }).catch((err: unknown) => {
+      if (!cancelled) diagLog('error', 'boxart', '✗', 'list-thumb-lg', { err: String(err) });
+    });
+    return () => { cancelled = true; };
+  }, [boxArtUrl]);
+
+  const tileStyle = { height: `${thumbPx}px`, width: `${Math.round(thumbPx * 0.75)}px` };
+  const interactiveProps = onClick !== undefined ? {
+    onClick: (e: React.MouseEvent) => { e.stopPropagation(); onClick(); },
+    role: 'button' as const,
+    tabIndex: 0,
+    title: clickLabel,
+    'aria-label': clickLabel,
+  } : {};
+
+  const imgContent = rowType === 'explorable-folder' ? (
+    <div className="flex items-center justify-center rounded-sm bg-overlay/40 text-fg-muted" style={tileStyle}>
+      <FolderOpen className="size-6" strokeWidth={1.5} aria-hidden />
+    </div>
+  ) : rowType === 'back' ? (
+    <div className="flex items-center justify-center rounded-sm bg-overlay/40 text-fg-muted" style={tileStyle}>
+      <CornerUpLeft className="size-6" strokeWidth={1.5} aria-hidden />
+    </div>
+  ) : objectUrl !== null ? (
+    <img src={objectUrl} alt={altText} className="rounded-sm object-contain"
+      style={{ height: `${thumbPx}px`, width: 'auto', maxWidth: `${Math.round(thumbPx * 0.75)}px` }}
+      loading="lazy" decoding="async" />
+  ) : (
+    <div className="flex items-center justify-center rounded-sm bg-overlay/40 text-fg-disabled" style={tileStyle}>
+      <ImageOff className="size-4" strokeWidth={1.5} aria-hidden />
+    </div>
+  );
+
+  return (
+    <TableCell
+      className={cn('p-1', onClick !== undefined && 'cursor-pointer')}
+      style={{ width: `${Math.round(thumbPx * 0.75) + 8}px` }}
+      {...interactiveProps}
+    >
+      {imgContent}
+    </TableCell>
+  );
+}
 
 /** Tooltip for buttons disabled because the SSH session was lost. */
 const DISCONNECTED_TOOLTIP = 'Reconnect to make changes.';
@@ -31,6 +126,12 @@ const DISCONNECTED_TOOLTIP = 'Reconnect to make changes.';
  * variants (Missing ROMs badge, empty cells for subfolder rows, etc.).
  * When absent every arcade conditional is a no-op and ROM-pane behavior
  * is unchanged.
+ *
+ * `viewSize` controls row density:
+ *   S  — compact 48px thumbnail, no description (original minimal behaviour)
+ *   M  — 80px thumbnail + 2-line description
+ *   L  — 120px thumbnail + 3-line description
+ *   XL — 160px thumbnail + 4-line description
  */
 export function RomListView({
   loading,
@@ -55,7 +156,12 @@ export function RomListView({
   setMenuFor,
   setDetailDialogFor,
   arcadeContext,
+  viewSize = 'S',
 }: RomsViewProps): JSX.Element {
+  const thumbPx = THUMB_PX[viewSize];
+  const isDetailed = thumbPx > 48;
+  const clampClass = DESCRIPTION_LINE_CLAMP[viewSize];
+  const skeletonH = isDetailed ? thumbPx + 8 : 40;
   return (
     /* PR #23 round 5 commit 1: `scroll-themed` reserves a stable
        scrollbar gutter and paints a permanent themed bar so native
@@ -72,7 +178,7 @@ export function RomListView({
       {loading && !roms ? (
         <div className="space-y-1 p-4">
           {Array.from({ length: 8 }).map((_, i) => (
-            <Skeleton key={i} className="h-10 w-full" />
+            <Skeleton key={i} style={{ height: `${skeletonH}px` }} className="w-full" />
           ))}
         </div>
       ) : !presentableRoms || presentableRoms.length === 0 ? (
@@ -115,8 +221,10 @@ export function RomListView({
                   name-stack into its own sortable column. Each
                   sortable header is clickable; the active column
                   shows a chevron. Folder rows pin to the top
-                  regardless of sort. */}
-              <TableHead className="w-16" aria-label="Box art" />
+                  regardless of sort. Column width grows with size. */}
+              {isDetailed
+                ? <TableHead style={{ width: `${Math.round(thumbPx * 0.75) + 8}px` }} aria-label="Box art" />
+                : <TableHead className="w-16" aria-label="Box art" />}
               <SortableHeader
                 label="Name"
                 sortKey="name"
@@ -344,19 +452,29 @@ export function RomListView({
                       />
                     </TableCell>
                   )}
-                  {/* PR #20 round 2: thumbnail cell. Metadata
-                      streamed from the parent prefetch; box-art
-                      bytes still fetched per-row via useBoxArt
-                      once the URL resolves. */}
-                  <RomThumbnailCell
-                    rom={rom}
-                    dimmed={isDimmed}
-                    metadata={metadata}
-                    error={fetchError}
-                    rowType={rowType}
-                    onClick={thumbActivate}
-                    clickLabel={thumbLabel}
-                  />
+                  {/* Thumbnail: compact (S) uses the shared RomThumbnailCell;
+                      larger sizes (M/L/XL) use DetailedThumbnailCell with
+                      boxArtUrl directly for pixel-accurate sizing. */}
+                  {isDetailed ? (
+                    <DetailedThumbnailCell
+                      boxArtUrl={metadata?.boxArtUrl ?? null}
+                      altText={metadata?.name ?? rom.displayName}
+                      rowType={rowType}
+                      thumbPx={thumbPx}
+                      onClick={thumbActivate}
+                      clickLabel={thumbLabel}
+                    />
+                  ) : (
+                    <RomThumbnailCell
+                      rom={rom}
+                      dimmed={isDimmed}
+                      metadata={metadata}
+                      error={fetchError}
+                      rowType={rowType}
+                      onClick={thumbActivate}
+                      clickLabel={thumbLabel}
+                    />
+                  )}
                   {/* PR #25: `max-w-0` is the standard CSS trick that
                       lets a flex/auto-width table cell honor its
                       children's `truncate`. Without it, the cell's
@@ -445,6 +563,15 @@ export function RomListView({
                                 aria-label="system file"
                               />
                             ) : null
+                          }
+                          descriptionContent={
+                            clampClass && !isFolder && metadata?.description
+                              ? (
+                                <p className={cn('mt-1 overflow-hidden text-caption text-fg-muted', clampClass)}>
+                                  {metadata.description}
+                                </p>
+                              )
+                              : null
                           }
                         />
                       </div>

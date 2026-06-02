@@ -5,10 +5,10 @@ import { describe, expect, it } from 'vitest';
 
 const ROMS_ADAPTER = readFileSync(resolve(__dirname, 'roms-adapter.tsx'), 'utf8');
 const ARCADE_ADAPTER = readFileSync(resolve(__dirname, 'arcade-adapter.tsx'), 'utf8');
-const DETAILED = readFileSync(resolve(__dirname, 'RomDetailedListView.tsx'), 'utf8');
+const LIST_VIEW = readFileSync(resolve(__dirname, 'RomListView.tsx'), 'utf8');
 const POSTER = readFileSync(resolve(__dirname, 'RomPosterView.tsx'), 'utf8');
 
-describe('viewSize wiring — adapters (feat/view-size-control)', () => {
+describe('viewSize wiring — adapters (refactor/unify-list-views)', () => {
   it('roms-adapter imports SizeControl and ViewSize', () => {
     expect(ROMS_ADAPTER).toContain("import { SizeControl }");
     expect(ROMS_ADAPTER).toMatch(/ViewSize.*from.*roms-view-props/s);
@@ -19,8 +19,10 @@ describe('viewSize wiring — adapters (feat/view-size-control)', () => {
     expect(ROMS_ADAPTER).toMatch(/usePersistedString<ViewSize>/);
   });
 
-  it('roms-adapter renders SizeControl only when not in list mode', () => {
-    expect(ROMS_ADAPTER).toMatch(/viewMode !== 'list'[\s\S]{0,100}<SizeControl/);
+  it('roms-adapter renders SizeControl unconditionally (both list and poster)', () => {
+    // SizeControl is always visible now — list mode uses it too (for size scaling)
+    expect(ROMS_ADAPTER).toMatch(/<SizeControl\s+value=\{viewSize\}/);
+    expect(ROMS_ADAPTER).not.toMatch(/viewMode !== 'list'[\s\S]{0,100}<SizeControl/);
   });
 
   it('roms-adapter passes viewSize to view components via sharedProps', () => {
@@ -33,35 +35,34 @@ describe('viewSize wiring — adapters (feat/view-size-control)', () => {
     expect(ARCADE_ADAPTER).not.toMatch(/viewSize\.roms\./);
   });
 
-  it('arcade-adapter renders SizeControl only in non-list modes', () => {
-    expect(ARCADE_ADAPTER).toMatch(/viewMode !== 'list'[\s\S]{0,100}<SizeControl/);
+  it('arcade-adapter renders SizeControl unconditionally', () => {
+    expect(ARCADE_ADAPTER).toMatch(/<SizeControl\s+value=\{viewSize\}/);
+    expect(ARCADE_ADAPTER).not.toMatch(/viewMode !== 'list'[\s\S]{0,100}<SizeControl/);
   });
 });
 
-describe('RomDetailedListView — size-driven rendering (feat/view-size-control)', () => {
-  it('defines THUMB_PX map for all four sizes', () => {
-    expect(DETAILED).toMatch(/THUMB_PX.*=.*\{.*S:.*M:.*L:.*XL:/s);
+describe('RomListView — unified size-driven rendering (refactor/unify-list-views)', () => {
+  it('defines THUMB_PX map for all four sizes (S=48 for compact compatibility)', () => {
+    expect(LIST_VIEW).toMatch(/THUMB_PX.*=.*\{.*S:.*48.*M:.*80.*L:.*120.*XL:.*160/s);
   });
 
-  it('defines DESCRIPTION_LINE_CLAMP map for all four sizes', () => {
-    expect(DETAILED).toMatch(/DESCRIPTION_LINE_CLAMP.*=.*\{.*S:.*M:.*L:.*XL:/s);
+  it('defines DESCRIPTION_LINE_CLAMP map (S=null = no description at compact size)', () => {
+    expect(LIST_VIEW).toMatch(/DESCRIPTION_LINE_CLAMP.*=.*\{.*S:.*null.*M:.*L:.*XL:/s);
   });
 
-  it('defaults viewSize to M', () => {
-    expect(DETAILED).toMatch(/viewSize\s*=\s*'M'/);
+  it('defaults viewSize to S (preserves original minimal-list behaviour)', () => {
+    expect(LIST_VIEW).toMatch(/viewSize\s*=\s*'S'/);
   });
 
-  it('passes descriptionContent to RomNameInner (description alignment fix)', () => {
-    // Description is now passed as descriptionContent to RomNameInner so it
-    // renders inside the title column, aligned with the title text.
-    expect(DETAILED).toMatch(/descriptionContent=\{/);
-    expect(DETAILED).toMatch(/RomNameInner[\s\S]{0,600}descriptionContent/);
+  it('passes descriptionContent to RomNameInner at M+ sizes', () => {
+    expect(LIST_VIEW).toMatch(/descriptionContent=\{/);
+    expect(LIST_VIEW).toMatch(/RomNameInner[\s\S]{0,600}descriptionContent/);
   });
 
-  it('thumbnail height is driven by thumbPx variable (not hardcoded h-20)', () => {
-    expect(DETAILED).toMatch(/thumbPx/);
-    // No hardcoded h-20 class (it should use inline style now)
-    expect(DETAILED).not.toMatch(/className=".*\bh-20\b/);
+  it('uses DetailedThumbnailCell at M+ and RomThumbnailCell at S', () => {
+    expect(LIST_VIEW).toMatch(/DetailedThumbnailCell/);
+    expect(LIST_VIEW).toMatch(/RomThumbnailCell/);
+    expect(LIST_VIEW).toMatch(/isDetailed/);
   });
 });
 
@@ -76,12 +77,10 @@ describe('RomPosterView — size-driven rendering (feat/view-size-control)', () 
 
   it('uses auto-fill minmax grid (not hardcoded grid-cols-N)', () => {
     expect(POSTER).toMatch(/repeat\(auto-fill,\s*minmax/);
-    // No hardcoded grid-cols-4 in the main grid
     expect(POSTER).not.toMatch(/grid-cols-4[\s\S]{0,200}gap-4[\s\S]{0,200}p-4/);
   });
 
   it('applies the same grid style to both main and pinned grids', () => {
-    // gridStyle is used in both grids
     const gridStyleCount = (POSTER.match(/style=\{gridStyle\}/g) ?? []).length;
     expect(gridStyleCount).toBeGreaterThanOrEqual(2);
   });

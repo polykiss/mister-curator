@@ -12,58 +12,66 @@ const ARCADE_ADAPTER = readFileSync(
   'utf8',
 );
 
-describe('view-mode wiring — roms-adapter (feat/view-modes)', () => {
-  it('imports ViewModeToggle, RomDetailedListView, RomPosterView, usePersistedString', () => {
-    expect(ROMS_ADAPTER).toContain("import { RomDetailedListView }");
+describe('view-mode wiring — roms-adapter (refactor/unify-list-views)', () => {
+  it('imports ViewModeToggle, RomPosterView, usePersistedString (no RomDetailedListView)', () => {
+    expect(ROMS_ADAPTER).not.toContain("import { RomDetailedListView }");
     expect(ROMS_ADAPTER).toContain("import { RomPosterView }");
     expect(ROMS_ADAPTER).toContain("import { ViewModeToggle }");
     expect(ROMS_ADAPTER).toContain("import { usePersistedString }");
   });
 
-  it('persists viewMode per host under the expected localStorage key', () => {
+  it('persists viewMode with 2-element allowlist (no "detailed")', () => {
     expect(ROMS_ADAPTER).toMatch(/mistercurator\.viewMode\.roms\.\$\{host\}/);
-    expect(ROMS_ADAPTER).toMatch(/usePersistedString<ViewMode>/);
+    expect(ROMS_ADAPTER).toMatch(/\['list',\s*'poster'\]/);
+    expect(ROMS_ADAPTER).not.toMatch(/'detailed'/);
   });
 
-  it('renders ViewModeToggle in the header alongside the filter input', () => {
+  it('renders ViewModeToggle in the header', () => {
     expect(ROMS_ADAPTER).toMatch(/<ViewModeToggle\s+value=\{viewMode\}\s+onChange=\{setViewMode\}/);
   });
 
-  it('switches between all three view components', () => {
-    expect(ROMS_ADAPTER).toMatch(/<RomDetailedListView\s/);
+  it('SizeControl always visible (not conditional on viewMode)', () => {
+    // Must contain SizeControl without a viewMode guard around it
+    expect(ROMS_ADAPTER).toMatch(/<SizeControl\s+value=\{viewSize\}/);
+    // Must NOT have the old viewMode !== 'list' guard
+    expect(ROMS_ADAPTER).not.toMatch(/viewMode !== 'list'[\s\S]{0,100}<SizeControl/);
+  });
+
+  it('switches between two view components (list + poster)', () => {
+    expect(ROMS_ADAPTER).not.toMatch(/<RomDetailedListView\s/);
     expect(ROMS_ADAPTER).toMatch(/<RomPosterView\s/);
     expect(ROMS_ADAPTER).toMatch(/<RomListView\s/);
-    // Both checks for viewMode branching
-    expect(ROMS_ADAPTER).toMatch(/viewMode === 'detailed'/);
     expect(ROMS_ADAPTER).toMatch(/viewMode === 'poster'/);
+    expect(ROMS_ADAPTER).not.toMatch(/viewMode === 'detailed'/);
   });
 });
 
-describe('view-mode wiring — arcade-adapter (feat/view-modes)', () => {
-  it('imports ViewModeToggle, RomDetailedListView, RomPosterView', () => {
-    expect(ARCADE_ADAPTER).toContain("import { RomDetailedListView }");
+describe('view-mode wiring — arcade-adapter (refactor/unify-list-views)', () => {
+  it('imports ViewModeToggle, RomPosterView (no RomDetailedListView)', () => {
+    expect(ARCADE_ADAPTER).not.toContain("import { RomDetailedListView }");
     expect(ARCADE_ADAPTER).toContain("import { RomPosterView }");
     expect(ARCADE_ADAPTER).toContain("import { ViewModeToggle }");
   });
 
-  it('persists viewMode per host under the arcade-specific key', () => {
+  it('persists viewMode with 2-element allowlist', () => {
     expect(ARCADE_ADAPTER).toMatch(/mistercurator\.viewMode\.arcade\.\$\{host\}/);
+    expect(ARCADE_ADAPTER).toMatch(/\['list',\s*'poster'\]/);
+  });
+
+  it('SizeControl always visible in arcade', () => {
+    expect(ARCADE_ADAPTER).toMatch(/<SizeControl\s+value=\{viewSize\}/);
+    expect(ARCADE_ADAPTER).not.toMatch(/viewMode !== 'list'[\s\S]{0,100}<SizeControl/);
   });
 
   it('arcade view mode is independent of ROM pane (different key prefix)', () => {
-    // ROM key: viewMode.roms; arcade key: viewMode.arcade — different keys
-    // so switching one pane does not affect the other
     expect(ROMS_ADAPTER).toMatch(/viewMode\.roms\./);
     expect(ARCADE_ADAPTER).toMatch(/viewMode\.arcade\./);
-    // Confirm ROM adapter does NOT use the arcade key
     expect(ROMS_ADAPTER).not.toMatch(/viewMode\.arcade\./);
-    // Confirm arcade adapter does NOT use the ROM key
     expect(ARCADE_ADAPTER).not.toMatch(/viewMode\.roms\./);
   });
 
-  it('passes arcadeContext through to all three view components', () => {
+  it('passes arcadeContext through sharedProps', () => {
     expect(ARCADE_ADAPTER).toMatch(/arcadeContext:\s*arcadeRowContext/);
-    // arcadeContext must appear multiple times (once per mode branch uses sharedProps)
     const count = (ARCADE_ADAPTER.match(/arcadeContext:/g) ?? []).length;
     expect(count).toBeGreaterThanOrEqual(1);
   });
@@ -76,7 +84,6 @@ describe('RomPosterView — structure (feat/view-modes)', () => {
   );
 
   it('renders a grid container (not a table)', () => {
-    // feat/view-size-control: grid uses auto-fill minmax instead of fixed cols
     expect(POSTER).toMatch(/grid/);
     expect(POSTER).not.toContain('<Table>');
     expect(POSTER).not.toContain('<TableBody>');
@@ -86,7 +93,7 @@ describe('RomPosterView — structure (feat/view-modes)', () => {
     expect(POSTER).toMatch(/unpinned\.map\(renderTile\)/);
   });
 
-  it('pinned rows (folder-container) render in a separate section at the top', () => {
+  it('pinned rows render in a separate section at the top', () => {
     expect(POSTER).toMatch(/pinned\.length > 0/);
     expect(POSTER).toMatch(/pinned\.map\(renderTile\)/);
   });
@@ -106,28 +113,38 @@ describe('RomPosterView — structure (feat/view-modes)', () => {
   });
 });
 
-describe('RomDetailedListView — structure (feat/view-modes)', () => {
-  const DETAILED = readFileSync(
-    resolve(__dirname, 'RomDetailedListView.tsx'),
+describe('RomListView — unified size-aware rendering (refactor/unify-list-views)', () => {
+  const LIST_VIEW = readFileSync(
+    resolve(__dirname, 'RomListView.tsx'),
     'utf8',
   );
 
-  it('renders a table (not a grid)', () => {
-    expect(DETAILED).toContain('<Table>');
-    expect(DETAILED).toContain('<TableBody>');
+  it('defines THUMB_PX with S=48 (minimal) through XL=160', () => {
+    expect(LIST_VIEW).toMatch(/THUMB_PX.*\{.*S:\s*48.*M:\s*80.*L:\s*120.*XL:\s*160/s);
   });
 
-  it('shows description below name using line-clamp-2', () => {
-    expect(DETAILED).toMatch(/line-clamp-2/);
-    expect(DETAILED).toMatch(/description/);
+  it('defines DESCRIPTION_LINE_CLAMP with S=null (no description at compact size)', () => {
+    expect(LIST_VIEW).toMatch(/DESCRIPTION_LINE_CLAMP/);
+    expect(LIST_VIEW).toMatch(/S:\s*null/);
+    expect(LIST_VIEW).toMatch(/M:\s*'line-clamp-2'/);
   });
 
-  it('uses a taller thumbnail (size driven by thumbPx)', () => {
-    // feat/view-size-control: h-20 replaced by dynamic inline style via thumbPx
-    expect(DETAILED).toMatch(/thumbPx/);
+  it('defaults viewSize to S (preserves original compact behaviour)', () => {
+    expect(LIST_VIEW).toMatch(/viewSize\s*=\s*'S'/);
   });
 
-  it('Missing ROMs badge preserved', () => {
-    expect(DETAILED).toContain('Missing ROMs');
+  it('passes descriptionContent to RomNameInner for M+ sizes (alignment fix)', () => {
+    expect(LIST_VIEW).toMatch(/descriptionContent=\{/);
+    expect(LIST_VIEW).toMatch(/RomNameInner[\s\S]{0,600}descriptionContent/);
+  });
+
+  it('uses DetailedThumbnailCell at M+ sizes, RomThumbnailCell at S', () => {
+    expect(LIST_VIEW).toMatch(/DetailedThumbnailCell/);
+    expect(LIST_VIEW).toMatch(/RomThumbnailCell/);
+    expect(LIST_VIEW).toMatch(/isDetailed/);
+  });
+
+  it('Missing ROMs badge preserved for arcade rows', () => {
+    expect(LIST_VIEW).toContain('Missing ROMs');
   });
 });
