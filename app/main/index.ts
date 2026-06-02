@@ -424,7 +424,13 @@ void app.whenReady().then(async () => {
       await metadataOrchestrator.getRomsMetadata(
         coreId,
         targets.paths,
-        () => onPathResolved(),
+        // fix/validation-not-scraping: only advance the per-core
+        // progress counter for paths that did real work (hash compute
+        // or SS/OpenVGDB call). Mtime-validated cache hits fire
+        // onResolved for metadata delivery but don't tick the engine's
+        // done counter — so pure-validation passes keep dots green
+        // and the status bar stays quiet.
+        (event) => { if (!event.fromCache) onPathResolved(); },
         shouldAbort,
         targets.atomicFolderPaths,
       );

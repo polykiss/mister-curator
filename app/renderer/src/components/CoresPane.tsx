@@ -503,6 +503,10 @@ export function progressForCore(
 ): number {
   if (event.completedCoreIds.includes(coreId)) return 1;
   if (event.state === 'active' && event.coreId === coreId) {
+    // fix/validation-not-scraping — when done=0 the engine is still
+    // validating (mtime-batch phase) with no real work started yet.
+    // Keep the dot green rather than snapping to cold blue.
+    if (event.done === 0) return 1;
     if (event.total <= 0) return 0;
     const ratio = event.done / event.total;
     if (ratio < 0) return 0;

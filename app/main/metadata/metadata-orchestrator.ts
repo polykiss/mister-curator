@@ -84,6 +84,18 @@ export interface RomMetadataResolvedEvent {
   readonly path: string;
   readonly metadata: RomMetadata | null;
   readonly error: boolean;
+  /**
+   * fix/validation-not-scraping — true when the metadata was served
+   * from a local cache (mtime-validated hash hit, synthetic-key read,
+   * or hash-failure-sentinel skip). False / absent when actual SSH +
+   * SS / OpenVGDB work was performed.
+   *
+   * The auto-scrape engine's `onPathResolved` callback should be a
+   * no-op for cache-only events so the per-core progress counter only
+   * ticks for real work, keeping dots green and the status bar quiet
+   * during pure validation passes.
+   */
+  readonly fromCache?: boolean;
 }
 
 /**
@@ -1263,7 +1275,7 @@ export class MetadataOrchestrator {
           source: 'synthetic-sentinel',
           ms: Date.now() - perRomStart,
         });
-        onResolved({ path, metadata, error: false });
+        onResolved({ path, metadata, error: false, fromCache: true });
         resolved += 1;
         hashSkipped += 1;
         continue;
@@ -1290,17 +1302,25 @@ export class MetadataOrchestrator {
           reason: 'cached-hash-failed',
           ms: Date.now() - perRomStart,
         });
-        onResolved({ path, metadata: null, error: false });
+        onResolved({ path, metadata: null, error: false, fromCache: true });
         resolved += 1;
         hashSkipped += 1;
         continue;
       }
 
       let entry: HashEntry | undefined;
+      // fix/validation-not-scraping: track whether this path had a
+      // mtime-validated hash hit (no SSH for hash) vs. required actual
+      // computeHash SSH work. fromCache=true for hits means the
+      // auto-scrape engine's onPathResolved counter won't tick for
+      // pure-validation passes, keeping dots green and the status bar
+      // quiet during warm scrapes.
+      let pathFromCache = false;
       const cachedEntry = mtimeMap.get(path);
       if (cachedEntry !== null && cachedEntry !== undefined) {
         // Mtime-validated cache hit — no SSH for this path.
         entry = cachedEntry;
+        pathFromCache = true;
       } else {
         try {
           entry = await this.hashService.computeHash(
@@ -1338,7 +1358,7 @@ export class MetadataOrchestrator {
           source: 'unmatched',
           ms: Date.now() - perRomStart,
         });
-        onResolved({ path, metadata: null, error: false });
+        onResolved({ path, metadata: null, error: false, fromCache: pathFromCache });
         resolved += 1;
         continue;
       }
@@ -1394,7 +1414,7 @@ export class MetadataOrchestrator {
           source: metadata?.source ?? 'none',
           ms: Date.now() - perRomStart,
         });
-        onResolved({ path, metadata, error: false });
+        onResolved({ path, metadata, error: false, fromCache: pathFromCache });
         resolved += 1;
       } catch (err) {
         diagLog('error', 'prefetch', '✗', 'lookup failed', {
@@ -1409,7 +1429,7 @@ export class MetadataOrchestrator {
           source: 'error',
           ms: Date.now() - perRomStart,
         });
-        onResolved({ path, metadata: null, error: true });
+        onResolved({ path, metadata: null, error: true, fromCache: pathFromCache });
         errors += 1;
       }
     }
