@@ -38,10 +38,14 @@ import {
   type SortState,
 } from '@app/renderer/src/lib/rom-sort';
 import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
+import { usePersistedString } from '@app/renderer/src/lib/use-persisted-string';
 import { filterArcadeEntries } from '@app/renderer/src/lib/filter-arcade';
 import { FilterInput } from '@app/renderer/src/components/FilterInput';
 import { RomListView } from '@app/renderer/src/components/RomListView';
-import type { ArcadeRowContext } from '@app/renderer/src/lib/roms-view-props';
+import { RomDetailedListView } from '@app/renderer/src/components/RomDetailedListView';
+import { RomPosterView } from '@app/renderer/src/components/RomPosterView';
+import { ViewModeToggle } from '@app/renderer/src/components/ViewModeToggle';
+import type { ArcadeRowContext, ViewMode } from '@app/renderer/src/lib/roms-view-props';
 
 /**
  * feat/arcade-phase-1.5 — pane for managing `.mra` files under
@@ -74,7 +78,13 @@ import type { ArcadeRowContext } from '@app/renderer/src/lib/roms-view-props';
  * wrapper that routes this hook's result through ItemListPane.
  */
 export function useArcadeAdapter(): ItemListAdapter {
-  const { status } = useConnection();
+  const { status, currentProfile } = useConnection();
+  const host = currentProfile?.host ?? 'default';
+  const [viewMode, setViewMode] = usePersistedString<ViewMode>(
+    `mistercurator.viewMode.arcade.${host}`,
+    'list',
+    ['list', 'detailed', 'poster'],
+  );
   // feat/pre-beta-polish-batch — single-toggle hide/show writes
   // through to the sidebar Arcade row's hidden-count badge via this
   // helper so the badge updates with the same click that flips the
@@ -890,12 +900,15 @@ export function useArcadeAdapter(): ItemListAdapter {
           )}
         </p>
         {/* feat/filter-as-you-type (#21) */}
-        <FilterInput
-          value={filterText}
-          onChange={setFilterText}
-          placeholder="Filter MRAs…"
-          inputRef={filterInputRef}
-        />
+        <div className="flex items-center gap-2">
+          <FilterInput
+            value={filterText}
+            onChange={setFilterText}
+            placeholder="Filter MRAs…"
+            inputRef={filterInputRef}
+          />
+          <ViewModeToggle value={viewMode} onChange={setViewMode} />
+        </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="secondary"
@@ -998,30 +1011,35 @@ export function useArcadeAdapter(): ItemListAdapter {
           </div>
         </div>
       ) : (
-        <RomListView
-          loading={false}
-          roms={enrichedPresentable.map((e) => e.rom)}
-          presentableRoms={sortedRows.map((e) => e.rom)}
-          deferredFilter={deferredFilter}
-          onClearFilter={() => setFilterText('')}
-          scrollContainerRef={arcadeScrollContainerRef}
-          sortState={sortState}
-          onSortChange={onSortChange}
-          selected={selectedKeys}
-          metadataByPath={metadataByPathForView}
-          systemFlags={EMPTY_SYSTEM_FLAGS}
-          maxSizeBytes={maxSizeBytes}
-          canMutate={canMutate}
-          backRow={backRow}
-          onToggleAll={onToggleAll}
-          onToggleSelect={onToggleSelect}
-          onSingleToggle={arcadeRowContext.singleToggle}
-          onRowActivate={onRowActivateArcade}
-          setSubPath={setSubPath}
-          setMenuFor={() => { /* no-op: handled by arcadeContext.openMenu */ }}
-          setDetailDialogFor={() => { /* no-op: handled by arcadeContext.openDetail */ }}
-          arcadeContext={arcadeRowContext}
-        />
+        (() => {
+          const sharedProps = {
+            loading: false,
+            roms: enrichedPresentable.map((e) => e.rom),
+            presentableRoms: sortedRows.map((e) => e.rom),
+            deferredFilter,
+            onClearFilter: () => setFilterText(''),
+            scrollContainerRef: arcadeScrollContainerRef,
+            sortState,
+            onSortChange,
+            selected: selectedKeys,
+            metadataByPath: metadataByPathForView,
+            systemFlags: EMPTY_SYSTEM_FLAGS,
+            maxSizeBytes,
+            canMutate,
+            backRow,
+            onToggleAll,
+            onToggleSelect,
+            onSingleToggle: arcadeRowContext.singleToggle,
+            onRowActivate: onRowActivateArcade,
+            setSubPath,
+            setMenuFor: () => { /* no-op: handled by arcadeContext.openMenu */ },
+            setDetailDialogFor: () => { /* no-op: handled by arcadeContext.openDetail */ },
+            arcadeContext: arcadeRowContext,
+          } as const;
+          if (viewMode === 'detailed') return <RomDetailedListView {...sharedProps} />;
+          if (viewMode === 'poster') return <RomPosterView {...sharedProps} />;
+          return <RomListView {...sharedProps} />;
+        })()
       )}
       </>
     ),
