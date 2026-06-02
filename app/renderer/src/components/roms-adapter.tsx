@@ -68,8 +68,13 @@ import {
 import { summarizeBulkResult } from '@app/renderer/src/lib/format';
 import type { VisibilityChange } from '@app/renderer/src/lib/optimistic';
 import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
+import { usePersistedString } from '@app/renderer/src/lib/use-persisted-string';
 import { filterRoms } from '@app/renderer/src/lib/filter-roms';
 import { FilterInput } from '@app/renderer/src/components/FilterInput';
+import { RomDetailedListView } from '@app/renderer/src/components/RomDetailedListView';
+import { RomPosterView } from '@app/renderer/src/components/RomPosterView';
+import { ViewModeToggle } from '@app/renderer/src/components/ViewModeToggle';
+import type { ViewMode } from '@app/renderer/src/lib/roms-view-props';
 
 /**
  * fix/render-cascade-hide-unhide Fix 1: returns a copy of `prev`
@@ -130,7 +135,13 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     romCacheVersion,
     updateModeActive,
   } = useCores();
-  const { status } = useConnection();
+  const { status, currentProfile } = useConnection();
+  const host = currentProfile?.host ?? 'default';
+  const [viewMode, setViewMode] = usePersistedString<ViewMode>(
+    `mistercurator.viewMode.roms.${host}`,
+    'list',
+    ['list', 'detailed', 'poster'],
+  );
   // Mid-session disconnect / pre-reconnect state — every mutating
   // button gates on this. Reads (browse, drill, filter) stay enabled
   // so the user can still inspect the cached state.
@@ -1150,12 +1161,15 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
           )}
         </p>
         {/* feat/filter-as-you-type (#21) */}
-        <FilterInput
-          value={filterText}
-          onChange={setFilterText}
-          placeholder="Filter ROMs…"
-          inputRef={filterInputRef}
-        />
+        <div className="flex items-center gap-2">
+          <FilterInput
+            value={filterText}
+            onChange={setFilterText}
+            placeholder="Filter ROMs…"
+            inputRef={filterInputRef}
+          />
+          <ViewModeToggle value={viewMode} onChange={setViewMode} />
+        </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="secondary"
@@ -1242,29 +1256,34 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
         </div>
       </header>
 
-      <RomListView
-        loading={loading}
-        roms={roms}
-        presentableRoms={presentableRoms ?? []}
-        deferredFilter={deferredFilter}
-        onClearFilter={() => setFilterText('')}
-        scrollContainerRef={scrollContainerRef}
-        sortState={sortState}
-        onSortChange={onSortChange}
-        selected={selected}
-        metadataByPath={metadataByPath}
-        systemFlags={systemFlags}
-        maxSizeBytes={maxSizeBytes}
-        canMutate={canMutate}
-        backRow={backRow}
-        onToggleAll={onToggleAll}
-        onToggleSelect={onToggleSelect}
-        onSingleToggle={onSingleToggle}
-        onRowActivate={onRowActivate}
-        setSubPath={setSubPath}
-        setMenuFor={setMenuFor}
-        setDetailDialogFor={setDetailDialogFor}
-      />
+      {(() => {
+        const sharedProps = {
+          loading,
+          roms,
+          presentableRoms: presentableRoms ?? [],
+          deferredFilter,
+          onClearFilter: () => setFilterText(''),
+          scrollContainerRef,
+          sortState,
+          onSortChange,
+          selected,
+          metadataByPath,
+          systemFlags,
+          maxSizeBytes,
+          canMutate,
+          backRow,
+          onToggleAll,
+          onToggleSelect,
+          onSingleToggle,
+          onRowActivate,
+          setSubPath,
+          setMenuFor,
+          setDetailDialogFor,
+        } as const;
+        if (viewMode === 'detailed') return <RomDetailedListView {...sharedProps} />;
+        if (viewMode === 'poster') return <RomPosterView {...sharedProps} />;
+        return <RomListView {...sharedProps} />;
+      })()}
       {menuFor ? (
         <RomRowMenu
           x={menuFor.x}
