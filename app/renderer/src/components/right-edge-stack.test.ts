@@ -38,11 +38,11 @@ const ROMS_DENSITY_EYE_SOURCE = readFileSync(
   resolve(__dirname, 'RomMetadataCells.tsx'),
   'utf8',
 );
-// feat/arcade-refactor-1-adapter — RomsPane.tsx is now a thin
-// wrapper around ItemListPane; the JSX that scans match here lives
-// in roms-adapter.tsx.
-const ROMS_PANE = readFileSync(
-  resolve(__dirname, 'roms-adapter.tsx'),
+// refactor/extract-rom-list-view — the table JSX moved from
+// roms-adapter.tsx into RomListView.tsx. All table structure
+// assertions now scan RomListView.tsx directly.
+const ROM_LIST_VIEW = readFileSync(
+  resolve(__dirname, 'RomListView.tsx'),
   'utf8',
 );
 const CORES_PANE = readFileSync(
@@ -110,7 +110,8 @@ describe('Right-edge stack — density + eye structure (PR #11 round 5)', () => 
     // force the row past its h-10 design height — the visible
     // symptom was 4px of bg-elevated above and below the density
     // rectangle in the right-edge cell.
-    expect(ROMS_PANE).toMatch(/<TableCell\s+className="w-10\s+py-0"/);
+    // refactor/extract-rom-list-view: the cell now lives in RomListView.tsx.
+    expect(ROM_LIST_VIEW).toMatch(/<TableCell\s+className="w-10\s+py-0"/);
   });
 
   it('roms pane eye button uses group-hover/row (row-hover, matching cores pane)', () => {

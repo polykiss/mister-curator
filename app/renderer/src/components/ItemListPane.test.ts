@@ -27,6 +27,11 @@ const ROMS_ADAPTER = readFileSync(
   resolve(__dirname, 'roms-adapter.tsx'),
   'utf8',
 );
+// refactor/extract-rom-list-view: the table JSX moved here.
+const ROM_LIST_VIEW = readFileSync(
+  resolve(__dirname, 'RomListView.tsx'),
+  'utf8',
+);
 const ARCADE_ADAPTER = readFileSync(
   resolve(__dirname, 'arcade-adapter.tsx'),
   'utf8',
@@ -339,18 +344,20 @@ describe('arcade-adapter sortable headers (feat/arcade-parity-3-ui G8)', () => {
     expect(persistMatches.length, 'sort state must not be persisted').toBeLessThan(3);
   });
 
-  it('extracted SortableHeader lives in its own shared file (no inline copy in roms-adapter)', () => {
+  it('extracted SortableHeader lives in its own shared file (no inline copy in roms-adapter or RomListView)', () => {
     const sortableHeaderSrc = readFileSync(
       resolve(__dirname, 'SortableHeader.tsx'),
       'utf8',
     );
     expect(sortableHeaderSrc).toMatch(/export function SortableHeader/);
-    expect(ROMS_ADAPTER).toMatch(
+    // refactor/extract-rom-list-view: SortableHeader is now imported
+    // by RomListView (where the table lives), not roms-adapter directly.
+    expect(ROM_LIST_VIEW).toMatch(
       /from '@app\/renderer\/src\/components\/SortableHeader'/,
     );
-    // The inline definition in roms-adapter is gone (would shadow
-    // the extracted one and silently keep two implementations).
+    // No inline definition in either file.
     expect(ROMS_ADAPTER).not.toMatch(/^function SortableHeader/m);
+    expect(ROM_LIST_VIEW).not.toMatch(/^function SortableHeader/m);
   });
 });
 
@@ -629,7 +636,8 @@ describe('arcade-adapter scrollbar gap parity (feat/arcade-scrollbar-gap-parity)
     // bits of the treatment in BOTH adapters so a future regression
     // would surface here.
     const SCROLL_CONTAINER_RE = /scroll-themed flex-1 overflow-auto pr-2\.5/;
-    expect(ROMS_ADAPTER).toMatch(SCROLL_CONTAINER_RE);
+    // refactor/extract-rom-list-view: scroll container moved to RomListView.
+    expect(ROM_LIST_VIEW).toMatch(SCROLL_CONTAINER_RE);
     expect(ARCADE_ADAPTER).toMatch(SCROLL_CONTAINER_RE);
   });
 });
@@ -976,7 +984,8 @@ describe('arcade row alignment with RomsPane (feat/arcade-edit-detail-alignment)
   it('arcade table header starts with the same w-10 pl-4 leading slot RomsPane uses for the checkbox column', () => {
     // Both panes now carry a "select all" checkbox in the w-10 pl-4
     // TableHead slot so the header row is pixel-identical across panes.
-    expect(ROMS_ADAPTER).toMatch(
+    // refactor/extract-rom-list-view: TableHead moved to RomListView.
+    expect(ROM_LIST_VIEW).toMatch(
       /<TableHead className="w-10 pl-4">[\s\S]{0,400}type="checkbox"/,
     );
     expect(ARCADE_ADAPTER).toMatch(
