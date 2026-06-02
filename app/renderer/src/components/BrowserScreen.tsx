@@ -19,6 +19,7 @@ import { UpdateModeDialog } from '@app/renderer/src/components/UpdateModeDialog'
 import { UpdateModeProgressModal } from '@app/renderer/src/components/UpdateModeProgressModal';
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import { useCores } from '@app/renderer/src/contexts/CoresContext';
+import { ViewPreferencesProvider } from '@app/renderer/src/contexts/ViewPreferencesContext';
 import { cn } from '@app/renderer/src/lib/cn';
 import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
 import { useResizablePaneWidth } from '@app/renderer/src/lib/use-resizable-pane';
@@ -148,6 +149,7 @@ export function BrowserScreen(): JSX.Element {
           the user can still browse cached state — but dim them so the
           stale-vs-live difference is visible at a glance. The banner
           above is the primary signal; this is the secondary one. */}
+      <ViewPreferencesProvider>
       <div
         className={cn(
           'flex min-h-0 flex-1',
@@ -209,6 +211,7 @@ export function BrowserScreen(): JSX.Element {
           )}
         </main>
       </div>
+      </ViewPreferencesProvider>
 
       <StatusBar />
       <SettingsDialog

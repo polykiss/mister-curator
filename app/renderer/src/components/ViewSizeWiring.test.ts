@@ -9,14 +9,16 @@ const LIST_VIEW = readFileSync(resolve(__dirname, 'RomListView.tsx'), 'utf8');
 const POSTER = readFileSync(resolve(__dirname, 'RomPosterView.tsx'), 'utf8');
 
 describe('viewSize wiring — adapters (refactor/unify-list-views)', () => {
-  it('roms-adapter imports SizeControl and ViewSize', () => {
+  it('roms-adapter imports SizeControl and uses useViewPreferences', () => {
     expect(ROMS_ADAPTER).toContain("import { SizeControl }");
-    expect(ROMS_ADAPTER).toMatch(/ViewSize.*from.*roms-view-props/s);
+    // feat/unified-views-and-optimistic-dots: viewSize now from context.
+    expect(ROMS_ADAPTER).toContain('useViewPreferences');
   });
 
-  it('roms-adapter persists viewSize with host-keyed key', () => {
-    expect(ROMS_ADAPTER).toMatch(/mistercurator\.viewSize\.roms\.\$\{host\}/);
-    expect(ROMS_ADAPTER).toMatch(/usePersistedString<ViewSize>/);
+  it('roms-adapter uses unified viewSize key from context', () => {
+    // Per-pane key removed; both adapters use ViewPreferencesContext.
+    expect(ROMS_ADAPTER).not.toMatch(/mistercurator\.viewSize\.roms\./);
+    expect(ROMS_ADAPTER).not.toMatch(/usePersistedString<ViewSize>/);
   });
 
   it('roms-adapter renders SizeControl unconditionally (both list and poster)', () => {
@@ -29,10 +31,12 @@ describe('viewSize wiring — adapters (refactor/unify-list-views)', () => {
     expect(ROMS_ADAPTER).toMatch(/viewSize,/);
   });
 
-  it('arcade-adapter has independent viewSize key (arcade, not roms)', () => {
-    expect(ARCADE_ADAPTER).toMatch(/mistercurator\.viewSize\.arcade\.\$\{host\}/);
+  it('viewSize is now universal (no per-pane arcade/roms keys)', () => {
+    // feat/unified-views-and-optimistic-dots: unified, not per-pane.
+    expect(ARCADE_ADAPTER).not.toMatch(/mistercurator\.viewSize\.arcade\./);
     expect(ROMS_ADAPTER).not.toMatch(/viewSize\.arcade\./);
     expect(ARCADE_ADAPTER).not.toMatch(/viewSize\.roms\./);
+    expect(ROMS_ADAPTER).not.toMatch(/viewSize\.roms\./);
   });
 
   it('arcade-adapter renders SizeControl unconditionally', () => {
