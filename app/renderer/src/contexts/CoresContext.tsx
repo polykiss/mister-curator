@@ -252,6 +252,19 @@ interface CoresContextValue {
    * Null before the first cores load completes.
    */
   readonly auditResult: CoreAuditResult | null;
+  /**
+   * Whether the arcade auto-hide rule is enabled for the active connection.
+   * Null before the first connect-time load completes.
+   */
+  readonly autoHideEnabled: boolean | null;
+  /** True while an auto-hide IPC write is in-flight. */
+  readonly autoHidePending: boolean;
+  /**
+   * Toggle the arcade auto-hide preference. Writes through to the
+   * on-device ledger via IPC, optimistically updates the context state,
+   * and reverts on failure. Throws on IPC error so the caller can toast.
+   */
+  readonly setAutoHideEnabled: (enabled: boolean) => Promise<void>;
   /** True while the pre-update hidden-file snapshot is active on the device. */
   readonly updateModeActive: boolean;
   /** Snapshot metadata shown in the update-mode banner. */
@@ -320,6 +333,8 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
   >(null);
   const [updateModeOperationKey, setUpdateModeOperationKey] = useState(0);
   const [arcadeOrphanZips, setArcadeOrphanZips] = useState<readonly string[]>([]);
+  const [autoHideEnabled, setAutoHideEnabledState] = useState<boolean | null>(null);
+  const [autoHidePending, setAutoHidePending] = useState(false);
 
   // Refs for stale-closure-safe reads inside async callbacks.
   const coresRef = useRef(cores);
@@ -487,6 +502,13 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
           );
         } catch {
           // best-effort; update mode state stays at defaults
+        }
+        try {
+          const enabled = await window.mister.getArcadeAutoHideEnabled();
+          setAutoHideEnabledState(enabled);
+        } catch {
+          // best-effort; autoHideEnabled stays null, SettingsDialog
+          // shows the toggle disabled until a value arrives
         }
       } catch (err) {
         const message =
@@ -1050,6 +1072,8 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
     setUpdateModeSnapshot(null);
     setUpdateModeOperationPhase(null);
     setUpdateModeOperationKey(0);
+    setAutoHideEnabledState(null);
+    setAutoHidePending(false);
   }, [status, lostConnection, autoRetry, autoRetryFailed]);
 
   // Load cores on entering the connected state.
@@ -1085,6 +1109,23 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       void loadCores({ forceRefresh: false });
     }
   }, [status, cores, coresLoading, coresError, loadCores]);
+
+  const setAutoHideEnabled = useCallback(
+    async (enabled: boolean): Promise<void> => {
+      const prev = autoHideEnabled;
+      setAutoHidePending(true);
+      setAutoHideEnabledState(enabled);
+      try {
+        await window.mister.setArcadeAutoHideEnabled(enabled);
+      } catch (err) {
+        setAutoHideEnabledState(prev);
+        throw err;
+      } finally {
+        setAutoHidePending(false);
+      }
+    },
+    [autoHideEnabled],
+  );
 
   const selectCore = useCallback((coreId: string | null) => {
     setSelectedCoreId(coreId);
@@ -1141,6 +1182,9 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       setFolderClassification,
       adjustArcadeHiddenCount,
       auditResult,
+      autoHideEnabled,
+      autoHidePending,
+      setAutoHideEnabled,
       updateModeActive,
       updateModeSnapshot,
       updateModeOperationPhase,
@@ -1176,6 +1220,9 @@ export function CoresProvider({ children }: { children: ReactNode }): JSX.Elemen
       setFolderClassification,
       adjustArcadeHiddenCount,
       auditResult,
+      autoHideEnabled,
+      autoHidePending,
+      setAutoHideEnabled,
       updateModeActive,
       updateModeSnapshot,
       updateModeOperationPhase,

@@ -136,7 +136,8 @@ describe('arcade-adapter: useArcadeAdapter', () => {
     expect(ARCADE_ADAPTER).not.toMatch(/<h2 className="text-heading text-fg">Arcade</);
     expect(ARCADE_ADAPTER).toMatch(/Hide all/);
     expect(ARCADE_ADAPTER).toMatch(/Unhide all/);
-    expect(ARCADE_ADAPTER).toMatch(/Auto-hide missing ROMs/);
+    // feat/settings-modal: "Auto-hide missing ROMs" moved to SettingsDialog.
+    expect(ARCADE_ADAPTER).not.toMatch(/Auto-hide missing ROMs/);
     expect(ARCADE_ADAPTER).toMatch(/Show hidden/);
   });
 
@@ -401,11 +402,18 @@ describe('CoresPane MAME/HBMame sidebar filter (feat/arcade-parity-3-ui G23)', (
     resolve(__dirname, 'CoresPane.tsx'),
     'utf8',
   );
+  const BROWSER_SCREEN = readFileSync(
+    resolve(__dirname, 'BrowserScreen.tsx'),
+    'utf8',
+  );
 
-  it('persists the "Show MAME / HBMame as separate cores" toggle with default OFF', () => {
-    expect(CORES_PANE).toMatch(
-      /usePersistedBool\(\s*'mistercurator\.showMameAsCores',\s*false,?\s*\)/,
+  it('persists the "Show MAME / HBMame as separate cores" toggle per-host (feat/settings-modal)', () => {
+    // feat/settings-modal: state lifted to BrowserScreen, host-keyed
+    // so each connected MiSTer keeps its own preference.
+    expect(BROWSER_SCREEN).toMatch(
+      /usePersistedBool\(\s*`mistercurator\.showMameAsCores\.\$\{/,
     );
+    expect(BROWSER_SCREEN).toMatch(/false,?\s*\)/);
   });
 
   it('filters coreId in {mame, hbmame} from visibleCores when the toggle is off', () => {
@@ -417,9 +425,14 @@ describe('CoresPane MAME/HBMame sidebar filter (feat/arcade-parity-3-ui G23)', (
     expect(CORES_PANE).toMatch(/showMameAsCores/);
   });
 
-  it('exposes the toggle in the sidebar header next to "Show hidden"', () => {
-    expect(CORES_PANE).toContain('Show MAME / HBMame as separate cores');
-    expect(CORES_PANE).toContain('Show hidden');
+  it('moves the toggle out of the sidebar header into SettingsDialog (feat/settings-modal)', () => {
+    // The checkbox was removed from CoresPane; it now lives in SettingsDialog.
+    expect(CORES_PANE).not.toContain('Show MAME / HBMame as separate cores');
+    const SETTINGS_DIALOG = readFileSync(
+      resolve(__dirname, 'SettingsDialog.tsx'),
+      'utf8',
+    );
+    expect(SETTINGS_DIALOG).toContain('Show MAME / HBMame as separate cores');
   });
 });
 
