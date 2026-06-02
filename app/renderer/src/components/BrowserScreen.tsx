@@ -1,4 +1,4 @@
-import { AlertCircle, LogOut, RefreshCw, Settings } from 'lucide-react';
+import { LogOut, RefreshCw, Settings } from 'lucide-react';
 import type { JSX } from 'react';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
@@ -8,7 +8,6 @@ import { coreDisplayName } from '@shared/core-matching';
 
 import { ArcadeMraPane } from '@app/renderer/src/components/ArcadeMraPane';
 import { Button } from '@app/renderer/src/components/ui/button';
-import { CoreAuditDialog } from '@app/renderer/src/components/CoreAuditDialog';
 import { CoresPane } from '@app/renderer/src/components/CoresPane';
 import { DisconnectBanner } from '@app/renderer/src/components/DisconnectBanner';
 import { DuplicateCoresBanner } from '@app/renderer/src/components/DuplicateCoresBanner';
@@ -36,7 +35,7 @@ const ROMS_PANE_MIN_WIDTH = 300;
 
 export function BrowserScreen(): JSX.Element {
   const { currentProfile, disconnect, lostConnection } = useConnection();
-  const { selectedCore, refresh, coresLoading, updateModeOperationPhase, updateModeOperationKey, auditResult } = useCores();
+  const { selectedCore, refresh, coresLoading, updateModeOperationPhase, updateModeOperationKey } = useCores();
   const host = currentProfile?.host ?? 'default';
   const [showMameAsCores, setShowMameAsCores] = usePersistedBool(
     `mistercurator.showMameAsCores.${host}`,
@@ -44,11 +43,6 @@ export function BrowserScreen(): JSX.Element {
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [updateModeDialogOpen, setUpdateModeDialogOpen] = useState(false);
-  const [auditDialogOpen, setAuditDialogOpen] = useState(false);
-  const auditIssueCount =
-    (auditResult?.missingCoreFile.length ?? 0) +
-    (auditResult?.noRomsForCore.length ?? 0) +
-    (auditResult?.orphanArcadeRoms.length ?? 0);
   const [progressCurrent, setProgressCurrent] = useState(0);
   const [progressTotal, setProgressTotal] = useState(0);
 
@@ -138,17 +132,6 @@ export function BrowserScreen(): JSX.Element {
           <Button
             variant="secondary"
             size="sm"
-            onClick={() => setAuditDialogOpen(true)}
-            disabled={coresLoading}
-          >
-            <AlertCircle strokeWidth={1.5} />
-            {auditIssueCount > 0
-              ? `Diagnostics (${String(auditIssueCount)})`
-              : 'Diagnostics'}
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
             onClick={() => setSettingsOpen(true)}
           >
             <Settings strokeWidth={1.5} />
@@ -228,10 +211,6 @@ export function BrowserScreen(): JSX.Element {
       </div>
 
       <StatusBar />
-      <CoreAuditDialog
-        open={auditDialogOpen}
-        onOpenChange={setAuditDialogOpen}
-      />
       <SettingsDialog
         open={settingsOpen}
         onOpenChange={setSettingsOpen}

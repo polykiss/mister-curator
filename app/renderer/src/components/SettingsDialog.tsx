@@ -1,5 +1,8 @@
-import { Loader2, ShieldCheck } from 'lucide-react';
+import { CheckCircle2, Loader2, ShieldCheck } from 'lucide-react';
 import type { JSX } from 'react';
+import { toast } from 'sonner';
+
+import { coreDisplayName } from '@shared/core-matching';
 
 import { Button } from '@app/renderer/src/components/ui/button';
 import {
@@ -36,13 +39,35 @@ export function SettingsDialog({
     autoHidePending,
     setAutoHideEnabled,
     updateModeActive,
+    auditResult,
+    hideCore,
   } = useCores();
 
   const host = currentProfile?.host;
 
+  const missingCoreFile = auditResult?.missingCoreFile ?? [];
+  const noRomsForCore = auditResult?.noRomsForCore ?? [];
+  const orphanArcadeRoms = auditResult?.orphanArcadeRoms ?? [];
+  const hasIssues =
+    missingCoreFile.length > 0 ||
+    noRomsForCore.length > 0 ||
+    orphanArcadeRoms.length > 0;
+  const issueCount =
+    missingCoreFile.length + noRomsForCore.length + orphanArcadeRoms.length;
+
+  const onHideCore = async (coreId: string): Promise<void> => {
+    try {
+      await hideCore(coreId);
+    } catch (err) {
+      toast.error('Could not hide core', {
+        description: err instanceof Error ? err.message : 'Unexpected error.',
+      });
+    }
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-3xl">
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
           {host !== undefined ? (
@@ -53,7 +78,7 @@ export function SettingsDialog({
           ) : null}
         </DialogHeader>
 
-        <div className="space-y-6 pt-2">
+        <div className="max-h-[70vh] overflow-y-auto space-y-6 pt-2 pr-1">
           {/* ── Display ───────────────────────────────────────────── */}
           <section>
             <h3 className="mb-3 text-caption font-semibold uppercase tracking-wider text-fg-muted">
@@ -144,6 +169,172 @@ export function SettingsDialog({
                 </p>
               ) : null}
             </div>
+          </section>
+
+          {/* ── Diagnostics ───────────────────────────────────────── */}
+          <section>
+            <h3 className="mb-3 text-caption font-semibold uppercase tracking-wider text-fg-muted">
+              {issueCount > 0
+                ? `Diagnostics (${String(issueCount)})`
+                : 'Diagnostics'}
+            </h3>
+
+            {!hasIssues ? (
+              <div className="flex items-center gap-2 text-body-sm text-fg-muted">
+                <CheckCircle2
+                  className="size-4 shrink-0 text-success"
+                  strokeWidth={1.5}
+                />
+                <span>No issues found.</span>
+              </div>
+            ) : (
+              <div className="space-y-5">
+                {missingCoreFile.length > 0 && (
+                  <div>
+                    <h4 className="mb-2 text-body-sm font-medium text-fg">
+                      Cores not installed ({String(missingCoreFile.length)})
+                    </h4>
+                    <div className="max-h-48 overflow-auto rounded border border-default">
+                      <table className="w-full text-body-sm">
+                        <thead className="sticky top-0 bg-overlay">
+                          <tr className="border-b border-default text-left text-fg-muted">
+                            <th className="px-3 py-2 font-medium">Core</th>
+                            <th className="px-3 py-2 font-medium">Games dir</th>
+                            <th className="px-3 py-2 text-right font-medium">ROMs</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {missingCoreFile.map((core) => (
+                            <tr
+                              key={core.id}
+                              className="border-b border-subtle last:border-0"
+                            >
+                              <td className="px-3 py-2 font-medium text-fg">
+                                {coreDisplayName(core.id)}
+                              </td>
+                              <td className="px-3 py-2 font-mono text-fg-muted">
+                                /media/fat/games/{core.gamesDirName ?? core.id}
+                              </td>
+                              <td className="px-3 py-2 text-right text-fg-muted">
+                                {String(core.recursiveRomCount ?? core.romCount)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="mt-1.5 text-body-sm text-fg-muted">
+                      Run{' '}
+                      <code className="rounded border border-default bg-overlay px-1 font-mono text-body-sm">
+                        update_all.sh
+                      </code>{' '}
+                      on the MiSTer to install missing cores.
+                    </p>
+                  </div>
+                )}
+
+                {noRomsForCore.length > 0 && (
+                  <div>
+                    <h4 className="mb-2 text-body-sm font-medium text-fg">
+                      Cores with no ROMs ({String(noRomsForCore.length)})
+                    </h4>
+                    <div className="max-h-48 overflow-auto rounded border border-default">
+                      <table className="w-full text-body-sm">
+                        <thead className="sticky top-0 bg-overlay">
+                          <tr className="border-b border-default text-left text-fg-muted">
+                            <th className="px-3 py-2 font-medium">Core</th>
+                            <th className="px-3 py-2 font-medium">.rbf location</th>
+                            <th className="px-3 py-2" />
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {noRomsForCore.map((core) => {
+                            const first = core.rbfPaths[0];
+                            const slash = first ? first.lastIndexOf('/') : -1;
+                            const dir = first && slash > 0
+                              ? first.slice(first.lastIndexOf('/', slash - 1) + 1, slash)
+                              : '';
+                            const file = first ? first.slice(slash + 1) : '—';
+                            const rbfPath = dir ? `${dir}/${file}` : file;
+                            return (
+                              <tr
+                                key={core.id}
+                                className="border-b border-subtle last:border-0"
+                              >
+                                <td className="px-3 py-2 font-medium text-fg">
+                                  {coreDisplayName(core.id)}
+                                </td>
+                                <td className="px-3 py-2 font-mono text-fg-muted">
+                                  {rbfPath}
+                                </td>
+                                <td className="px-3 py-2">
+                                  <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    onClick={() => void onHideCore(core.id)}
+                                  >
+                                    Hide
+                                  </Button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="mt-1.5 text-body-sm text-fg-muted">
+                      Add ROMs or use <strong>Hide</strong> to remove from the
+                      MiSTer menu.
+                    </p>
+                  </div>
+                )}
+
+                {orphanArcadeRoms.length > 0 && (
+                  <div>
+                    <h4 className="mb-2 text-body-sm font-medium text-fg">
+                      Orphan arcade ROMs ({String(orphanArcadeRoms.length)})
+                    </h4>
+                    <div className="max-h-48 overflow-auto rounded border border-default">
+                      <table className="w-full text-body-sm">
+                        <thead className="sticky top-0 bg-overlay">
+                          <tr className="border-b border-default text-left text-fg-muted">
+                            <th className="px-3 py-2 font-medium">File</th>
+                            <th className="px-3 py-2 font-medium">Location</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {orphanArcadeRoms.map((filename) => (
+                            <tr
+                              key={filename}
+                              className="border-b border-subtle last:border-0"
+                            >
+                              <td className="px-3 py-2 font-mono text-fg">
+                                {filename}
+                              </td>
+                              <td className="px-3 py-2 font-mono text-fg-muted">
+                                games/mame/ or hbmame/
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="mt-1.5 text-body-sm text-fg-muted">
+                      These ROMs aren&apos;t referenced by any{' '}
+                      <code className="rounded border border-default bg-overlay px-1 font-mono text-body-sm">
+                        .mra
+                      </code>{' '}
+                      launcher. Run{' '}
+                      <code className="rounded border border-default bg-overlay px-1 font-mono text-body-sm">
+                        update_all.sh
+                      </code>{' '}
+                      on the MiSTer to install missing launchers, or delete
+                      the ROMs to reclaim space.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
           </section>
         </div>
       </DialogContent>
