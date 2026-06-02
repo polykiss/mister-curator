@@ -509,7 +509,12 @@ export function progressForCore(
     if (ratio > 1) return 1;
     return ratio;
   }
-  return 0;
+  // feat/unified-views-and-optimistic-dots: default to 1 (green /
+  // healthy) instead of 0 (cold blue / "not yet processed"). A core
+  // that hasn't been scraped in the current session is not an issue —
+  // the status bar's "Validating library…" already communicates
+  // background work. Cold blue misleadingly implied a problem.
+  return 1;
 }
 
 function renderCoreList(args: RenderArgs): JSX.Element {

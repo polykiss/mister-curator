@@ -38,14 +38,14 @@ import {
   type SortState,
 } from '@app/renderer/src/lib/rom-sort';
 import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
-import { usePersistedString } from '@app/renderer/src/lib/use-persisted-string';
+import { useViewPreferences } from '@app/renderer/src/contexts/ViewPreferencesContext';
 import { filterArcadeEntries } from '@app/renderer/src/lib/filter-arcade';
 import { FilterInput } from '@app/renderer/src/components/FilterInput';
 import { RomListView } from '@app/renderer/src/components/RomListView';
 import { RomPosterView } from '@app/renderer/src/components/RomPosterView';
 import { ViewModeToggle } from '@app/renderer/src/components/ViewModeToggle';
 import { SizeControl } from '@app/renderer/src/components/SizeControl';
-import type { ArcadeRowContext, ViewMode, ViewSize } from '@app/renderer/src/lib/roms-view-props';
+import type { ArcadeRowContext } from '@app/renderer/src/lib/roms-view-props';
 
 /**
  * feat/arcade-phase-1.5 — pane for managing `.mra` files under
@@ -78,18 +78,9 @@ import type { ArcadeRowContext, ViewMode, ViewSize } from '@app/renderer/src/lib
  * wrapper that routes this hook's result through ItemListPane.
  */
 export function useArcadeAdapter(): ItemListAdapter {
-  const { status, currentProfile } = useConnection();
-  const host = currentProfile?.host ?? 'default';
-  const [viewMode, setViewMode] = usePersistedString<ViewMode>(
-    `mistercurator.viewMode.arcade.${host}`,
-    'list',
-    ['list', 'poster'],
-  );
-  const [viewSize, setViewSize] = usePersistedString<ViewSize>(
-    `mistercurator.viewSize.arcade.${host}`,
-    'M',
-    ['S', 'M', 'L', 'XL'],
-  );
+  const { status } = useConnection();
+  // feat/unified-views-and-optimistic-dots: shared with ROM pane.
+  const { viewMode, setViewMode, viewSize, setViewSize } = useViewPreferences();
   // feat/pre-beta-polish-batch — single-toggle hide/show writes
   // through to the sidebar Arcade row's hidden-count badge via this
   // helper so the badge updates with the same click that flips the

@@ -13,16 +13,21 @@ const ARCADE_ADAPTER = readFileSync(
 );
 
 describe('view-mode wiring — roms-adapter (refactor/unify-list-views)', () => {
-  it('imports ViewModeToggle, RomPosterView, usePersistedString (no RomDetailedListView)', () => {
+  it('imports ViewModeToggle, RomPosterView, useViewPreferences (unified, no per-pane keys)', () => {
     expect(ROMS_ADAPTER).not.toContain("import { RomDetailedListView }");
     expect(ROMS_ADAPTER).toContain("import { RomPosterView }");
     expect(ROMS_ADAPTER).toContain("import { ViewModeToggle }");
-    expect(ROMS_ADAPTER).toContain("import { usePersistedString }");
+    // feat/unified-views-and-optimistic-dots: usePersistedString replaced
+    // by useViewPreferences (shared context).
+    expect(ROMS_ADAPTER).not.toContain("import { usePersistedString }");
+    expect(ROMS_ADAPTER).toContain("useViewPreferences");
   });
 
-  it('persists viewMode with 2-element allowlist (no "detailed")', () => {
-    expect(ROMS_ADAPTER).toMatch(/mistercurator\.viewMode\.roms\.\$\{host\}/);
-    expect(ROMS_ADAPTER).toMatch(/\['list',\s*'poster'\]/);
+  it('uses unified view keys from context (not per-pane roms keys)', () => {
+    // feat/unified-views-and-optimistic-dots: per-pane key removed,
+    // both panes now read from ViewPreferencesContext.
+    expect(ROMS_ADAPTER).not.toMatch(/mistercurator\.viewMode\.roms\./);
+    expect(ROMS_ADAPTER).not.toMatch(/\['list',\s*'poster'\]/);
     expect(ROMS_ADAPTER).not.toMatch(/'detailed'/);
   });
 
@@ -47,15 +52,17 @@ describe('view-mode wiring — roms-adapter (refactor/unify-list-views)', () => 
 });
 
 describe('view-mode wiring — arcade-adapter (refactor/unify-list-views)', () => {
-  it('imports ViewModeToggle, RomPosterView (no RomDetailedListView)', () => {
+  it('imports ViewModeToggle, RomPosterView, useViewPreferences', () => {
     expect(ARCADE_ADAPTER).not.toContain("import { RomDetailedListView }");
     expect(ARCADE_ADAPTER).toContain("import { RomPosterView }");
     expect(ARCADE_ADAPTER).toContain("import { ViewModeToggle }");
+    expect(ARCADE_ADAPTER).toContain("useViewPreferences");
   });
 
-  it('persists viewMode with 2-element allowlist', () => {
-    expect(ARCADE_ADAPTER).toMatch(/mistercurator\.viewMode\.arcade\.\$\{host\}/);
-    expect(ARCADE_ADAPTER).toMatch(/\['list',\s*'poster'\]/);
+  it('uses unified view keys from context (not per-pane arcade keys)', () => {
+    // feat/unified-views-and-optimistic-dots: per-pane key removed.
+    expect(ARCADE_ADAPTER).not.toMatch(/mistercurator\.viewMode\.arcade\./);
+    expect(ARCADE_ADAPTER).not.toMatch(/\['list',\s*'poster'\]/);
   });
 
   it('SizeControl always visible in arcade', () => {
@@ -63,11 +70,14 @@ describe('view-mode wiring — arcade-adapter (refactor/unify-list-views)', () =
     expect(ARCADE_ADAPTER).not.toMatch(/viewMode !== 'list'[\s\S]{0,100}<SizeControl/);
   });
 
-  it('arcade view mode is independent of ROM pane (different key prefix)', () => {
-    expect(ROMS_ADAPTER).toMatch(/viewMode\.roms\./);
-    expect(ARCADE_ADAPTER).toMatch(/viewMode\.arcade\./);
-    expect(ROMS_ADAPTER).not.toMatch(/viewMode\.arcade\./);
-    expect(ARCADE_ADAPTER).not.toMatch(/viewMode\.roms\./);
+  it('view mode is now universal (both panes use ViewPreferencesContext)', () => {
+    // feat/unified-views-and-optimistic-dots: per-pane keys removed.
+    // Both adapters read from ViewPreferencesContext (unified key
+    // mistercurator.viewMode.${host}).
+    expect(ROMS_ADAPTER).not.toMatch(/viewMode\.roms\./);
+    expect(ARCADE_ADAPTER).not.toMatch(/viewMode\.arcade\./);
+    expect(ROMS_ADAPTER).toContain('useViewPreferences');
+    expect(ARCADE_ADAPTER).toContain('useViewPreferences');
   });
 
   it('passes arcadeContext through sharedProps', () => {

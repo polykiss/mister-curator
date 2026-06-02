@@ -54,14 +54,20 @@ describe('progressForCore', () => {
     ).toBe(0.75);
   });
 
-  it('returns 0 when the engine is active on a different core', () => {
+  it('returns 1 (green / healthy) when the engine is active on a different core', () => {
+    // feat/unified-views-and-optimistic-dots: dots default to 1 (green)
+    // instead of 0 (cold blue). A core not being scraped right now is
+    // not an issue — it's healthy unless proven otherwise.
     expect(
       progressForCore('NES', active({ coreId: 'SNES', done: 50, total: 100 })),
-    ).toBe(0);
+    ).toBe(1);
   });
 
-  it('returns 0 for an idle engine and a non-completed core', () => {
-    expect(progressForCore('SNES', idle)).toBe(0);
+  it('returns 1 (green / healthy) for an idle engine and a non-completed core', () => {
+    // feat/unified-views-and-optimistic-dots: same rationale — unscraped
+    // in this session ≠ problem. The status bar communicates background
+    // work; the per-core dot communicates core health.
+    expect(progressForCore('SNES', idle)).toBe(1);
   });
 
   it('completedCoreIds wins over an active branch (already-done sticks)', () => {

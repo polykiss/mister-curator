@@ -68,13 +68,12 @@ import {
 import { summarizeBulkResult } from '@app/renderer/src/lib/format';
 import type { VisibilityChange } from '@app/renderer/src/lib/optimistic';
 import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
-import { usePersistedString } from '@app/renderer/src/lib/use-persisted-string';
+import { useViewPreferences } from '@app/renderer/src/contexts/ViewPreferencesContext';
 import { filterRoms } from '@app/renderer/src/lib/filter-roms';
 import { FilterInput } from '@app/renderer/src/components/FilterInput';
 import { RomPosterView } from '@app/renderer/src/components/RomPosterView';
 import { ViewModeToggle } from '@app/renderer/src/components/ViewModeToggle';
 import { SizeControl } from '@app/renderer/src/components/SizeControl';
-import type { ViewMode, ViewSize } from '@app/renderer/src/lib/roms-view-props';
 
 /**
  * fix/render-cascade-hide-unhide Fix 1: returns a copy of `prev`
@@ -135,18 +134,10 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     romCacheVersion,
     updateModeActive,
   } = useCores();
-  const { status, currentProfile } = useConnection();
-  const host = currentProfile?.host ?? 'default';
-  const [viewMode, setViewMode] = usePersistedString<ViewMode>(
-    `mistercurator.viewMode.roms.${host}`,
-    'list',
-    ['list', 'poster'],
-  );
-  const [viewSize, setViewSize] = usePersistedString<ViewSize>(
-    `mistercurator.viewSize.roms.${host}`,
-    'M',
-    ['S', 'M', 'L', 'XL'],
-  );
+  const { status } = useConnection();
+  // feat/unified-views-and-optimistic-dots: viewMode and viewSize are
+  // now shared across both ROM and arcade panes via ViewPreferencesContext.
+  const { viewMode, setViewMode, viewSize, setViewSize } = useViewPreferences();
   // Mid-session disconnect / pre-reconnect state — every mutating
   // button gates on this. Reads (browse, drill, filter) stay enabled
   // so the user can still inspect the cached state.
