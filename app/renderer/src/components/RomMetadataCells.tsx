@@ -570,7 +570,7 @@ export function RomDensityEyeCell(props: {
   return (
     <TableCell className="relative p-0">
       <div className="absolute inset-0 flex shrink-0 items-stretch">
-        {!isSystem && rom.kind === 'file' ? (
+        {!isSystem && rom.kind !== 'folder-container' ? (
           <DensityBar
             floor="bg-elevated"
             value={rom.sizeBytes}

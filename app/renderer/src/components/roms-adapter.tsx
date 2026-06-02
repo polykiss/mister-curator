@@ -641,14 +641,15 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     return () => document.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Density-bar denominator for the size column — peer max across file
-  // rows only. Folder rows are excluded: their aggregate sizeBytes
-  // (sum of all child files) would dominate the scale and compress all
-  // the individual-file bars toward zero.
+  // Density-bar denominator — peer max across file + folder-atomic rows.
+  // folder-atomic rows ARE single games (multi-track CD, X68000-style);
+  // their aggregate sizeBytes reflects one game's weight and should
+  // participate in the scale. folder-container rows are excluded: their
+  // aggregate spans many games and would compress every other bar.
   const maxSizeBytes = useMemo(() => {
     if (!presentableRoms) return 0;
     return presentableRoms
-      .filter((r) => r.kind === 'file')
+      .filter((r) => r.kind !== 'folder-container')
       .reduce((acc, r) => (r.sizeBytes > acc ? r.sizeBytes : acc), 0);
   }, [presentableRoms]);
 

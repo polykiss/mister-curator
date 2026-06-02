@@ -169,12 +169,19 @@ describe('RomDensityEyeCell — folder rows hide density bar (feat/rom-list-poli
     expect(countDensityBars(cell)).toBe(1);
   });
 
-  it('folder-atomic rows do NOT render the DensityBar', () => {
+  it('folder-atomic rows DO render the DensityBar (single-game folder = one game)', () => {
+    // folder-atomic is a multi-file game folder (multi-track CD,
+    // X68000-style). The user sees it as "the game" — its aggregate
+    // sizeBytes represents that one game's weight and should be
+    // visualized the same as a file row.
     const cell = renderCell('folder-atomic');
-    expect(countDensityBars(cell)).toBe(0);
+    expect(countDensityBars(cell)).toBe(1);
   });
 
   it('folder-container rows do NOT render the DensityBar', () => {
+    // folder-container is a drillable organizational folder containing
+    // multiple games. Its aggregate sizeBytes spans many games and
+    // would distort the per-game density scale.
     const cell = renderCell('folder-container');
     expect(countDensityBars(cell)).toBe(0);
   });
