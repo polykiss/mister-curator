@@ -13,7 +13,7 @@ import type { SortKey, SortState } from '@app/renderer/src/lib/rom-sort';
  * Introduced in PR I-1; the 'detailed' and 'poster' variants are wired
  * up in PR I-2.
  */
-export type ViewMode = 'list' | 'detailed' | 'poster';
+export type ViewMode = 'list' | 'poster';
 
 /**
  * Size preset for Detailed and Poster views. Controls thumbnail height

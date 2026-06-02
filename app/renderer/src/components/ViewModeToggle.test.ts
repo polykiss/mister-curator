@@ -13,23 +13,21 @@ describe('ViewModeToggle — structure (feat/view-modes)', () => {
     expect(SOURCE).toMatch(/export function ViewModeToggle/);
   });
 
-  it('renders three buttons — one per ViewMode', () => {
-    // Three modes: list, detailed, poster
+  it('renders two buttons — one per ViewMode (refactor/unify-list-views: dropped Detailed)', () => {
+    // Two modes: list, poster
     expect(SOURCE).toMatch(/'list'/);
-    expect(SOURCE).toMatch(/'detailed'/);
     expect(SOURCE).toMatch(/'poster'/);
-    // Three icon buttons in the render output
-    const buttonCount = (SOURCE.match(/mode:\s*'(list|detailed|poster)'/g) ?? []).length;
-    expect(buttonCount).toBe(3);
+    expect(SOURCE).not.toMatch(/'detailed'/);
+    const buttonCount = (SOURCE.match(/mode:\s*'(list|poster)'/g) ?? []).length;
+    expect(buttonCount).toBe(2);
   });
 
-  it('uses lucide-react icons: List, LayoutList, LayoutGrid', () => {
+  it('uses lucide-react icons: List and LayoutGrid (LayoutList removed)', () => {
     expect(SOURCE).toContain("from 'lucide-react'");
     expect(SOURCE).toContain('LayoutGrid');
-    expect(SOURCE).toContain('LayoutList');
+    expect(SOURCE).not.toContain('LayoutList');
     expect(SOURCE).toContain('List');
     expect(SOURCE).toMatch(/Icon: List/);
-    expect(SOURCE).toMatch(/Icon: LayoutList/);
     expect(SOURCE).toMatch(/Icon: LayoutGrid/);
   });
 

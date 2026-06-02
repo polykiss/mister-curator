@@ -42,7 +42,6 @@ import { usePersistedString } from '@app/renderer/src/lib/use-persisted-string';
 import { filterArcadeEntries } from '@app/renderer/src/lib/filter-arcade';
 import { FilterInput } from '@app/renderer/src/components/FilterInput';
 import { RomListView } from '@app/renderer/src/components/RomListView';
-import { RomDetailedListView } from '@app/renderer/src/components/RomDetailedListView';
 import { RomPosterView } from '@app/renderer/src/components/RomPosterView';
 import { ViewModeToggle } from '@app/renderer/src/components/ViewModeToggle';
 import { SizeControl } from '@app/renderer/src/components/SizeControl';
@@ -84,7 +83,7 @@ export function useArcadeAdapter(): ItemListAdapter {
   const [viewMode, setViewMode] = usePersistedString<ViewMode>(
     `mistercurator.viewMode.arcade.${host}`,
     'list',
-    ['list', 'detailed', 'poster'],
+    ['list', 'poster'],
   );
   const [viewSize, setViewSize] = usePersistedString<ViewSize>(
     `mistercurator.viewSize.arcade.${host}`,
@@ -914,9 +913,7 @@ export function useArcadeAdapter(): ItemListAdapter {
             inputRef={filterInputRef}
           />
           <ViewModeToggle value={viewMode} onChange={setViewMode} />
-          {viewMode !== 'list' ? (
-            <SizeControl value={viewSize} onChange={setViewSize} />
-          ) : null}
+          <SizeControl value={viewSize} onChange={setViewSize} />
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button
@@ -1046,7 +1043,6 @@ export function useArcadeAdapter(): ItemListAdapter {
             arcadeContext: arcadeRowContext,
             viewSize,
           } as const;
-          if (viewMode === 'detailed') return <RomDetailedListView {...sharedProps} />;
           if (viewMode === 'poster') return <RomPosterView {...sharedProps} />;
           return <RomListView {...sharedProps} />;
         })()

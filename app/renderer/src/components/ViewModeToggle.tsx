@@ -1,4 +1,4 @@
-import { LayoutGrid, LayoutList, List } from 'lucide-react';
+import { LayoutGrid, List } from 'lucide-react';
 import type { JSX } from 'react';
 
 import type { ViewMode } from '@app/renderer/src/lib/roms-view-props';
@@ -11,7 +11,6 @@ interface ViewModeToggleProps {
 
 const MODES: readonly { readonly mode: ViewMode; readonly label: string; readonly Icon: typeof List }[] = [
   { mode: 'list', label: 'List view', Icon: List },
-  { mode: 'detailed', label: 'Detailed list', Icon: LayoutList },
   { mode: 'poster', label: 'Poster grid', Icon: LayoutGrid },
 ];
 
