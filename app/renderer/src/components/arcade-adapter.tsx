@@ -1,4 +1,4 @@
-import { Loader2, MoreHorizontal } from 'lucide-react';
+import { MoreHorizontal } from 'lucide-react';
 import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
@@ -68,9 +68,8 @@ import { FilterInput } from '@app/renderer/src/components/FilterInput';
  *
  * PR 2/2 (feat/arcade-ux-and-ledger) layered on:
  *   • MISSING ROMS pill per row sourced from `getArcadePlayability`.
- *   • "Auto-hide missing ROMs" persisted checkbox in the header,
- *     backed by the per-host ledger (default ON). Flipping it
- *     runs the rule diff via setArcadeAutoHideEnabled.
+ *   • Auto-hide preference backed by the per-host ledger (default ON).
+ *     Toggled from SettingsDialog; runs the rule diff on change.
  *   • Three-state eye-toggle tooltip: "Hide" / "Show (you hid this)"
  *     / "Show (auto-hidden because ROMs are missing)".
  *
@@ -98,7 +97,12 @@ export function useArcadeAdapter(): ItemListAdapter {
   // helper so the badge updates with the same click that flips the
   // pane row's eye icon. (Pre-fix the badge waited for the next
   // CoresContext refresh.)
-  const { adjustArcadeHiddenCount, romCacheVersion, updateModeActive } = useCores();
+  const {
+    adjustArcadeHiddenCount,
+    romCacheVersion,
+    updateModeActive,
+    autoHideEnabled,
+  } = useCores();
   // Also gate on !updateModeActive: while update mode is active the
   // hidden-file state is intentionally in flux and mutations are unsafe.
   const canMutate = status === 'connected' && !updateModeActive;
@@ -108,8 +112,6 @@ export function useArcadeAdapter(): ItemListAdapter {
   );
   const [playability, setPlayability] =
     useState<ArcadePlayabilityWire | null>(null);
-  const [autoHideEnabled, setAutoHideEnabled] = useState<boolean | null>(null);
-  const [autoHidePending, setAutoHidePending] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // feat/arcade-parity-2-metadata — cached ScreenScraper metadata per
@@ -202,14 +204,12 @@ export function useArcadeAdapter(): ItemListAdapter {
       setLoading(true);
       setError(null);
       try {
-        const [wire, play, enabled] = await Promise.all([
+        const [wire, play] = await Promise.all([
           window.mister.listArcadeMraEntries({ forceRefresh }),
           window.mister.getArcadePlayability(),
-          window.mister.getArcadeAutoHideEnabled(),
         ]);
         setEntries(wireToEntries(wire));
         setPlayability(play);
-        setAutoHideEnabled(enabled);
         void window.mister
           .getArcadeMetadataBatch()
           .then((batch) => setMetadataByMra(batch))
@@ -703,37 +703,22 @@ export function useArcadeAdapter(): ItemListAdapter {
     }
   };
 
-  /**
-   * Toggle the persisted auto-hide preference. The main-process
-   * call also applies the rule diff (hides every missing-ROM mra
-   * on OFF→ON, restores every auto-hidden mra on ON→OFF), so we
-   * refresh the entry list + playability after a successful flip.
-   *
-   * The checkbox flips optimistically so the user sees the change
-   * land immediately even though the bulk SSH rename takes ~3-5s
-   * for a typical 100-mra diff. On failure we revert and surface
-   * the toast.
-   */
-  const onToggleAutoHide = async (next: boolean): Promise<void> => {
-    if (!canMutate || autoHideEnabled === null) return;
-    const prev = autoHideEnabled;
-    setAutoHidePending(true);
-    setAutoHideEnabled(next);
-    try {
-      await window.mister.setArcadeAutoHideEnabled(next);
-      await refresh(true);
-    } catch (err) {
-      setAutoHideEnabled(prev);
-      toast.error(
-        `Could not ${next ? 'enable' : 'disable'} auto-hide`,
-        {
-          description: err instanceof Error ? err.message : 'Unexpected error.',
-        },
-      );
-    } finally {
-      setAutoHidePending(false);
+  // Refresh arcade entries when auto-hide is toggled from the Settings
+  // modal. CoresContext.setAutoHideEnabled handles the IPC write and
+  // optimistic state update; this effect fires when the context value
+  // changes so the arcade pane reflects the on-device rule diff
+  // (entries un-dotted or re-dotted after the bulk rename) without
+  // requiring the user to manually Refresh. Skip the first settled
+  // value (initial load from null → bool) since the pane is already
+  // loading at that point.
+  const prevAutoHideRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (autoHideEnabled === null) return;
+    if (prevAutoHideRef.current !== null && prevAutoHideRef.current !== autoHideEnabled) {
+      void refresh(true);
     }
-  };
+    prevAutoHideRef.current = autoHideEnabled;
+  }, [autoHideEnabled, refresh]);
 
   // Bug E — scroll preservation for arcade single-toggle (mirrors the
   // roms-adapter pattern). Anchor the first partially-visible row
@@ -911,35 +896,6 @@ export function useArcadeAdapter(): ItemListAdapter {
               onChange={(e) => setShowHidden(e.target.checked)}
             />
             Show hidden
-          </label>
-          <label
-            className={cn(
-              'flex items-center gap-2',
-              (!canMutate || autoHidePending || autoHideEnabled === null) &&
-                'opacity-60',
-            )}
-            title={
-              canMutate
-                ? 'When on, .mras whose ROM zips are missing from games/mame/ + games/hbmame/ are dot-prefixed so the MiSTer arcade menu only shows what you can actually play.'
-                : 'Reconnect to change.'
-            }
-          >
-            <input
-              type="checkbox"
-              className="accent-accent"
-              checked={autoHideEnabled ?? true}
-              disabled={
-                !canMutate || autoHidePending || autoHideEnabled === null
-              }
-              onChange={(e) => void onToggleAutoHide(e.target.checked)}
-            />
-            Auto-hide missing ROMs
-            {autoHidePending ? (
-              <Loader2
-                className="ml-1 size-3.5 animate-spin text-fg-muted"
-                strokeWidth={1.5}
-              />
-            ) : null}
           </label>
         </div>
       </header>

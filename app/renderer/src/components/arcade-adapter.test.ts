@@ -44,9 +44,11 @@ describe('arcade-adapter — optimistic single-toggle (feat/pre-beta-polish-batc
     expect(SOURCE).toMatch(
       /import \{ useCores \} from '@app\/renderer\/src\/contexts\/CoresContext'/,
     );
-    expect(SOURCE).toMatch(
-      /const \{ adjustArcadeHiddenCount[^}]* \} = useCores\(\);/,
-    );
+    // The destructure may be multi-line; check that both symbols appear
+    // together in the useCores() call.
+    expect(SOURCE).toMatch(/adjustArcadeHiddenCount/);
+    expect(SOURCE).toMatch(/useCores\(\)/);
+    expect(SOURCE).toMatch(/= useCores\(\)/);
   });
 
   it('onToggleSingle is synchronous (no await on the SSH call) — UI flips before the wire round-trip', () => {
@@ -139,13 +141,14 @@ describe('arcade-adapter — optimistic single-toggle (feat/pre-beta-polish-batc
     // pendingPaths used to gate a Loader2 in the eye column while
     // SSH was on the wire. With optimistic UI the eye flip itself
     // is the feedback; the spinner was deleted along with the
-    // pendingPaths state. (Loader2 stays in the file — it's still
-    // used by the auto-hide checkbox while the bulk rule runs.)
+    // pendingPaths state.
     expect(SOURCE).not.toMatch(/pendingPaths/);
     expect(SOURCE).not.toMatch(/setPendingPaths/);
-    // The auto-hide spinner survives — its bulk rename can still
-    // run for several seconds, so the indicator is meaningful.
-    expect(SOURCE).toMatch(/autoHidePending \?\s*\(\s*<Loader2/);
+    // feat/settings-modal: the auto-hide spinner moved to SettingsDialog
+    // alongside the auto-hide checkbox. arcade-adapter no longer imports
+    // Loader2 or renders the spinner.
+    expect(SOURCE).not.toMatch(/autoHidePending/);
+    expect(SOURCE).not.toMatch(/Loader2/);
   });
 });
 
@@ -269,23 +272,24 @@ describe('arcade-adapter — top bar consolidation (feat/arcade-bulk-select-and-
   });
 
   it('"Show hidden" checkbox is rendered in the second-row leftmost position', () => {
-    // Second row = div.flex.flex-wrap.gap-4. "Show hidden" must appear
-    // before "Auto-hide missing ROMs" in the source (DOM order = layout
-    // position for a left-to-right flex row).
+    // Second row = div.flex.flex-wrap.gap-4. "Show hidden" is the only
+    // remaining toggle here — "Auto-hide missing ROMs" moved to SettingsDialog.
     const secondRowStart = SOURCE.indexOf('flex flex-wrap gap-4');
     expect(secondRowStart).toBeGreaterThan(-1);
     const block = SOURCE.slice(secondRowStart, secondRowStart + 2000);
     const showHiddenIdx = block.indexOf('Show hidden');
-    const autoHideIdx = block.indexOf('Auto-hide missing ROMs');
     expect(showHiddenIdx).toBeGreaterThan(-1);
-    expect(autoHideIdx).toBeGreaterThan(-1);
-    expect(showHiddenIdx).toBeLessThan(autoHideIdx);
   });
 
-  it('"Auto-hide missing ROMs" is rendered in the second row (same row as "Show hidden")', () => {
-    const secondRowStart = SOURCE.indexOf('flex flex-wrap gap-4');
-    const block = SOURCE.slice(secondRowStart, secondRowStart + 2000);
-    expect(block).toMatch(/Auto-hide missing ROMs/);
+  it('"Auto-hide missing ROMs" moved to SettingsDialog (feat/settings-modal)', () => {
+    // The checkbox was removed from arcade-adapter's header and now
+    // lives in SettingsDialog alongside the MAME toggle and Update Mode.
+    expect(SOURCE).not.toContain('Auto-hide missing ROMs');
+    const SETTINGS_DIALOG = readFileSync(
+      resolve(__dirname, 'SettingsDialog.tsx'),
+      'utf8',
+    );
+    expect(SETTINGS_DIALOG).toContain('Auto-hide missing ROMs');
   });
 
   it('top row contains "Hide all", "Unhide all", "Hide selected", "Unhide selected" in order', () => {

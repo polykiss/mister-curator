@@ -1,4 +1,4 @@
-import { AlertCircle, LogOut, RefreshCw, ShieldCheck } from 'lucide-react';
+import { LogOut, RefreshCw, Settings } from 'lucide-react';
 import type { JSX } from 'react';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
@@ -8,11 +8,11 @@ import { coreDisplayName } from '@shared/core-matching';
 
 import { ArcadeMraPane } from '@app/renderer/src/components/ArcadeMraPane';
 import { Button } from '@app/renderer/src/components/ui/button';
-import { CoreAuditDialog } from '@app/renderer/src/components/CoreAuditDialog';
 import { CoresPane } from '@app/renderer/src/components/CoresPane';
 import { DisconnectBanner } from '@app/renderer/src/components/DisconnectBanner';
 import { DuplicateCoresBanner } from '@app/renderer/src/components/DuplicateCoresBanner';
 import { RomsPane } from '@app/renderer/src/components/RomsPane';
+import { SettingsDialog } from '@app/renderer/src/components/SettingsDialog';
 import { StatusBar } from '@app/renderer/src/components/StatusBar';
 import { UpdateModeBanner } from '@app/renderer/src/components/UpdateModeBanner';
 import { UpdateModeDialog } from '@app/renderer/src/components/UpdateModeDialog';
@@ -20,6 +20,7 @@ import { UpdateModeProgressModal } from '@app/renderer/src/components/UpdateMode
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
+import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
 import { useResizablePaneWidth } from '@app/renderer/src/lib/use-resizable-pane';
 
 // Round 5: cores pane min bumped from 200 → 320. Below 320px the
@@ -34,13 +35,14 @@ const ROMS_PANE_MIN_WIDTH = 300;
 
 export function BrowserScreen(): JSX.Element {
   const { currentProfile, disconnect, lostConnection } = useConnection();
-  const { selectedCore, refresh, coresLoading, updateModeActive, updateModeOperationPhase, updateModeOperationKey, auditResult } = useCores();
+  const { selectedCore, refresh, coresLoading, updateModeOperationPhase, updateModeOperationKey } = useCores();
+  const host = currentProfile?.host ?? 'default';
+  const [showMameAsCores, setShowMameAsCores] = usePersistedBool(
+    `mistercurator.showMameAsCores.${host}`,
+    false,
+  );
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [updateModeDialogOpen, setUpdateModeDialogOpen] = useState(false);
-  const [auditDialogOpen, setAuditDialogOpen] = useState(false);
-  const auditIssueCount =
-    (auditResult?.missingCoreFile.length ?? 0) +
-    (auditResult?.noRomsForCore.length ?? 0) +
-    (auditResult?.orphanArcadeRoms.length ?? 0);
   const [progressCurrent, setProgressCurrent] = useState(0);
   const [progressTotal, setProgressTotal] = useState(0);
 
@@ -130,23 +132,10 @@ export function BrowserScreen(): JSX.Element {
           <Button
             variant="secondary"
             size="sm"
-            onClick={() => setAuditDialogOpen(true)}
-            disabled={coresLoading}
+            onClick={() => setSettingsOpen(true)}
           >
-            <AlertCircle strokeWidth={1.5} />
-            {auditIssueCount > 0
-              ? `Diagnostics (${String(auditIssueCount)})`
-              : 'Diagnostics'}
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => setUpdateModeDialogOpen(true)}
-            disabled={updateModeActive || coresLoading}
-            title={updateModeActive ? 'Update mode already active — restore first' : undefined}
-          >
-            <ShieldCheck strokeWidth={1.5} />
-            Update mode
+            <Settings strokeWidth={1.5} />
+            Settings
           </Button>
           <Button variant="ghost" size="sm" onClick={() => void onDisconnect()}>
             <LogOut strokeWidth={1.5} />
@@ -169,7 +158,7 @@ export function BrowserScreen(): JSX.Element {
           style={{ width: `${String(coresWidth)}px` }}
           className="shrink-0 overflow-auto border-r border-subtle bg-surface"
         >
-          <CoresPane />
+          <CoresPane showMameAsCores={showMameAsCores} />
         </aside>
         <div
           role="separator"
@@ -222,9 +211,12 @@ export function BrowserScreen(): JSX.Element {
       </div>
 
       <StatusBar />
-      <CoreAuditDialog
-        open={auditDialogOpen}
-        onOpenChange={setAuditDialogOpen}
+      <SettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        showMameAsCores={showMameAsCores}
+        onShowMameAsCoresChange={setShowMameAsCores}
+        onOpenUpdateMode={() => setUpdateModeDialogOpen(true)}
       />
       <UpdateModeDialog
         open={updateModeDialogOpen}
