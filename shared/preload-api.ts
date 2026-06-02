@@ -32,6 +32,7 @@ export const IPC_CHANNELS = {
   connect: 'mister:connect',
   disconnect: 'mister:disconnect',
   getConnectionStatus: 'mister:getConnectionStatus',
+  getBackgroundValidating: 'mister:getBackgroundValidating',
   listAllCoresWithFiles: 'mister:listAllCoresWithFiles',
   listRoms: 'mister:listRoms',
   setRomVisibility: 'mister:setRomVisibility',
@@ -347,6 +348,12 @@ export interface MisterApi {
   connect(profileId: string): Promise<ConnectResult>;
   disconnect(): Promise<void>;
   getConnectionStatus(): Promise<ConnectionStatus>;
+  /**
+   * feat/optimistic-connect — returns true when background arcade
+   * validation is in progress after a connect. The renderer uses this
+   * to initialize the "Validating library…" indicator on load.
+   */
+  getBackgroundValidating(): Promise<boolean>;
   /**
    * Returns the cores list. By default served from the local-disk
    * cache when its mtime witnesses match the device's current state

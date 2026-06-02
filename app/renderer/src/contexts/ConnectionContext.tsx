@@ -87,6 +87,13 @@ interface ConnectionContextValue {
   readonly connectingPhase: ConnectPhase | null;
 
   /**
+   * feat/optimistic-connect — true while background arcade validation
+   * is running after a connect. The status bar shows "Validating
+   * library…" while this is set.
+   */
+  readonly backgroundValidating: boolean;
+
+  /**
    * True iff the SSH transport dropped mid-session and the user has
    * not yet dismissed the resulting banner. The browser screen stays
    * mounted while this is true (read-only mode) so the user can still
@@ -162,6 +169,8 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
   const [autoRetry, setAutoRetry] = useState<AutoRetryProgress | null>(null);
   const [autoRetryFailed, setAutoRetryFailed] = useState(false);
   const [detectedDuplicates, setDetectedDuplicates] = useState<readonly DuplicatePair[] | null>(null);
+  // feat/optimistic-connect
+  const [backgroundValidating, setBackgroundValidating] = useState(false);
 
   // Refs so async callbacks can read the latest "current profile"
   // without re-binding subscriptions on every state change.
@@ -222,17 +231,39 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
         case 'duplicates-detected':
           setDetectedDuplicates(event.duplicates);
           break;
+
+        case 'background-validating':
+          setBackgroundValidating(event.isValidating);
+          break;
+
+        case 'arcade-auto-hide-applied': {
+          const n = event.count;
+          const noun = n === 1 ? 'arcade game' : 'arcade games';
+          toast.info(`Auto-hid ${String(n)} ${noun} with missing ROMs.`, {
+            description: 'Toggle "Auto-hide missing ROMs" off in Settings to restore them.',
+          });
+          break;
+        }
+
+        case 'arcade-refreshed':
+          // No UI action needed — CoresContext reloads arcade data via
+          // the existing onStatusChange / romCacheVersion mechanism when
+          // the arcade pane is next focused. The event is consumed here
+          // to prevent the switch from falling to the default.
+          break;
       }
     });
 
     void (async () => {
       try {
-        const [initialStatus, initialProfiles] = await Promise.all([
+        const [initialStatus, initialProfiles, initialBgValidating] = await Promise.all([
           window.mister.getConnectionStatus(),
           window.mister.listProfiles(),
+          window.mister.getBackgroundValidating(),
         ]);
         setStatus(initialStatus);
         setProfiles(initialProfiles);
+        setBackgroundValidating(initialBgValidating);
       } finally {
         setProfilesLoading(false);
       }
@@ -369,6 +400,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
       connectingProfileId,
       connectingElapsedMs,
       connectingPhase,
+      backgroundValidating,
       lostConnection,
       autoRetry,
       autoRetryFailed,
@@ -391,6 +423,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
       connectingProfileId,
       connectingElapsedMs,
       connectingPhase,
+      backgroundValidating,
       lostConnection,
       autoRetry,
       autoRetryFailed,

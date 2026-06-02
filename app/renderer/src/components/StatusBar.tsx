@@ -43,6 +43,7 @@ export function StatusBar(): JSX.Element {
     autoRetryFailed,
     connectingElapsedMs,
     connectingPhase,
+    backgroundValidating,
   } = useConnection();
   const autoScrape = useAutoScrapeProgress();
   const autoScrapeProgress = useActiveScrapeProgress();
@@ -66,7 +67,12 @@ export function StatusBar(): JSX.Element {
     connectingPhase,
   });
   const autoScrapeMessage = autoScrapeMessageFor(autoScrape, status);
-  const baseMessage = current ?? autoScrapeMessage ?? idleMessage;
+  // feat/optimistic-connect — prepend "Validating library…" when
+  // background arcade validation is running. Shown BEFORE the scrape
+  // message since validation typically completes first.
+  const validatingMessage =
+    backgroundValidating && status === 'connected' ? 'Validating library…' : null;
+  const baseMessage = current ?? validatingMessage ?? autoScrapeMessage ?? idleMessage;
   const isBusy = current !== null;
   // Reconnecting overrides the underlying disconnected dot so the
   // user sees the progress signal instead of a "we gave up" gray.

@@ -84,6 +84,7 @@ const api: MisterApi = {
     invoke<ConnectResult>(IPC_CHANNELS.connect, profileId),
   disconnect: () => invoke<void>(IPC_CHANNELS.disconnect),
   getConnectionStatus: () => invoke<ConnectionStatus>(IPC_CHANNELS.getConnectionStatus),
+  getBackgroundValidating: () => invoke<boolean>(IPC_CHANNELS.getBackgroundValidating),
   listAllCoresWithFiles: (options?: { readonly forceRefresh?: boolean }) =>
     invoke<CoreEntry[]>(IPC_CHANNELS.listAllCoresWithFiles, options),
   listRoms: (
