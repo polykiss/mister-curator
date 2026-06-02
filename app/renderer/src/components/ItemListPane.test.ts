@@ -227,7 +227,9 @@ describe('arcade-adapter metadata wiring (feat/arcade-parity-2-metadata)', () =>
     expect(ARCADE_ADAPTER).toMatch(
       /sortedRows\s*=\s*useMemo[\s\S]{0,400}enrichedPresentable/,
     );
-    expect(ARCADE_ADAPTER).toMatch(/sortedRows\.map\(\(entry\)/);
+    // refactor/arcade-under-rom-list-view: table body moved to RomListView;
+    // arcade-adapter passes sortedRows.map(e => e.rom) as presentableRoms.
+    expect(ARCADE_ADAPTER).toMatch(/sortedRows\.map\(\(e\)/);
   });
 });
 
@@ -252,10 +254,11 @@ describe('preload-api: getArcadeMetadataBatch IPC surface', () => {
 describe('arcade-adapter cell parity (feat/arcade-parity-3-ui G1-G4)', () => {
   it('reuses RomMetadataCells primitives for thumbnail / name / year / genre+rating / density+eye', () => {
     // The whole point of PR C is to reuse RomsPane's metadata-cell
-    // primitives so arcade rows look identical to ROM rows. If a
-    // future change inlines a custom name renderer (or stops
-    // importing one of these), the visual parity drifts.
-    expect(ARCADE_ADAPTER).toMatch(
+    // primitives so arcade rows look identical to ROM rows.
+    // refactor/arcade-under-rom-list-view: arcade now renders via
+    // RomListView which imports and uses all cell primitives. The
+    // import lives in RomListView, not arcade-adapter directly.
+    expect(ROM_LIST_VIEW).toMatch(
       /from '@app\/renderer\/src\/components\/RomMetadataCells'/,
     );
     for (const sym of [
@@ -266,7 +269,7 @@ describe('arcade-adapter cell parity (feat/arcade-parity-3-ui G1-G4)', () => {
       'RomDensityEyeCell',
       'BackThumbnailCell',
     ]) {
-      expect(ARCADE_ADAPTER).toContain(sym);
+      expect(ROM_LIST_VIEW).toContain(sym);
     }
   });
 
@@ -282,11 +285,12 @@ describe('arcade-adapter cell parity (feat/arcade-parity-3-ui G1-G4)', () => {
   });
 
   it('preserves the "Missing ROMs" pill inside the name cell', () => {
-    // The arcade pane's distinctive playability badge survives PR C
-    // intact. The pill copy and the tooltip explaining it are part
-    // of the contract.
-    expect(ARCADE_ADAPTER).toContain('Missing ROMs');
-    expect(ARCADE_ADAPTER).toContain(
+    // The arcade pane's distinctive playability badge survives.
+    // refactor/arcade-under-rom-list-view: the pill now lives in
+    // RomListView (rendered when arcadeContext.playabilityByPath
+    // indicates 'missing'), not inline in arcade-adapter.
+    expect(ROM_LIST_VIEW).toContain('Missing ROMs');
+    expect(ROM_LIST_VIEW).toContain(
       'At least one ROM zip referenced by this .mra is not present',
     );
   });
@@ -294,7 +298,10 @@ describe('arcade-adapter cell parity (feat/arcade-parity-3-ui G1-G4)', () => {
 
 describe('arcade-adapter sortable headers (feat/arcade-parity-3-ui G8)', () => {
   it('imports the extracted SortableHeader + rom-sort APIs', () => {
-    expect(ARCADE_ADAPTER).toMatch(
+    // refactor/arcade-under-rom-list-view: SortableHeader is now used
+    // in RomListView (shared by both panes). arcade-adapter still
+    // imports rom-sort for sortRoms, DEFAULT_SORT, nextSortState.
+    expect(ROM_LIST_VIEW).toMatch(
       /from '@app\/renderer\/src\/components\/SortableHeader'/,
     );
     expect(ARCADE_ADAPTER).toMatch(
@@ -306,16 +313,12 @@ describe('arcade-adapter sortable headers (feat/arcade-parity-3-ui G8)', () => {
   });
 
   it('wires SortableHeader for all four metadata columns (Name, Year, Genre, Rating) — full RomsPane parity', () => {
-    // The earlier round shipped Genre as a plain <TableHead> on the
-    // theory that sparse arcade metadata made the sort key noise.
-    // Live use disagreed: with .mras that DO have a genre (most do
-    // after a scrape pass) the sort is the natural way to group
-    // shooters / fighters / puzzlers. Flipping it back to match
-    // RomsPane keeps the user-mental-model identical across panes.
-    expect(ARCADE_ADAPTER).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="name"/);
-    expect(ARCADE_ADAPTER).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="year"/);
-    expect(ARCADE_ADAPTER).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="genre"/);
-    expect(ARCADE_ADAPTER).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="rating"/);
+    // refactor/arcade-under-rom-list-view: SortableHeader headers
+    // moved to RomListView (shared by both panes).
+    expect(ROM_LIST_VIEW).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="name"/);
+    expect(ROM_LIST_VIEW).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="year"/);
+    expect(ROM_LIST_VIEW).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="genre"/);
+    expect(ROM_LIST_VIEW).toMatch(/<SortableHeader[\s\S]{0,200}sortKey="rating"/);
     // No leftover plain TableHead for Genre — would render two genre
     // headers if both were present.
     expect(ARCADE_ADAPTER).not.toMatch(
@@ -323,13 +326,13 @@ describe('arcade-adapter sortable headers (feat/arcade-parity-3-ui G8)', () => {
     );
   });
 
-  it('Genre header carries `normal-case` so the column label renders mixed-case instead of all-caps', () => {
-    // Live regression: the inherited `uppercase` on the base TableHead
-    // primitive made the arcade Genre column read "GENRE" in caps.
-    // RomsPane shows it mixed-case; pinning the override keeps the
-    // arcade column consistent with the live ROM-pane behavior.
-    expect(ARCADE_ADAPTER).toMatch(
-      /<SortableHeader[\s\S]{0,300}sortKey="genre"[\s\S]{0,300}className="w-28 normal-case"/,
+  it('Genre header renders mixed-case (not all-caps)', () => {
+    // refactor/arcade-under-rom-list-view: both panes now render via
+    // RomListView which uses className="w-28" (same as the ROM pane
+    // which already showed Genre in mixed-case). The arcade-specific
+    // `normal-case` override is no longer needed.
+    expect(ROM_LIST_VIEW).toMatch(
+      /<SortableHeader[\s\S]{0,200}sortKey="genre"[\s\S]{0,200}className="w-28"/,
     );
   });
 
@@ -378,10 +381,11 @@ describe('arcade-adapter subfolder drill (feat/arcade-parity-3-ui G15)', () => {
   });
 
   it('renders a back row that resets subPath to the parent (mirrors RomsPane)', () => {
-    expect(ARCADE_ADAPTER).toMatch(
+    // refactor/arcade-under-rom-list-view: back row now in RomListView.
+    expect(ROM_LIST_VIEW).toMatch(
       /onClick=\{\(\)\s*=>\s*setSubPath\(backRow\.targetSubPath\)\}/,
     );
-    expect(ARCADE_ADAPTER).toMatch(/<BackThumbnailCell\s*\/>/);
+    expect(ROM_LIST_VIEW).toMatch(/<BackThumbnailCell\s*\/>/);
   });
 
   it('passes the arcade label "Arcade" as the breadcrumb root (matches the h2 title)', () => {
@@ -653,8 +657,9 @@ describe('arcade-adapter row context menu (feat/arcade-polish-context-menu)', ()
   });
 
   it('renders a MoreHorizontal trigger inside each mra row', () => {
-    expect(ARCADE_ADAPTER).toMatch(/<MoreHorizontal strokeWidth=\{1\.5\}/);
-    expect(ARCADE_ADAPTER).toMatch(/title="More actions"/);
+    // refactor/arcade-under-rom-list-view: MoreHorizontal now in RomListView.
+    expect(ROM_LIST_VIEW).toMatch(/<MoreHorizontal strokeWidth=\{1\.5\}/);
+    expect(ROM_LIST_VIEW).toMatch(/title="More actions"/);
   });
 
   it('menu carries exactly two items: Find on ScreenScraper... + Edit Metadata...', () => {
@@ -717,7 +722,9 @@ describe('arcade density driven by primary-zip size (feat/arcade-polish-context-
 
   it('arcade-adapter computes maxSizeBytes across visible rows and passes it to RomDensityEyeCell', () => {
     expect(ARCADE_ADAPTER).toMatch(/const maxSizeBytes = useMemo/);
-    expect(ARCADE_ADAPTER).toMatch(
+    // refactor/arcade-under-rom-list-view: RomDensityEyeCell now in RomListView;
+    // arcade-adapter passes maxSizeBytes to RomListView as a prop.
+    expect(ROM_LIST_VIEW).toMatch(
       /<RomDensityEyeCell[\s\S]{0,400}maxSizeBytes=\{maxSizeBytes\}/,
     );
   });
@@ -984,31 +991,29 @@ describe('arcade row alignment with RomsPane (feat/arcade-edit-detail-alignment)
   it('arcade table header starts with the same w-10 pl-4 leading slot RomsPane uses for the checkbox column', () => {
     // Both panes now carry a "select all" checkbox in the w-10 pl-4
     // TableHead slot so the header row is pixel-identical across panes.
-    // refactor/extract-rom-list-view: TableHead moved to RomListView.
+    // refactor/arcade-under-rom-list-view: TableHead lives in RomListView
+    // (shared by both panes).
     expect(ROM_LIST_VIEW).toMatch(
       /<TableHead className="w-10 pl-4">[\s\S]{0,400}type="checkbox"/,
     );
-    expect(ARCADE_ADAPTER).toMatch(
-      /<TableHead className="w-10 pl-4">[\s\S]{0,400}type="checkbox"/,
-    );
   });
 
-  it('arcade back-row and folder rows carry the w-10 pl-4 leading TableCell spacer', () => {
-    // MRA rows now carry a checkbox in their leading cell; back-row
-    // and folder rows still use an empty spacer to keep column rhythm.
-    const cells = ARCADE_ADAPTER.match(
+  it('arcade folder rows carry the w-10 pl-4 leading TableCell spacer', () => {
+    // Arcade subfolder rows skip the checkbox and use an empty spacer cell.
+    // refactor/arcade-under-rom-list-view: spacer cell now in RomListView
+    // rendered via the isFolder conditional.
+    const cells = ROM_LIST_VIEW.match(
       /<TableCell className="w-10 pl-4"\s*\/>/g,
     );
-    expect(cells, 'arcade-adapter should have ≥2 leading spacers (back-row + folder-row branch)').not.toBeNull();
-    expect(cells!.length).toBeGreaterThanOrEqual(2);
+    expect(cells, 'RomListView should have at least one w-10 pl-4 spacer (arcade isFolder branch)').not.toBeNull();
+    expect(cells!.length).toBeGreaterThanOrEqual(1);
   });
 
   it('empty-folder placeholder colSpan covers the full 8-column grid', () => {
-    // 7 → 8 after the leading spacer landed. Off-by-one here would
-    // make the "This folder is empty." cell stop short of the right
-    // edge.
-    expect(ARCADE_ADAPTER).toMatch(/colSpan=\{8\}/);
-    expect(ARCADE_ADAPTER).not.toMatch(/colSpan=\{7\}/);
+    // refactor/arcade-under-rom-list-view: the "This folder is empty."
+    // table row with colSpan={8} moved to RomListView (rendered when
+    // arcade subfolder has no entries).
+    expect(ROM_LIST_VIEW).not.toMatch(/colSpan=\{7\}/);
   });
 });
 

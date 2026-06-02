@@ -1,5 +1,6 @@
 import type { RefObject } from 'react';
 
+import type { Playability } from '@shared/arcade-mra-parse';
 import type { RomMetadata } from '@shared/metadata-types';
 import type { Rom } from '@shared/types';
 
@@ -13,6 +14,64 @@ import type { SortKey, SortState } from '@app/renderer/src/lib/rom-sort';
  * up in PR I-2.
  */
 export type ViewMode = 'list' | 'detailed' | 'poster';
+
+/**
+ * Arcade-specific row context, bundled into one optional prop so the
+ * view component stays self-contained. When arcadeContext is defined
+ * the component uses arcade-specific behavior; when absent (ROM pane)
+ * all standard ROM behavior applies — the ROM pane is untouched.
+ *
+ * The six fields correspond to the six arcade/ROM behavioral
+ * differences identified in PR I-2a:
+ *   1. Folder-row detection (subfolder entries skip checkbox/menu/density)
+ *   2. Playability map for the "Missing ROMs" badge
+ *   3. Checkbox key function (arcadeMraVisiblePath instead of rom.filename)
+ *   4. Detail-dialog open handler (arcade state shape differs from ROM)
+ *   5. Menu open handler (arcade state shape differs from ROM)
+ *   6. Single-toggle handler (wraps ArcadeMraEntry instead of Rom)
+ */
+export interface ArcadeRowContext {
+  /**
+   * Returns true when the row represents an organisational subfolder
+   * (not a .mra launcher). Folder rows skip the checkbox, kebab menu,
+   * and density+eye cells; the row itself is the drill-in affordance.
+   */
+  readonly isFolderRow: (rom: Rom) => boolean;
+  /**
+   * Per-.mra playability status. Used to:
+   *   - Drive the "Missing ROMs" badge in the name cell.
+   *   - Compute `canManageMetadata` for the detail dialog and menu.
+   */
+  readonly playabilityByPath: ReadonlyMap<string, Playability>;
+  /**
+   * Stable checkbox selection key.
+   * ROM pane: `rom.filename` (unchanged across hide/show).
+   * Arcade:   `arcadeMraVisiblePath(rom.filename)` (normalises the
+   *           leading-dot rename so the selection survives hide/show).
+   */
+  readonly checkboxKey: (rom: Rom) => string;
+  /**
+   * Open the arcade detail dialog. Receives the standard Rom + metadata
+   * so the view component stays generic; the handler reconstructs the
+   * arcade-specific dialog state internally.
+   */
+  readonly openDetail: (rom: Rom, metadata: RomMetadata | null) => void;
+  /**
+   * Open the arcade context/kebab menu. Same generic signature; the
+   * handler captures the arcade-specific fields from its closure.
+   */
+  readonly openMenu: (
+    rom: Rom,
+    metadata: RomMetadata | null,
+    x: number,
+    y: number,
+  ) => void;
+  /**
+   * Eye-toggle for a single .mra row. The handler wraps the Rom
+   * back into the ArcadeMraEntry shape that onToggleSingle expects.
+   */
+  readonly singleToggle: (rom: Rom) => void;
+}
 
 /**
  * Shared props contract for ROM list view components (RomListView,
@@ -82,4 +141,12 @@ export interface RomsViewProps {
       readonly filename: string;
     } | null,
   ) => void;
+  // ── Arcade-specific (optional) ───────────────────────────────────────
+  /**
+   * Arcade row context. When provided, the view uses arcade-specific
+   * rendering (Missing ROMs badge, folder-row empty cells, arcade-
+   * shaped dialog/menu callbacks). When absent the ROM-pane behavior
+   * applies unchanged.
+   */
+  readonly arcadeContext?: ArcadeRowContext;
 }
