@@ -670,7 +670,7 @@ describe('arcade-adapter row context menu (feat/arcade-polish-context-menu)', ()
     // against); Edit further disables when no metadata record exists
     // yet (composer needs an existing record to override).
     const itemsBlock = ARCADE_ADAPTER.match(
-      /const items: readonly RomRowMenuItem\[\] = \[[\s\S]{0,1600}\];/,
+      /const items: RomRowMenuItem\[\] = \[[\s\S]{0,1600}\];/,
     );
     expect(itemsBlock).not.toBeNull();
     const body = itemsBlock![0];

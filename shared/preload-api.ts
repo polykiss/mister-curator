@@ -167,6 +167,9 @@ export const IPC_CHANNELS = {
   rescrapeSystemCatalog: 'mister:rescrapeSystemCatalog',
   // feat/core-info-dialog-v2 — Wikipedia summary for the Core info dialog right strip.
   getSystemWikipediaSummary: 'mister:getSystemWikipediaSummary',
+  // feat/launch — mrext Remote HTTP API.
+  remoteStatus: 'mister:remoteStatus',
+  launchOnMister: 'mister:launchOnMister',
 } as const;
 
 /** PR #15 prefetch progress kind. Discriminator for the wire event. */
@@ -865,6 +868,19 @@ export interface MisterApi {
    * Wikipedia article or the fetch fails.
    */
   getSystemWikipediaSummary(ssId: number): Promise<WikipediaSummary | null>;
+  // ─── feat/launch — mrext Remote HTTP API ──────────────────────────
+  /**
+   * Return the cached Remote-availability status for the active host.
+   * Populated by the background probe that fires on connect.
+   * {available:false, version:null} when not probed yet or unavailable.
+   */
+  getRemoteStatus(): Promise<{ available: boolean; version: string | null }>;
+  /**
+   * Launch the game/arcade entry at `absolutePath` on the connected
+   * MiSTer via POST /api/launch. Returns {ok, httpStatus}; httpStatus
+   * is 0 on network error or timeout.
+   */
+  launchOnMister(absolutePath: string): Promise<{ ok: boolean; httpStatus: number }>;
 }
 
 /**

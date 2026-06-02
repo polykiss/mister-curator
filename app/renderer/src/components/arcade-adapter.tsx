@@ -78,7 +78,7 @@ import type { ArcadeRowContext, ViewMode, ViewSize } from '@app/renderer/src/lib
  * wrapper that routes this hook's result through ItemListPane.
  */
 export function useArcadeAdapter(): ItemListAdapter {
-  const { status, currentProfile } = useConnection();
+  const { status, currentProfile, remoteAvailable } = useConnection();
   const host = currentProfile?.host ?? 'default';
   const [viewMode, setViewMode] = usePersistedString<ViewMode>(
     `mistercurator.viewMode.arcade.${host}`,
@@ -1209,6 +1209,17 @@ export function useArcadeAdapter(): ItemListAdapter {
                     : undefined
                 }
                 hideAction={hideAction}
+                onLaunch={
+                  remoteAvailable &&
+                  (detailDialogFor.playability === 'playable' ||
+                    detailDialogFor.playability === 'no-roms-needed')
+                    ? () => {
+                        void window.mister.launchOnMister(
+                          `/media/fat/${detailDialogFor.relativePath}`,
+                        );
+                      }
+                    : undefined
+                }
               />
             );
           })()
@@ -1269,7 +1280,7 @@ export function useArcadeAdapter(): ItemListAdapter {
                 'Install the ROM to enable metadata search.';
               const noMetadataTooltip =
                 'No metadata yet — use Find on ScreenScraper first.';
-              const items: readonly RomRowMenuItem[] = [
+              const items: RomRowMenuItem[] = [
                 {
                   label: 'Find on ScreenScraper...',
                   onSelect: () => setSearchScreenScraperFor(target),
@@ -1296,6 +1307,17 @@ export function useArcadeAdapter(): ItemListAdapter {
                       : missingZipTooltip,
                 },
               ];
+              // feat/launch — show only when Remote is available and
+              // the entry is playable (not missing ROMs).
+              if (remoteAvailable && canSearch) {
+                items.push({
+                  label: 'Launch on MiSTer',
+                  onSelect: () =>
+                    void window.mister.launchOnMister(
+                      `/media/fat/${target.relativePath}`,
+                    ),
+                });
+              }
               return (
                 <RomRowMenu
                   x={menuFor.x}

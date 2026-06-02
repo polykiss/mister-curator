@@ -34,6 +34,7 @@ import { ScreenScraperService } from '@app/main/metadata/screenscraper-service';
 import { SystemCatalogService } from '@app/main/metadata/system-catalog-service';
 import { WikipediaService } from '@app/main/metadata/wikipedia-service';
 import { AutoScrapeEngine } from '@app/main/services/auto-scrape-engine';
+import { RemoteService } from '@app/main/services/remote-service';
 import { groupByPrimaryZipBasename } from '@app/main/services/arcade-prefetch-paths';
 import { ARCADE_VIRTUAL_CORE_ID } from '@shared/arcade-mra';
 import { MISTER_ARCADE_ZIP_DIRS } from '@shared/constants';
@@ -234,6 +235,8 @@ void app.whenReady().then(async () => {
     rootDir: metadataRoot,
     userAgent: 'MiSTerCurator/0.1 (https://github.com/polykiss/mister-curator)',
   });
+
+  const remoteService = new RemoteService();
 
   const metadataOrchestrator = new MetadataOrchestrator(
     hashService,
@@ -455,6 +458,8 @@ void app.whenReady().then(async () => {
     systemCatalog,
     // feat/core-info-dialog-v2
     wikipedia,
+    // feat/launch
+    remoteService,
   );
 
   const window = createWindow();
@@ -462,6 +467,21 @@ void app.whenReady().then(async () => {
   manager.onStatusChange((status) => {
     if (!window.isDestroyed()) {
       window.webContents.send(IPC_CHANNELS.connectionStatusChanged, status);
+    }
+    // feat/launch — probe Remote API on connect; clear cache on disconnect
+    const session = manager.getActiveSession();
+    if (status === 'connected' && session !== null) {
+      void remoteService.probe(session.host).then((remoteStatus) => {
+        if (!window.isDestroyed()) {
+          window.webContents.send(IPC_CHANNELS.connectionEvent, {
+            type: 'remote-status',
+            available: remoteStatus.available,
+            version: remoteStatus.version,
+          });
+        }
+      });
+    } else if (status === 'disconnected') {
+      remoteService.clearAll();
     }
   });
   manager.onBulkProgress((event) => {

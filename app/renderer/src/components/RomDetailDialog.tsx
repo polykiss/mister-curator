@@ -152,6 +152,12 @@ export interface RomDetailDialogProps {
     readonly currentHidden: boolean;
     readonly onToggle: () => void;
   };
+  /**
+   * feat/launch — when provided, renders a "Launch on MiSTer" button
+   * in the footer. Omit to hide the button (e.g. when Remote is
+   * unavailable or the entry has missing ROMs).
+   */
+  readonly onLaunch?: () => void;
 }
 
 export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
@@ -170,6 +176,7 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
     onNext,
     navPosition,
     hideAction,
+    onLaunch,
   } = props;
   const defaultAllow = readOnly === true ? false : true;
   const resolvedAllowEdit = allowEdit ?? defaultAllow;
@@ -187,6 +194,7 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
         onNext={onNext}
         navPosition={navPosition}
         hideAction={hideAction}
+        onLaunch={onLaunch}
       />
     );
   }
@@ -203,6 +211,7 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
       onNext={onNext}
       navPosition={navPosition}
       hideAction={hideAction}
+      onLaunch={onLaunch}
     />
   );
 }
@@ -219,6 +228,7 @@ function PopulatedDetailDialog(props: {
   readonly onNext?: () => void;
   readonly navPosition?: RomDetailDialogProps['navPosition'];
   readonly hideAction?: RomDetailDialogProps['hideAction'];
+  readonly onLaunch?: () => void;
 }): JSX.Element {
   const {
     metadata,
@@ -232,6 +242,7 @@ function PopulatedDetailDialog(props: {
     onNext,
     navPosition,
     hideAction,
+    onLaunch,
   } = props;
 
   // feat/arcade-parse-tolerance-gallery-polish — lightbox state is
@@ -478,6 +489,11 @@ function PopulatedDetailDialog(props: {
           {allowSearch ? (
             <Button variant="ghost" onClick={handleSearch}>
               Find on ScreenScraper...
+            </Button>
+          ) : null}
+          {onLaunch !== undefined ? (
+            <Button variant="ghost" onClick={onLaunch}>
+              Launch on MiSTer
             </Button>
           ) : null}
           <Button variant="primary" onClick={() => onOpenChange(false)}>
@@ -957,6 +973,7 @@ function EmptyDetailDialog(props: {
   readonly onNext?: () => void;
   readonly navPosition?: RomDetailDialogProps['navPosition'];
   readonly hideAction?: RomDetailDialogProps['hideAction'];
+  readonly onLaunch?: () => void;
 }): JSX.Element {
   function handleSearch(): void {
     props.onOpenChange(false);
@@ -1011,6 +1028,11 @@ function EmptyDetailDialog(props: {
           {props.allowSearch ? (
             <Button variant="primary" onClick={handleSearch}>
               Find on ScreenScraper...
+            </Button>
+          ) : null}
+          {props.onLaunch !== undefined ? (
+            <Button variant="ghost" onClick={props.onLaunch}>
+              Launch on MiSTer
             </Button>
           ) : null}
           <Button

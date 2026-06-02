@@ -42,6 +42,7 @@ import type { ScreenScraperService } from '@app/main/metadata/screenscraper-serv
 import type { SystemCatalogService } from '@app/main/metadata/system-catalog-service';
 import type { WikipediaService } from '@app/main/metadata/wikipedia-service';
 import type { AutoScrapeEngine } from '@app/main/services/auto-scrape-engine';
+import type { RemoteService } from '@app/main/services/remote-service';
 import type { ProfileStore } from '@app/main/storage/profile-store';
 
 type IpcHandler<TArgs extends readonly unknown[], TResult> = (
@@ -153,6 +154,8 @@ export function registerIpcHandlers(
   systemCatalog: SystemCatalogService | null,
   // feat/core-info-dialog-v2
   wikipedia: WikipediaService | null,
+  // feat/launch
+  remoteService: RemoteService,
 ): void {
   handle<[], MisterProfile[]>(IPC_CHANNELS.listProfiles, () => store.list());
 
@@ -679,5 +682,15 @@ export function registerIpcHandlers(
       if (entry === undefined) return null;
       return wikipedia.ensureSummary(ssId, entry.displayName);
     },
+  );
+
+  // feat/launch — mrext Remote HTTP API
+  handle<[], { available: boolean; version: string | null }>(
+    IPC_CHANNELS.remoteStatus,
+    () => remoteService.getStatus(manager.getActiveSession()?.host ?? null),
+  );
+  handle<[string], { ok: boolean; httpStatus: number }>(
+    IPC_CHANNELS.launchOnMister,
+    (path) => remoteService.launch(manager.getActiveSession()?.host ?? null, path),
   );
 }

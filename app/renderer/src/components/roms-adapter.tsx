@@ -135,7 +135,7 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     romCacheVersion,
     updateModeActive,
   } = useCores();
-  const { status, currentProfile } = useConnection();
+  const { status, currentProfile, remoteAvailable } = useConnection();
   const host = currentProfile?.host ?? 'default';
   const [viewMode, setViewMode] = usePersistedString<ViewMode>(
     `mistercurator.viewMode.roms.${host}`,
@@ -1068,6 +1068,18 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
         : 'Search ScreenScraper for the right match — useful when the auto-binder missed or got it wrong.',
     });
 
+    // feat/launch — "Launch on MiSTer" via mrext Remote HTTP API.
+    // Shown only when Remote is available; hidden otherwise.
+    if (remoteAvailable) {
+      const launchPath = rom.kind === 'file'
+        ? (rom.containedRomPath ?? rom.path)
+        : rom.path;
+      items.push({
+        label: 'Launch on MiSTer',
+        onSelect: () => void window.mister.launchOnMister(launchPath),
+      });
+    }
+
     return items;
   }
 
@@ -1498,6 +1510,12 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
                   : undefined
               }
               hideAction={hideAction}
+              onLaunch={remoteAvailable && currentRom !== null ? () => {
+                const launchPath = currentRom.kind === 'file'
+                  ? (currentRom.containedRomPath ?? currentRom.path)
+                  : currentRom.path;
+                void window.mister.launchOnMister(launchPath);
+              } : undefined}
             />
           );
         })()

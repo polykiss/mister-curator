@@ -421,6 +421,11 @@ const api: MisterApi = {
     invoke<SystemCatalogRescrapeResult>(IPC_CHANNELS.rescrapeSystemCatalog),
   getSystemWikipediaSummary: (ssId: number) =>
     invoke<WikipediaSummary | null>(IPC_CHANNELS.getSystemWikipediaSummary, ssId),
+  // feat/launch
+  getRemoteStatus: () =>
+    invoke<{ available: boolean; version: string | null }>(IPC_CHANNELS.remoteStatus),
+  launchOnMister: (absolutePath: string) =>
+    invoke<{ ok: boolean; httpStatus: number }>(IPC_CHANNELS.launchOnMister, absolutePath),
 };
 
 contextBridge.exposeInMainWorld('mister', api);

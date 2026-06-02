@@ -177,6 +177,16 @@ export type ConnectionEvent =
       readonly type: 'duplicates-detected';
       readonly profileId: string;
       readonly duplicates: readonly DuplicatePair[];
+    }
+  | {
+      /**
+       * feat/launch — fired after the background Remote-availability
+       * probe resolves. Parallel to 'background-validating': never
+       * blocks connect, result cached per-host in RemoteService.
+       */
+      readonly type: 'remote-status';
+      readonly available: boolean;
+      readonly version: string | null;
     };
 
 /**

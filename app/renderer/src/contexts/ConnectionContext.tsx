@@ -124,6 +124,14 @@ interface ConnectionContextValue {
    * Reappears on the next connect if duplicates are still present.
    */
   readonly dismissDuplicates: () => void;
+
+  /**
+   * feat/launch — whether mrext Remote HTTP API is available on the
+   * connected MiSTer. False until the background probe resolves after
+   * connect, and reset to false on disconnect.
+   */
+  readonly remoteAvailable: boolean;
+  readonly remoteVersion: string | null;
 }
 
 const ConnectionContext = createContext<ConnectionContextValue | null>(null);
@@ -162,6 +170,8 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
   const [autoRetry, setAutoRetry] = useState<AutoRetryProgress | null>(null);
   const [autoRetryFailed, setAutoRetryFailed] = useState(false);
   const [detectedDuplicates, setDetectedDuplicates] = useState<readonly DuplicatePair[] | null>(null);
+  const [remoteAvailable, setRemoteAvailable] = useState(false);
+  const [remoteVersion, setRemoteVersion] = useState<string | null>(null);
 
   // Refs so async callbacks can read the latest "current profile"
   // without re-binding subscriptions on every state change.
@@ -222,6 +232,11 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
         case 'duplicates-detected':
           setDetectedDuplicates(event.duplicates);
           break;
+
+        case 'remote-status':
+          setRemoteAvailable(event.available);
+          setRemoteVersion(event.version);
+          break;
       }
     });
 
@@ -276,6 +291,8 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
       setAutoRetry(null);
       setAutoRetryFailed(false);
       setDetectedDuplicates(null);
+      setRemoteAvailable(false);
+      setRemoteVersion(null);
 
       const profile = profiles.find((p) => p.id === profileId);
       const message = profile
@@ -319,6 +336,8 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
       setAutoRetry(null);
       setAutoRetryFailed(false);
       setDetectedDuplicates(null);
+      setRemoteAvailable(false);
+      setRemoteVersion(null);
     }
   }, [runWithStatus]);
 
@@ -375,6 +394,8 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
       reconnect,
       detectedDuplicates,
       dismissDuplicates,
+      remoteAvailable,
+      remoteVersion,
     }),
     [
       status,
@@ -397,6 +418,8 @@ export function ConnectionProvider({ children }: { children: ReactNode }): JSX.E
       reconnect,
       detectedDuplicates,
       dismissDuplicates,
+      remoteAvailable,
+      remoteVersion,
     ],
   );
 
