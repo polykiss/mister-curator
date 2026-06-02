@@ -21,10 +21,16 @@ import { describe, expect, it } from 'vitest';
 // wrapper that routes through ItemListPane; the actual menu-build /
 // detail-modal / cell-render logic moved to roms-adapter.tsx
 // (preserving the same code, just with a different return shape).
-// The source-string assertions stay pointed at whichever file holds
-// the implementation.
+// refactor/extract-rom-list-view — row JSX (click handlers, cell
+// rendering, cursor-pointer) moved from roms-adapter.tsx to
+// RomListView.tsx. State declarations and dialog mounts stay in
+// roms-adapter.tsx. Assertions scan whichever file holds the impl.
 const SOURCE = readFileSync(
   resolve(__dirname, 'roms-adapter.tsx'),
+  'utf8',
+);
+const ROM_LIST_VIEW_SOURCE = readFileSync(
+  resolve(__dirname, 'RomListView.tsx'),
   'utf8',
 );
 
@@ -92,7 +98,8 @@ describe('RomsPane — single-click → detail modal (feat/metadata-detail-modal
     // The folder-container drill case must hit FIRST and `return`
     // before any detail-modal branch — otherwise a clicked
     // folder-container would also try to open the detail modal.
-    expect(SOURCE).toMatch(
+    // refactor/extract-rom-list-view: click handler moved to RomListView.
+    expect(ROM_LIST_VIEW_SOURCE).toMatch(
       /if \(rom\.kind === 'folder-container' && !rom\.hidden\) \{\s*e\.preventDefault\(\);\s*onRowActivate\(rom\);\s*return;\s*\}/,
     );
   });
@@ -103,7 +110,8 @@ describe('RomsPane — single-click → detail modal (feat/metadata-detail-modal
     // case so unmatched / source=none rows are still clickable
     // (the modal becomes the single discovery point + offers
     // "Find on ScreenScraper" as the primary action).
-    expect(SOURCE).toMatch(
+    // refactor/extract-rom-list-view: click handler moved to RomListView.
+    expect(ROM_LIST_VIEW_SOURCE).toMatch(
       /rom\.kind === 'file' \|\|\s*rom\.kind === 'folder-atomic'/,
     );
     expect(SOURCE).toMatch(/setDetailDialogFor\(\{/);
@@ -138,7 +146,8 @@ describe('RomsPane — single-click → detail modal (feat/metadata-detail-modal
     // The cursor change is the affordance. Applied to every file /
     // folder-atomic row regardless of metadata state — they're all
     // clickable (the modal handles the no-record case).
-    expect(SOURCE).toMatch(
+    // refactor/extract-rom-list-view: className logic moved to RomListView.
+    expect(ROM_LIST_VIEW_SOURCE).toMatch(
       /\(rom\.kind === 'file' \|\|\s*rom\.kind === 'folder-atomic'\) &&\s*'cursor-pointer'/,
     );
   });
