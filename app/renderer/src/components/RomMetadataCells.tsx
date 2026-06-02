@@ -567,17 +567,25 @@ export function RomDensityEyeCell(props: {
   // `right-edge-stack.test.ts` can find them without resolving a
   // const reference. The exported constants must agree with the
   // strings here — `RomMetadataCells.test.ts` pins both ends.
+  // Show density for file + folder-atomic rows; containers get a
+  // zero-value bar that renders as the floor color and acts as a
+  // fixed-width spacer. This keeps the eye icon anchored to the right
+  // edge of the cell at the same X position for all row kinds — without
+  // it, removing the bar for containers would shift the eye left.
+  const showDensity = !isSystem && rom.kind !== 'folder-container';
   return (
     <TableCell className="relative p-0">
       <div className="absolute inset-0 flex shrink-0 items-stretch">
-        {!isSystem ? (
-          <DensityBar
-            floor="bg-elevated"
-            value={rom.sizeBytes}
-            max={maxSizeBytes}
-            ariaLabel={`${formatBytes(rom.sizeBytes)} of peer max ${formatBytes(maxSizeBytes)}`}
-          />
-        ) : null}
+        <DensityBar
+          floor="bg-elevated"
+          value={showDensity ? rom.sizeBytes : 0}
+          max={showDensity ? maxSizeBytes : 0}
+          ariaLabel={
+            showDensity
+              ? `${formatBytes(rom.sizeBytes)} of peer max ${formatBytes(maxSizeBytes)}`
+              : undefined
+          }
+        />
         {isSystem ? (
           <span
             className="flex items-center px-2 font-mono text-body-sm text-fg-disabled"

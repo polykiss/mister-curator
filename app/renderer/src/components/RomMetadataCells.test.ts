@@ -13,6 +13,7 @@ import {
   RomNameInner,
   shouldShowFilenameSubline,
 } from '@app/renderer/src/components/RomMetadataCells';
+import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
 
 /**
  * PR #23 round 4 — regression coverage for the density+eye cell. The
@@ -126,6 +127,72 @@ describe('RomDensityEyeCell — render shape', () => {
     expect(sysCell.props.children.props.className).toBe(
       DENSITY_EYE_CELL_CLASSNAMES.wrapper,
     );
+  });
+});
+
+describe('RomDensityEyeCell — density bar visibility per row kind (feat/rom-list-polish)', () => {
+  // DensityBar is ALWAYS rendered in the cell so the eye icon stays
+  // right-aligned regardless of row kind. For folder-container rows
+  // the bar renders with value=0 (floor color, visually invisible) and
+  // acts as a fixed-width spacer. file + folder-atomic rows get the
+  // real sizeBytes so the tint reflects actual game weight.
+
+  // Walk the JSX element tree and return the first DensityBar element
+  // found (or null). React JSX keeps components as their function
+  // reference in `el.type`.
+  function findDensityBar(node: unknown, depth = 0): Record<string, unknown> | null {
+    if (depth > 20 || node === null || typeof node !== 'object') return null;
+    const el = node as Record<string, unknown>;
+    if (el.type === DensityBar) return el;
+    const props = el.props as Record<string, unknown> | undefined;
+    const children = props?.children;
+    if (Array.isArray(children)) {
+      for (const c of children) {
+        const found = findDensityBar(c, depth + 1);
+        if (found !== null) return found;
+      }
+      return null;
+    }
+    return findDensityBar(children, depth + 1);
+  }
+
+  const MAX = 100 * 1024 * 1024;
+
+  function renderCell(kind: Rom['kind']): ReturnType<typeof RomDensityEyeCell> {
+    return RomDensityEyeCell({
+      rom: rom({ kind }),
+      isSystem: false,
+      maxSizeBytes: MAX,
+      canMutate: true,
+      disconnectedTooltip: 'Reconnect to make changes.',
+      onSingleToggle: noop,
+    });
+  }
+
+  it('file rows: DensityBar present with real sizeBytes', () => {
+    const bar = findDensityBar(renderCell('file'));
+    expect(bar).not.toBeNull();
+    expect((bar!.props as { value: number }).value).toBe(rom().sizeBytes);
+    expect((bar!.props as { max: number }).max).toBe(MAX);
+  });
+
+  it('folder-atomic rows: DensityBar present with real sizeBytes (single-game folder = one game)', () => {
+    // folder-atomic (multi-track CD, X68000-style): the user sees it as
+    // "the game". Its aggregate sizeBytes represents one game's weight.
+    const bar = findDensityBar(renderCell('folder-atomic'));
+    expect(bar).not.toBeNull();
+    expect((bar!.props as { value: number }).value).toBe(rom().sizeBytes);
+    expect((bar!.props as { max: number }).max).toBe(MAX);
+  });
+
+  it('folder-container rows: DensityBar is a zero-value spacer (eye stays right-aligned)', () => {
+    // DensityBar is rendered with value=0 so the eye icon stays at the
+    // same X position as for file rows. Without the spacer the eye would
+    // shift left when the bar is absent.
+    const bar = findDensityBar(renderCell('folder-container'));
+    expect(bar).not.toBeNull();
+    expect((bar!.props as { value: number }).value).toBe(0);
+    expect((bar!.props as { max: number }).max).toBe(0);
   });
 });
 

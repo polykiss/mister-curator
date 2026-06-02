@@ -641,15 +641,16 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     return () => document.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Density-bar denominator for the size column — peer max across the
-  // rows actually being rendered. SYSTEM.md §10: ROMs use file size /
-  // max visible.
+  // Density-bar denominator — peer max across file + folder-atomic rows.
+  // folder-atomic rows ARE single games (multi-track CD, X68000-style);
+  // their aggregate sizeBytes reflects one game's weight and should
+  // participate in the scale. folder-container rows are excluded: their
+  // aggregate spans many games and would compress every other bar.
   const maxSizeBytes = useMemo(() => {
     if (!presentableRoms) return 0;
-    return presentableRoms.reduce(
-      (acc, r) => (r.sizeBytes > acc ? r.sizeBytes : acc),
-      0,
-    );
+    return presentableRoms
+      .filter((r) => r.kind !== 'folder-container')
+      .reduce((acc, r) => (r.sizeBytes > acc ? r.sizeBytes : acc), 0);
   }, [presentableRoms]);
 
   // Counts shown in the header — non-system ROMs only.
@@ -1364,17 +1365,19 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
                     right-edge stack so the row's primary visibility
                     toggle owns the far-right slot. */}
                 <TableHead className="w-10" aria-label="Actions" />
-                {/* Combined density + eye column. Round 5: the two
-                    used to live in separate cells with default cell
-                    padding between them, which left a too-wide gap
-                    versus the cores pane. One cell + a flex stack
-                    inside lets density sit flush against the eye
-                    icon and the whole stack hugs the row's far edge.
-                    Width = 20 (density) + 32 (eye) + a hair of
-                    right padding ≈ 52px. */}
-                <TableHead
+                {/* Combined density + eye column. "Size" label is
+                    left-aligned so it sits above the density bar
+                    (the left-hand portion of the cell) rather than
+                    above the eye icon (the right-hand portion).
+                    Width = 20 (density) + 32 (eye) ≈ 52px. */}
+                <SortableHeader
+                  label="Size"
+                  sortKey="size"
                   className="w-[3.25rem] p-0"
-                  aria-label="Intensity / visibility"
+                  sortState={sortState}
+                  onSort={(k) =>
+                    setSortState((prev) => nextSortState(prev, k))
+                  }
                 />
               </TableRow>
             </TableHeader>
