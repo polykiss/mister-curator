@@ -474,39 +474,114 @@ export class FakeMisterClient implements IMisterClient {
         );
         const kind =
           classification === 'container' ? 'folder-container' : 'folder-atomic';
-        // PR-D1 (PR #27): mirror real-mister-client — for atomic
-        // folders, identify the alphabetical-first launchable file
-        // for renderer-side metadata binding. Walks immediate
-        // children only (matches the real client's behavior).
-        let containedRomPath: string | undefined;
-        if (kind === 'folder-atomic') {
+
+        // feat/auto-subfolder-scraping — mirror real-mister-client: expand
+        // auto-detected bucket containers inline at top level.
+        // User-pinned containers (override !== undefined) are kept drillable.
+        const containerOverride = getFolderOverride(folderClassifications, coreId, visibleRelPath);
+        if (kind === 'folder-container' && subPath === '' && containerOverride === undefined) {
+          let innerEntries: Dirent[];
           try {
-            const innerEntries = await fs.readdir(fullPath, {
-              withFileTypes: true,
-            });
-            const launchable = innerEntries
-              .filter((e) => e.isFile() && isLaunchableRomExtension(e.name))
-              .map((e) => e.name)
-              .sort((a, b) => a.localeCompare(b));
-            if (launchable.length > 0) {
-              containedRomPath = `${MISTER_GAMES_DIR}/${coreId}/${visibleRelPath}/${launchable[0]!}`;
-            }
+            innerEntries = await fs.readdir(fullPath, { withFileTypes: true });
           } catch {
-            // Unreadable folder — skip; renderer falls back to
-            // ImageOff + folder badge.
+            // Unreadable container — skip silently.
+            continue;
           }
+          for (const inner of innerEntries) {
+            if (inner.isFile() && isOsMetadataFile(inner.name)) continue;
+            if (inner.isDirectory() && isOsMetadataDir(inner.name)) continue;
+            const iHidden = inner.name.startsWith('.');
+            const iVisibleBase = iHidden ? inner.name.slice(1) : inner.name;
+            const iRelPath = `${visibleBase}/${inner.name}`;
+            const iOnDevicePath = `${MISTER_GAMES_DIR}/${coreId}/${iRelPath}`;
+            const iFullPath = path.join(fullPath, inner.name);
+            if (inner.isFile()) {
+              if (!isLaunchableRomExtension(iVisibleBase)) continue;
+              const iStat = await fs.stat(iFullPath);
+              roms.push({
+                coreId,
+                filename: inner.name,
+                displayName: displayRomName(iVisibleBase),
+                sizeBytes: iStat.size,
+                hidden: iHidden,
+                path: iOnDevicePath,
+                kind: 'file',
+                relativePath: iRelPath,
+              });
+            } else if (inner.isDirectory()) {
+              const iVisibleRelPath = `${visibleBase}/${iVisibleBase}`;
+              const iSizeBytes = await sumDirectoryBytes(iFullPath);
+              const iClassification = await this.classifyLocalFolder(
+                iFullPath,
+                coreId,
+                iVisibleRelPath,
+                folderClassifications,
+              );
+              const iKind = iClassification === 'container' ? 'folder-container' : 'folder-atomic';
+              let iContainedRomPath: string | undefined;
+              if (iKind === 'folder-atomic') {
+                try {
+                  const deepEntries = await fs.readdir(iFullPath, { withFileTypes: true });
+                  const launchable = deepEntries
+                    .filter((e) => e.isFile() && isLaunchableRomExtension(e.name))
+                    .map((e) => e.name)
+                    .sort((a, b) => a.localeCompare(b));
+                  if (launchable.length > 0) {
+                    iContainedRomPath = `${MISTER_GAMES_DIR}/${coreId}/${iVisibleRelPath}/${launchable[0]!}`;
+                  }
+                } catch {
+                  // Unreadable — no containedRomPath.
+                }
+              }
+              roms.push({
+                coreId,
+                filename: inner.name,
+                displayName: displayRomName(iVisibleBase),
+                sizeBytes: iSizeBytes,
+                hidden: iHidden,
+                path: iOnDevicePath,
+                kind: iKind,
+                relativePath: iRelPath,
+                containedRomPath: iContainedRomPath,
+              });
+            }
+          }
+          // Don't emit the container row.
+        } else {
+          // PR-D1 (PR #27): mirror real-mister-client — for atomic
+          // folders, identify the alphabetical-first launchable file
+          // for renderer-side metadata binding. Walks immediate
+          // children only (matches the real client's behavior).
+          let containedRomPath: string | undefined;
+          if (kind === 'folder-atomic') {
+            try {
+              const innerEntries = await fs.readdir(fullPath, {
+                withFileTypes: true,
+              });
+              const launchable = innerEntries
+                .filter((e) => e.isFile() && isLaunchableRomExtension(e.name))
+                .map((e) => e.name)
+                .sort((a, b) => a.localeCompare(b));
+              if (launchable.length > 0) {
+                containedRomPath = `${MISTER_GAMES_DIR}/${coreId}/${visibleRelPath}/${launchable[0]!}`;
+              }
+            } catch {
+              // Unreadable folder — skip; renderer falls back to
+              // ImageOff + folder badge.
+            }
+          }
+          roms.push({
+            coreId,
+            filename,
+            displayName,
+            sizeBytes,
+            hidden,
+            path: onDevicePath,
+            kind,
+            relativePath,
+            containedRomPath,
+          });
         }
-        roms.push({
-          coreId,
-          filename,
-          displayName,
-          sizeBytes,
-          hidden,
-          path: onDevicePath,
-          kind,
-          relativePath,
-          containedRomPath,
-        });
       }
     }
 
