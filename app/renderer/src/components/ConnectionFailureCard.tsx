@@ -50,32 +50,30 @@ export function ConnectionFailureCard({
       />
       <div className="min-w-0 flex-1">
         <p className="text-body font-medium text-fg">{message}</p>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={onRetry}
-            disabled={retrying}
-          >
-            <RotateCcw strokeWidth={1.5} />
-            {retrying ? 'Retrying…' : 'Retry'}
-          </Button>
-          <Button variant="secondary" size="sm" onClick={onEdit}>
-            <Pencil strokeWidth={1.5} />
-            Edit profile
-          </Button>
-        </div>
       </div>
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={onDismiss}
-        aria-label="Dismiss"
-        title="Dismiss"
-        className="-mr-1 -mt-1 shrink-0"
-      >
-        <X strokeWidth={1.5} />
-      </Button>
+      <div className="flex shrink-0 items-center gap-2">
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={onRetry}
+          disabled={retrying}
+        >
+          <RotateCcw strokeWidth={1.5} />
+          {retrying ? 'Retrying…' : 'Retry'}
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onEdit} aria-label="Edit profile" title="Edit profile">
+          <Pencil strokeWidth={1.5} />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onDismiss}
+          aria-label="Dismiss"
+          title="Dismiss"
+        >
+          <X strokeWidth={1.5} />
+        </Button>
+      </div>
     </div>
   );
 }

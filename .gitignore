@@ -23,6 +23,9 @@ config.json
 .DS_Store
 .claude/
 
+# Handoff docs (design specs, not part of the repo)
+handoff/
+
 # Logs
 *.log
 npm-debug.log*

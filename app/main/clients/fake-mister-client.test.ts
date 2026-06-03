@@ -745,7 +745,7 @@ describe('FakeMisterClient', () => {
       // Container row is NOT emitted; contents appear inline.
       expect(roms.find((r) => r.filename === '1 World A-Z')).toBeUndefined();
       // Expanded files carry the nested relativePath.
-      const expanded = roms.filter((r) => r.relativePath.startsWith('1 World A-Z/'));
+      const expanded = roms.filter((r) => r.relativePath?.startsWith('1 World A-Z/'));
       expect(expanded.length).toBeGreaterThan(0);
       expect(expanded[0]?.kind).toBe('file');
       expect(expanded[0]?.relativePath).toMatch(/^1 World A-Z\//);
