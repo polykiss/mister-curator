@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import {
+  EMPTY_FOLDER_CLASSIFICATIONS,
+  withFolderOverride,
+} from '@shared/folder-classifications';
 import { MisterConnectionError } from '@shared/types';
 import type { CoreEntry, MisterProfile } from '@shared/types';
 import type { MisterSecret } from '@shared/mister-client';
@@ -1280,7 +1284,10 @@ describe('RealMisterClient', () => {
 
       const roms = await client.listRoms('NES');
 
-      expect(roms).toHaveLength(6);
+      // feat/auto-subfolder-scraping: '1 World A-Z' (folder-container) is
+      // expanded inline → its 6 .zip files become individual file rows.
+      // Total: 3 top-level files + 2 disc atomics + 6 expanded files = 11.
+      expect(roms).toHaveLength(11);
 
       const hiddenFile = roms.find((r) => r.filename === '.Action 52 (USA) (Unl).nes');
       expect(hiddenFile?.kind).toBe('file');
@@ -1309,9 +1316,23 @@ describe('RealMisterClient', () => {
       expect(hiddenFolder?.hidden).toBe(true);
       expect(hiddenFolder?.displayName).toBe('Hidden Disc Game');
 
+      // feat/auto-subfolder-scraping: container row itself is NOT emitted.
       const containerFolder = roms.find((r) => r.filename === '1 World A-Z');
-      expect(containerFolder?.kind).toBe('folder-container');
-      expect(containerFolder?.sizeBytes).toBe(52428800);
+      expect(containerFolder).toBeUndefined();
+
+      // Instead the 6 .zip files appear with nested relativePaths.
+      const mslug = roms.find((r) => r.filename === 'mslug.zip');
+      expect(mslug?.kind).toBe('file');
+      expect(mslug?.relativePath).toBe('1 World A-Z/mslug.zip');
+      expect(mslug?.path).toBe('/media/fat/games/NES/1 World A-Z/mslug.zip');
+      expect(mslug?.sizeBytes).toBe(10485760);
+
+      const garou = roms.find((r) => r.filename === 'garou.zip');
+      expect(garou?.kind).toBe('file');
+      expect(garou?.relativePath).toBe('1 World A-Z/garou.zip');
+
+      const expandedZips = roms.filter((r) => r.relativePath?.startsWith('1 World A-Z/'));
+      expect(expandedZips).toHaveLength(6);
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
       // Round 4: existence check + single find with -printf.
@@ -1328,8 +1349,10 @@ describe('RealMisterClient', () => {
     it('classifies a folder via the hasManySameExtension long-tail rule (Round 9 / Round 4 reroute)', async () => {
       // Round 9: even when no recognised cart extension is present,
       // a folder with 5+ files of one extension is treated as
-      // drillable. Round 4 moved this check into `classifyFolder`,
-      // fed by the raw direct-child filenames the find pass emits.
+      // drillable (folder-container). feat/auto-subfolder-scraping:
+      // the container is expanded inline; since `.fmt` is not a
+      // launchable ROM extension the expanded files are all skipped
+      // and the result is an empty list (no container row, no files).
       const client = new RealMisterClient();
       await client.connect(profile, secret);
       mocks.execCommand.mockClear();
@@ -1351,7 +1374,8 @@ describe('RealMisterClient', () => {
       );
 
       const roms = await client.listRoms('FuturePastel');
-      expect(roms[0]?.kind).toBe('folder-container');
+      // Container expanded but its files are non-launchable — no rows emitted.
+      expect(roms).toHaveLength(0);
     });
 
     it('lists ROMs at a sub-path when drilled into a container', async () => {
@@ -1379,6 +1403,159 @@ describe('RealMisterClient', () => {
 
       const script = mocks.execCommand.mock.calls[0]?.[0] as string;
       expect(script).toContain(`find '/media/fat/games/NEOGEO/1 World A-Z'`);
+    });
+
+    // feat/auto-subfolder-scraping tests ─────────────────────────────────
+
+    it('PR-K: bucket container with flat launchable files — expands inline, no container row', async () => {
+      // Need >5 .chd files so countDiscImageGroups > DISC_COLLECTION_THRESHOLD
+      // and the disc-marker rule flips to folder-container.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            // Alphabetical bucket: 6 CHDs → classifyFolder → folder-container.
+            'd\t1 USA - A-D\t0',
+            'f\t1 USA - A-D/Castlevania Chronicles (USA).chd\t1073741824',
+            'f\t1 USA - A-D/Crash Bandicoot (USA).chd\t2147483648',
+            'f\t1 USA - A-D/Destruction Derby (USA).chd\t536870912',
+            'f\t1 USA - A-D/Die Hard Trilogy (USA).chd\t536870912',
+            'f\t1 USA - A-D/Dino Crisis (USA).chd\t536870912',
+            'f\t1 USA - A-D/Driver (USA).chd\t536870912',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('PSX');
+
+      // Container row should NOT appear.
+      expect(roms.find((r) => r.filename === '1 USA - A-D')).toBeUndefined();
+      // Six launchable files surfaced inline.
+      expect(roms).toHaveLength(6);
+
+      const crash = roms.find((r) => r.filename === 'Crash Bandicoot (USA).chd');
+      expect(crash?.kind).toBe('file');
+      expect(crash?.relativePath).toBe('1 USA - A-D/Crash Bandicoot (USA).chd');
+      expect(crash?.path).toBe('/media/fat/games/PSX/1 USA - A-D/Crash Bandicoot (USA).chd');
+      expect(crash?.sizeBytes).toBe(2147483648);
+      expect(crash?.hidden).toBe(false);
+    });
+
+    it('PR-K: bucket container with nested disc-game subfolders — each subfolder emitted as folder-atomic', async () => {
+      // Bucket has ONLY subdirs (no flat disc files). classifyFolder rule 4
+      // fires (subdirs present → container) without triggering the disc-marker
+      // rule. Each nested disc-game folder is classified as folder-atomic.
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            // Bucket contains only disc-game subdirs — rule 4 fires → container.
+            'd\t1 USA - A-D\t0',
+            'd\t1 USA - A-D/Crash Bandicoot (USA)\t0',
+            'f\t1 USA - A-D/Crash Bandicoot (USA)/Crash Bandicoot.cue\t512',
+            'f\t1 USA - A-D/Crash Bandicoot (USA)/Crash Bandicoot (Track 02).bin\t734003200',
+            'd\t1 USA - A-D/Dino Crisis (USA)\t0',
+            'f\t1 USA - A-D/Dino Crisis (USA)/Dino Crisis.cue\t512',
+            'f\t1 USA - A-D/Dino Crisis (USA)/Dino Crisis (Track 02).bin\t536870912',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('PSX');
+
+      // Container row NOT emitted; 2 nested atomics emitted inline.
+      expect(roms.find((r) => r.filename === '1 USA - A-D')).toBeUndefined();
+      expect(roms).toHaveLength(2);
+
+      // First nested disc-game folder.
+      const crash = roms.find((r) => r.filename === 'Crash Bandicoot (USA)');
+      expect(crash?.kind).toBe('folder-atomic');
+      expect(crash?.relativePath).toBe('1 USA - A-D/Crash Bandicoot (USA)');
+      expect(crash?.path).toBe('/media/fat/games/PSX/1 USA - A-D/Crash Bandicoot (USA)');
+      expect(crash?.sizeBytes).toBe(734003712); // cue + bin
+      // containedRomPath picks .cue over .bin.
+      expect(crash?.containedRomPath).toBe(
+        '/media/fat/games/PSX/1 USA - A-D/Crash Bandicoot (USA)/Crash Bandicoot.cue',
+      );
+
+      // Second nested disc-game folder.
+      const dino = roms.find((r) => r.filename === 'Dino Crisis (USA)');
+      expect(dino?.kind).toBe('folder-atomic');
+      expect(dino?.relativePath).toBe('1 USA - A-D/Dino Crisis (USA)');
+      expect(dino?.sizeBytes).toBe(536871424); // cue + bin
+    });
+
+    it('PR-K: user-pinned-to-atomic container is NOT expanded — emits single atomic row', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            // Six .zip files → heuristic says container.
+            'd\tA-F\t0',
+            'f\tA-F/alpha.zip\t1024',
+            'f\tA-F/beta.zip\t1024',
+            'f\tA-F/gamma.zip\t1024',
+            'f\tA-F/delta.zip\t1024',
+            'f\tA-F/epsilon.zip\t1024',
+            'f\tA-F/zeta.zip\t1024',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      // User pinned 'A-F' to atomic override.
+      const overrides = withFolderOverride(EMPTY_FOLDER_CLASSIFICATIONS, {
+        coreId: 'NES',
+        folderPath: 'A-F',
+        classification: 'atomic',
+        setAt: '2026-01-01T00:00:00.000Z',
+      });
+      const roms = await client.listRoms('NES', '', overrides);
+
+      // Override respected: emits single folder-atomic row (no expansion).
+      expect(roms).toHaveLength(1);
+      const pinned = roms[0];
+      expect(pinned?.filename).toBe('A-F');
+      expect(pinned?.kind).toBe('folder-atomic');
+      // containedRomPath picks the first zip alphabetically.
+      expect(pinned?.containedRomPath).toBe(
+        '/media/fat/games/NES/A-F/alpha.zip',
+      );
+    });
+
+    it('PR-K: nested disc-game subfolder inside bucket inherits depth-3 size correctly', async () => {
+      const client = new RealMisterClient();
+      await client.connect(profile, secret);
+      mocks.execCommand.mockClear();
+      mocks.execCommand.mockResolvedValueOnce(
+        execOk(
+          [
+            'd\tBucket\t0',
+            'd\tBucket/Multi-Disc Game\t0',
+            'f\tBucket/Multi-Disc Game/disc1.cue\t512',
+            'f\tBucket/Multi-Disc Game/disc1 (Track 1).bin\t734003200',
+            'f\tBucket/Multi-Disc Game/disc1 (Track 2).bin\t734003200',
+            '',
+          ].join('\n'),
+        ),
+      );
+
+      const roms = await client.listRoms('SomeSys');
+      expect(roms).toHaveLength(1);
+      const nested = roms[0];
+      expect(nested?.kind).toBe('folder-atomic');
+      expect(nested?.relativePath).toBe('Bucket/Multi-Disc Game');
+      // sizeBytes = sum of depth-3 files (two bins + cue).
+      expect(nested?.sizeBytes).toBe(734003200 + 734003200 + 512);
+      expect(nested?.containedRomPath).toContain('disc1.cue');
     });
 
     it('rejects subPaths that try to climb out of the core dir', async () => {
@@ -1586,11 +1763,14 @@ describe('RealMisterClient', () => {
       expect(noRom?.kind).toBe('folder-atomic');
       expect(noRom?.containedRomPath).toBeUndefined();
 
-      const container = roms.find((r) => r.filename === 'ManyGames');
-      expect(container?.kind).toBe('folder-container');
-      // Container folders don't carry a contained-rom-path; they're
-      // drilled into to enumerate their contents.
-      expect(container?.containedRomPath).toBeUndefined();
+      // feat/auto-subfolder-scraping: ManyGames (folder-container, 5 zips)
+      // is expanded inline — container row is gone, 5 file rows appear.
+      expect(roms.find((r) => r.filename === 'ManyGames')).toBeUndefined();
+      const manyGamesFiles = roms.filter((r) =>
+        r.relativePath.startsWith('ManyGames/'),
+      );
+      expect(manyGamesFiles).toHaveLength(5);
+      expect(manyGamesFiles[0]?.kind).toBe('file');
     });
 
     it('fix/cd-hash-prefer-cue-over-bin: .cue + (Track 01).bin → picks .cue (collision-fix scenario)', async () => {

@@ -922,18 +922,39 @@ export class RealMisterClient implements IMisterClient {
       throw new Error(`Unknown core: ${coreId}`);
     }
 
+    // feat/auto-subfolder-scraping — per nested-dir accumulator so
+    // classifyFolder can run on sub-subfolder contents (depth 3 data
+    // that the find already returns).
+    interface NestedDirAcc {
+      sizeBytes: number;
+      readonly directFiles: string[];
+      readonly directDirs: string[];
+    }
     interface FolderAcc {
       readonly name: string;
       sizeBytes: number;
       readonly directFiles: string[];
       readonly directDirs: string[];
+      // depth-2 file entries with sizes — used to emit nested file Roms
+      // when the parent container is expanded inline.
+      readonly directFileEntries: { name: string; sizeBytes: number }[];
+      // depth-2 sub-subfolders with their depth-3 child lists —
+      // used to classify and emit nested folder Roms inline.
+      readonly nestedDirAccs: Map<string, NestedDirAcc>;
     }
     const topLevelFiles: { name: string; sizeBytes: number }[] = [];
     const folderAccs = new Map<string, FolderAcc>();
     const ensureFolderAcc = (name: string): FolderAcc => {
       let acc = folderAccs.get(name);
       if (acc === undefined) {
-        acc = { name, sizeBytes: 0, directFiles: [], directDirs: [] };
+        acc = {
+          name,
+          sizeBytes: 0,
+          directFiles: [],
+          directDirs: [],
+          directFileEntries: [],
+          nestedDirAccs: new Map(),
+        };
         folderAccs.set(name, acc);
       }
       return acc;
@@ -987,8 +1008,38 @@ export class RealMisterClient implements IMisterClient {
         // below the top folder.
         if (segments.length === 2) {
           const childName = segments[1]!;
-          if (type === 'f') acc.directFiles.push(childName);
-          else acc.directDirs.push(childName);
+          if (type === 'f') {
+            acc.directFiles.push(childName);
+            acc.directFileEntries.push({ name: childName, sizeBytes });
+          } else {
+            acc.directDirs.push(childName);
+            if (!acc.nestedDirAccs.has(childName)) {
+              acc.nestedDirAccs.set(childName, {
+                sizeBytes: 0,
+                directFiles: [],
+                directDirs: [],
+              });
+            }
+          }
+        } else if (segments.length === 3) {
+          // Grandchildren — feed classifyFolder for nested sub-subfolders
+          // and accumulate their size. Only reach here if the depth-2
+          // parent dir was seen first; ensureFolderAcc already ran for
+          // `top`, but the nestedDirAcc for `mid` may not exist yet if
+          // the dir entry at depth 2 arrived after a depth-3 file.
+          const mid = segments[1]!;
+          const leaf = segments[2]!;
+          let nestedAcc = acc.nestedDirAccs.get(mid);
+          if (nestedAcc === undefined) {
+            nestedAcc = { sizeBytes: 0, directFiles: [], directDirs: [] };
+            acc.nestedDirAccs.set(mid, nestedAcc);
+          }
+          if (type === 'f') {
+            nestedAcc.sizeBytes += sizeBytes;
+            nestedAcc.directFiles.push(leaf);
+          } else {
+            nestedAcc.directDirs.push(leaf);
+          }
         }
       }
     }
@@ -1038,29 +1089,92 @@ export class RealMisterClient implements IMisterClient {
       const classification = resolveClassification(heuristic, override);
       const kind =
         classification === 'container' ? 'folder-container' : 'folder-atomic';
-      // PR-D1 (PR #27): for atomic folders, identify the
-      // alphabetical-first launchable ROM file inside so the
-      // renderer can bind metadata (box art etc.) to the folder
-      // row by looking up the contained file's hash. Container
-      // folders don't get this — they're drilled into.
-      const containedRomPath =
-        kind === 'folder-atomic'
-          ? pickPrimaryRomFile(
-              acc.directFiles,
-              `${MISTER_GAMES_DIR}/${coreId}/${visibleRelPath}`,
-            )
-          : undefined;
-      roms.push({
-        coreId,
-        filename: acc.name,
-        displayName: displayRomName(visibleBase),
-        sizeBytes: acc.sizeBytes,
-        hidden,
-        path: `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`,
-        kind,
-        relativePath,
-        containedRomPath,
-      });
+
+      // feat/auto-subfolder-scraping — at top-level (relPrefix === ''),
+      // expand auto-detected bucket containers inline so users see
+      // individual game rows without drilling. User-pinned containers
+      // (override !== undefined) are left as drillable rows — the user
+      // explicitly chose "treat as container" and expects drill-in.
+      // Drill-in calls (relPrefix !== '') keep existing behaviour so the
+      // explicit subPath still returns the raw folder view.
+      if (kind === 'folder-container' && relPrefix === '' && override === undefined) {
+        // Flat files directly inside the container.
+        for (const entry of acc.directFileEntries) {
+          const fHidden = entry.name.startsWith('.');
+          const fVisibleBase = fHidden ? entry.name.slice(1) : entry.name;
+          if (!isLaunchableRomExtension(fVisibleBase)) continue;
+          const fRelPath = `${acc.name}/${entry.name}`;
+          roms.push({
+            coreId,
+            filename: entry.name,
+            displayName: displayRomName(fVisibleBase),
+            sizeBytes: entry.sizeBytes,
+            hidden: fHidden,
+            path: `${MISTER_GAMES_DIR}/${coreId}/${fRelPath}`,
+            kind: 'file',
+            relativePath: fRelPath,
+          });
+        }
+        // Nested subfolders inside the container.
+        for (const [dirName, nestedAcc] of acc.nestedDirAccs) {
+          const dHidden = dirName.startsWith('.');
+          const dVisibleBase = dHidden ? dirName.slice(1) : dirName;
+          const dRelPath = `${acc.name}/${dirName}`;
+          const dVisibleRelPath = `${visibleBase}/${dVisibleBase}`;
+          const dHeuristic = classifyFolder({
+            files: nestedAcc.directFiles,
+            dirs: nestedAcc.directDirs,
+            folderName: dVisibleBase,
+          });
+          const dOverride = getFolderOverride(folderClassifications, coreId, dVisibleRelPath);
+          const dClassification = resolveClassification(dHeuristic, dOverride);
+          const dKind = dClassification === 'container' ? 'folder-container' : 'folder-atomic';
+          const dContainedRomPath =
+            dKind === 'folder-atomic'
+              ? pickPrimaryRomFile(
+                  nestedAcc.directFiles,
+                  `${MISTER_GAMES_DIR}/${coreId}/${dVisibleRelPath}`,
+                )
+              : undefined;
+          roms.push({
+            coreId,
+            filename: dirName,
+            displayName: displayRomName(dVisibleBase),
+            sizeBytes: nestedAcc.sizeBytes,
+            hidden: dHidden,
+            path: `${MISTER_GAMES_DIR}/${coreId}/${dRelPath}`,
+            kind: dKind,
+            relativePath: dRelPath,
+            containedRomPath: dContainedRomPath,
+          });
+        }
+        // Don't emit the container row itself.
+      } else {
+        // PR-D1 (PR #27): for atomic folders, identify the
+        // alphabetical-first launchable ROM file inside so the
+        // renderer can bind metadata (box art etc.) to the folder
+        // row by looking up the contained file's hash. Container
+        // folders don't get this — they're drilled into (or are a
+        // depth-2 container surfaced from an expanded parent).
+        const containedRomPath =
+          kind === 'folder-atomic'
+            ? pickPrimaryRomFile(
+                acc.directFiles,
+                `${MISTER_GAMES_DIR}/${coreId}/${visibleRelPath}`,
+              )
+            : undefined;
+        roms.push({
+          coreId,
+          filename: acc.name,
+          displayName: displayRomName(visibleBase),
+          sizeBytes: acc.sizeBytes,
+          hidden,
+          path: `${MISTER_GAMES_DIR}/${coreId}/${relativePath}`,
+          kind,
+          relativePath,
+          containedRomPath,
+        });
+      }
     }
 
     roms.sort((a, b) => a.displayName.localeCompare(b.displayName));

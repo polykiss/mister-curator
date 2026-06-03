@@ -734,15 +734,21 @@ describe('FakeMisterClient', () => {
   });
 
   describe('folder drilling + classification', () => {
-    it('classifies NEOGEO subfolders as containers (cart-shape)', async () => {
+    it('classifies NEOGEO subfolders as containers and expands them inline (auto-subfolder-scraping)', async () => {
+      // '1 World A-Z' has 5 .zip files (incl. hidden .mslug2.zip) →
+      // classifyFolder → folder-container → auto-expanded inline.
       const cores = await client.listAllCoresWithFiles();
       const neogeo = cores.find((c) => c.id === 'NEOGEO');
       expect(neogeo).toBeDefined();
 
       const roms = await client.listRoms('NEOGEO');
-      const sub = roms.find((r) => r.filename === '1 World A-Z');
-      expect(sub).toBeDefined();
-      expect(sub?.kind).toBe('folder-container');
+      // Container row is NOT emitted; contents appear inline.
+      expect(roms.find((r) => r.filename === '1 World A-Z')).toBeUndefined();
+      // Expanded files carry the nested relativePath.
+      const expanded = roms.filter((r) => r.relativePath.startsWith('1 World A-Z/'));
+      expect(expanded.length).toBeGreaterThan(0);
+      expect(expanded[0]?.kind).toBe('file');
+      expect(expanded[0]?.relativePath).toMatch(/^1 World A-Z\//);
     });
 
     it('classifies Saturn disc folders as atomic', async () => {
