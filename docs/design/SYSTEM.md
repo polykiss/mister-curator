@@ -372,6 +372,31 @@ On the ROMs-pane search row, after the filter input:
 "Show MAME / HBMame as separate cores" is NOT in the cores-sidebar
 header — it lives in the Settings dialog.
 
+### DetailHeader (CoreInfoDialog + RomDetailDialog) (D14)
+
+Both detail dialogs open with the same header, top→bottom:
+- **Kicker** — tracked caps (`caption`, `font-bold`, `tracking-[0.19em]`,
+  `fg-muted`): "Core info" / "ROM detail".
+- **Platform logo** — top-left, monochrome system logo inverted to white
+  (`max-h-12`, `object-contain`, `invert`). Omitted when no logo exists.
+- **Title** — the system display name (CoreInfo, `heading`) or the game
+  title (RomDetail, `heading-lg`), `font-bold`, `break-words`.
+- **Metadata row** — either inline **badge chips** beside the title
+  (CoreInfo: company·years·media) OR a muted **subtitle** line below it
+  (RomDetail: developer · year · genre · system).
+
+The logo sits ABOVE the title in both dialogs (not inline) — this unifies
+the two and matches the detail mockups. The component owns the system-logo
+blob fetch; CoreInfoDialog's previously-inline logo fetch is removed.
+
+### Detail-dialog footer (D15)
+
+ROM detail dialog footer order: `Hide` (ghost) · `Edit…` (ghost) ·
+`Find on ScreenScraper…` (**primary** — the single filled button) ·
+`Close` (secondary). The empty-metadata state hides `Edit…` and keeps
+`Find on ScreenScraper…` as primary. Never make `Close` the primary/filled
+action — closing is not the screen's main verb.
+
 ### Wordmark / brand mark (rev. 2)
 
 The brand lockup is the **pixel-M monogram tile + "MiSTerCurator"
@@ -654,6 +679,8 @@ anyone re-reading the document.
 | D11 | PlatformBadge      | Fixed 104×40 badge; logo normalized to 26px cap-height; name-wordmark fallback; always-shown mono core-id. New §5 entry. |
 | D12 | Scrape dot         | `StatusIndicator` is 7px + haloless in list rows (color encoding kept). §5 amended. |
 | D13 | ROMs view toolbar  | list/poster toggle + S–XL scale stepper; poster mode adds a Sort-by dropdown (Name/Year/Genre/Rating/Size) since it has no column headers. MAME-as-cores toggle lives in Settings. §5 amended. |
+| D14 | DetailHeader | CoreInfoDialog + RomDetailDialog share one header primitive: kicker → logo-on-top → title → chips (Core) / subtitle (ROM). CoreInfo's logo moves from inline to top. §5 amended. |
+| D15 | Detail footer | ROM detail's single filled button is "Find on ScreenScraper…"; Close is secondary (was filled). One-primary-per-screen rule. §5 amended. |
 
 A few notes on the choices:
 

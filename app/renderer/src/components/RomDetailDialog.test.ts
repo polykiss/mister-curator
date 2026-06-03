@@ -236,30 +236,20 @@ describe('RomDetailDialog — empty state (no metadata yet)', () => {
 });
 
 describe('RomDetailDialog — long-title overflow guard (feat/arcade-polish-context-menu)', () => {
-  it('title elements use break-words instead of truncate so long unbreakable filenames wrap inside the dialog', () => {
-    // Live bug: a 110-char zip filename made the dialog's max-w-3xl
-    // cap fight against `white-space: nowrap` (inside `truncate`),
-    // and the title's intrinsic width pushed the absolutely-
-    // positioned Close button past the visible right edge. Switching
-    // the title + filename-subhead to `break-words` keeps the
-    // content inside the dialog width — content wraps to a second
-    // line rather than overflowing horizontally.
-    //
-    // Both the populated DialogTitle and the EmptyDetailDialog title
-    // get the same treatment.
-    const titleOccurrences = SOURCE.match(
-      /<DialogTitle\s+className="[^"]*"\s+title=\{/g,
-    );
-    expect(titleOccurrences).not.toBeNull();
-    expect(titleOccurrences!.length).toBe(2);
-    for (const occ of titleOccurrences!) {
-      expect(occ).toContain('break-words');
-      // The Tailwind `truncate` shortcut sets white-space:nowrap +
-      // overflow-hidden + text-overflow:ellipsis — exactly the
-      // single-line treatment we're moving away from. Make sure
-      // it's gone from the title classes.
-      expect(occ).not.toMatch(/\btruncate\b/);
-    }
+  it('title elements use sr-only DialogTitle (D14: visual title in DetailHeader which uses break-words)', () => {
+    // D14: the visible title moved into DetailHeader's <h2> (which uses
+    // `min-w-0 break-words`) so long unbreakable filenames wrap correctly.
+    // Both the populated and empty variants now use sr-only DialogTitles for
+    // Radix a11y; the visual heading is in DetailHeader.
+    // Three sr-only DialogTitles: populated, empty, and lightbox.
+    const srOnlyTitles = SOURCE.match(/<DialogTitle className="sr-only">/g);
+    expect(srOnlyTitles).not.toBeNull();
+    expect(srOnlyTitles!.length).toBeGreaterThanOrEqual(2);
+    // Verify DetailHeader is used for the visual heading in both variants.
+    expect(SOURCE).toContain('import { DetailHeader }');
+    const headerOccurrences = SOURCE.match(/<DetailHeader\b/g);
+    expect(headerOccurrences).not.toBeNull();
+    expect(headerOccurrences!.length).toBe(2);
   });
 
   it('button rows use flex-wrap so a narrow viewport stacks them inside the dialog', () => {
@@ -288,6 +278,48 @@ describe('RomDetailDialog — long-title overflow guard (feat/arcade-polish-cont
     expect(SOURCE).not.toMatch(
       /ScreenScraper hasn['\\]+t matched this file/,
     );
+  });
+});
+
+describe('RomDetailDialog — footer primary (D15)', () => {
+  it('populated footer: Find on ScreenScraper is primary', () => {
+    // D15: the single filled button per screen rule — Find (the main
+    // curation action) is primary. Old shape had Close = primary.
+    const idx = SOURCE.indexOf('function PopulatedDetailDialog');
+    const populated = SOURCE.slice(idx, SOURCE.indexOf('\nfunction ', idx + 10));
+    // Find button must be primary.
+    expect(populated).toMatch(/variant="primary"[\s\S]{0,80}Find on ScreenScraper/);
+  });
+
+  it('populated footer: Close is secondary (not primary)', () => {
+    // D15: Close drops from primary to secondary.
+    // Look for the populated-dialog footer's Close button by finding the
+    // literal source fragment that follows the last Find-button in the populated
+    // variant. We know line order: Find(primary) → Close(secondary).
+    // The populated Close button is: variant="secondary" onClick={...}>\n Close
+    expect(SOURCE).toContain('variant="secondary" onClick={() => onOpenChange(false)}>');
+    // And the literal "variant=\"primary\"" for the close button is gone.
+    expect(SOURCE).not.toContain('variant="primary" onClick={() => onOpenChange(false)}>');
+  });
+
+  it('empty footer: Find on ScreenScraper stays primary when allowSearch is true', () => {
+    const idx = SOURCE.indexOf('function EmptyDetailDialog');
+    const empty = SOURCE.slice(idx);
+    expect(empty).toMatch(/variant="primary"[\s\S]{0,80}Find on ScreenScraper/);
+  });
+});
+
+describe('RomDetailDialog — systemLogoUrl prop (D14)', () => {
+  it('declares systemLogoUrl as an optional prop on RomDetailDialogProps', () => {
+    expect(SOURCE).toMatch(/readonly systemLogoUrl\?.*string \| null/s);
+  });
+
+  it('threads systemLogoUrl to both PopulatedDetailDialog and EmptyDetailDialog', () => {
+    expect(SOURCE).toMatch(/systemLogoUrl=\{systemLogoUrl\}/);
+  });
+
+  it('passes systemLogoUrl to DetailHeader (null degrades to no-logo)', () => {
+    expect(SOURCE).toMatch(/logoUrl=\{.*systemLogoUrl.*\}/);
   });
 });
 

@@ -5,10 +5,10 @@ import type { JSX, ReactNode } from 'react';
 import type { RomMetadata } from '@shared/metadata-types';
 
 import { Button } from '@app/renderer/src/components/ui/button';
+import { DetailHeader } from '@app/renderer/src/components/DetailHeader';
 import {
   Dialog,
   DialogContent,
-  DialogHeader,
   DialogTitle,
 } from '@app/renderer/src/components/ui/dialog';
 import { cn } from '@app/renderer/src/lib/cn';
@@ -152,6 +152,12 @@ export interface RomDetailDialogProps {
     readonly currentHidden: boolean;
     readonly onToggle: () => void;
   };
+  /**
+   * D14: system logo URL for the DetailHeader. Resolved from the system
+   * catalog by the instantiation site (catalog[core.id]?.logoUrl).
+   * DetailHeader degrades to no-logo when null/undefined.
+   */
+  readonly systemLogoUrl?: string | null;
 }
 
 export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
@@ -170,6 +176,7 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
     onNext,
     navPosition,
     hideAction,
+    systemLogoUrl,
   } = props;
   const defaultAllow = readOnly === true ? false : true;
   const resolvedAllowEdit = allowEdit ?? defaultAllow;
@@ -187,6 +194,7 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
         onNext={onNext}
         navPosition={navPosition}
         hideAction={hideAction}
+        systemLogoUrl={systemLogoUrl}
       />
     );
   }
@@ -203,6 +211,7 @@ export function RomDetailDialog(props: RomDetailDialogProps): JSX.Element {
       onNext={onNext}
       navPosition={navPosition}
       hideAction={hideAction}
+      systemLogoUrl={systemLogoUrl}
     />
   );
 }
@@ -219,6 +228,7 @@ function PopulatedDetailDialog(props: {
   readonly onNext?: () => void;
   readonly navPosition?: RomDetailDialogProps['navPosition'];
   readonly hideAction?: RomDetailDialogProps['hideAction'];
+  readonly systemLogoUrl?: string | null;
 }): JSX.Element {
   const {
     metadata,
@@ -232,6 +242,7 @@ function PopulatedDetailDialog(props: {
     onNext,
     navPosition,
     hideAction,
+    systemLogoUrl,
   } = props;
 
   // feat/arcade-parse-tolerance-gallery-polish — lightbox state is
@@ -330,19 +341,15 @@ function PopulatedDetailDialog(props: {
           the absolutely-positioned prev/next arrows stay anchored
           to the DialogContent bounds and don't scroll with content. */}
       <DialogContent className="flex max-h-[85vh] max-w-[85vw] flex-col gap-3 p-5">
-        <DialogHeader className="min-w-0">
-          <DialogTitle
-            className="min-w-0 break-words pr-8"
-            title={title}
-          >
-            {title}
-          </DialogTitle>
-          {subheadParts.length > 0 ? (
-            <p className="text-body-sm text-fg-muted break-words">
-              {subheadParts.join(' · ')}
-            </p>
-          ) : null}
-        </DialogHeader>
+        <DialogTitle className="sr-only">{title}</DialogTitle>
+        <DetailHeader
+          kicker="ROM detail"
+          logoUrl={systemLogoUrl ?? null}
+          logoAlt={metadata.system}
+          title={title}
+          titleClassName="text-heading-lg"
+          subtitle={subheadParts.length > 0 ? subheadParts.join(' · ') : undefined}
+        />
 
         {/* feat/detail-dialog-nav-layout-fix (B + D) — ROM
             navigation strip lives in the header area with text-
@@ -476,11 +483,11 @@ function PopulatedDetailDialog(props: {
             </Button>
           ) : null}
           {allowSearch ? (
-            <Button variant="ghost" onClick={handleSearch}>
+            <Button variant="primary" onClick={handleSearch}>
               Find on ScreenScraper...
             </Button>
           ) : null}
-          <Button variant="primary" onClick={() => onOpenChange(false)}>
+          <Button variant="secondary" onClick={() => onOpenChange(false)}>
             Close
           </Button>
         </div>
@@ -957,6 +964,7 @@ function EmptyDetailDialog(props: {
   readonly onNext?: () => void;
   readonly navPosition?: RomDetailDialogProps['navPosition'];
   readonly hideAction?: RomDetailDialogProps['hideAction'];
+  readonly systemLogoUrl?: string | null;
 }): JSX.Element {
   function handleSearch(): void {
     props.onOpenChange(false);
@@ -970,14 +978,14 @@ function EmptyDetailDialog(props: {
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogContent className="flex max-h-[85vh] max-w-[85vw] flex-col gap-3 p-5">
-        <DialogHeader className="min-w-0">
-          <DialogTitle
-            className="min-w-0 break-words pr-8"
-            title={props.filename}
-          >
-            {props.filename}
-          </DialogTitle>
-        </DialogHeader>
+        <DialogTitle className="sr-only">{props.filename}</DialogTitle>
+        <DetailHeader
+          kicker="ROM detail"
+          logoUrl={props.systemLogoUrl ?? null}
+          logoAlt=""
+          title={props.filename}
+          titleClassName="text-heading-lg"
+        />
 
         {/* feat/detail-dialog-nav-layout-fix — header-area ROM nav
             strip, same shape as the populated variant. The empty
@@ -1014,7 +1022,7 @@ function EmptyDetailDialog(props: {
             </Button>
           ) : null}
           <Button
-            variant={props.allowSearch ? 'ghost' : 'primary'}
+            variant={props.allowSearch ? 'secondary' : 'primary'}
             onClick={() => props.onOpenChange(false)}
           >
             Close
