@@ -1,8 +1,8 @@
 # MiSTerCurator Design System
 
-Status: **Locked.** Phase 1 proposal accepted with revisions; Phase 2
-applies it across the app. See section 9 (Decisions) for what changed
-between proposal and lock-in.
+Status: **Locked (rev. 2).** Phase 1 proposal accepted with revisions;
+Phase 2 applies it across the app. Rev. 2 ratifies three field
+divergences — see section 9 (Decisions) D6–D8 and the amended §5 / §10.
 
 This document is the single coherent visual identity that replaces the
 cumulative drift accumulated across MVP iterations. It is the reference
@@ -99,8 +99,12 @@ white" territory.
 
 A nod to LED indicators and CRT phosphor — culturally aligned with the
 audience, and lifted directly from the SmartShort reference. Reserved
-**exclusively** for active navigation state and one primary CTA per
-screen. Never used for status or success.
+for active navigation state and one primary CTA per screen.
+**One sanctioned exception:** the brand mark (the pixel-M monogram)
+renders in `accent` as identity, and only inside the wordmark lockup
+(connection screen, app header). This is the single non-state,
+non-CTA use of accent permitted in the system. It is still never used
+for status or success.
 
 | Token            | Hex       | Use                                                  |
 | ---------------- | --------- | ---------------------------------------------------- |
@@ -318,6 +322,34 @@ Saturn games dir with 17 disc folders renders the single-number
 form (`17`). This matches the user's mental model — the folder is
 the unit.
 
+### Core identity cell (rev. 2)
+
+The leading cell of a CoreRow shows the core's **logo if one is
+available, otherwise the core name set as a wordmark** — never a
+generic placeholder icon. The two cases are mutually exclusive:
+
+- **Logo present**: render the monochrome system logo (white-on-
+  transparent), left-aligned, full cell height, max ~124×38.
+- **No logo**: render the core name in `heading-sm` (16px/600)
+  `fg-primary`, left-aligned. Do **not** also show the gamepad icon,
+  and do not repeat the name in the metadata column.
+
+Beside the identity sits the **core-id subtitle** in `font-mono`
+`body-sm` `fg-muted` (e.g. `MRA`, `Minimig`, `AO486`, `MegaCD`,
+`MegaDrive`, `MSX1`) — the technical core string, distinct from the
+human identity. This removes the rev. 1 redundancy where logo + name
++ core-id repeated the same token three times (e.g. "MSX / MSX / MSX").
+
+### Wordmark / brand mark (rev. 2)
+
+The brand lockup is the **pixel-M monogram tile + "MiSTerCurator"
+wordmark**. The monogram is an 8-bit "M" in `accent` on a `bg-elevated`
+tile (radius ≈ 0.26 × size). The wordmark stays IBM Plex Sans 700,
+`-0.02em` tracking, **monochrome `fg-primary`** — the lime lives only
+in the monogram and the primary CTA, preserving one-accent discipline.
+Appears at tile 44 / wordmark `display` on the connection screen; tile
+~32 / wordmark `heading` in the app header / status contexts.
+
 ### Buttons
 
 Six variants total. `cva` setup keeps shadcn's API.
@@ -468,7 +500,7 @@ stays consistent):
 
 | Concept           | Icon              |
 | ----------------- | ----------------- |
-| Core              | `Cpu`             |
+| Core (no logo)    | name as wordmark — no icon |
 | ROM               | `Disc`            |
 | Folder (drillable)| `Folder`          |
 | Folder (atomic)   | `FolderArchive`   |
@@ -570,7 +602,10 @@ anyone re-reading the document.
 | Q2 | Typography   | **IBM Plex Sans + IBM Plex Mono**. Self-hosted woff2 (CSP blocks Google Fonts CDN).       |
 | Q3 | Row density  | **40px** rows.                                                                            |
 | Q4 | Light mode   | **Defer to post-v0.1.0.** Tokens wired for both modes; `<body>` forced to `dark`.         |
-| Q5 | Wordmark     | **Restrained.** Plex Sans 700 with letter-spacing `-0.02em`. No separate display font.    |
+| Q5 | Wordmark | **Pixel-M monogram (accent) + monochrome wordmark.** Plex Sans 700, -0.02em. Logo carries the accent; wordmark stays fg-primary. (rev. 2) |
+| D6 | Density bar | Full-height, ~row-width, solid teal→green fill. §10 amended. |
+| D7 | Core identity | Logo OR name-wordmark; no gamepad fallback; mono core-id subtitle. §5 amended. |
+| D8 | Brand mark | Pixel-M monogram in accent (sanctioned exception). §2/§5 amended. |
 
 A few notes on the choices:
 
@@ -622,23 +657,35 @@ Cores list (bg-surface)              ROMs list (bg-elevated)
        intensity = romCount / maxRomCount    intensity = sizeBytes / maxSize
 ```
 
-### Visual spec
+### Visual spec (rev. 2)
 
 - **Geometry**: pinned to the row's right edge, after any trailing
-  actions. Width = 50% of the row height (~20px on a 40px row),
-  height = full row height, no border-radius (sharp rectangle).
-- **Fill**: `color-mix(in oklch, <row-bg> <(1 - r) × 100%>, hsl(var(--accent)))`
-  where `r = clamp(value / max, 0, 1)`. The mix happens in OKLCH so
-  the perceptual midpoint reads as a midpoint, not a muddy lerp
-  through HSL grey.
-- **Row-bg basis**: matches the pane the row lives in.
-  - Cores list (sits on `bg-surface`): floor color is `bg-surface`.
-  - ROMs list (sits on `bg-elevated`, see §4 / pane elevation): floor
-    color is `bg-elevated`.
-  At `r = 0` the rectangle is invisible against the row; at `r = 1`
-  it is full signal-green.
-- **No glow, no halo, no ambient bleed, no animation.** Computed
-  once per render, stable across hover.
+  actions. Full row height, top and bottom flush to the row edges
+  (≤1px breathing). Width = **~40px** (≈ row height, 2× the rev. 1
+  ~20px). No border-radius.
+- **Fill**: a single flat color along a fixed **teal → signal-green**
+  density ramp, indexed by `r = clamp(value / max, 0, 1)`:
+  `color-mix(in oklch, hsl(var(--density-fill-low)) <(1 − r)×100%>,
+  hsl(var(--density-fill-high)))`, where `--density-fill-low` is the
+  teal floor and `--density-fill-high` is `accent`. The bar is a solid
+  block — the magnitude reads from *hue/lightness*, never from width.
+- **Row-bg basis**: no longer relevant — the bar is a solid block at
+  full opacity against the row, not a low-r fade into the surface.
+  Empty/zero-value rows render the floor teal (still visibly a bar),
+  not "invisible against the row."
+- **No glow, no halo, no animation.** Computed once per render.
+
+Density tokens (add to both modes in `index.css`):
+
+| Token               | Value                                         |
+| ------------------- | --------------------------------------------- |
+| `density-fill-low`  | teal floor of the density ramp (≈ `#2BB89B`) |
+| `density-fill-high` | `accent` — top of the density ramp           |
+
+> The floor was `fg-muted` grey in rev. 1. Rev. 2 makes it teal so the
+> ramp reads as a deliberate teal→green scale. Pick the exact teal during
+> implementation; `success` (`#3FCFA3`) is a reasonable anchor but a
+> touch lighter — a slightly deeper teal reads better as "low."
 
 ### Where it appears
 
@@ -675,6 +722,13 @@ audiences associate with "this is the heavyweight in the list" (level
 meters, signal strength). The geometry also makes the indicator
 **always present** at the same position, so the eye has a fixed
 column to track.
+
+Rev. 2 widens the bar to ~row-height and makes it full-bleed top-to-
+bottom so the density column is unmistakable as a fixed scannable
+lane, and switches the fill from a fade-into-surface mix to a solid
+teal→green block: at a glance the *column of color* is the signal, and
+faint near-floor rows no longer disappear. The fill still encodes
+magnitude as color (level-meter mental model), not as width/progress.
 
 If a future PR is tempted to apply this OKLCH interpolation to
 anything besides these per-row indicators, it should propose it as a

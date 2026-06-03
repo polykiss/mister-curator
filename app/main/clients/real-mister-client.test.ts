@@ -1767,7 +1767,7 @@ describe('RealMisterClient', () => {
       // is expanded inline — container row is gone, 5 file rows appear.
       expect(roms.find((r) => r.filename === 'ManyGames')).toBeUndefined();
       const manyGamesFiles = roms.filter((r) =>
-        r.relativePath.startsWith('ManyGames/'),
+        r.relativePath?.startsWith('ManyGames/'),
       );
       expect(manyGamesFiles).toHaveLength(5);
       expect(manyGamesFiles[0]?.kind).toBe('file');
