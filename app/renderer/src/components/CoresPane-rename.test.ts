@@ -12,9 +12,9 @@ import { describe, expect, it } from 'vitest';
 const SOURCE = readFileSync(resolve(__dirname, 'CoresPane.tsx'), 'utf8');
 
 describe('CoresPane — sidebar logos and naming', () => {
-  it('imports CoreLogo', () => {
-    expect(SOURCE).toContain("import { CoreLogo }");
-    expect(SOURCE).toContain("from '@app/renderer/src/components/CoreLogo'");
+  it('imports PlatformBadge (D11: replaced CoreLogo in the sidebar row)', () => {
+    expect(SOURCE).toContain("import { PlatformBadge }");
+    expect(SOURCE).toContain("from '@app/renderer/src/components/PlatformBadge'");
   });
 
   it('imports CoreRenameDialog', () => {
@@ -70,11 +70,12 @@ describe('CoresPane — sidebar logos and naming', () => {
   });
 
   it('uses h-14 for the row li element', () => {
-    expect(SOURCE).toMatch(/h-14.*items-center.*gap-3.*border-b|group\/row.*h-14/s);
+    // D11: row is now items-stretch (grid layout), not items-center gap-3.
+    expect(SOURCE).toMatch(/h-14.*items-stretch.*border-b|group\/row.*h-14/s);
   });
 
-  it('renders CoreLogo with catalogEntry?.logoUrl', () => {
-    expect(SOURCE).toMatch(/<CoreLogo\b/);
+  it('renders PlatformBadge with catalogEntry?.logoUrl (D11: replaces CoreLogo)', () => {
+    expect(SOURCE).toMatch(/<PlatformBadge\b/);
     expect(SOURCE).toContain('catalogEntry?.logoUrl');
   });
 
@@ -82,13 +83,18 @@ describe('CoresPane — sidebar logos and naming', () => {
     expect(SOURCE).toContain('customName ?? catalogEntry?.displayName ?? technicalId');
   });
 
-  it('conditionally renders subtitle when displayName !== technicalId', () => {
-    expect(SOURCE).toContain('showSubtitle');
-    expect(SOURCE).toContain('displayName !== technicalId');
+  it('always shows mono core-id (D11: replaces showSubtitle conditional)', () => {
+    // D11: core-id is always shown as the secondary mono line —
+    // eliminates the inconsistent rows where subtitle only showed
+    // when displayName !== technicalId.
+    expect(SOURCE).not.toContain('showSubtitle');
+    expect(SOURCE).toContain('technicalId');
+    // core-id rendered in mono fg-disabled
+    expect(SOURCE).toContain('font-mono text-body-sm text-fg-disabled');
   });
 
-  it('adds title attribute to display name span for truncation tooltip', () => {
-    expect(SOURCE).toContain('title={displayName}');
+  it('adds title attribute to core-id span for truncation tooltip', () => {
+    expect(SOURCE).toContain('title={technicalId}');
   });
 
   it('renders CoreRenameDialog with renameFor as core prop', () => {

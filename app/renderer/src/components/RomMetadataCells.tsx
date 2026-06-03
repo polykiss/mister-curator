@@ -550,8 +550,8 @@ export const DENSITY_EYE_CELL_CLASSNAMES = {
  *     which is now resolving against an absolutely-positioned parent
  *     with a defined size.
  *
- * Width: the column header (`<TableHead className="w-[3.25rem] p-0"/>`)
- * sets the column to ~52px; the body cell inherits that width from the
+ * Width: the column header (`<TableHead className="w-[3.5rem] p-0"/>`)
+ * sets the column to ~56px (D6: 24px density + 32px eye); the body cell inherits that width from the
  * table layout, so absolute-only content doesn't collapse the column.
  *
  * Adjacent-cell behavior: the absolutely-positioned wrapper doesn't

@@ -35,6 +35,12 @@ export interface StatusIndicatorProps {
   readonly progress: number;
   /** Pixel diameter of the circle. */
   readonly sizePx: number;
+  /**
+   * D12: suppress the halo entirely for list-row placements (sidebar
+   * cores list) where a glowing 7px dot per row creates visual noise.
+   * The color machine stays active — only the box-shadow is zeroed.
+   */
+  readonly noGlow?: boolean;
   /** Override for the screen-reader label. */
   readonly ariaLabel?: string;
   readonly className?: string;
@@ -43,12 +49,13 @@ export interface StatusIndicatorProps {
 export function StatusIndicator({
   progress,
   sizePx,
+  noGlow = false,
   ariaLabel,
   className,
 }: StatusIndicatorProps): JSX.Element {
   const p = clamp01(progress);
   const fill = statusIndicatorFillColor(p);
-  const glowPx = statusIndicatorGlowSpread(p);
+  const glowPx = noGlow ? 0 : statusIndicatorGlowSpread(p);
   const style: CSSProperties = {
     width: `${String(sizePx)}px`,
     height: `${String(sizePx)}px`,

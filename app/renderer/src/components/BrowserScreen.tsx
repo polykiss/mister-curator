@@ -7,6 +7,7 @@ import { ARCADE_VIRTUAL_CORE_ID } from '@shared/arcade-mra';
 import { coreDisplayName } from '@shared/core-matching';
 
 import { ArcadeMraPane } from '@app/renderer/src/components/ArcadeMraPane';
+import { BrandMark } from '@app/renderer/src/components/BrandMark';
 import { Button } from '@app/renderer/src/components/ui/button';
 import { CoresPane } from '@app/renderer/src/components/CoresPane';
 import { DisconnectBanner } from '@app/renderer/src/components/DisconnectBanner';
@@ -106,16 +107,7 @@ export function BrowserScreen(): JSX.Element {
       <DuplicateCoresBanner />
       <UpdateModeBanner />
       <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-subtle bg-chrome px-4">
-        <div className="min-w-0">
-          <div className="truncate text-body font-medium text-fg">
-            {currentProfile?.name ?? 'MiSTer'}
-          </div>
-          <div className="truncate font-mono text-body-sm text-fg-muted">
-            {currentProfile
-              ? `${currentProfile.username}@${currentProfile.host}:${currentProfile.port}`
-              : 'connected'}
-          </div>
-        </div>
+        <BrandMark tile={28} compact />
         <div className="flex shrink-0 items-center gap-2">
           <Button
             variant="secondary"
