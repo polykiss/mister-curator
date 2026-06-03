@@ -3,6 +3,8 @@ import type { JSX, ReactNode } from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
+import { DetailHeader } from '@app/renderer/src/components/DetailHeader';
+
 import type { SystemCatalogWireEntry, WikipediaSummary } from '@shared/preload-api';
 import type { CoreEntry } from '@shared/types';
 
@@ -49,34 +51,6 @@ export function CoreInfoDialog({
 
   const effectiveCatalog = catalog ?? localCatalog;
   const catalogEntry = core !== null ? (effectiveCatalog?.[core.id] ?? null) : null;
-
-  // ── logo fetch ─────────────────────────────────────────────────────
-  const logoUrlRef = useRef<string | null>(null);
-  const [logoObjectUrl, setLogoObjectUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (logoUrlRef.current !== null) {
-        URL.revokeObjectURL(logoUrlRef.current);
-        logoUrlRef.current = null;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    const url = catalogEntry?.logoUrl ?? null;
-    if (url === null) { setLogoObjectUrl(null); return; }
-    let cancelled = false;
-    void window.mister.getSystemLogoBytes(url).then((bytes) => {
-      if (cancelled || bytes === null) return;
-      const blob = new Blob([new Uint8Array(bytes)]);
-      if (logoUrlRef.current !== null) URL.revokeObjectURL(logoUrlRef.current);
-      const created = URL.createObjectURL(blob);
-      logoUrlRef.current = created;
-      setLogoObjectUrl(created);
-    });
-    return () => { cancelled = true; };
-  }, [catalogEntry?.logoUrl]);
 
   // ── console photo fetch ────────────────────────────────────────────
   const photoUrlRef = useRef<string | null>(null);
@@ -141,55 +115,25 @@ export function CoreInfoDialog({
         {core !== null ? (
           <>
             {/* ── header ─────────────────────────────────────────── */}
-            <div className="px-7 pb-5 pt-6">
-              <div className="mb-2 text-caption font-bold uppercase tracking-[0.19em] text-fg-muted">
-                Core info
-              </div>
-              <div className="flex flex-wrap items-center gap-[14px]">
-                {/* logo */}
-                <div className="flex h-12 items-center">
-                  {catalogEntry?.logoUrl !== null && catalogEntry !== null ? (
-                    logoObjectUrl !== null ? (
-                      <img
-                        src={logoObjectUrl}
-                        alt={displayName}
-                        className="max-h-12 max-w-[160px] object-contain invert"
-                      />
-                    ) : (
-                      <Skeleton className="h-12 w-[120px]" />
-                    )
-                  ) : (
-                    <span className="text-heading font-bold tracking-[-0.01em] text-fg">
-                      {displayName}
-                    </span>
+            <DetailHeader
+              kicker="Core info"
+              logoUrl={catalogEntry?.logoUrl ?? null}
+              logoAlt={displayName}
+              title={displayName}
+              chips={hasChips ? (
+                <div className="flex flex-wrap gap-[7px]">
+                  {catalogEntry!.company !== null && (
+                    <Chip dot>{catalogEntry!.company}</Chip>
+                  )}
+                  {(catalogEntry!.yearStart !== null || catalogEntry!.yearEnd !== null) && (
+                    <Chip>{formatYears(catalogEntry!.yearStart, catalogEntry!.yearEnd)}</Chip>
+                  )}
+                  {catalogEntry!.supportType !== null && (
+                    <Chip>{formatSupportType(catalogEntry!.supportType)}</Chip>
                   )}
                 </div>
-                {catalogEntry?.logoUrl !== null && catalogEntry !== null && (
-                  <>
-                    <span className="h-4 w-px bg-border-default" />
-                    <span className="text-heading font-bold tracking-[-0.01em] text-fg">
-                      {displayName}
-                    </span>
-                  </>
-                )}
-                {hasChips && (
-                  <>
-                    <span className="h-4 w-px bg-border-default" />
-                    <div className="flex flex-wrap gap-[7px]">
-                      {catalogEntry!.company !== null && (
-                        <Chip dot>{catalogEntry!.company}</Chip>
-                      )}
-                      {(catalogEntry!.yearStart !== null || catalogEntry!.yearEnd !== null) && (
-                        <Chip>{formatYears(catalogEntry!.yearStart, catalogEntry!.yearEnd)}</Chip>
-                      )}
-                      {catalogEntry!.supportType !== null && (
-                        <Chip>{formatSupportType(catalogEntry!.supportType)}</Chip>
-                      )}
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
+              ) : undefined}
+            />
 
             <hr className="border-border-default" />
 

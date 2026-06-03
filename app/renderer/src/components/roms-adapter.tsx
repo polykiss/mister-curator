@@ -197,6 +197,20 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     readonly filename: string;
   } | null>(null);
 
+  // D14: resolve the current core's system logo URL for DetailHeader.
+  // Fetches the catalog (already cached on the main side from CoresPane's
+  // earlier load) and extracts the logoUrl for this core. Resets on
+  // core change via the [core.id] dependency.
+  const [coreLogoUrl, setCoreLogoUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void window.mister.getSystemCatalog().then((catalog) => {
+      if (cancelled) return;
+      setCoreLogoUrl(catalog?.[core.id]?.logoUrl ?? null);
+    });
+    return () => { cancelled = true; };
+  }, [core.id]);
+
   // Reset drill state SYNCHRONOUSLY when the visible core changes so
   // the `ensureRoms` effect below never sees a stale subPath against a
   // new core. Without this, switching from `NEOGEO/1 World A-Z` to
@@ -1478,6 +1492,7 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
               path={detailDialogFor.path}
               filename={detailDialogFor.filename}
               metadata={metadataByPath[detailDialogFor.path]?.metadata ?? null}
+              systemLogoUrl={coreLogoUrl}
               open
               onOpenChange={(open) => {
                 if (!open) setDetailDialogFor(null);

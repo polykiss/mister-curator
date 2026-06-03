@@ -127,13 +127,14 @@ describe('CoresPane — buildMenuItems rename additions', () => {
   });
 });
 
-describe('CoresPane — CoreInfoDialog invert', () => {
-  // Verify the CoreInfoDialog file (same directory) got the invert fix.
-  it('CoreInfoDialog.tsx has invert on the logo img', () => {
-    const dialogSrc = readFileSync(
-      resolve(__dirname, 'CoreInfoDialog.tsx'),
+describe('CoresPane — CoreInfoDialog invert (D14: logo in DetailHeader)', () => {
+  // D14: the system logo img moved from CoreInfoDialog into DetailHeader.
+  // Verify the logo invert is now in DetailHeader.tsx instead.
+  it('DetailHeader.tsx has invert on the logo img (D14: logo delegated from CoreInfoDialog)', () => {
+    const detailHeaderSrc = readFileSync(
+      resolve(__dirname, 'DetailHeader.tsx'),
       'utf8',
     );
-    expect(dialogSrc).toMatch(/object-contain invert|invert.*object-contain/);
+    expect(detailHeaderSrc).toMatch(/object-contain.*invert|invert.*object-contain/);
   });
 });

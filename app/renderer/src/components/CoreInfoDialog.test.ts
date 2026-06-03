@@ -127,18 +127,19 @@ describe('CoreInfoDialog v2.0 — ScreenScraper section fields', () => {
   });
 });
 
-describe('CoreInfoDialog v2.0 — logo image', () => {
-  it('fetches logo via getSystemLogoBytes', () => {
-    expect(SOURCE).toContain('getSystemLogoBytes');
-    expect(SOURCE).toContain('logoUrl');
+describe('CoreInfoDialog v2.0 — logo image (D14: delegated to DetailHeader)', () => {
+  it('passes logoUrl to DetailHeader (logo fetch delegated, no inline fetch state)', () => {
+    // D14: the inline logo fetch (logoUrlRef / logoObjectUrl / useEffect)
+    // was removed from CoreInfoDialog and moved into DetailHeader. CoreInfo
+    // now just passes catalogEntry?.logoUrl to <DetailHeader>.
+    expect(SOURCE).toContain('DetailHeader');
+    expect(SOURCE).toContain('catalogEntry?.logoUrl');
+    expect(SOURCE).not.toContain('logoObjectUrl');
+    expect(SOURCE).not.toContain('logoUrlRef');
   });
 
-  it('shows img when logoObjectUrl is loaded', () => {
-    expect(SOURCE).toContain('logoObjectUrl');
-    expect(SOURCE).toContain('<img');
-  });
-
-  it('shows Skeleton while logo is loading', () => {
+  it('shows Skeleton while logo or console photo is loading', () => {
+    // CoreInfoDialog still uses <Skeleton> for the console photo loading state.
     expect(SOURCE).toContain('<Skeleton');
   });
 });
@@ -291,9 +292,14 @@ describe('CoreInfoDialog v2.0 — visual polish (phase 2 round 2)', () => {
     expect(SOURCE).not.toContain("'text-body font-medium leading-[1.35] text-fg'");
   });
 
-  it('system title uses text-heading (20px) as the focal point', () => {
-    expect(SOURCE).toContain('text-heading font-bold');
+  it('system title uses text-heading (20px) — delegated to DetailHeader (D14)', () => {
+    // D14: the title heading moved into DetailHeader's <h2>. CoreInfoDialog
+    // passes no explicit titleClassName so DetailHeader uses its default
+    // 'text-heading'. Verify that CoreInfoDialog does NOT hard-code the old
+    // inline heading span (which was next to the logo in the pre-D14 flex row).
     expect(SOURCE).not.toContain('text-heading-sm font-bold');
+    // CoreInfoDialog still uses the DetailHeader API (kicker/title/chips).
+    expect(SOURCE).toContain('kicker="Core info"');
   });
 
   it('StatGrid uses tighter row gap (gap-y-4)', () => {
