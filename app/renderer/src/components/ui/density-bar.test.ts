@@ -88,43 +88,41 @@ describe('densityRatio', () => {
 });
 
 describe('densityFillColor', () => {
-  it('returns the floor color verbatim at ratio 0', () => {
-    expect(densityFillColor(0, 'bg-surface')).toBe('hsl(var(--bg-surface))');
-    expect(densityFillColor(0, 'bg-elevated')).toBe('hsl(var(--bg-elevated))');
+  // D6 (rev. 2): `floor` arg removed — ramp is now fixed teal→green via
+  // --density-fill-low / --density-fill-high tokens.
+
+  it('returns the teal floor token at ratio 0', () => {
+    expect(densityFillColor(0)).toBe('hsl(var(--density-fill-low))');
   });
 
-  it('returns the accent color at ratio 1', () => {
-    expect(densityFillColor(1, 'bg-surface')).toBe('hsl(var(--accent))');
-    expect(densityFillColor(1, 'bg-elevated')).toBe('hsl(var(--accent))');
+  it('returns the high (accent) token at ratio 1', () => {
+    expect(densityFillColor(1)).toBe('hsl(var(--density-fill-high))');
   });
 
   it('returns a color-mix(in oklch, …) expression at the perceptual midpoint', () => {
-    const result = densityFillColor(0.5, 'bg-surface');
+    const result = densityFillColor(0.5);
     expect(result).toContain('color-mix(in oklch,');
-    expect(result).toContain('hsl(var(--bg-surface)) 50.00%');
-    expect(result).toContain('hsl(var(--accent)) 50.00%');
+    expect(result).toContain('hsl(var(--density-fill-low)) 50.00%');
+    expect(result).toContain('hsl(var(--density-fill-high)) 50.00%');
   });
 
-  it('honors the floor token in the mix expression', () => {
-    expect(densityFillColor(0.25, 'bg-elevated')).toContain(
-      'hsl(var(--bg-elevated)) 75.00%',
-    );
-    expect(densityFillColor(0.25, 'bg-elevated')).toContain(
-      'hsl(var(--accent)) 25.00%',
-    );
+  it('uses the fixed teal floor token in the mix expression at 0.25', () => {
+    const result = densityFillColor(0.25);
+    expect(result).toContain('hsl(var(--density-fill-low)) 75.00%');
+    expect(result).toContain('hsl(var(--density-fill-high)) 25.00%');
   });
 
-  it('clamps a negative ratio to the floor color', () => {
-    expect(densityFillColor(-0.5, 'bg-surface')).toBe('hsl(var(--bg-surface))');
+  it('clamps a negative ratio to the teal floor token', () => {
+    expect(densityFillColor(-0.5)).toBe('hsl(var(--density-fill-low))');
   });
 
-  it('clamps a ratio above 1 to the accent color', () => {
-    expect(densityFillColor(2, 'bg-elevated')).toBe('hsl(var(--accent))');
+  it('clamps a ratio above 1 to the high (accent) token', () => {
+    expect(densityFillColor(2)).toBe('hsl(var(--density-fill-high))');
   });
 
   it('produces percentages that sum to 100 for any in-range ratio', () => {
     for (const r of [0.1, 0.33, 0.5, 0.67, 0.9]) {
-      const result = densityFillColor(r, 'bg-surface');
+      const result = densityFillColor(r);
       const matches = [...result.matchAll(/(\d+\.\d+)%/g)].map((m) =>
         Number.parseFloat(m[1]!),
       );
@@ -138,7 +136,7 @@ describe('densityFillColor', () => {
     // to a default `color-mix(...)` (which mixes in sRGB and produces
     // a muddy midpoint). The point of this indicator is perceptual
     // uniformity — see SYSTEM.md §10.
-    expect(densityFillColor(0.5, 'bg-surface')).toMatch(/in oklch/);
+    expect(densityFillColor(0.5)).toMatch(/in oklch/);
   });
 });
 
@@ -173,9 +171,12 @@ describe('DensityBar — render shape (PR-A item 9)', () => {
     expect(cn).not.toMatch(/\b[mp][ytb]-\d/);
   });
 
-  it('keeps the §10 ratio: 20px wide, shrink-0', () => {
+  it('keeps the D6 width: 24px wide (w-6), shrink-0', () => {
+    // D6 (rev. 2, final mockup): bar finalized at w-6 (24px) —
+    // identical width in the cores sidebar and the ROM list.
     const cn = classNameFor();
-    expect(cn).toContain('w-5');
+    expect(cn).toContain('w-6');
+    expect(cn).not.toContain('w-10');
     expect(cn).toContain('shrink-0');
   });
 

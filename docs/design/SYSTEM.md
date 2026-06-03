@@ -1,8 +1,8 @@
 # MiSTerCurator Design System
 
 Status: **Locked (rev. 2).** Phase 1 proposal accepted with revisions;
-Phase 2 applies it across the app. Rev. 2 ratifies three field
-divergences — see section 9 (Decisions) D6–D8 and the amended §5 / §10.
+Phase 2 applies it across the app. Rev. 2 ratifies eight field
+divergences — see section 9 (Decisions) D6–D13 and the amended §4 / §5 / §10.
 
 This document is the single coherent visual identity that replaces the
 cumulative drift accumulated across MVP iterations. It is the reference
@@ -101,10 +101,11 @@ A nod to LED indicators and CRT phosphor — culturally aligned with the
 audience, and lifted directly from the SmartShort reference. Reserved
 for active navigation state and one primary CTA per screen.
 **One sanctioned exception:** the brand mark (the pixel-M monogram)
-renders in `accent` as identity, and only inside the wordmark lockup
-(connection screen, app header). This is the single non-state,
-non-CTA use of accent permitted in the system. It is still never used
-for status or success.
+renders in `accent` as identity — either inside the full wordmark
+lockup (connection screen) or as the bare monogram alone (the quiet
+app-presence mark at the far left of the browser's top header). This
+is the single non-state, non-CTA use of accent permitted in the system.
+It is still never used for status or success.
 
 | Token            | Hex       | Use                                                  |
 | ---------------- | --------- | ---------------------------------------------------- |
@@ -234,7 +235,7 @@ Tailwind's 4px base scale stays. The system uses these tokens:
 
 | Element                    | Height | Note                                                  |
 | -------------------------- | ------ | ----------------------------------------------------- |
-| List row (cores, ROMs)     | **40px** | Tight enough for 50+ visible; loose enough to click  |
+| List row (cores, ROMs)     | **56px** (`h-14`) | Holds a 48px logo/thumbnail; still scannable at ~40 visible. Was 40px in rev. 1 — raised once art entered the row. |
 | Header (top app chrome)    | 56px   |                                                       |
 | Status bar                 | 32px   | Caption type only                                     |
 | Button (default)           | 32px   | sm: 28px, lg: 36px                                    |
@@ -277,7 +278,7 @@ are correct.
                                                                 rectangle
 ```
 
-- Height 40px, paddingX 16px, no borders by default
+- Height **56px** (`h-14`), paddingX 16px, no borders by default
 - Bottom: `border-subtle` (one-line separator across the panel)
 - Hover: `bg-elevated` (cores) / `bg-overlay` (ROMs, since the ROMs
   pane sits on `bg-elevated` already — see §4 / pane elevation), with
@@ -334,11 +335,42 @@ generic placeholder icon. The two cases are mutually exclusive:
   `fg-primary`, left-aligned. Do **not** also show the gamepad icon,
   and do not repeat the name in the metadata column.
 
-Beside the identity sits the **core-id subtitle** in `font-mono`
-`body-sm` `fg-muted` (e.g. `MRA`, `Minimig`, `AO486`, `MegaCD`,
-`MegaDrive`, `MSX1`) — the technical core string, distinct from the
-human identity. This removes the rev. 1 redundancy where logo + name
-+ core-id repeated the same token three times (e.g. "MSX / MSX / MSX").
+Beside the identity sits the **core-id** in `font-mono` `body-sm`
+`fg-disabled` (e.g. `MRA`, `Minimig`, `AO486`, `MegaCD`, `MegaDrive`,
+`MSX1`) — the technical core string, always shown. When two visible
+cores share a display name (the two MSX cores), the core-id is the
+disambiguator and may be promoted into the badge slot so the rows read
+distinctly.
+
+The scrape-progress `StatusIndicator` renders at **7px with no halo** in
+the cores-list row (the color still encodes progress: cold-blue = not
+yet scraped, green = metadata resolved). The larger glowing form is
+reserved for the footer's active-scrape indicator.
+
+### PlatformBadge (D11)
+
+The leading identity slot of every cores-list row: a fixed **104×40** box.
+- **Logo present**: the monochrome system logo normalized to a **26px
+  cap-height** (`width: auto`, clamped to the box), left-aligned. Every
+  system therefore sits at the same visual size and baseline.
+- **No logo**: the core name as a wordmark (`heading-sm`/700) in the
+  same box. Logo-less cores (Amiga, Arcade, DOS Games) are NOT a
+  separate bare-text row type — they use the badge slot like everyone else.
+
+### ROMs-pane view toolbar (D13)
+
+On the ROMs-pane search row, after the filter input:
+- **View-mode toggle** — segmented `[list | poster]`. Active segment uses
+  `bg-overlay` fill + `accent` icon; inactive is `fg-muted`.
+- **Scale stepper** — `−  [S|M|L|XL]  +` in a single bordered group;
+  the current size shows in mono. Drives `viewSize` (tile/row density).
+- **Sort-by dropdown** — rendered **only in poster mode** (list/detailed
+  sort via clickable column headers, which poster lacks). Options mirror
+  the list columns: Name / Year / Genre / Rating / Size, with an asc/desc
+  direction. Wired to the same sort state the list headers use.
+
+"Show MAME / HBMame as separate cores" is NOT in the cores-sidebar
+header — it lives in the Settings dialog.
 
 ### Wordmark / brand mark (rev. 2)
 
@@ -434,18 +466,29 @@ This is also the shape for the disconnect banner that PR #8 introduced
 (which is currently reverted) — the system pre-defines its surface so
 it lands consistent.
 
-### Status bar
+### Status bar (rev. 2)
 
-32px, `border-t border-subtle`, lives at bottom of window. Slot layout:
+32px, `border-t border-subtle`, `bg-chrome`, caption type. Two zones:
+
+- **Left** — transient op / scrape message, the scrape `StatusIndicator`,
+  and the bulk-op progress bar. (Unchanged from rev. 1.)
+- **Right — connection identity zone:** profile name (`fg`, normal-case)
+  · `username@host:port` (mono, `fg-muted`) · status dot + state label.
+  This is the single home for connection identity; the top header no
+  longer shows it.
 
 ```
-●  Connected  ·  bedroom-mister  ·  192.168.1.42:22                          1247 ROMs · 312 hidden
+◐ Scraping NES (18/681) ……… bedroom-mister · root@192.168.1.42:22 · ● CONNECTED
 ```
 
-- Caption type, single line
 - Bullet (`·`) separators are `fg-disabled`
-- Host slot is mono
-- Right-aligned slot: counts (mono), or progress text during bulk ops
+- Host segment is mono
+
+The browser top header (`h-14 bg-chrome`) carries the **brand lockup on
+the left** (pixel-M monogram + compact wordmark, tile 28) and the real
+actions on the right (Refresh / Settings / Disconnect). It does NOT show
+the profile name or host — those live in the status bar's identity zone
+(rev. 2, superseding PR-A item 7).
 
 ### Modals
 
@@ -600,12 +643,17 @@ anyone re-reading the document.
 | -- | ------------ | ----------------------------------------------------------------------------------------- |
 | Q1 | Accent       | **Signal green `#B8F500`**. No dual-accent rule — cores and ROMs differ by icon + layout. |
 | Q2 | Typography   | **IBM Plex Sans + IBM Plex Mono**. Self-hosted woff2 (CSP blocks Google Fonts CDN).       |
-| Q3 | Row density  | **40px** rows.                                                                            |
+| Q3 | Row density  | **56px (`h-14`) rows** (rev. 2). Raised from 40px so a logo/box-art tile fits the row without clipping; density target is now ~40 visible rather than 50+. |
 | Q4 | Light mode   | **Defer to post-v0.1.0.** Tokens wired for both modes; `<body>` forced to `dark`.         |
 | Q5 | Wordmark | **Pixel-M monogram (accent) + monochrome wordmark.** Plex Sans 700, -0.02em. Logo carries the accent; wordmark stays fg-primary. (rev. 2) |
-| D6 | Density bar | Full-height, ~row-width, solid teal→green fill. §10 amended. |
-| D7 | Core identity | Logo OR name-wordmark; no gamepad fallback; mono core-id subtitle. §5 amended. |
-| D8 | Brand mark | Pixel-M monogram in accent (sanctioned exception). §2/§5 amended. |
+| D6  | Density bar        | Full-height, 24px wide, solid teal→green fill. §10 amended. |
+| D7  | Core identity      | Logo OR name-wordmark; no gamepad fallback; mono core-id subtitle. §5 amended. |
+| D8  | Brand mark         | Pixel-M monogram in accent (sanctioned exception). §2/§5 amended. |
+| D9  | Row height         | List rows are 56px (`h-14`), not 40px. §4 / §9-Q3 amended. |
+| D10 | Identity location  | Connection identity (name + host + state) lives in the status-bar right zone; the top header is brand + actions. Supersedes PR-A item 7. §5 amended. |
+| D11 | PlatformBadge      | Fixed 104×40 badge; logo normalized to 26px cap-height; name-wordmark fallback; always-shown mono core-id. New §5 entry. |
+| D12 | Scrape dot         | `StatusIndicator` is 7px + haloless in list rows (color encoding kept). §5 amended. |
+| D13 | ROMs view toolbar  | list/poster toggle + S–XL scale stepper; poster mode adds a Sort-by dropdown (Name/Year/Genre/Rating/Size) since it has no column headers. MAME-as-cores toggle lives in Settings. §5 amended. |
 
 A few notes on the choices:
 
@@ -661,8 +709,8 @@ Cores list (bg-surface)              ROMs list (bg-elevated)
 
 - **Geometry**: pinned to the row's right edge, after any trailing
   actions. Full row height, top and bottom flush to the row edges
-  (≤1px breathing). Width = **~40px** (≈ row height, 2× the rev. 1
-  ~20px). No border-radius.
+  (≤1px breathing). Width = **24px** (`w-6`) — identical in the cores
+  sidebar and the ROM list (final mockup value). No border-radius.
 - **Fill**: a single flat color along a fixed **teal → signal-green**
   density ramp, indexed by `r = clamp(value / max, 0, 1)`:
   `color-mix(in oklch, hsl(var(--density-fill-low)) <(1 − r)×100%>,

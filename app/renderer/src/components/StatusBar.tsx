@@ -43,6 +43,7 @@ export function StatusBar(): JSX.Element {
     autoRetryFailed,
     connectingElapsedMs,
     connectingPhase,
+    currentProfile,
   } = useConnection();
   const autoScrape = useAutoScrapeProgress();
   const autoScrapeProgress = useActiveScrapeProgress();
@@ -135,7 +136,19 @@ export function StatusBar(): JSX.Element {
           </div>
         ) : null}
       </div>
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="flex shrink-0 items-center gap-1.5">
+        {currentProfile !== null ? (
+          <>
+            <span className="normal-case tracking-normal text-fg">
+              {currentProfile.name}
+            </span>
+            <span className="text-fg-disabled" aria-hidden>·</span>
+            <span className="font-mono normal-case tracking-normal text-fg-muted">
+              {currentProfile.username}@{currentProfile.host}:{String(currentProfile.port)}
+            </span>
+            <span className="text-fg-disabled" aria-hidden>·</span>
+          </>
+        ) : null}
         <span
           aria-hidden
           className={cn(

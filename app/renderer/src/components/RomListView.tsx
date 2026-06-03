@@ -258,18 +258,21 @@ export function RomListView({
                   right-edge stack so the row's primary visibility
                   toggle owns the far-right slot. */}
               <TableHead className="w-10" aria-label="Actions" />
-              {/* Combined density + eye column. "Size" label is
-                  left-aligned so it sits above the density bar
-                  (the left-hand portion of the cell) rather than
-                  above the eye icon (the right-hand portion).
-                  Width = 20 (density) + 32 (eye) ≈ 52px. */}
-              <SortableHeader
-                label="Size"
-                sortKey="size"
-                className="w-[3.25rem] p-0"
-                sortState={sortState}
-                onSort={(k) => onSortChange(k)}
-              />
+              {/* Combined density + eye column. Plain centered "Size"
+                  label — no sort arrow (Name carries the active caret).
+                  Still clickable to sort by size.
+                  Width = 24 (density w-6) + 32 (eye) = 56px (w-[3.5rem]). */}
+              <TableHead className="w-[3.5rem] p-0 text-center">
+                <button
+                  type="button"
+                  onClick={() => onSortChange('size')}
+                  className="inline-flex w-full items-center justify-center text-inherit transition-colors hover:text-fg"
+                  aria-label={`Sort by Size${sortState.key === 'size' ? ` (currently ${sortState.dir})` : ''}`}
+                  aria-sort={sortState.key === 'size' ? (sortState.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+                >
+                  Size
+                </button>
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -315,7 +318,7 @@ export function RomListView({
                 <TableCell className="w-28" />
                 <TableCell className="w-14" />
                 <TableCell className="w-10" />
-                <TableCell className="w-[3.25rem] p-0" />
+                <TableCell className="w-[3.5rem] p-0" />
               </TableRow>
             ) : null}
             {presentableRoms.map((rom) => {
@@ -655,7 +658,7 @@ export function RomListView({
                       actual row ~56px, not the declared 40px).
                       Arcade subfolder rows skip this cell too. */}
                   {isFolder ? (
-                    <TableCell className="w-[3.25rem] p-0" />
+                    <TableCell className="w-[3.5rem] p-0" />
                   ) : (
                     <RomDensityEyeCell
                       rom={rom}

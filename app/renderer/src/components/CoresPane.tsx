@@ -10,7 +10,7 @@ import { coreDisplayName, isCoreHidden } from '@shared/core-matching';
 import type { CoreEntry } from '@shared/types';
 
 import { CoreInfoDialog } from '@app/renderer/src/components/CoreInfoDialog';
-import { CoreLogo } from '@app/renderer/src/components/CoreLogo';
+import { PlatformBadge } from '@app/renderer/src/components/PlatformBadge';
 import { CoreRenameDialog } from '@app/renderer/src/components/CoreRenameDialog';
 import type { RomRowMenuItem } from '@app/renderer/src/components/RomRowMenu';
 import { RomRowMenu } from '@app/renderer/src/components/RomRowMenu';
@@ -556,6 +556,16 @@ function renderCoreList(args: RenderArgs): JSX.Element {
     return v > acc ? v : acc;
   }, 0);
 
+  // D11: when two visible cores share a display name (e.g. the two MSX
+  // cores), promote the core-id into the badge's name slot so rows read
+  // distinctly even if both share the same logo.
+  const resolveName = (c: CoreEntry): string =>
+    args.customNames.customName(c.id) ?? args.catalog?.[c.id]?.displayName ?? coreDisplayName(c.id);
+  const nameList = args.visibleCores.map(resolveName);
+  const dupeNames = new Set(
+    nameList.filter((n) => nameList.indexOf(n) !== nameList.lastIndexOf(n)),
+  );
+
   return (
     <ul
       // PR #23 round 5 commit 1: `scroll-themed` reserves a stable
@@ -582,13 +592,15 @@ function renderCoreList(args: RenderArgs): JSX.Element {
         const technicalId = coreDisplayName(core.id);
         const customName = args.customNames.customName(core.id);
         const displayName = customName ?? catalogEntry?.displayName ?? technicalId;
-        const showSubtitle = displayName !== technicalId;
+        // D11: for colliding display names, promote the core-id into
+        // the badge slot so the two MSX rows read as "MSX" / "MSX1".
+        const badgeName = dupeNames.has(displayName) ? technicalId : displayName;
 
         return (
           <li
             key={core.id}
             className={cn(
-              'group/row relative flex h-14 items-center gap-3 border-b border-subtle pl-4 text-body transition-colors',
+              'group/row relative flex h-14 items-stretch border-b border-subtle text-body transition-colors',
               !isSelected && 'hover:bg-elevated',
               isSelected && 'bg-overlay',
               // Hidden rows lean entirely on dimming: opacity +
@@ -614,38 +626,29 @@ function renderCoreList(args: RenderArgs): JSX.Element {
               role="option"
               aria-selected={isSelected}
               onClick={() => args.onSelect(core.id)}
-              className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none"
+              // D11/D12: grid row — dot(10px) · badge(104px) · core-id(1fr) · count(96px).
+              // pl-4 keeps the accent edge clear; gap-[13px] between columns.
+              className="grid min-w-0 flex-1 items-center gap-[13px] pl-4 text-left focus-visible:outline-none"
+              style={{ gridTemplateColumns: '10px 104px 1fr 96px' }}
             >
-              {/* fix/count-and-status-indicator commit 2 — placed before
-                  the logo so the indicator column stays fixed. */}
+              {/* D12: 7px flat dot, no halo in the list. */}
               <StatusIndicator
                 progress={progressForCore(core.id, args.autoScrapeProgress)}
-                sizePx={12}
+                sizePx={7}
+                noGlow
                 ariaLabel={`Scrape progress for ${displayName}`}
               />
 
-              <CoreLogo url={catalogEntry?.logoUrl ?? null} />
+              {/* D11: PlatformBadge — logo or name wordmark, fixed 104×40. */}
+              <PlatformBadge url={catalogEntry?.logoUrl ?? null} name={badgeName} />
 
-              <div className="flex min-w-0 flex-col items-start">
-                <span
-                  className={cn(
-                    'w-full truncate',
-                    isSelected && !isHiddenCore && 'font-medium text-fg',
-                  )}
-                  title={displayName}
-                >
-                  {displayName}
-                </span>
-                {showSubtitle && (
-                  <span className="w-full truncate text-body-sm text-fg-muted">
-                    {technicalId}
-                  </span>
-                )}
-              </div>
-
-              <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-body-sm text-fg-muted tabular">
-                <CoreCountSummary core={core} />
+              {/* D11: always-shown mono core-id — the technical disambiguator. */}
+              <span className="truncate font-mono text-body-sm text-fg-disabled" title={technicalId}>
+                {technicalId}
               </span>
+
+              {/* D11: fixed two-column count grid so totals align vertically. */}
+              <CoreCountSummary core={core} />
             </button>
 
             {/* Right-edge stack: density rectangle flush against the
@@ -773,19 +776,19 @@ export function CoreCountSummary({ core }: { readonly core: CoreEntry }): JSX.El
   // scan resolves; both fall through to the legacy display.
   if (core.arcadePlayableCount !== undefined) {
     return (
-      <>
-        <span className="min-w-[2.5rem] text-right">{core.arcadePlayableCount}</span>
-        <span className="text-fg-disabled">({total})</span>
-      </>
+      <span className="grid grid-cols-[42px_48px] items-baseline gap-1 font-mono tabular">
+        <span className="text-right text-body text-fg-body">{core.arcadePlayableCount}</span>
+        <span className="text-left text-body-sm text-fg-disabled">({total})</span>
+      </span>
     );
   }
   const hidden = core.recursiveHiddenCount ?? core.hiddenCount;
   return (
-    <>
-      <span className="min-w-[2.5rem] text-right">{total}</span>
-      {hidden > 0 ? (
-        <span className="text-fg-disabled">({hidden})</span>
-      ) : null}
-    </>
+    <span className="grid grid-cols-[42px_48px] items-baseline gap-1 font-mono tabular">
+      <span className="text-right text-body text-fg-body">{total}</span>
+      <span className="text-left text-body-sm text-fg-disabled">
+        {hidden > 0 ? `(${hidden})` : ''}
+      </span>
+    </span>
   );
 }

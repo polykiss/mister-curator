@@ -40,9 +40,17 @@ export function PixelM({ size = 28 }: { readonly size?: number }): JSX.Element {
  * wordmark. The lime lives only in the monogram (and the primary CTA),
  * keeping the one-accent discipline — the wordmark stays `fg-primary`.
  *
- * `tile` sizes the monogram tile; the wordmark uses `text-display`.
+ * `tile` sizes the monogram tile; the wordmark uses `text-display` by
+ * default. Pass `compact` to render at `text-heading` (20px) for the
+ * browser header's 56px chrome.
  */
-export function BrandMark({ tile = 44 }: { readonly tile?: number }): JSX.Element {
+export function BrandMark({
+  tile = 44,
+  compact = false,
+}: {
+  readonly tile?: number;
+  readonly compact?: boolean;
+}): JSX.Element {
   return (
     <div className="flex items-center gap-4">
       <div
@@ -51,7 +59,9 @@ export function BrandMark({ tile = 44 }: { readonly tile?: number }): JSX.Elemen
       >
         <PixelM size={Math.round(tile * 0.62)} />
       </div>
-      <h1 className="text-display tracking-[-0.02em] text-fg">MiSTerCurator</h1>
+      <h1 className={compact ? 'text-heading tracking-[-0.02em] text-fg' : 'text-display tracking-[-0.02em] text-fg'}>
+        MiSTerCurator
+      </h1>
     </div>
   );
 }

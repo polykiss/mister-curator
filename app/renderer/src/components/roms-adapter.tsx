@@ -72,6 +72,7 @@ import { usePersistedString } from '@app/renderer/src/lib/use-persisted-string';
 import { filterRoms } from '@app/renderer/src/lib/filter-roms';
 import { FilterInput } from '@app/renderer/src/components/FilterInput';
 import { RomPosterView } from '@app/renderer/src/components/RomPosterView';
+import { SortDropdown } from '@app/renderer/src/components/SortDropdown';
 import { ViewModeToggle } from '@app/renderer/src/components/ViewModeToggle';
 import { SizeControl } from '@app/renderer/src/components/SizeControl';
 import type { ViewMode, ViewSize } from '@app/renderer/src/lib/roms-view-props';
@@ -1175,6 +1176,9 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
           />
           <ViewModeToggle value={viewMode} onChange={setViewMode} />
           <SizeControl value={viewSize} onChange={setViewSize} />
+          {viewMode === 'poster' ? (
+            <SortDropdown value={sortState} onChange={onSortChange} />
+          ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button

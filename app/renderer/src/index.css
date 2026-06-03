@@ -126,7 +126,7 @@
     --destructive: 358 75% 59%;
     --info: 219 100% 74%;
     /* Density-indicator gradient stops — see SYSTEM.md §10 */
-    --density-fill-low: 218 9% 40%;     /* same as fg-muted */
+    --density-fill-low: 168 64% 38%;    /* teal floor of the density ramp */
     --density-fill-high: 75 100% 48%;   /* same as accent */
     --density-track: 36 14% 94%;        /* same as bg-elevated, light */
     /* Themed scrollbar — PR #23 round 5. Track sits one elevation tier
@@ -167,7 +167,7 @@
     --destructive: 358 75% 59%;
     --info: 219 100% 74%;
     /* Density-indicator gradient stops */
-    --density-fill-low: 218 8% 57%;     /* same as fg-muted, dark */
+    --density-fill-low: 168 64% 38%;    /* teal floor of the density ramp */
     --density-fill-high: 75 100% 48%;   /* same as accent */
     --density-track: 213 19% 11%;       /* same as bg-elevated, dark */
     /* Themed scrollbar — see light-mode comment above. */

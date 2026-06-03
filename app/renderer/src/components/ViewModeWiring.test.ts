@@ -11,6 +11,10 @@ const ARCADE_ADAPTER = readFileSync(
   resolve(__dirname, 'arcade-adapter.tsx'),
   'utf8',
 );
+const SORT_DROPDOWN = readFileSync(
+  resolve(__dirname, 'SortDropdown.tsx'),
+  'utf8',
+);
 
 describe('view-mode wiring — roms-adapter (refactor/unify-list-views)', () => {
   it('imports ViewModeToggle, RomPosterView, usePersistedString (no RomDetailedListView)', () => {
@@ -146,5 +150,38 @@ describe('RomListView — unified size-aware rendering (refactor/unify-list-view
 
   it('Missing ROMs badge preserved for arcade rows', () => {
     expect(LIST_VIEW).toContain('Missing ROMs');
+  });
+});
+
+describe('SortDropdown — poster-mode sort control (D13)', () => {
+  it('renders only in poster mode (guarded by viewMode === poster in roms-adapter)', () => {
+    // The dropdown must be inside a viewMode === 'poster' conditional —
+    // list view uses clickable column headers, poster lacks those.
+    expect(ROMS_ADAPTER).toMatch(/viewMode === 'poster'[\s\S]{0,200}SortDropdown/);
+  });
+
+  it('is wired to sortState and onSortChange (same state as list headers)', () => {
+    expect(ROMS_ADAPTER).toMatch(/SortDropdown[\s\S]{0,100}value=\{sortState\}/);
+    expect(ROMS_ADAPTER).toMatch(/SortDropdown[\s\S]{0,100}onChange=\{onSortChange\}/);
+  });
+
+  it('covers all five sort keys (Name/Year/Genre/Rating/Size)', () => {
+    expect(SORT_DROPDOWN).toContain("'name'");
+    expect(SORT_DROPDOWN).toContain("'year'");
+    expect(SORT_DROPDOWN).toContain("'genre'");
+    expect(SORT_DROPDOWN).toContain("'rating'");
+    expect(SORT_DROPDOWN).toContain("'size'");
+  });
+
+  it('direction toggle calls onChange with the current key (triggers nextSortState asc↔desc flip)', () => {
+    // The chevron button calls `onChange(value.key)` — selecting the
+    // active key via nextSortState semantics flips the direction.
+    expect(SORT_DROPDOWN).toMatch(/onChange\(value\.key\)/);
+  });
+
+  it('uses ChevronUp for asc, ChevronDown for desc', () => {
+    expect(SORT_DROPDOWN).toContain('ChevronUp');
+    expect(SORT_DROPDOWN).toContain('ChevronDown');
+    expect(SORT_DROPDOWN).toMatch(/value\.dir === 'asc'/);
   });
 });

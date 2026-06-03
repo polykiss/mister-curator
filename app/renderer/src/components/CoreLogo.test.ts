@@ -44,10 +44,13 @@ describe('CoreLogo — structural contract', () => {
     expect(SOURCE).toContain('invert');
   });
 
-  it('renders Gamepad2 fallback when url is null', () => {
-    expect(SOURCE).toContain('Gamepad2');
-    expect(SOURCE).toMatch(/<Gamepad2\b/);
+  it('returns null (no gamepad fallback) when url is null (D7 rev. 2)', () => {
+    // D7: logo if available, otherwise name carries identity — never a
+    // generic gamepad icon. The no-logo branch must return null, not
+    // render a <Gamepad2> placeholder.
+    expect(SOURCE).not.toContain('Gamepad2');
     expect(SOURCE).toContain('url === null');
+    expect(SOURCE).toContain('return null');
   });
 
   it('sets aria-hidden on the img (decorative)', () => {
