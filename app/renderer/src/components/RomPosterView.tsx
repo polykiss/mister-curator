@@ -1,4 +1,4 @@
-import { Eye, EyeOff, FolderOpen, ImageOff } from 'lucide-react';
+import { Check, Eye, EyeOff, FolderOpen, ImageOff } from 'lucide-react';
 import type { JSX } from 'react';
 import { useEffect, useRef, useState } from 'react';
 
@@ -163,7 +163,7 @@ function PosterTile({
         </div>
       ) : null}
 
-      {/* Checkbox — top-left, visible on hover or when selected */}
+      {/* D20: corner checkmark — filled accent when selected, outline on hover */}
       <div
         className={cn(
           'absolute left-1.5 top-1.5 transition-opacity',
@@ -171,13 +171,25 @@ function PosterTile({
         )}
         onClick={(e) => e.stopPropagation()}
       >
-        <input
-          type="checkbox"
-          className="accent-accent h-4 w-4 cursor-pointer rounded"
-          aria-label={`Select ${displayName}`}
-          checked={isSelected}
-          onChange={(e) => onToggleSelect(checkboxKey, e.target.checked)}
-        />
+        <label className="cursor-pointer">
+          <input
+            type="checkbox"
+            className="sr-only"
+            aria-label={`Select ${displayName}`}
+            checked={isSelected}
+            onChange={(e) => onToggleSelect(checkboxKey, e.target.checked)}
+          />
+          <span
+            className={cn(
+              'grid size-5 place-items-center rounded-[5px] border transition-colors',
+              isSelected
+                ? 'border-accent bg-accent text-accent-fg'
+                : 'border-fg-muted/60 bg-canvas/60 text-transparent',
+            )}
+          >
+            <Check className="size-3.5" strokeWidth={3} aria-hidden />
+          </span>
+        </label>
       </div>
 
       {/* Eye toggle — top-right, visible on hover */}

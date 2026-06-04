@@ -34,15 +34,18 @@ import {
   DEFAULT_SORT,
   nextSortState,
   sortRoms,
+  type SortDir,
   type SortKey,
   type SortState,
 } from '@app/renderer/src/lib/rom-sort';
 import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
 import { usePersistedString } from '@app/renderer/src/lib/use-persisted-string';
 import { filterArcadeEntries } from '@app/renderer/src/lib/filter-arcade';
+import { CountPill } from '@app/renderer/src/components/CountPill';
 import { FilterInput } from '@app/renderer/src/components/FilterInput';
 import { RomListView } from '@app/renderer/src/components/RomListView';
 import { RomPosterView } from '@app/renderer/src/components/RomPosterView';
+import { Switch } from '@app/renderer/src/components/ui/switch';
 import { ViewModeToggle } from '@app/renderer/src/components/ViewModeToggle';
 import { SizeControl } from '@app/renderer/src/components/SizeControl';
 import type { ArcadeRowContext, ViewMode, ViewSize } from '@app/renderer/src/lib/roms-view-props';
@@ -80,13 +83,14 @@ import type { ArcadeRowContext, ViewMode, ViewSize } from '@app/renderer/src/lib
 export function useArcadeAdapter(): ItemListAdapter {
   const { status, currentProfile } = useConnection();
   const host = currentProfile?.host ?? 'default';
+  // D26-fix: same unified host-global key as roms-adapter.
   const [viewMode, setViewMode] = usePersistedString<ViewMode>(
-    `mistercurator.viewMode.arcade.${host}`,
+    `mistercurator.viewMode.${host}`,
     'list',
     ['list', 'poster'],
   );
   const [viewSize, setViewSize] = usePersistedString<ViewSize>(
-    `mistercurator.viewSize.arcade.${host}`,
+    `mistercurator.viewSize.${host}`,
     'M',
     ['S', 'M', 'L', 'XL'],
   );
@@ -130,9 +134,21 @@ export function useArcadeAdapter(): ItemListAdapter {
   const [selectedKeys, setSelectedKeys] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
-  // feat/arcade-parity-3-ui (G8) — per-pane sort state, not persisted
-  // (matches RomsPane). Switching panes resets to the default.
-  const [sortState, setSortState] = useState<SortState>(DEFAULT_SORT);
+  // Host-global sort persistence — same key + SORT_VALID as roms-adapter.
+  const SORT_VALID = [
+    'name:asc', 'name:desc', 'year:asc', 'year:desc',
+    'genre:asc', 'genre:desc', 'rating:asc', 'rating:desc',
+    'size:asc', 'size:desc',
+  ] as const;
+  const [sortRaw, setSortRaw] = usePersistedString(
+    `mistercurator.sort.${host}`,
+    `${DEFAULT_SORT.key}:${DEFAULT_SORT.dir}`,
+    SORT_VALID,
+  );
+  const sortState: SortState = (() => {
+    const [k, d] = sortRaw.split(':');
+    return { key: k as SortKey, dir: d as SortDir };
+  })();
   // feat/filter-as-you-type (#21) — per-pane text filter. Not persisted.
   const [filterText, setFilterText] = useState('');
   const deferredFilter = useDeferredValue(filterText);
@@ -371,8 +387,9 @@ export function useArcadeAdapter(): ItemListAdapter {
   // refactor/arcade-under-rom-list-view: sort-change callback and
   // metadataByPath conversion needed by RomListView.
   const onSortChange = useCallback((key: SortKey) => {
-    setSortState((prev) => nextSortState(prev, key));
-  }, []);
+    const next = nextSortState({ key: sortRaw.split(':')[0] as SortKey, dir: sortRaw.split(':')[1] as SortDir }, key);
+    setSortRaw(`${next.key}:${next.dir}`);
+  }, [setSortRaw, sortRaw]);
 
   // metadataByPath for RomListView: convert metadataByMra (keyed by
   // relativePath) to the {metadata, error} shape keyed by rom.path
@@ -853,124 +870,146 @@ export function useArcadeAdapter(): ItemListAdapter {
     containerClassName: 'bg-canvas',
     content: (
       <>
-      <header className="flex flex-col gap-3 border-b border-subtle bg-chrome px-4 py-3">
-        <nav
-          aria-label="Folder path"
-          className="flex items-center gap-1 overflow-x-auto whitespace-nowrap font-mono text-body-sm"
-        >
-          {breadcrumb.map((seg, i) => (
-            <span
-              key={`${String(seg.depth)}-${seg.label}`}
-              className="flex shrink-0 items-center"
-            >
-              {i > 0 ? (
-                <span aria-hidden className="px-2 select-none text-fg-disabled">
-                  /
-                </span>
-              ) : null}
-              {seg.current ? (
-                <span
-                  aria-current="page"
-                  className="font-medium text-fg"
-                  title={seg.label}
-                >
-                  {seg.label}
-                </span>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => navigateToDepth(seg.depth)}
-                  className="rounded text-fg-body transition-colors hover:text-fg focus-visible:text-fg hover:underline focus-visible:underline focus-visible:outline-none"
-                  title={`Go to ${seg.label}`}
-                >
-                  {seg.label}
-                </button>
-              )}
-            </span>
-          ))}
-        </nav>
-        <p className="font-mono text-body-sm text-fg-muted tabular">
+      <header className="space-y-3 border-b border-subtle bg-chrome px-4 py-3">
+        {/* row 1 — D18/D21: pane title (left) + view-option toggle (right) */}
+        <div className="flex items-start justify-between gap-4">
+          <nav aria-label="Folder path" className="flex min-w-0 flex-col gap-0.5">
+            {/* D21: large pane title — 'Arcade' as heading */}
+            {subPath !== '' ? (
+              <button
+                type="button"
+                onClick={() => navigateToDepth(0)}
+                className="text-left text-heading font-bold text-fg-muted transition-colors hover:text-fg focus-visible:outline-none"
+                title="Go to Arcade"
+              >
+                Arcade
+              </button>
+            ) : (
+              <span aria-current="page" className="text-heading font-bold text-fg">
+                Arcade
+              </span>
+            )}
+            {/* Sub-path breadcrumb — only when drilled in */}
+            {subPath !== '' ? (
+              <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap font-mono text-body-sm">
+                {breadcrumb.slice(1).map((seg, i) => (
+                  <span
+                    key={`${String(seg.depth)}-${seg.label}`}
+                    className="flex shrink-0 items-center"
+                  >
+                    {i > 0 ? (
+                      <span aria-hidden className="px-2 select-none text-fg-disabled">
+                        /
+                      </span>
+                    ) : null}
+                    {seg.current ? (
+                      <span
+                        aria-current="page"
+                        className="font-medium text-fg"
+                        title={seg.label}
+                      >
+                        {seg.label}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => navigateToDepth(seg.depth)}
+                        className="rounded text-fg-body transition-colors hover:text-fg focus-visible:text-fg hover:underline focus-visible:underline focus-visible:outline-none"
+                        title={`Go to ${seg.label}`}
+                      >
+                        {seg.label}
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </nav>
+          {/* D17: view-option Switch */}
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-x-4 gap-y-1">
+            <label className="flex cursor-pointer items-center gap-2 text-body-sm text-fg-body">
+              <Switch checked={showHidden} onCheckedChange={setShowHidden} />
+              Show hidden
+            </label>
+          </div>
+        </div>
+        {/* row 2 — D16: count pills */}
+        <div className="flex flex-wrap items-center gap-1.5">
           {deferredFilter !== '' ? (
-            <>
-              Showing{' '}
-              <span className="text-fg-body">{filteredMraCount}</span> of{' '}
-              <span className="text-fg-body">{preFilterMraCount}</span> ROMs ·{' '}
-              <span className="text-fg-body">{hiddenCount}</span> hidden
-            </>
+            <CountPill count={`${filteredMraCount} / ${preFilterMraCount}`} label="shown" />
           ) : (
-            <>
-              <span className="text-fg-body">{visibleCount}</span> ROMs ·{' '}
-              <span className="text-fg-body">{hiddenCount}</span> hidden
-            </>
+            <CountPill count={visibleCount} label="ROMs" />
           )}
-        </p>
-        {/* feat/filter-as-you-type (#21) */}
+          <CountPill count={hiddenCount} label="hidden" tone="hidden" />
+        </div>
+        {/* row 3 — D22: filter input flex-grows to fill the row */}
         <div className="flex items-center gap-2">
           <FilterInput
             value={filterText}
             onChange={setFilterText}
             placeholder="Filter MRAs…"
             inputRef={filterInputRef}
+            className="flex-1"
           />
           <ViewModeToggle value={viewMode} onChange={setViewMode} />
           <SizeControl value={viewSize} onChange={setViewSize} />
         </div>
+        {/* row 4 — D23: action buttons as segmented groups */}
         <div className="flex flex-wrap items-center gap-2">
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => void runBulk('hide')}
-            disabled={!canMutate || mraRows.every((r) => r.hidden)}
-            title={
-              canMutate
-                ? 'Hide every visible .mra so it disappears from the MiSTer arcade menu.'
-                : 'Reconnect to make changes.'
-            }
-          >
-            Hide all
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => void runBulk('show')}
-            disabled={!canMutate || mraRows.every((r) => !r.hidden)}
-            title={
-              canMutate
-                ? 'Restore every hidden .mra back into the MiSTer arcade menu.'
-                : 'Reconnect to make changes.'
-            }
-          >
-            Unhide all
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => void onHideSelected()}
-            disabled={!canMutate || visibleSelectedCount === 0}
-            title={canMutate ? undefined : 'Reconnect to make changes.'}
-          >
-            Hide selected ({visibleSelectedCount})
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => void onShowSelected()}
-            disabled={!canMutate || hiddenSelectedCount === 0}
-            title={canMutate ? undefined : 'Reconnect to make changes.'}
-          >
-            Unhide selected ({hiddenSelectedCount})
-          </Button>
-        </div>
-        <div className="flex flex-wrap gap-4 text-body-sm text-fg-body">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              className="accent-accent"
-              checked={showHidden}
-              onChange={(e) => setShowHidden(e.target.checked)}
-            />
-            Show hidden
-          </label>
+          {/* Group: Hide all / Unhide all */}
+          <div role="group" className="inline-flex overflow-hidden rounded border border-default">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-none"
+              onClick={() => void runBulk('hide')}
+              disabled={!canMutate || mraRows.every((r) => r.hidden)}
+              title={
+                canMutate
+                  ? 'Hide every visible .mra so it disappears from the MiSTer arcade menu.'
+                  : 'Reconnect to make changes.'
+              }
+            >
+              Hide all
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-none border-l border-default"
+              onClick={() => void runBulk('show')}
+              disabled={!canMutate || mraRows.every((r) => !r.hidden)}
+              title={
+                canMutate
+                  ? 'Restore every hidden .mra back into the MiSTer arcade menu.'
+                  : 'Reconnect to make changes.'
+              }
+            >
+              Unhide all
+            </Button>
+          </div>
+          {/* Group: Hide selected / Unhide selected */}
+          <div role="group" className="inline-flex overflow-hidden rounded border border-default">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-none"
+              onClick={() => void onHideSelected()}
+              disabled={!canMutate || visibleSelectedCount === 0}
+              title={canMutate ? undefined : 'Reconnect to make changes.'}
+            >
+              Hide selected ({visibleSelectedCount})
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-none border-l border-default"
+              onClick={() => void onShowSelected()}
+              disabled={!canMutate || hiddenSelectedCount === 0}
+              title={canMutate ? undefined : 'Reconnect to make changes.'}
+            >
+              Unhide selected ({hiddenSelectedCount})
+            </Button>
+          </div>
         </div>
       </header>
 

@@ -9,6 +9,7 @@ interface FilterInputProps {
   readonly onChange: (value: string) => void;
   readonly placeholder: string;
   readonly inputRef: RefObject<HTMLInputElement | null>;
+  readonly className?: string;
 }
 
 /**
@@ -22,9 +23,10 @@ export function FilterInput({
   onChange,
   placeholder,
   inputRef,
+  className,
 }: FilterInputProps): JSX.Element {
   return (
-    <div className="relative flex items-center">
+    <div className={cn('relative flex items-center', className)}>
       <Search
         className="pointer-events-none absolute left-2.5 size-3.5 text-fg-muted"
         strokeWidth={2}

@@ -24,8 +24,10 @@ describe('view-mode wiring — roms-adapter (refactor/unify-list-views)', () => 
     expect(ROMS_ADAPTER).toContain("import { usePersistedString }");
   });
 
-  it('persists viewMode with 2-element allowlist (no "detailed")', () => {
-    expect(ROMS_ADAPTER).toMatch(/mistercurator\.viewMode\.roms\.\$\{host\}/);
+  it('persists viewMode with unified host key (no pane-type prefix, D26-fix)', () => {
+    // D26-fix: reverted from .roms.${host} to .${host} (shared with arcade).
+    expect(ROMS_ADAPTER).toMatch(/mistercurator\.viewMode\.\$\{host\}/);
+    expect(ROMS_ADAPTER).not.toMatch(/mistercurator\.viewMode\.roms\./);
     expect(ROMS_ADAPTER).toMatch(/\['list',\s*'poster'\]/);
     expect(ROMS_ADAPTER).not.toMatch(/'detailed'/);
   });
@@ -57,8 +59,10 @@ describe('view-mode wiring — arcade-adapter (refactor/unify-list-views)', () =
     expect(ARCADE_ADAPTER).toContain("import { ViewModeToggle }");
   });
 
-  it('persists viewMode with 2-element allowlist', () => {
-    expect(ARCADE_ADAPTER).toMatch(/mistercurator\.viewMode\.arcade\.\$\{host\}/);
+  it('persists viewMode with unified host key (no pane-type prefix, D26-fix)', () => {
+    // D26-fix: same unified key as roms-adapter — both panes share view prefs.
+    expect(ARCADE_ADAPTER).toMatch(/mistercurator\.viewMode\.\$\{host\}/);
+    expect(ARCADE_ADAPTER).not.toMatch(/mistercurator\.viewMode\.arcade\./);
     expect(ARCADE_ADAPTER).toMatch(/\['list',\s*'poster'\]/);
   });
 
@@ -67,11 +71,12 @@ describe('view-mode wiring — arcade-adapter (refactor/unify-list-views)', () =
     expect(ARCADE_ADAPTER).not.toMatch(/viewMode !== 'list'[\s\S]{0,100}<SizeControl/);
   });
 
-  it('arcade view mode is independent of ROM pane (different key prefix)', () => {
-    expect(ROMS_ADAPTER).toMatch(/viewMode\.roms\./);
-    expect(ARCADE_ADAPTER).toMatch(/viewMode\.arcade\./);
-    expect(ROMS_ADAPTER).not.toMatch(/viewMode\.arcade\./);
-    expect(ARCADE_ADAPTER).not.toMatch(/viewMode\.roms\./);
+  it('arcade and ROM pane share the same viewMode key (D26-fix: unified)', () => {
+    // D26-fix: both adapters now use mistercurator.viewMode.${host} (no pane prefix).
+    expect(ROMS_ADAPTER).not.toMatch(/viewMode\.roms\./);
+    expect(ARCADE_ADAPTER).not.toMatch(/viewMode\.arcade\./);
+    expect(ROMS_ADAPTER).toMatch(/mistercurator\.viewMode\.\$\{host\}/);
+    expect(ARCADE_ADAPTER).toMatch(/mistercurator\.viewMode\.\$\{host\}/);
   });
 
   it('passes arcadeContext through sharedProps', () => {

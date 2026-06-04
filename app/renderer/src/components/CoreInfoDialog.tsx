@@ -120,6 +120,7 @@ export function CoreInfoDialog({
               logoUrl={catalogEntry?.logoUrl ?? null}
               logoAlt={displayName}
               title={displayName}
+              titleClassName="text-body"
               chips={hasChips ? (
                 <div className="flex flex-wrap gap-[7px]">
                   {catalogEntry!.company !== null && (
@@ -319,8 +320,8 @@ export function CoreInfoDialog({
 
 function Chip({ dot, children }: { dot?: boolean; children: ReactNode }): JSX.Element {
   return (
-    <span className="inline-flex items-center gap-[6px] rounded-full border border-border-default bg-elevated px-[10px] py-[4px] text-body-sm font-medium text-fg">
-      {dot && <span className="inline-block h-[5px] w-[5px] rounded-full bg-accent" />}
+    <span className="inline-flex items-center gap-[5px] rounded-full border border-border-default bg-elevated px-[8px] py-[2px] text-caption font-medium text-fg">
+      {dot && <span className="inline-block h-[4px] w-[4px] rounded-full bg-accent" />}
       {children}
     </span>
   );

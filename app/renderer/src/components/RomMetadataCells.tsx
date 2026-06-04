@@ -167,10 +167,10 @@ export function RomThumbnailCell(
   // existing tile chain, then optionally composite the folder badge
   // on top for single-game-folder.
   const baseTile = loading ? (
-    <Skeleton className="h-12 w-12 rounded-sm" />
+    <Skeleton className="h-12 w-12 rounded-md" />
   ) : error ? (
     <div
-      className="flex h-12 w-12 items-center justify-center rounded-sm bg-overlay/40 text-fg-disabled"
+      className="flex h-12 w-12 items-center justify-center rounded-md bg-overlay/40 text-fg-disabled"
       title="Metadata fetch failed (connection dropped). Retry by reconnecting."
       aria-label="Metadata fetch failed"
     >
@@ -180,7 +180,7 @@ export function RomThumbnailCell(
     <img
       src={boxArtObjectUrl}
       alt={metadata?.name ?? props.rom.displayName}
-      className="h-12 w-auto max-w-16 rounded-sm object-contain"
+      className="h-12 w-auto max-w-16 rounded-md object-contain"
       loading="lazy"
       decoding="async"
       onError={(event) => {
@@ -202,7 +202,7 @@ export function RomThumbnailCell(
     />
   ) : (
     <div
-      className="flex h-12 w-12 items-center justify-center rounded-sm bg-overlay/40 text-fg-disabled"
+      className="flex h-12 w-12 items-center justify-center rounded-md bg-overlay/40 text-fg-disabled"
       aria-label="No box art available"
     >
       <ImageOff className="size-4" strokeWidth={1.5} aria-hidden />
@@ -249,7 +249,7 @@ export function BackThumbnailCell(): JSX.Element {
 
 /**
  * Shared 40px tile chrome for non-art rows. Same dimensions as the
- * box-art tile (`h-12 w-12 rounded-sm`) and the ImageOff fallback so
+ * box-art tile (`h-12 w-12 rounded-md`) and the ImageOff fallback so
  * the column has a single visual rhythm regardless of row type.
  */
 function FolderTile(props: {
@@ -259,7 +259,7 @@ function FolderTile(props: {
   const Icon = props.icon === 'open' ? FolderOpen : CornerUpLeft;
   return (
     <div
-      className="flex h-12 w-12 items-center justify-center rounded-sm bg-overlay/40 text-fg-muted"
+      className="flex h-12 w-12 items-center justify-center rounded-md bg-overlay/40 text-fg-muted"
       aria-label={props.ariaLabel}
     >
       <Icon className="size-5" strokeWidth={1.5} aria-hidden />

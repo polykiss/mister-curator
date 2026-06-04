@@ -28,6 +28,11 @@ const THUMB_PX: Record<ViewSize, number> = { S: 48, M: 80, L: 120, XL: 160 };
 const DESCRIPTION_LINE_CLAMP: Record<ViewSize, string | null> = {
   S: null, M: 'line-clamp-2', L: 'line-clamp-3', XL: 'line-clamp-4',
 };
+// Max aspect ratio supported at M/L/XL (4:3 landscape). Both the TableHead
+// width and the DetailedThumbnailCell container use this so the column is
+// always wide enough for any art, while the container clips overflow so art
+// can NEVER bleed into the name column. Module-level so header + cell share it.
+const THUMB_ASPECT = 4 / 3;
 
 /** Larger thumbnail cell used at M/L/XL sizes — fetches boxArtUrl directly. */
 function DetailedThumbnailCell({
@@ -75,7 +80,11 @@ function DetailedThumbnailCell({
     return () => { cancelled = true; };
   }, [boxArtUrl]);
 
-  const tileStyle = { height: `${thumbPx}px`, width: `${Math.round(thumbPx * 0.75)}px` };
+  // Container dimensions — fixed box, clips to prevent any art from
+  // bleeding into the name column. THUMB_ASPECT is module-level and
+  // matches the TableHead width so the column is always exactly right.
+  const containerW = Math.round(thumbPx * THUMB_ASPECT);
+  const tileStyle = { height: `${thumbPx}px`, width: `${containerW}px` };
   const interactiveProps = onClick !== undefined ? {
     onClick: (e: React.MouseEvent) => { e.stopPropagation(); onClick(); },
     role: 'button' as const,
@@ -85,19 +94,23 @@ function DetailedThumbnailCell({
   } : {};
 
   const imgContent = rowType === 'explorable-folder' ? (
-    <div className="flex items-center justify-center rounded-sm bg-overlay/40 text-fg-muted" style={tileStyle}>
+    <div className="flex items-center justify-center rounded-md bg-overlay/40 text-fg-muted" style={tileStyle}>
       <FolderOpen className="size-6" strokeWidth={1.5} aria-hidden />
     </div>
   ) : rowType === 'back' ? (
-    <div className="flex items-center justify-center rounded-sm bg-overlay/40 text-fg-muted" style={tileStyle}>
+    <div className="flex items-center justify-center rounded-md bg-overlay/40 text-fg-muted" style={tileStyle}>
       <CornerUpLeft className="size-6" strokeWidth={1.5} aria-hidden />
     </div>
   ) : objectUrl !== null ? (
-    <img src={objectUrl} alt={altText} className="rounded-sm object-contain"
-      style={{ height: `${thumbPx}px`, width: 'auto', maxWidth: `${Math.round(thumbPx * 0.75)}px` }}
-      loading="lazy" decoding="async" />
+    // Hard clipping container — image fills the box with object-contain so
+    // it can NEVER overflow into the adjacent name column regardless of
+    // aspect ratio. Portrait art letterboxes; landscape art fills width.
+    <div className="overflow-hidden rounded-md" style={tileStyle}>
+      <img src={objectUrl} alt={altText} className="h-full w-full object-contain"
+        loading="lazy" decoding="async" />
+    </div>
   ) : (
-    <div className="flex items-center justify-center rounded-sm bg-overlay/40 text-fg-disabled" style={tileStyle}>
+    <div className="flex items-center justify-center rounded-md bg-overlay/40 text-fg-disabled" style={tileStyle}>
       <ImageOff className="size-4" strokeWidth={1.5} aria-hidden />
     </div>
   );
@@ -105,7 +118,7 @@ function DetailedThumbnailCell({
   return (
     <TableCell
       className={cn('p-1', onClick !== undefined && 'cursor-pointer')}
-      style={{ width: `${Math.round(thumbPx * 0.75) + 8}px` }}
+      style={{ width: `${containerW + 8}px` }}
       {...interactiveProps}
     >
       {imgContent}
@@ -223,7 +236,7 @@ export function RomListView({
                   shows a chevron. Folder rows pin to the top
                   regardless of sort. Column width grows with size. */}
               {isDetailed
-                ? <TableHead style={{ width: `${Math.round(thumbPx * 0.75) + 8}px` }} aria-label="Box art" />
+                ? <TableHead style={{ width: `${Math.round(thumbPx * THUMB_ASPECT) + 8}px` }} aria-label="Box art" />
                 : <TableHead className="w-16" aria-label="Box art" />}
               <SortableHeader
                 label="Name"
@@ -258,11 +271,11 @@ export function RomListView({
                   right-edge stack so the row's primary visibility
                   toggle owns the far-right slot. */}
               <TableHead className="w-10" aria-label="Actions" />
-              {/* Combined density + eye column. Plain centered "Size"
-                  label — no sort arrow (Name carries the active caret).
-                  Still clickable to sort by size.
+              {/* Combined density + eye column. "Size" label centered
+                  over the 24px density bar only (D29: pr-8 offsets
+                  the 32px eye slot so text-center lands on the bar).
                   Width = 24 (density w-6) + 32 (eye) = 56px (w-[3.5rem]). */}
-              <TableHead className="w-[3.5rem] p-0 text-center">
+              <TableHead className="w-[3.5rem] p-0 pr-8 text-center">
                 <button
                   type="button"
                   onClick={() => onSortChange('size')}

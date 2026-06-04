@@ -1,5 +1,5 @@
-import { Eye, EyeOff, Loader2, Sparkles, Undo2 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { Eye, EyeOff, Gamepad2, Joystick, Loader2, Monitor, Sparkles, Undo2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { JSX } from 'react';
 import { toast } from 'sonner';
 
@@ -7,16 +7,18 @@ import type { AutoScrapeProgressEvent, SystemCatalogWireEntry } from '@shared/pr
 import { decodeIpcError, isDestinationAlreadyExistsError } from '@shared/preload-api';
 import { aliasTargetsToSuppress } from '@shared/core-audit';
 import { coreDisplayName, isCoreHidden } from '@shared/core-matching';
-import type { CoreEntry } from '@shared/types';
+import type { CoreCategory, CoreEntry } from '@shared/types';
 
 import { CoreInfoDialog } from '@app/renderer/src/components/CoreInfoDialog';
 import { PlatformBadge } from '@app/renderer/src/components/PlatformBadge';
+import type { CoreMenuStyle } from '@app/renderer/src/components/SettingsDialog';
 import { CoreRenameDialog } from '@app/renderer/src/components/CoreRenameDialog';
 import type { RomRowMenuItem } from '@app/renderer/src/components/RomRowMenu';
 import { RomRowMenu } from '@app/renderer/src/components/RomRowMenu';
 import { useCoreCustomNames } from '@app/renderer/src/lib/use-core-custom-names';
 
 import { Button } from '@app/renderer/src/components/ui/button';
+import { Switch } from '@app/renderer/src/components/ui/switch';
 import { DensityBar } from '@app/renderer/src/components/ui/density-bar';
 import { StatusIndicator } from '@app/renderer/src/components/ui/status-indicator';
 import { HideEmptyCoresDialog } from '@app/renderer/src/components/HideEmptyCoresDialog';
@@ -32,8 +34,10 @@ const DISCONNECTED_TOOLTIP = 'Reconnect to make changes.';
 
 export function CoresPane({
   showMameAsCores,
+  coreMenuStyle = 'logos',
 }: {
   readonly showMameAsCores: boolean;
+  readonly coreMenuStyle?: CoreMenuStyle;
 }): JSX.Element {
   const {
     cores,
@@ -391,13 +395,8 @@ export function CoresPane({
           </Button>
         </div>
         <div className="flex flex-wrap gap-4 text-body-sm text-fg-body">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              className="accent-accent"
-              checked={showHidden}
-              onChange={(e) => setShowHidden(e.target.checked)}
-            />
+          <label className="flex cursor-pointer items-center gap-2">
+            <Switch checked={showHidden} onCheckedChange={setShowHidden} />
             Show hidden
           </label>
         </div>
@@ -418,6 +417,7 @@ export function CoresPane({
         onHide,
         onShow,
         onContextMenu: (core, x, y) => { setMenuFor({ core, x, y }); },
+        coreMenuStyle,
       })}
 
       <HideEmptyCoresDialog
@@ -489,6 +489,7 @@ interface RenderArgs {
   readonly onHide: (core: CoreEntry) => Promise<void>;
   readonly onShow: (core: CoreEntry) => Promise<void>;
   readonly onContextMenu: (core: CoreEntry, x: number, y: number) => void;
+  readonly coreMenuStyle: CoreMenuStyle;
 }
 
 /**
@@ -639,13 +640,40 @@ function renderCoreList(args: RenderArgs): JSX.Element {
                 ariaLabel={`Scrape progress for ${displayName}`}
               />
 
-              {/* D11: PlatformBadge — logo or name wordmark, fixed 104×40. */}
-              <PlatformBadge url={catalogEntry?.logoUrl ?? null} name={badgeName} />
+              {/* D36: badge column switches by coreMenuStyle */}
+              {args.coreMenuStyle === 'text' ? (
+                // Text only — name wordmark for every core
+                <span className="flex h-10 w-[104px] shrink-0 items-center text-body-sm font-semibold leading-tight tracking-[-0.01em] text-fg">
+                  {badgeName}
+                </span>
+              ) : args.coreMenuStyle === 'images' ? (
+                // System images — hardware photo (or category icon)
+                <SystemPhotoBadge
+                  photoUrl={catalogEntry?.photoUrl ?? null}
+                  category={core.category}
+                />
+              ) : (
+                // logos (default) — monochrome logo or category icon (not wordmark)
+                catalogEntry?.logoUrl ? (
+                  <PlatformBadge url={catalogEntry.logoUrl} name={badgeName} />
+                ) : (
+                  <span className="flex h-10 w-[104px] shrink-0 items-center">
+                    <CategoryIcon category={core.category} />
+                  </span>
+                )
+              )}
 
-              {/* D11: always-shown mono core-id — the technical disambiguator. */}
-              <span className="truncate font-mono text-body-sm text-fg-disabled" title={technicalId}>
-                {technicalId}
-              </span>
+              {/* Core-id col: in images mode show name+path, otherwise mono core-id */}
+              {args.coreMenuStyle === 'images' ? (
+                <span className="flex min-w-0 flex-col gap-0.5">
+                  <span className="truncate font-medium text-fg-body" title={displayName}>{displayName}</span>
+                  <span className="truncate font-mono text-[11px] text-fg-muted">games/{core.id}</span>
+                </span>
+              ) : (
+                <span className="truncate font-mono text-body-sm text-fg-disabled" title={technicalId}>
+                  {technicalId}
+                </span>
+              )}
 
               {/* D11: fixed two-column count grid so totals align vertically. */}
               <CoreCountSummary core={core} />
@@ -747,6 +775,81 @@ function renderCoreList(args: RenderArgs): JSX.Element {
  * with containers — NEOGEO, MegaCD, Saturn, ...). Falls back to the
  * top-level `romCount` when the matcher input lacked sub-folder data.
  */
+// ── D36 helpers ──────────────────────────────────────────────────────────────
+
+/**
+ * Generic category icon used when no logo or photo is available.
+ * Arcade → Joystick; Computer (DOS/Amiga/MSX) → Monitor; everything else → Gamepad2.
+ */
+function CategoryIcon({ category }: { readonly category: CoreCategory }): JSX.Element {
+  if (category === 'Arcade') {
+    return <Joystick className="size-7 text-fg-disabled" strokeWidth={1.5} aria-hidden />;
+  }
+  if (category === 'Computer') {
+    return <Monitor className="size-7 text-fg-disabled" strokeWidth={1.5} aria-hidden />;
+  }
+  return <Gamepad2 className="size-7 text-fg-disabled" strokeWidth={1.5} aria-hidden />;
+}
+
+/**
+ * D36 images-mode badge. Fetches the ScreenScraper hardware photo via
+ * getSystemLogoBytes (same URL shape as logo; works for any catalog media URL).
+ * Falls back to a CategoryIcon when photoUrl is null.
+ */
+function SystemPhotoBadge({
+  photoUrl,
+  category,
+}: {
+  readonly photoUrl: string | null;
+  readonly category: CoreCategory;
+}): JSX.Element {
+  const objectUrlRef = useRef<string | null>(null);
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (objectUrlRef.current !== null) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (photoUrl === null) { setObjectUrl(null); return; }
+    let cancelled = false;
+    void window.mister.getSystemLogoBytes(photoUrl).then((bytes) => {
+      if (cancelled || bytes === null) return;
+      const blob = new Blob([new Uint8Array(bytes)]);
+      if (objectUrlRef.current !== null) URL.revokeObjectURL(objectUrlRef.current);
+      const created = URL.createObjectURL(blob);
+      objectUrlRef.current = created;
+      setObjectUrl(created);
+    });
+    return () => { cancelled = true; };
+  }, [photoUrl]);
+
+  return (
+    <span className="flex h-10 w-[104px] shrink-0 items-center">
+      {photoUrl === null ? (
+        <CategoryIcon category={category} />
+      ) : objectUrl !== null ? (
+        // No box/border per spec — image directly on the row background,
+        // uncropped (object-contain), full image visible.
+        <img
+          src={objectUrl}
+          alt=""
+          aria-hidden
+          className="max-h-[52px] max-w-[80px] object-contain object-left"
+        />
+      ) : (
+        // Loading — show category icon while bytes in-flight
+        <CategoryIcon category={category} />
+      )}
+    </span>
+  );
+}
+
 function densityValueFor(core: CoreEntry): number {
   return core.recursiveRomCount ?? core.romCount;
 }

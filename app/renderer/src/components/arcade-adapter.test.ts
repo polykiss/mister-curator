@@ -279,14 +279,13 @@ describe('arcade-adapter — top bar consolidation (feat/arcade-bulk-select-and-
     expect(SOURCE).not.toMatch(/Unmark as system/);
   });
 
-  it('"Show hidden" checkbox is rendered in the second-row leftmost position', () => {
-    // Second row = div.flex.flex-wrap.gap-4. "Show hidden" is the only
-    // remaining toggle here — "Auto-hide missing ROMs" moved to SettingsDialog.
-    const secondRowStart = SOURCE.indexOf('flex flex-wrap gap-4');
-    expect(secondRowStart).toBeGreaterThan(-1);
-    const block = SOURCE.slice(secondRowStart, secondRowStart + 2000);
-    const showHiddenIdx = block.indexOf('Show hidden');
-    expect(showHiddenIdx).toBeGreaterThan(-1);
+  it('"Show hidden" Switch is rendered alongside the breadcrumb (D17/D18)', () => {
+    // D17/D18: "Show hidden" is now a Switch in the path+toggles row
+    // (right side of the breadcrumb div), not a separate checkbox row.
+    expect(SOURCE).toContain('Show hidden');
+    expect(SOURCE).toContain('Switch');
+    // Confirm the old flex-wrap gap-4 checkbox row is gone.
+    expect(SOURCE).not.toMatch(/flex flex-wrap gap-4 text-body-sm text-fg-body/);
   });
 
   it('"Auto-hide missing ROMs" moved to SettingsDialog (feat/settings-modal)', () => {

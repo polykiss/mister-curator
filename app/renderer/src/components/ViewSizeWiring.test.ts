@@ -14,8 +14,9 @@ describe('viewSize wiring — adapters (refactor/unify-list-views)', () => {
     expect(ROMS_ADAPTER).toMatch(/ViewSize.*from.*roms-view-props/s);
   });
 
-  it('roms-adapter persists viewSize with host-keyed key', () => {
-    expect(ROMS_ADAPTER).toMatch(/mistercurator\.viewSize\.roms\.\$\{host\}/);
+  it('roms-adapter persists viewSize with unified host key (D26-fix: no pane prefix)', () => {
+    expect(ROMS_ADAPTER).toMatch(/mistercurator\.viewSize\.\$\{host\}/);
+    expect(ROMS_ADAPTER).not.toMatch(/mistercurator\.viewSize\.roms\./);
     expect(ROMS_ADAPTER).toMatch(/usePersistedString<ViewSize>/);
   });
 
@@ -29,10 +30,14 @@ describe('viewSize wiring — adapters (refactor/unify-list-views)', () => {
     expect(ROMS_ADAPTER).toMatch(/viewSize,/);
   });
 
-  it('arcade-adapter has independent viewSize key (arcade, not roms)', () => {
-    expect(ARCADE_ADAPTER).toMatch(/mistercurator\.viewSize\.arcade\.\$\{host\}/);
-    expect(ROMS_ADAPTER).not.toMatch(/viewSize\.arcade\./);
-    expect(ARCADE_ADAPTER).not.toMatch(/viewSize\.roms\./);
+  it('arcade-adapter shares the same unified viewSize key as roms (D26-fix)', () => {
+    // D26-fix: both panes now use mistercurator.viewSize.${host} (no pane prefix).
+    expect(ARCADE_ADAPTER).toMatch(/mistercurator\.viewSize\.\$\{host\}/);
+    expect(ARCADE_ADAPTER).not.toMatch(/viewSize\.arcade\./);
+    expect(ROMS_ADAPTER).not.toMatch(/viewSize\.roms\./);
+    // They share the key, so setting view size in one pane carries to the other.
+    expect(ROMS_ADAPTER).toMatch(/mistercurator\.viewSize\.\$\{host\}/);
+    expect(ARCADE_ADAPTER).toMatch(/mistercurator\.viewSize\.\$\{host\}/);
   });
 
   it('arcade-adapter renders SizeControl unconditionally', () => {

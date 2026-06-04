@@ -266,13 +266,12 @@ function PopulatedDetailDialog(props: {
   const tags = displayTags(metadata);
   const note = displayNote(metadata);
 
-  // Subhead: developer · year · genre · system. Drop empties so we
-  // don't render trailing separators.
+  // Subhead: developer · year · genre. System is rendered as its own
+  // line in the compact DetailHeader (D32), so it's excluded here.
   const subheadParts = [
     metadata.developer,
     year !== null ? String(year) : null,
     genre,
-    metadata.system === '' ? null : metadata.system,
   ].filter((p): p is string => p !== null && p !== '');
 
   const description = metadata.description;
@@ -347,8 +346,9 @@ function PopulatedDetailDialog(props: {
           logoUrl={systemLogoUrl ?? null}
           logoAlt={metadata.system}
           title={title}
-          titleClassName="text-heading-lg"
+          systemName={metadata.system !== '' ? metadata.system : undefined}
           subtitle={subheadParts.length > 0 ? subheadParts.join(' · ') : undefined}
+          compact
         />
 
         {/* feat/detail-dialog-nav-layout-fix (B + D) — ROM
@@ -984,7 +984,7 @@ function EmptyDetailDialog(props: {
           logoUrl={props.systemLogoUrl ?? null}
           logoAlt=""
           title={props.filename}
-          titleClassName="text-heading-lg"
+          compact
         />
 
         {/* feat/detail-dialog-nav-layout-fix — header-area ROM nav

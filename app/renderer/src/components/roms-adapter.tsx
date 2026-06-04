@@ -56,7 +56,7 @@ import {
   type RomRowMenuItem,
 } from '@app/renderer/src/components/RomRowMenu';
 import { RomListView } from '@app/renderer/src/components/RomListView';
-import { DEFAULT_SORT, nextSortState, sortRoms, type SortKey, type SortState } from '@app/renderer/src/lib/rom-sort';
+import { DEFAULT_SORT, nextSortState, sortRoms, type SortDir, type SortKey, type SortState } from '@app/renderer/src/lib/rom-sort';
 import type { RomMetadata } from '@shared/metadata-types';
 import { romsKey, useCores } from '@app/renderer/src/contexts/CoresContext';
 import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
@@ -71,8 +71,10 @@ import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
 import { usePersistedString } from '@app/renderer/src/lib/use-persisted-string';
 import { filterRoms } from '@app/renderer/src/lib/filter-roms';
 import { FilterInput } from '@app/renderer/src/components/FilterInput';
+import { CountPill } from '@app/renderer/src/components/CountPill';
 import { RomPosterView } from '@app/renderer/src/components/RomPosterView';
 import { SortDropdown } from '@app/renderer/src/components/SortDropdown';
+import { Switch } from '@app/renderer/src/components/ui/switch';
 import { ViewModeToggle } from '@app/renderer/src/components/ViewModeToggle';
 import { SizeControl } from '@app/renderer/src/components/SizeControl';
 import type { ViewMode, ViewSize } from '@app/renderer/src/lib/roms-view-props';
@@ -138,13 +140,16 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
   } = useCores();
   const { status, currentProfile } = useConnection();
   const host = currentProfile?.host ?? 'default';
+  // D26-fix: unified host-global keys shared with arcade-adapter.
+  // (Was .roms.${host} / .arcade.${host} — re-split in #128 design
+  // reskin; reverted to the unified form from db7e74a.)
   const [viewMode, setViewMode] = usePersistedString<ViewMode>(
-    `mistercurator.viewMode.roms.${host}`,
+    `mistercurator.viewMode.${host}`,
     'list',
     ['list', 'poster'],
   );
   const [viewSize, setViewSize] = usePersistedString<ViewSize>(
-    `mistercurator.viewSize.roms.${host}`,
+    `mistercurator.viewSize.${host}`,
     'M',
     ['S', 'M', 'L', 'XL'],
   );
@@ -217,14 +222,27 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
   // Saturn would fire `listRoms('Saturn', '1 World A-Z')` once before
   // the [core.id] reset effect committed — that call fails with
   // "Unknown core: Saturn" in the main-process log.
-  // Pattern reference: https://react.dev/reference/react/useState#storing-information-from-previous-renders
-  // PR-A item 8: per-pane sort state, no persistence. Switching
-  // cores resets to the default (`name asc`) along with subPath /
-  // selection / etc.
-  const [sortState, setSortState] = useState<SortState>(DEFAULT_SORT);
+  // Host-global sort persistence — same key for all cores and arcade pane.
+  // Serialized as "key:dir" (e.g. "name:asc"). Switching cores no longer
+  // resets sort (removed from the core-switch block below).
+  const SORT_VALID = [
+    'name:asc', 'name:desc', 'year:asc', 'year:desc',
+    'genre:asc', 'genre:desc', 'rating:asc', 'rating:desc',
+    'size:asc', 'size:desc',
+  ] as const;
+  const [sortRaw, setSortRaw] = usePersistedString(
+    `mistercurator.sort.${host}`,
+    `${DEFAULT_SORT.key}:${DEFAULT_SORT.dir}`,
+    SORT_VALID,
+  );
+  const sortState: SortState = (() => {
+    const [k, d] = sortRaw.split(':');
+    return { key: k as SortKey, dir: d as SortDir };
+  })();
   const onSortChange = useCallback((key: SortKey) => {
-    setSortState((prev) => nextSortState(prev, key));
-  }, []);
+    const next = nextSortState({ key: sortRaw.split(':')[0] as SortKey, dir: sortRaw.split(':')[1] as SortDir }, key);
+    setSortRaw(`${next.key}:${next.dir}`);
+  }, [setSortRaw, sortRaw]);
   // feat/filter-as-you-type (#21) — per-pane text filter. Resets on
   // core switch (same synchronous pattern as sortState). Not persisted.
   const [filterText, setFilterText] = useState('');
@@ -236,7 +254,7 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
     setTrackedCoreId(core.id);
     setSubPath('');
     setSelected(new Set());
-    setSortState(DEFAULT_SORT);
+    // Sort is now host-global and persisted — intentionally NOT reset on core switch.
     setFilterText('');
   }
 
@@ -1121,72 +1139,92 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
           counts; tools; filters. Each row owns its full horizontal
           width. */}
       <header className="space-y-3 border-b border-subtle px-4 py-3">
-        <nav
-          aria-label="Folder path"
-          className="flex items-center gap-1 overflow-x-auto whitespace-nowrap font-mono text-body-sm"
-        >
-          {breadcrumb.map((seg, i) => (
-            <span
-              key={`${String(seg.depth)}-${seg.label}`}
-              className="flex shrink-0 items-center"
-            >
-              {i > 0 ? (
-                <span aria-hidden className="px-2 select-none text-fg-disabled">
-                  /
-                </span>
-              ) : null}
-              {seg.current ? (
-                <span
-                  aria-current="page"
-                  className="font-medium text-fg"
-                  title={seg.label}
-                >
-                  {seg.label}
-                </span>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => navigateToDepth(seg.depth)}
-                  className="rounded text-fg-body transition-colors hover:text-fg focus-visible:text-fg hover:underline focus-visible:underline focus-visible:outline-none"
-                  title={`Go to ${seg.label}`}
-                >
-                  {seg.label}
-                </button>
-              )}
-            </span>
-          ))}
-        </nav>
-        <p className="font-mono text-body-sm text-fg-muted tabular">
+        {/* row 1 — D18/D21: pane title (left) + view-option toggles (right) */}
+        <div className="flex items-start justify-between gap-4">
+          <nav aria-label="Folder path" className="flex min-w-0 flex-col gap-0.5">
+            {/* D21: large pane title — core name as heading */}
+            {subPath !== '' ? (
+              <button
+                type="button"
+                onClick={() => navigateToDepth(0)}
+                className="text-left text-heading font-bold text-fg-muted transition-colors hover:text-fg focus-visible:outline-none"
+                title={`Go to ${core.name}`}
+              >
+                {core.name}
+              </button>
+            ) : (
+              <span aria-current="page" className="text-heading font-bold text-fg">
+                {core.name}
+              </span>
+            )}
+            {/* Sub-path breadcrumb — only when drilled in */}
+            {subPath !== '' ? (
+              <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap font-mono text-body-sm">
+                {breadcrumb.slice(1).map((seg, i) => (
+                  <span
+                    key={`${String(seg.depth)}-${seg.label}`}
+                    className="flex shrink-0 items-center"
+                  >
+                    {i > 0 ? (
+                      <span aria-hidden className="px-2 select-none text-fg-disabled">
+                        /
+                      </span>
+                    ) : null}
+                    {seg.current ? (
+                      <span
+                        aria-current="page"
+                        className="font-medium text-fg"
+                        title={seg.label}
+                      >
+                        {seg.label}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => navigateToDepth(seg.depth)}
+                        className="rounded text-fg-body transition-colors hover:text-fg focus-visible:text-fg hover:underline focus-visible:underline focus-visible:outline-none"
+                        title={`Go to ${seg.label}`}
+                      >
+                        {seg.label}
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </nav>
+          {/* D17: view-option Switches */}
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-x-4 gap-y-1">
+            <label className="flex cursor-pointer items-center gap-2 text-body-sm text-fg-body">
+              <Switch checked={showHidden} onCheckedChange={setShowHidden} />
+              Show hidden
+            </label>
+            <label className="flex cursor-pointer items-center gap-2 text-body-sm text-fg-body">
+              <Switch checked={showSystem} onCheckedChange={setShowSystem} />
+              Show system files
+            </label>
+          </div>
+        </div>
+        {/* row 2 — D16: count pills */}
+        <div className="flex flex-wrap items-center gap-1.5">
           {deferredFilter !== '' && presentableRoms !== null ? (
-            <>
-              Showing{' '}
-              <span className="text-fg-body">{presentableRoms.length}</span> of{' '}
-              <span className="text-fg-body">{preFilterCount}</span> ROMs ·{' '}
-              <span className="text-fg-body">{hiddenNonSystem}</span> hidden
-              {systemCount > 0 ? (
-                <> · <span className="text-fg-body">{systemCount}</span> system</>
-              ) : null}
-            </>
+            <CountPill count={`${presentableRoms.length} / ${preFilterCount}`} label="shown" />
           ) : (
-            <>
-              <span className="text-fg-body">{visibleNonSystem}</span> ROMs ·{' '}
-              <span className="text-fg-body">{hiddenNonSystem}</span> hidden
-              {systemCount > 0 ? (
-                <>
-                  {' '}
-                  · <span className="text-fg-body">{systemCount}</span> system
-                </>
-              ) : null}
-            </>
+            <CountPill count={visibleNonSystem} label="ROMs" />
           )}
-        </p>
-        {/* feat/filter-as-you-type (#21) */}
+          <CountPill count={hiddenNonSystem} label="hidden" tone="hidden" />
+          {systemCount > 0 ? (
+            <CountPill count={systemCount} label="system" tone="system" />
+          ) : null}
+        </div>
+        {/* row 3 — D22: filter input flex-grows to fill the row */}
         <div className="flex items-center gap-2">
           <FilterInput
             value={filterText}
             onChange={setFilterText}
             placeholder="Filter ROMs…"
             inputRef={filterInputRef}
+            className="flex-1"
           />
           <ViewModeToggle value={viewMode} onChange={setViewMode} />
           <SizeControl value={viewSize} onChange={setViewSize} />
@@ -1194,89 +1232,85 @@ export function useRomsAdapter({ core }: RomsAdapterProps): ItemListAdapter {
             <SortDropdown value={sortState} onChange={onSortChange} />
           ) : null}
         </div>
+        {/* row 4 — D23: action buttons as segmented groups */}
         <div className="flex flex-wrap items-center gap-2">
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={onHideAll}
-            disabled={!canMutate || candidates.every((r) => r.hidden)}
-            title={canMutate ? undefined : DISCONNECTED_TOOLTIP}
-          >
-            Hide all
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={onShowAll}
-            disabled={!canMutate || candidates.every((r) => !r.hidden)}
-            title={canMutate ? undefined : DISCONNECTED_TOOLTIP}
-          >
-            Unhide all
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={onHideSelected}
-            disabled={!canMutate || visibleSelectedCount === 0}
-            title={canMutate ? undefined : DISCONNECTED_TOOLTIP}
-          >
-            Hide selected ({visibleSelectedCount})
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={onShowSelected}
-            disabled={!canMutate || hiddenSelectedCount === 0}
-            title={canMutate ? undefined : DISCONNECTED_TOOLTIP}
-          >
-            Unhide selected ({hiddenSelectedCount})
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => void onMarkSelectedAsSystem()}
-            disabled={!canMutate || markableSelected.length === 0}
-            title={
-              canMutate
-                ? "Treat the selected files as system files (BIOS, palette, config). Hidden by default; visible when 'Show system files' is on."
-                : DISCONNECTED_TOOLTIP
-            }
-          >
-            Mark as system ({markableSelected.length})
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => void onUnmarkSelected()}
-            disabled={!canMutate || unmarkableSelected.length === 0}
-            title={
-              canMutate
-                ? 'Remove the user-system mark from the selected files. Auto-detected system files are not affected.'
-                : DISCONNECTED_TOOLTIP
-            }
-          >
-            Unmark system ({unmarkableSelected.length})
-          </Button>
-        </div>
-        <div className="flex flex-wrap gap-4 text-body-sm text-fg-body">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              className="accent-accent"
-              checked={showHidden}
-              onChange={(e) => setShowHidden(e.target.checked)}
-            />
-            Show hidden
-          </label>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              className="accent-accent"
-              checked={showSystem}
-              onChange={(e) => setShowSystem(e.target.checked)}
-            />
-            Show system files
-          </label>
+          {/* Group: Hide all / Unhide all */}
+          <div role="group" className="inline-flex overflow-hidden rounded border border-default">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-none"
+              onClick={onHideAll}
+              disabled={!canMutate || candidates.every((r) => r.hidden)}
+              title={canMutate ? undefined : DISCONNECTED_TOOLTIP}
+            >
+              Hide all
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-none border-l border-default"
+              onClick={onShowAll}
+              disabled={!canMutate || candidates.every((r) => !r.hidden)}
+              title={canMutate ? undefined : DISCONNECTED_TOOLTIP}
+            >
+              Unhide all
+            </Button>
+          </div>
+          {/* Group: Hide selected / Unhide selected */}
+          <div role="group" className="inline-flex overflow-hidden rounded border border-default">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-none"
+              onClick={onHideSelected}
+              disabled={!canMutate || visibleSelectedCount === 0}
+              title={canMutate ? undefined : DISCONNECTED_TOOLTIP}
+            >
+              Hide selected ({visibleSelectedCount})
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-none border-l border-default"
+              onClick={onShowSelected}
+              disabled={!canMutate || hiddenSelectedCount === 0}
+              title={canMutate ? undefined : DISCONNECTED_TOOLTIP}
+            >
+              Unhide selected ({hiddenSelectedCount})
+            </Button>
+          </div>
+          {/* Group: Mark as system / Unmark system */}
+          <div role="group" className="inline-flex overflow-hidden rounded border border-default">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-none"
+              onClick={() => void onMarkSelectedAsSystem()}
+              disabled={!canMutate || markableSelected.length === 0}
+              title={
+                canMutate
+                  ? "Treat the selected files as system files (BIOS, palette, config). Hidden by default; visible when 'Show system files' is on."
+                  : DISCONNECTED_TOOLTIP
+              }
+            >
+              Mark as system ({markableSelected.length})
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-none border-l border-default"
+              onClick={() => void onUnmarkSelected()}
+              disabled={!canMutate || unmarkableSelected.length === 0}
+              title={
+                canMutate
+                  ? 'Remove the user-system mark from the selected files. Auto-detected system files are not affected.'
+                  : DISCONNECTED_TOOLTIP
+              }
+            >
+              Unmark system ({unmarkableSelected.length})
+            </Button>
+          </div>
         </div>
       </header>
 

@@ -39,6 +39,8 @@ module.exports = {
           soft: 'hsl(var(--accent-soft) / <alpha-value>)',
           fg: 'hsl(var(--accent-fg) / <alpha-value>)',
         },
+        // Switch off-track token
+        'switch-off': 'hsl(var(--switch-off) / <alpha-value>)',
         // Status
         success: 'hsl(var(--success) / <alpha-value>)',
         warning: 'hsl(var(--warning) / <alpha-value>)',

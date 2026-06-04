@@ -173,6 +173,8 @@
     /* Themed scrollbar — see light-mode comment above. */
     --scrollbar-track: 213 18% 14%;     /* same as bg-overlay, dark */
     --scrollbar-thumb: 217 16% 22%;     /* same as border-emphasis, dark */
+    /* Switch track off-state — slightly lighter than bg-overlay */
+    --switch-off: 213 22% 20%;
   }
 
   * {

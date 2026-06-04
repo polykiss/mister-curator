@@ -102,12 +102,11 @@ describe('roms-adapter: useRomsAdapter', () => {
     expect(ROMS_ADAPTER).toMatch(/containerClassName:\s*'bg-elevated'/);
   });
 
-  it('returns the existing RomsPane chrome verbatim inside `content` (breadcrumb / count paragraph / toolbar / toggle row)', () => {
-    // The four pre-refactor header rows are still present — the
-    // refactor is structural (re-wraps the return) but does not
-    // touch the inner chrome.
+  it('returns the RomsPane chrome inside `content` (breadcrumb / count pills / toolbar / toggle switches)', () => {
+    // D16–D18: count `<p>` → CountPills, checkboxes → Switches, header reordered.
+    // Core chrome still present — only presentation changed.
     expect(ROMS_ADAPTER).toMatch(/aria-label="Folder path"/); // breadcrumb nav
-    expect(ROMS_ADAPTER).toMatch(/font-mono text-body-sm text-fg-muted tabular/); // count paragraph
+    expect(ROMS_ADAPTER).toContain('CountPill'); // D16: count pills replace mono paragraph
     expect(ROMS_ADAPTER).toMatch(/Hide all/);
     expect(ROMS_ADAPTER).toMatch(/Unhide all/);
     expect(ROMS_ADAPTER).toMatch(/Show hidden/);
@@ -336,15 +335,12 @@ describe('arcade-adapter sortable headers (feat/arcade-parity-3-ui G8)', () => {
     );
   });
 
-  it('declares a per-pane sortState defaulting to DEFAULT_SORT (not persisted)', () => {
-    expect(ARCADE_ADAPTER).toMatch(
-      /\[sortState,\s*setSortState\]\s*=\s*useState<SortState>\(DEFAULT_SORT\)/,
-    );
-    // The not-persisted assertion is structural: usePersistedBool
-    // appears only twice — for `showHiddenArcadeMras`. Renaming
-    // the sort state into a persisted slot would surface here.
-    const persistMatches = ARCADE_ADAPTER.match(/usePersistedBool/g) ?? [];
-    expect(persistMatches.length, 'sort state must not be persisted').toBeLessThan(3);
+  it('declares a host-global sortState via usePersistedString (D32: unified sort)', () => {
+    // D32: sort is now persisted globally like viewMode/viewSize.
+    // Uses mistercurator.sort.${host} key shared with roms-adapter.
+    expect(ARCADE_ADAPTER).toMatch(/mistercurator\.sort\.\$\{host\}/);
+    expect(ARCADE_ADAPTER).toMatch(/sortState/);
+    expect(ARCADE_ADAPTER).toContain('usePersistedString');
   });
 
   it('extracted SortableHeader lives in its own shared file (no inline copy in roms-adapter or RomListView)', () => {
