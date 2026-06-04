@@ -41,8 +41,9 @@ describe('PlatformBadge — structural contract (D11)', () => {
     expect(SOURCE).toContain('aria-hidden');
   });
 
-  it('logo branch: normalizes logo to 26px cap-height', () => {
-    expect(SOURCE).toContain('h-[26px]');
+  it('logo branch: normalizes logo to 32px cap-height (D25: +50% from original 26px)', () => {
+    expect(SOURCE).toContain('h-[32px]');
+    expect(SOURCE).not.toContain('h-[26px]');
   });
 
   it('no-logo branch: renders name as a wordmark (not a gamepad icon)', () => {

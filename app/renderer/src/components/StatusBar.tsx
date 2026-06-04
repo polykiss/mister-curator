@@ -95,6 +95,17 @@ export function StatusBar(): JSX.Element {
         )} (${String(percent)}%)`
       : baseMessage;
 
+  // D30: overall session progress for the ring; sub-task for the bar.
+  const scrapeOverallProgress: number | null =
+    (autoScrape.state === 'active' || autoScrape.state === 'discovering') &&
+    autoScrape.totalCoreCount > 0
+      ? Math.min(1, (autoScrape.processedCoreCount + 1) / autoScrape.totalCoreCount)
+      : null;
+  const scrapeSubTaskProgress: number | null =
+    autoScrape.state === 'active' && autoScrape.total > 0
+      ? Math.min(1, autoScrape.done / autoScrape.total)
+      : null;
+
   return (
     <footer className="flex h-8 shrink-0 items-center justify-between gap-3 border-t border-subtle bg-chrome px-4 text-caption uppercase tracking-[0.08em] text-fg-muted">
       <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -105,12 +116,17 @@ export function StatusBar(): JSX.Element {
             aria-hidden
           />
         ) : null}
+        {/* D30: session-level progress ring (overall cores done / total). */}
+        {scrapeOverallProgress !== null ? (
+          <ScrapeProgressRing
+            progress={scrapeOverallProgress}
+            ariaLabel={`Auto-scrape session progress ${String(Math.round(scrapeOverallProgress * 100))}%`}
+          />
+        ) : null}
         {/* fix/count-and-status-indicator commit 2 — live progress
             indicator next to the "Scraping <core> (n/total)" message.
             Brightens from cold-blue to signal-green-with-halo as the
-            current core's done/total approaches 1. Rendered only
-            when the engine is actively scraping (autoScrapeProgress
-            non-null); idle status messages skip the indicator. */}
+            current core's done/total approaches 1. */}
         {autoScrapeProgress !== null ? (
           <StatusIndicator
             progress={autoScrapeProgress}
@@ -121,6 +137,22 @@ export function StatusBar(): JSX.Element {
         <span className="truncate normal-case tracking-normal text-body-sm text-fg-body">
           {message}
         </span>
+        {/* D30: sub-task bar — current core's done / total. */}
+        {scrapeSubTaskProgress !== null ? (
+          <div
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={autoScrape.state === 'active' ? autoScrape.total : 0}
+            aria-valuenow={autoScrape.state === 'active' ? autoScrape.done : 0}
+            aria-label="Current core scrape progress"
+            className="ml-1 h-1 w-20 shrink-0 overflow-hidden rounded-full bg-elevated"
+          >
+            <div
+              className="h-full bg-accent transition-[width] duration-150 ease-out"
+              style={{ width: `${String(Math.round(scrapeSubTaskProgress * 100))}%` }}
+            />
+          </div>
+        ) : null}
         {isBusy && hasProgress ? (
           <div
             role="progressbar"
@@ -292,6 +324,56 @@ export function autoScrapeMessageFor(
   if (doneCount > 0) tail.push(`${String(doneCount)} done`);
   if (queuedCount > 0) tail.push(`${String(queuedCount)} queued`);
   return tail.length > 0 ? `${base} · ${tail.join(' · ')}` : base;
+}
+
+/**
+ * D30: SVG ring showing overall auto-scrape session progress.
+ * Uses CSS custom property tokens (no raw hex). The ring fills
+ * clockwise from the top via `-rotate-90` on the SVG element.
+ *
+ * Ring numerator: cores processed + in-flight ÷ totalCoreCount.
+ * The data is available on `active` and `discovering` events.
+ */
+function ScrapeProgressRing({
+  progress,
+  size = 14,
+  ariaLabel,
+}: {
+  readonly progress: number;
+  readonly size?: number;
+  readonly ariaLabel?: string;
+}): JSX.Element {
+  const r = (size - 2) / 2;
+  const circ = 2 * Math.PI * r;
+  const filled = Math.max(0, Math.min(1, progress)) * circ;
+  return (
+    <svg
+      width={size}
+      height={size}
+      className="-rotate-90 shrink-0"
+      role="img"
+      aria-label={ariaLabel ?? `progress ${String(Math.round(progress * 100))}%`}
+    >
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        fill="none"
+        stroke="hsl(var(--border-default))"
+        strokeWidth={1.5}
+      />
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        fill="none"
+        stroke="hsl(var(--accent))"
+        strokeWidth={1.5}
+        strokeDasharray={`${filled} ${circ - filled}`}
+        strokeLinecap="round"
+      />
+    </svg>
+  );
 }
 
 function statusDotClass(state: ConnectionStatus | 'reconnecting'): string {

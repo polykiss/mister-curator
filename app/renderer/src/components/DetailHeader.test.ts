@@ -51,10 +51,11 @@ describe('DetailHeader — no-logo branch (logoUrl null)', () => {
 });
 
 describe('DetailHeader — layout slots', () => {
-  it('renders kicker above the logo and title', () => {
-    // The kicker div must appear before the logo block in the JSX.
+  it('renders kicker above the logo and title in the roomy layout', () => {
+    // The kicker div must appear before the roomy logo block in the JSX.
+    // D26: roomy layout uses h-[72px] (+50% from original 48px).
     const kickerIdx = SOURCE.indexOf('mb-3 text-caption font-bold uppercase tracking-[0.19em]');
-    const logoIdx = SOURCE.indexOf('mb-3.5 flex h-12 items-center');
+    const logoIdx = SOURCE.indexOf('mb-3.5 flex h-[72px] items-center');
     expect(kickerIdx).toBeGreaterThan(-1);
     expect(logoIdx).toBeGreaterThan(kickerIdx);
   });
@@ -64,16 +65,13 @@ describe('DetailHeader — layout slots', () => {
     expect(SOURCE).toContain('break-words');
   });
 
-  it('renders chips inline beside the title (not below)', () => {
-    // chips renders inside the same flex-wrap div as the h2.
-    // Use lastIndexOf to find the JSX occurrence (not the JSDoc mention).
+  it('renders chips inline beside the title (not below) in both layouts', () => {
+    // chips renders inside the same flex div as the h2 in both compact
+    // and roomy layouts. Use lastIndexOf to find the final JSX occurrence.
     const h2Idx = SOURCE.lastIndexOf('<h2');
     const chipsIdx = SOURCE.lastIndexOf('{chips}');
     expect(h2Idx).toBeGreaterThan(-1);
     expect(chipsIdx).toBeGreaterThan(h2Idx);
-    // The subtitle paragraph follows the flex div.
-    const subtitleIdx = SOURCE.indexOf('text-body-sm text-fg-muted');
-    expect(subtitleIdx).toBeGreaterThan(chipsIdx);
   });
 
   it('renders subtitle below the title when present', () => {
@@ -81,7 +79,19 @@ describe('DetailHeader — layout slots', () => {
     expect(SOURCE).toContain('{subtitle}');
   });
 
-  it('default titleClassName is text-heading; RomDetail can override to text-heading-lg', () => {
+  it('default titleClassName is text-heading (D26: both layouts use heading, not heading-lg)', () => {
     expect(SOURCE).toContain("titleClassName = 'text-heading'");
+  });
+
+  it('compact prop selects the stacked logo+text layout (D32)', () => {
+    // compact=true triggers the RomDetail layout: logo left, stacked text right.
+    expect(SOURCE).toContain('compact = false');
+    expect(SOURCE).toContain('if (compact)');
+    // Compact logo is smaller (max-h-8) vs roomy (max-h-[72px]).
+    expect(SOURCE).toContain('max-h-8');
+    expect(SOURCE).toContain('max-h-[72px]');
+    // Compact stacks title / systemName / subtitle vertically.
+    expect(SOURCE).toContain('systemName');
+    expect(SOURCE).toContain('flex-col');
   });
 });

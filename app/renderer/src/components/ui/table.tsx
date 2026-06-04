@@ -96,7 +96,9 @@ export const TableRow = forwardRef<
     <tr
       ref={ref}
       className={cn(
-        'group/row h-10 border-b border-subtle transition-colors hover:bg-overlay data-[state=selected]:bg-overlay',
+        'group/row h-10 border-b border-subtle transition-colors hover:bg-overlay ' +
+          'data-[state=selected]:bg-accent/[0.07] ' +
+          'data-[state=selected]:shadow-[inset_2px_0_0_0_hsl(var(--accent))]',
         className,
       )}
       {...props}

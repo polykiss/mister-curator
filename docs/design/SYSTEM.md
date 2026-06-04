@@ -1,8 +1,8 @@
 # MiSTerCurator Design System
 
 Status: **Locked (rev. 2).** Phase 1 proposal accepted with revisions;
-Phase 2 applies it across the app. Rev. 2 ratifies eight field
-divergences — see section 9 (Decisions) D6–D13 and the amended §4 / §5 / §10.
+Phase 2 applies it across the app. Rev. 2 ratifies thirteen field
+divergences — see section 9 (Decisions) D6–D20 and the amended §4 / §5 / §10.
 
 This document is the single coherent visual identity that replaces the
 cumulative drift accumulated across MVP iterations. It is the reference
@@ -372,6 +372,44 @@ On the ROMs-pane search row, after the filter input:
 "Show MAME / HBMame as separate cores" is NOT in the cores-sidebar
 header — it lives in the Settings dialog.
 
+### Count summary (CountPill) (D16, rev. 2)
+
+The pane header summarizes the list as a row of filled pills, not a
+"N ROMs · M hidden" text line. Each pill is `bg-overlay rounded-md px-2`,
+`body-sm`, tabular: a **bold** count in `fg` followed by a receded `fg-muted`
+label, with an optional leading status dot. Tones: total ROMs = neutral (no
+dot); hidden = amber dot (`warning`); system = blue dot (`info`). When a filter
+is active the first pill reads "N / M shown". No border — the filled surface
+is the signal.
+
+### Switch (D17, rev. 2)
+
+Boolean view-options (Show hidden, Show system files, Auto-hide missing ROMs,
+Show MAME/HBMame as separate cores) render as a Switch: an `h-[18px] w-8` pill,
+`bg-accent` track when on / `bg-overlay` when off, **white** (`bg-white`) knob
+with `shadow-sm` and `duration-200` slide transition. Replaces
+`<input type="checkbox" className="accent-accent">`. Per-row / per-tile
+SELECTION stays a checkbox.
+
+### Pane header layout (D18–D23)
+
+Vertical stack: (1) **pane title** (`text-heading font-bold text-fg`, left) +
+view-option Switches (right-aligned on the same row); (2) the CountPill
+summary; (3) the tools row — filter input (`flex-1`, fills the row) + view-mode
+toggle + size stepper + (poster mode only) sort dropdown; (4) the action-button
+row — joined **segmented groups** (`inline-flex overflow-hidden rounded border
+border-default`, ghost variant, `border-l border-default` separators), not
+individual spaced buttons. `space-y-3`, `border-b border-subtle`, `px-4 py-3`.
+Both panes share this structure (arcade omits system pill, system-file toggle,
+and Mark-as-system group).
+
+### App header gradient (D24)
+
+The browser top header (`h-14`) replaces the flat `bg-chrome` with a
+`bg-gradient-to-b from-surface to-chrome` gradient: surface (8% lightness)
+at the top fades to chrome (6% lightness) at the bottom. Uses existing design
+tokens; no raw hex.
+
 ### DetailHeader (CoreInfoDialog + RomDetailDialog) (D14)
 
 Both detail dialogs open with the same header, top→bottom:
@@ -388,6 +426,63 @@ Both detail dialogs open with the same header, top→bottom:
 The logo sits ABOVE the title in both dialogs (not inline) — this unifies
 the two and matches the detail mockups. The component owns the system-logo
 blob fetch; CoreInfoDialog's previously-inline logo fetch is removed.
+
+### Settings dialog (D35 + D36)
+
+A 1040×`min(88vh,672px)` modal (`rounded-[14px]`, `bg-surface`, `border-default`, custom shadow). No footer — dismiss via the boxed 32×32 close button or Esc.
+
+Header (`border-b border-subtle`): "Settings" title (24px/700) + connection subtitle (green dot · profile name · mono host IP) + boxed close.
+
+Body: `grid-cols-[1fr_396px]` — left column (settings, `border-r border-subtle`) + right column (diagnostics, `bg-black/[0.13]`).
+
+Section labels share the **mono-caps** style (`text-[11px] font-mono font-semibold uppercase tracking-[0.16em] text-fg-disabled`) with a 14px leading lucide icon.
+
+Options wrap in cards (`rounded-xl border-subtle bg-canvas/40`), rows at `px-4 py-[15px] flex items-start justify-between gap-4`. Inline code literals use a `CodeChip` (`font-mono text-[12px] bg-overlay border-default rounded-[5px]`).
+
+**Display section** — Core menu style dropdown (D36, see below) + Show MAME toggle.
+**Arcade section** — Auto-hide missing ROMs Switch.
+**System section** — Enter Update Mode secondary button.
+
+Diagnostics: status chip (amber count / success "No issues"); each issue group title-rows a flex-fill table (`border-default rounded-[10px] overflow-hidden`), mono-caps `th` on `bg-elevated`, row hover, footnote pinned below.
+
+**Switch token** — `bg-switch-off` (HSL `213 22% 20%`) as the off-track color, replacing `bg-overlay`.
+
+### Core menu style (D36)
+
+Three modes for how cores appear in the browser sidebar:
+- **Text only** (`text`) — name wordmark for every core; no logos or photos.
+- **System logos** (`logos`, default) — monochrome ScreenScraper logo via PlatformBadge; logo-less cores show a **category icon** (Arcade → Joystick, Computer → Monitor, everything else → Gamepad2), NOT a name wordmark.
+- **System images** (`images`) — ScreenScraper hardware photo (`catalogEntry.photoUrl`, same URL shape as `logoUrl`) rendered `object-contain max-h-[52px]`; photo-less systems fall back to the category icon. The core-id column shows display-name (bold) + `games/<id>` path (mono fg-muted).
+
+Persisted at `mistercurator.coreMenuStyle.${host}` (default `logos`).
+
+⚠️ Photo coverage: `photoUrl` is populated by the ScreenScraper system catalog for major platforms (NES, SNES, Genesis, GBA, N64, etc.). Niche/future cores may have `photoUrl: null` — these gracefully fall back to the category icon. No fabricated assets.
+
+### Status bar — progress ring + sub-task bar (D30)
+
+During an auto-scrape session the status bar left zone gains two visual signals:
+
+- **Session ring** — a 14px SVG ring (`ScrapeProgressRing`) that fills clockwise using `stroke="hsl(var(--accent))"` (green) against a `hsl(var(--border-default))` track. Fill = `(processedCoreCount + 1) / totalCoreCount`. Rendered during `active` and `discovering` states; hidden on `idle`. Data comes from the existing `AutoScrapeProgressEvent`.
+- **Sub-task bar** — a `h-1 w-20 bg-elevated` inline bar with an `bg-accent` fill that tracks the active core's `done / total`. Shown during `active` state only.
+
+Both use design tokens only. In `idle` state, `totalCoreCount` is not in the event — rings and bars are hidden rather than fabricated.
+
+### Thumbnail radius (D19)
+
+Box-art thumbnails use the standard `rounded-md` in BOTH list view and
+poster tiles (previously list thumbnails were `rounded-sm`). Art stays
+`object-contain` (no crop) in list view, `object-cover` in poster tiles.
+
+### Selection (D20)
+
+Selected items carry the accent (signal-green):
+- **List rows** — a 2px `accent` left edge (inset box-shadow) plus a faint
+  `bg-accent/[0.07]` tint (was `bg-overlay`).
+- **Poster tiles** — a `ring-2 ring-accent` and a filled-green corner
+  checkmark (top-left) in place of the bare selection checkbox.
+
+Selection is wired to existing selection state; the accent here is a
+selection signal, a sanctioned use alongside active-nav and the brand mark.
 
 ### Detail-dialog footer (D15)
 
@@ -681,6 +776,27 @@ anyone re-reading the document.
 | D13 | ROMs view toolbar  | list/poster toggle + S–XL scale stepper; poster mode adds a Sort-by dropdown (Name/Year/Genre/Rating/Size) since it has no column headers. MAME-as-cores toggle lives in Settings. §5 amended. |
 | D14 | DetailHeader | CoreInfoDialog + RomDetailDialog share one header primitive: kicker → logo-on-top → title → chips (Core) / subtitle (ROM). CoreInfo's logo moves from inline to top. §5 amended. |
 | D15 | Detail footer | ROM detail's single filled button is "Find on ScreenScraper…"; Close is secondary (was filled). One-primary-per-screen rule. §5 amended. |
+| D16 | Count pills | Pane-header counts are outline CountPills (total / hidden=amber / system=blue dots), replacing the "N ROMs · M hidden" text line. §5 amended. |
+| D17 | Toggle switches | View-option booleans are Switches (accent-green on); row/tile selection stays a checkbox. §5 amended. |
+| D18 | Pane-header layout | path+toggles row → count pills → tools row → actions row, shared by ROM + arcade panes. §5 amended. |
+| D19 | Thumbnail radius | List + poster box-art thumbnails are rounded-md (was rounded-sm in list). §5 amended. |
+| D20 | Selection ring | Selected list rows get a green left edge + tint; poster tiles get a green ring + corner checkmark. §5 amended. |
+| D21 | Pane title | Core / pane name rendered as `text-heading font-bold text-fg` above the sub-path breadcrumb, not as mono body text. §5 amended. |
+| D22 | Search full-width | Filter input in the tools row is `flex-1` — fills the remaining width, pushing view toggle + size stepper to the right edge. §5 amended. |
+| D23 | Segmented action groups | Hide all/Unhide all, Hide selected/Unhide selected, Mark/Unmark system are joined segmented controls (`inline-flex overflow-hidden rounded border border-default`), not spaced separate buttons. §5 amended. |
+| D24 | Header gradient | App top header uses `bg-gradient-to-b from-surface to-chrome` instead of flat `bg-chrome`. §5 amended. |
+| D25 | Badge refinements | PlatformBadge logo 26px→32px cap-height; name-wordmark fallback uses `text-body-sm font-semibold` (was `text-[17px] font-bold`) so logo-less rows don't visually dominate. §5 amended. |
+| D26 | DetailHeader compact | DetailHeader adds `compact` prop: CoreInfo keeps the roomy stacked layout (+50% logo to 72px); RomDetail uses compact inline logo+title on one row, tighter padding, `text-heading` title (was `text-heading-lg`). §5 amended. |
+| D27 | CountPill polish | CountPill changed to `rounded-full h-5 px-1.5 text-caption` — smaller, fully-round pills. §5 amended. |
+| D28 | Switch thumb contrast | Switch thumb is `bg-accent-fg` (dark) on ON/accent track, `bg-white` on OFF/overlay track. §5 amended. |
+| D29 | Size header centering | "Size" header in ROM list uses `pr-8` to center over the 24px density bar only, not the full 56px column. §5 amended. |
+| D30 | Progress ring + sub-task bar | Status bar gains a `ScrapeProgressRing` SVG (session overall: processedCoreCount+1 / totalCoreCount) and a thin sub-task bar (current core: done/total). Both show during `active`/`discovering` states; hide on `idle`. Data is available from the existing `AutoScrapeProgressEvent`. §5 amended. |
+| D31 | CoreInfo header size | CoreInfo dialog: core name drops to `text-body font-bold` (was `text-heading`); metadata chips shrink to `text-caption px-[8px] py-[2px]`. §5 amended. |
+| D32 | RomDetail compact header | RomDetail compact layout: logo left; stacked text right: (1) game title bold body, (2) system name muted body-sm, (3) publisher·year·genre muted body-sm. System name extracted from subtitle to its own line via `systemName` prop. §5 amended. |
+| D33 | Thumbnail container clip | `DetailedThumbnailCell` (M/L/XL) wraps art in a fixed `overflow-hidden` container (`thumbPx × thumbPx*THUMB_ASPECT`). `TableHead` width matches exactly. Art can never bleed into the name column. §5 amended. |
+| D34 | Sort persistence | `sortState` persisted globally at `mistercurator.sort.${host}` (serialized `key:dir`), shared by all ROM cores and the arcade pane. No longer resets on core switch. §5 amended. |
+| D35 | Settings dialog | 1040px modal (`rounded-[14px]`, `bg-surface`, `border-default`, 88vh×672px bounded height, no footer); `border-b` header with title + green dot + mono host + boxed 32px close; `grid-cols-[1fr_396px]` body; mono-caps section labels (`11px`, `font-mono`, `fg-disabled`); option rows in `rounded-xl bg-canvas/40` cards; diagnostics status chip (amber count / success clear); flex-fill tables with mono-caps headers and row hover; `switch-off` token for the Switch off-state track. §5 amended. |
+| D36 | Core menu style | New Display setting with three modes: **Text only** (name wordmark for all), **System logos** (logo or category icon, no name wordmark), **System images** (hardware photo from `catalogEntry.photoUrl` or category icon + name + `games/id` path). Persisted at `mistercurator.coreMenuStyle.${host}`. §5 amended. |
 
 A few notes on the choices:
 

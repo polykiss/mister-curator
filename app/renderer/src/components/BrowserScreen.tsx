@@ -13,7 +13,7 @@ import { CoresPane } from '@app/renderer/src/components/CoresPane';
 import { DisconnectBanner } from '@app/renderer/src/components/DisconnectBanner';
 import { DuplicateCoresBanner } from '@app/renderer/src/components/DuplicateCoresBanner';
 import { RomsPane } from '@app/renderer/src/components/RomsPane';
-import { SettingsDialog } from '@app/renderer/src/components/SettingsDialog';
+import { SettingsDialog, type CoreMenuStyle } from '@app/renderer/src/components/SettingsDialog';
 import { StatusBar } from '@app/renderer/src/components/StatusBar';
 import { UpdateModeBanner } from '@app/renderer/src/components/UpdateModeBanner';
 import { UpdateModeDialog } from '@app/renderer/src/components/UpdateModeDialog';
@@ -22,6 +22,7 @@ import { useConnection } from '@app/renderer/src/contexts/ConnectionContext';
 import { useCores } from '@app/renderer/src/contexts/CoresContext';
 import { cn } from '@app/renderer/src/lib/cn';
 import { usePersistedBool } from '@app/renderer/src/lib/use-persisted-bool';
+import { usePersistedString } from '@app/renderer/src/lib/use-persisted-string';
 import { useResizablePaneWidth } from '@app/renderer/src/lib/use-resizable-pane';
 
 // Round 5: cores pane min bumped from 200 → 320. Below 320px the
@@ -41,6 +42,11 @@ export function BrowserScreen(): JSX.Element {
   const [showMameAsCores, setShowMameAsCores] = usePersistedBool(
     `mistercurator.showMameAsCores.${host}`,
     false,
+  );
+  const [coreMenuStyle, setCoreMenuStyle] = usePersistedString<CoreMenuStyle>(
+    `mistercurator.coreMenuStyle.${host}`,
+    'logos',
+    ['text', 'logos', 'images'],
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [updateModeDialogOpen, setUpdateModeDialogOpen] = useState(false);
@@ -106,7 +112,7 @@ export function BrowserScreen(): JSX.Element {
       <DisconnectBanner />
       <DuplicateCoresBanner />
       <UpdateModeBanner />
-      <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-subtle bg-chrome px-4">
+      <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-subtle bg-gradient-to-b from-surface to-chrome px-4">
         <BrandMark tile={28} compact />
         <div className="flex shrink-0 items-center gap-2">
           <Button
@@ -150,7 +156,7 @@ export function BrowserScreen(): JSX.Element {
           style={{ width: `${String(coresWidth)}px` }}
           className="shrink-0 overflow-auto border-r border-subtle bg-surface"
         >
-          <CoresPane showMameAsCores={showMameAsCores} />
+          <CoresPane showMameAsCores={showMameAsCores} coreMenuStyle={coreMenuStyle} />
         </aside>
         <div
           role="separator"
@@ -208,6 +214,8 @@ export function BrowserScreen(): JSX.Element {
         onOpenChange={setSettingsOpen}
         showMameAsCores={showMameAsCores}
         onShowMameAsCoresChange={setShowMameAsCores}
+        coreMenuStyle={coreMenuStyle}
+        onCoreMenuStyleChange={setCoreMenuStyle}
         onOpenUpdateMode={() => setUpdateModeDialogOpen(true)}
       />
       <UpdateModeDialog

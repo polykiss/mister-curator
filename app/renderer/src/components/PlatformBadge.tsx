@@ -54,9 +54,11 @@ export function PlatformBadge({ url, name }: Props): JSX.Element {
   }, [url]);
 
   // Logo-less: name as a wordmark in the badge box (one consistent row type).
+  // D25: smaller text for name-fallback rows so they don't visually
+  // dominate next to logo rows at the same row height.
   if (url === null) {
     return (
-      <span className="flex h-10 w-[104px] shrink-0 items-center text-[17px] font-bold leading-tight tracking-[-0.015em] text-fg">
+      <span className="flex h-10 w-[104px] shrink-0 items-center text-body-sm font-semibold leading-tight tracking-[-0.01em] text-fg">
         {name}
       </span>
     );
@@ -66,7 +68,8 @@ export function PlatformBadge({ url, name }: Props): JSX.Element {
     return <Skeleton className="h-10 w-[104px] shrink-0 rounded" />;
   }
 
-  // Fixed box; logo normalized to 26px cap-height (width auto, clamped).
+  // Fixed box; logo normalized to 32px cap-height (D25: slightly larger
+  // than the original 26px so logos read more clearly in the sidebar row).
   // `invert` renders black-on-transparent monochrome logos white on dark.
   return (
     <span className="flex h-10 w-[104px] shrink-0 items-center overflow-hidden">
@@ -74,7 +77,7 @@ export function PlatformBadge({ url, name }: Props): JSX.Element {
         src={objectUrl}
         alt={name}
         aria-hidden
-        className="h-[26px] w-auto max-w-[104px] object-contain object-left invert"
+        className="h-[32px] w-auto max-w-[104px] object-contain object-left invert"
       />
     </span>
   );
